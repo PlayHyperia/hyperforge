@@ -1,5 +1,57 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 checkpoint — actual island flower integration, art still open
+
+- [x] Source-bind the flower owner in private build57 without rebuilding protected
+  packages. Nine bundles / 1,096 input pins are verified. The flattened private
+  build resolves its existing Delaunator dependency from the installed procgen
+  package; no install, canonical dependency or lock change. Build55 was not run;
+  runtime84/build56's missing-dependency failure is retained, not concealed.
+- [x] Native115/runtime85 renders the actual TerrainSystem flower owner in headed
+  Chrome/Metal at the unchanged 1280×720 profile. Original startup passes in
+  33.838 s with 122 completed / zero failed grass cells. Pond-arrival and eastern
+  foliage camera cuts satisfy the original 30 s allowance: flower readiness at
+  1.996 / 4.454 s respectively. These are diagnostic settling times, NOT seamless
+  camera-motion acceptance, isolated feature cost or evidence of a speedup.
+- [x] Actual submitted native flower pipelines and one 32,768-byte matrix-storage
+  allocation are observed. The two published pools contain 58 / 53 instances;
+  9 / 7 static projected heads do NOT imply that many unoccluded visible flowers.
+  Main-view ownership, source/served-response hashes and before/after storage
+  identity/version checks pass. Zero capture errors; all nine host checks nominal,
+  AC-powered and awake. Other-game activity excludes quiet-host qualification.
+- [x] Retain native114: original startup passed in 45.810 s and flowers were ready,
+  but delayed retrieval of the original framework response failed in the capture
+  harness. Native115 hashes that original response promptly instead of refetching;
+  no production threshold, rendering setting or startup budget was relaxed.
+- Actual owner lifetime maxima in native115: generation/update 3.100 ms,
+  validation 0.200 ms, publication 2.300 ms, three soft-slice overruns. Native114
+  retains its larger 6.400 ms update maximum and six overruns. Validation telemetry
+  excludes getReceipt's repeated live check and other preparation work; these
+  values are not total frame/GPU cost or a claim that the owner stays below 1 ms.
+- [x] Primary and independent image review agree: a few pale flower heads are
+  visible, but dense grass dominates and most flowers read as tiny flecks. No
+  meadow-art approval. Concealed roots and distant petals cannot establish
+  complete fitting, self-shadow quality or wind animation.
+- [ ] Next: close, low-angle native island review of an EXISTING accepted flower,
+  keeping density, grass, lighting and renderer settings unchanged. Then tune
+  height/shape, grouping and contrast from evidence, without blanketing the field.
+- [ ] Test continuous movement and population replacement. Measure steady owner
+  distributions on a quiet host. A bounded allocation optimization may compare
+  live resource scalars against captured IDs while preserving the full scan,
+  duplicate detection, region/depletion semantics and replacement checks; do not
+  replace currentness with incomplete entity events or Map-size caching.
+- [x] Owned native browsers and runtime85 are stopped; its temporary DB removed.
+  Protected 145 compiled artifacts/retained lock/playable localhost remain intact.
+  Defaults are unchanged. Connected tree wind, falling leaves, petal self-shadow,
+  reliable startup, sustained performance, 2× cinematic and AAA acceptance remain open.
+
+References remain the [official WebGPU instancing example](https://threejs.org/examples/webgpu_instance_mesh.html)
+and [instance updates, bounds and disposal](https://threejs.org/docs/pages/InstancedMesh.html),
+checked against local r186. Evidence: inland-pond `isolated-build57-report.json`,
+`rooted-flower-build57-preflight01.json`, `native114/process.json`,
+`native115/process.json`, two native115 PNG/view receipts and
+`native115/visual-review.json`, `runtime84/85/process.json`.
+
 ## 2026-09-22 checkpoint — opt-in rooted flower placement and ownership
 
 - [x] Add an explicit `flowers=rooted-v1` candidate, admitted only with the
