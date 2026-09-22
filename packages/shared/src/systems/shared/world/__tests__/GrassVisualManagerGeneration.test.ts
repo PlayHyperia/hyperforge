@@ -1611,6 +1611,7 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           correctionBytes: number;
           maxAcceptedBaseError: number;
           sameFaceEdges: number;
+          refinedSameFaceEdges: number;
           triangleVisits: number;
           endpointQueries: number;
           groundingOperations: number;
@@ -1845,9 +1846,28 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
                 expect(legacy.result.dependencies).toEqual(
                   current.result.dependencies,
                 );
-                expect(current.result.receipt.sameFaceEdges).toBe(
-                  legacy.result.receipt.sameFaceEdges,
-                );
+                // The frozen oracle only shortcuts canonical faces. Current
+                // refined certificates add hits to the total, not to that
+                // historical population; compare each census explicitly.
+                expect(
+                  Number.isSafeInteger(
+                    current.result.receipt.refinedSameFaceEdges,
+                  ),
+                ).toBe(true);
+                expect(
+                  current.result.receipt.refinedSameFaceEdges,
+                ).toBeGreaterThanOrEqual(0);
+                expect(
+                  current.result.receipt.sameFaceEdges -
+                    current.result.receipt.refinedSameFaceEdges,
+                ).toBe(legacy.result.receipt.sameFaceEdges);
+                expect([
+                  receipt.sameFaceEdges,
+                  receipt.refinedSameFaceEdges,
+                ]).toEqual([
+                  current.result.receipt.sameFaceEdges,
+                  current.result.receipt.refinedSameFaceEdges,
+                ]);
                 expect(current.result.receipt.triangleVisits).toBeLessThan(
                   legacy.result.receipt.triangleVisits,
                 );
@@ -1874,6 +1894,12 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
                     currentPipelineOperations: job.operations,
                     currentTriangleVisits:
                       current.result.receipt.triangleVisits,
+                    currentSameFaceEdges: current.result.receipt.sameFaceEdges,
+                    currentRefinedSameFaceEdges:
+                      current.result.receipt.refinedSameFaceEdges,
+                    currentCanonicalSameFaceEdges:
+                      current.result.receipt.sameFaceEdges -
+                      current.result.receipt.refinedSameFaceEdges,
                     ...legacyCensus,
                   }) + "\n",
                 );
@@ -1903,6 +1929,7 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
               correctionBytes: receipt.correctionBytes,
               maxAcceptedBaseError: receipt.maxAcceptedBaseError,
               sameFaceEdges: receipt.sameFaceEdges,
+              refinedSameFaceEdges: receipt.refinedSameFaceEdges,
               triangleVisits: receipt.triangleVisits,
               endpointQueries: receipt.endpointQueries,
               groundingOperations: job.operations,
@@ -2000,11 +2027,13 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           // optimization, so its census still owns this exact historical delta.
           // Current output must match it while doing less measured core work.
           if (pathRecipe === "candidate29") {
-            expect(a.legacyCensus?.triangleVisits).toBe(
-              baselineVisits[i] - a.sameFaceEdges,
+            const legacy = a.legacyCensus;
+            if (!legacy) throw new Error("Missing historical shortcut census");
+            expect(legacy.triangleVisits).toBe(
+              baselineVisits[i] - legacy.sameFaceEdges,
             );
-            expect(a.legacyCensus?.groundingOperations).toBe(
-              baselineOperations[i] - 4 * a.sameFaceEdges,
+            expect(legacy.groundingOperations).toBe(
+              baselineOperations[i] - 4 * legacy.sameFaceEdges,
             );
           }
           if (i < 2) {
@@ -2019,6 +2048,13 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
             expect(a.geometryAttributeBytes).toBe(b.geometryAttributeBytes);
           }
         }
+        if (geometryRecipe === "historical-linear")
+          expect(
+            [...before, ...after].reduce(
+              (sum, row) => sum + row.refinedSameFaceEdges,
+              0,
+            ),
+          ).toBeGreaterThan(0);
         expect(recoveredGrounded).toBeGreaterThan(0);
         // Acceptance can rephase later rotation draws within changed cells.
         // Do not claim exact poses outside each station rectangle, or GPU cost.
@@ -2036,6 +2072,8 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
               correctionBytes: a.correctionBytes,
               maxAcceptedBaseError: a.maxAcceptedBaseError,
               sameFaceEdges: a.sameFaceEdges,
+              refinedSameFaceEdges: a.refinedSameFaceEdges,
+              canonicalSameFaceEdges: a.sameFaceEdges - a.refinedSameFaceEdges,
               triangleVisits: a.triangleVisits,
               endpointQueries: a.endpointQueries,
               groundingOperations: a.groundingOperations,

@@ -331,9 +331,7 @@ function pipelineInputs(
   };
 }
 
-function drainPipeline(
-  steps: Generator<string, GrassBladeGroundingResult, void>,
-) {
+function drainPipeline<Result>(steps: Generator<string, Result, void>) {
   const trace: string[] = [];
   for (let i = 0; i <= 1_000_000; i++) {
     const step = steps.next();

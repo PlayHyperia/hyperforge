@@ -204,6 +204,7 @@ import {
   resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
+  resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
   resolveGrassGroundingExecution,
@@ -456,6 +457,7 @@ export class TerrainSystem extends System {
         coverageTrial: ReturnType<typeof resolveGrassCoverageTrial>;
         roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
         lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
+        palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
       }>
     | undefined;
@@ -870,6 +872,7 @@ export class TerrainSystem extends System {
       const coverageTrial = resolveGrassCoverageTrial();
       const roadClearance = resolveGrassRoadClearance();
       const lighting = resolveGrassLightingCandidate();
+      const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const fine = appearance === "fine-meadow-v1";
       if (
@@ -883,10 +886,13 @@ export class TerrainSystem extends System {
         coverageTrial,
         ...(roadClearance ? { roadClearance } : {}),
         ...(lighting ? { lighting } : {}),
+        ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
       });
       this.compactGrassColorGrade = fine
-        ? compactTerrainColorOperations.getGrassColorGrade().id
+        ? compactTerrainColorOperations.getGrassColorGrade(
+            palette === "regional-v1" ? "fine-meadow-regional-v1" : undefined,
+          ).id
         : null;
     }
     return this.compactGrassColorGrade ?? undefined;

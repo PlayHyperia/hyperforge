@@ -1003,6 +1003,19 @@ describe("actual authored-surface grass worker", () => {
         expect(
           admitGrassWorkerPlacementResult(actual, selected).pondServiceGround,
         ).toEqual(selected.pondServiceGround);
+        const regionalInput = prepareGrassWorkerRequest({
+          ...selected,
+          compactGrassColorGrade: "fine-meadow-regional-v1",
+        });
+        const regional = await worker.run(regionalInput);
+        const regionalReference = await reference.run(regionalInput);
+        assertExactInstanceBytes(regional, regionalReference);
+        expect(regional.compactGrassColorGrade).toBe("fine-meadow-regional-v1");
+        expect(regional.pondServiceGround).toEqual(selected.pondServiceGround);
+        expect(regional.groundColors).not.toEqual(actual.groundColors);
+        expect(
+          admitGrassWorkerPlacementResult(regional, regionalInput),
+        ).toEqual(regional);
         const ordinary = await worker.run(input);
         assertExactInstanceBytes(ordinary, await reference.run(input));
         expect(ordinary).not.toHaveProperty("pondServiceGround");
@@ -2740,6 +2753,39 @@ describe("actual authored-surface grass worker", () => {
         expect(graded[name]).toEqual(ungraded[name]);
       expect(graded.groundColors).not.toEqual(ungraded.groundColors);
       expect(admitGrassWorkerPlacementResult(graded, queued)).toEqual(graded);
+      const regionalInput: GrassWorkerInput = {
+        ...queued,
+        compactGrassColorGrade: "fine-meadow-regional-v1",
+      };
+      const regional = await worker.run(regionalInput);
+      expect(regional.compactGrassColorGrade).toBe("fine-meadow-regional-v1");
+      expect(regional.count).toBe(graded.count);
+      for (const name of [
+        "offsets",
+        "rotScaleHash",
+        "grassTints",
+        "groundNormals",
+      ] as const)
+        expect(new Uint8Array(regional[name].buffer)).toEqual(
+          new Uint8Array(graded[name].buffer),
+        );
+      // Haven without the coastal-meadow field bypasses meadow tint, so both
+      // grades deliberately retain identical RGB as well as identical roots.
+      expect(
+        createCompactTerrainColorOperations().macroField(
+          terrain.getWorldTerrainProfile(),
+        )?.coastalMeadow,
+      ).toBeUndefined();
+      assertExactInstanceBytes(regional, graded);
+      expect(admitGrassWorkerPlacementResult(regional, regionalInput)).toEqual(
+        regional,
+      );
+      expect(() => admitGrassWorkerPlacementResult(regional, queued)).toThrow(
+        /grade/i,
+      );
+      expect(() =>
+        admitGrassWorkerPlacementResult(graded, regionalInput),
+      ).toThrow(/grade/i);
       for (const value of [null, false, "unknown", "fine-meadow-green-v2"]) {
         const malformed = { ...input, compactGrassColorGrade: value };
         expect(() =>
@@ -2791,6 +2837,145 @@ describe("actual authored-surface grass worker", () => {
       expect(empty.compactGrassColorGrade).toBe("fine-meadow-green-v1");
       expect(admitGrassWorkerPlacementResult(empty, queued)).toEqual(empty);
     });
+  });
+
+  it("keeps regional coastal placement byte-exact while actual worker RGB matches main-thread palette samples and preserves empty grade identity", async () => {
+    await withTerrain(async (terrain, internals, worker) => {
+      internals.loadWaterBodiesFromManifest();
+      internals.loadFlatZonesFromManifest();
+      const colors = createCompactTerrainColorOperations();
+      const macroField = colors.macroField(terrain.getWorldTerrainProfile());
+      expect(macroField?.coastalMeadow).toBeDefined();
+      let checkedColors = 0;
+      let changedColors = 0;
+      for (const [x, z, size] of [
+        [384, 438, 12],
+        [430, 470, 6],
+      ]) {
+        const greenInput = prepareGrassWorkerRequest({
+          ...request(terrain, internals, x, z, size),
+          grassEligibility: "compact-pbr-v1",
+          compactGrassColorGrade: "fine-meadow-green-v1",
+        });
+        const regionalInput = prepareGrassWorkerRequest({
+          ...greenInput,
+          compactGrassColorGrade: "fine-meadow-regional-v1",
+        });
+        const green = await worker.run(greenInput);
+        const regional = await worker.run(regionalInput);
+        expect(regional.count).toBeGreaterThan(0);
+        expect(regional.count).toBe(green.count);
+        expect(regional.terrainProfileIdentity).toBe(
+          green.terrainProfileIdentity,
+        );
+        expect(regional.grassEligibility).toBe(green.grassEligibility);
+        expect(regional.compactGrassColorGrade).toBe("fine-meadow-regional-v1");
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(
+            Buffer.from(
+              regional[key].buffer,
+              regional[key].byteOffset,
+              regional[key].byteLength,
+            ).equals(
+              Buffer.from(
+                green[key].buffer,
+                green[key].byteOffset,
+                green[key].byteLength,
+              ),
+            ),
+            key,
+          ).toBe(true);
+        assertSurfaceParity(regionalInput, regional, internals);
+        for (const point of points(regionalInput, regional)) {
+          const main = terrain.getTerrainColorAt(point.x, point.z, true);
+          const expected = colors.sample({
+            grassColorGrade: regionalInput.compactGrassColorGrade,
+            noiseValue: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+            ),
+            meadowNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              colors.getComposition().meadowNoiseScale,
+            ),
+            distortNoise: sampleNoiseCPU(
+              point.x,
+              point.z,
+              TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+            ),
+            slope: 1 - main.ny,
+            roadInfluence: 0,
+            surface: {
+              x: point.x,
+              z: point.z,
+              height: internals.getHeightAtComputed(point.x, point.z),
+              pond:
+                regionalInput.terrainSurface.waterBodies.find(
+                  (body) => body.id === "haven_pond_water",
+                ) ?? null,
+              macroField,
+            },
+          });
+          for (const [axis, channel] of (["r", "g", "b"] as const).entries())
+            expect(
+              Math.abs(
+                regional.groundColors[point.index * 3 + axis] -
+                  expected[channel],
+              ),
+            ).toBeLessThan(colorParityTolerance);
+          if (
+            [0, 1, 2].some(
+              (channel) =>
+                regional.groundColors[point.index * 3 + channel] !==
+                green.groundColors[point.index * 3 + channel],
+            )
+          )
+            changedColors++;
+          checkedColors++;
+        }
+        const emptyInput = prepareGrassWorkerRequest({
+          ...regionalInput,
+          grassConfigs: Object.fromEntries(
+            Object.entries(regionalInput.grassConfigs).map(([key, config]) => [
+              key,
+              { ...config, density: 0 },
+            ]),
+          ),
+        });
+        const empty = await worker.run(emptyInput);
+        expect(empty.count).toBe(0);
+        expect(empty.compactGrassColorGrade).toBe("fine-meadow-regional-v1");
+        for (const [output, input] of [
+          [regional, regionalInput],
+          [empty, emptyInput],
+        ] as const) {
+          expect(admitGrassWorkerPlacementResult(output, input)).toEqual(
+            output,
+          );
+          expect(() =>
+            admitGrassWorkerPlacementResult(output, greenInput),
+          ).toThrow(/grade/i);
+          const missing = { ...output };
+          delete missing.compactGrassColorGrade;
+          expect(() => admitGrassWorkerPlacementResult(missing, input)).toThrow(
+            /grade/i,
+          );
+        }
+        expect(() =>
+          admitGrassWorkerPlacementResult(green, regionalInput),
+        ).toThrow(/grade/i);
+        assertExactInstanceBytes(await worker.run(regionalInput), regional);
+      }
+      expect(checkedColors).toBeGreaterThan(0);
+      expect(changedColors).toBeGreaterThan(0);
+    }, true);
   });
 
   it("keeps all five legacy arrays byte-exact against the real pre-cell sampling statements", async () => {

@@ -11310,6 +11310,122 @@ describe("candidate coastal mineral-to-meadow ground", () => {
         }
   });
 
+  it("separates regional fresh/dry reflectance with exact CPU/TSL parity and no new physical layers or texture samples", () => {
+    const ops = createCompactTerrainColorOperations();
+    const grade = "fine-meadow-regional-v1" as const;
+    const descriptor = ops.getGrassColorGrade(grade);
+    expect(descriptor.id).toBe(grade);
+    expect(descriptor.linearMultipliers).toEqual([0.95, 1.3, 1.1]);
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(descriptor.linearMultipliers)).toBe(true);
+    expect(ops.getGrassColorGrade().id).toBe("fine-meadow-green-v1");
+    const grass: CompactTerrainLayer = {
+      albedo: vec3(0.2, 0.3, 0.15),
+      roughness: float(0.91),
+      ao: float(0.8),
+      worldNormal: vec3(0.1, 0.99, 0.05),
+    };
+    for (const [noise, endpoint] of [
+      [-1, [0.8, 1.25, 0.65]],
+      [0.43, [0.8, 1.25, 0.65]],
+      [0.515, [1.025, 1.1, 0.95]],
+      [0.6, [1.25, 0.95, 1.25]],
+      [2, [1.25, 0.95, 1.25]],
+    ] as const)
+      for (const macroDry of [0, 0.35, 1]) {
+        const expected = endpoint.map(
+          (value, channel) =>
+            value + ([1.25, 0.95, 1.25][channel] - value) * macroDry,
+        );
+        const actual = applyCompactMeadowTint(
+          grass,
+          float(noise),
+          float(macroDry),
+          0.4,
+          grade,
+        );
+        const cpu = ops.meadowTint(noise, macroDry, 0.4, grade);
+        vectorValue(actual.albedo).forEach((value, channel) => {
+          expect(cpu[channel]).toBeCloseTo(expected[channel], 14);
+          expect(value).toBeCloseTo(
+            [0.2, 0.3, 0.15][channel] * expected[channel],
+            14,
+          );
+        });
+        expect(actual.roughness).toBe(grass.roughness);
+        expect(actual.ao).toBe(grass.ao);
+        expect(actual.worldNormal).toBe(grass.worldNormal);
+        expect(
+          [...graph(actual.albedo)].some((node) =>
+            Reflect.get(node, "isTextureNode"),
+          ),
+        ).toBe(false);
+      }
+    // Actual production color/normal/roughness/AO graphs use the same texture
+    // budget. This is a structural check, not a native GPU-time measurement.
+    const materials = (["fine-meadow-green-v1", grade] as const).map(
+      (compactGrassColorGrade) =>
+        createTerrainMaterial(undefined, {
+          compactPbr: true,
+          compactProfile: candidateProfile(),
+          compactGrassColorGrade,
+        }),
+    );
+    try {
+      expect(materials[1].compactGrassColorGrade?.id).toBe(grade);
+      for (const key of [
+        "colorNode",
+        "normalNode",
+        "roughnessNode",
+        "aoNode",
+      ] as const) {
+        const counts = materials.map(
+          (material) =>
+            [...graph(material[key]!)].filter((node) =>
+              Reflect.get(node, "isTextureNode"),
+            ).length,
+        );
+        if (key === "colorNode") expect(counts[0]).toBeGreaterThan(0);
+        expect(counts[1]).toBe(counts[0]);
+      }
+      const field = ops.macroField(candidateProfile());
+      for (const noise of [0, 0.43, 0.515, 0.6, 1])
+        for (const slope of [0, 0.08, 0.2, 0.5])
+          for (const roadInfluence of [0, 0.2, 1]) {
+            const input = {
+              noiseValue: noise,
+              meadowNoise: noise,
+              distortNoise: 0.5,
+              slope,
+              roadInfluence,
+              surface: {
+                x: 383,
+                z: 438,
+                height: 27,
+                pond: null,
+                macroField: field,
+              },
+            };
+            const regionalInput = { ...input, grassColorGrade: grade };
+            expect(ops.grassSupport(regionalInput)).toBe(
+              ops.grassSupport(input),
+            );
+            expect(ops.grassSupportBeforeCoast(regionalInput)).toBe(
+              ops.grassSupportBeforeCoast(input),
+            );
+            if (roadInfluence === 1)
+              expect(ops.sample(regionalInput)).toEqual(
+                ops.sample({
+                  ...input,
+                  grassColorGrade: "fine-meadow-green-v1",
+                }),
+              );
+          }
+    } finally {
+      for (const material of materials) material.dispose();
+    }
+  });
+
   it("uses literal restrained tint endpoints in CPU and actual TSL without changing physical layer owners", () => {
     const ops = createCompactTerrainColorOperations();
     expect(ops.getComposition().coastalMeadowTintStrength).toBe(0.4);

@@ -1041,6 +1041,7 @@ export class GrassGroundingWorkerClient {
         "endpointQueries",
         "triangleVisits",
         "sameFaceEdges",
+        "refinedSameFaceEdges",
         "workUnits",
         "workBudget",
         "correctionBytes",
@@ -1060,6 +1061,7 @@ export class GrassGroundingWorkerClient {
       "endpointQueries",
       "triangleVisits",
       "sameFaceEdges",
+      "refinedSameFaceEdges",
       "workUnits",
       "workBudget",
       "correctionBytes",
@@ -1074,6 +1076,11 @@ export class GrassGroundingWorkerClient {
         receipt.geometryLayout === slot.geometryLayout &&
         receipt.elapsedMs === activeMs,
       "Grounding result input mismatch",
+    );
+    ensure(
+      integer(receipt.sameFaceEdges) &&
+        integer(receipt.refinedSameFaceEdges, receipt.sameFaceEdges),
+      "Invalid grounding shortcut census",
     );
     for (const key of ["processedClumps", "retainedClumps"])
       ensure(

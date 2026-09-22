@@ -20,6 +20,10 @@ import {
   type TerrainCellTopology,
 } from "../../TerrainGridSurface";
 import { gridGeometry } from "../terrain-grid.fixture";
+import type { GrassBladeGroundingResult as LegacyGrassBladeGroundingResult } from "./LegacyGrassBladeGroundingReference";
+
+type SameFaceResult =
+  GrassBladeGroundingResult | LegacyGrassBladeGroundingResult;
 
 type Point = readonly [number, number, number?, number?];
 const emptySnapshot = (): GrassTerrainSurfaceSnapshot => ({
@@ -456,15 +460,19 @@ function rawBytes(values: ArrayBufferView) {
     values.byteLength,
   ).toString("hex");
 }
-export function sameFaceSemantic(result: GrassBladeGroundingResult) {
-  // Only measured work/timing and the new diagnostic hit counter may differ.
+export function sameFaceSemantic(result: SameFaceResult) {
+  // Only measured work/timing and explicitly named shortcut censuses may differ.
   // Unknown receipt fields remain included so future semantic changes fail.
   const receipt = Object.fromEntries(
     Object.entries(result.receipt).filter(
       ([key]) =>
-        !["elapsedMs", "triangleVisits", "workUnits", "sameFaceEdges"].includes(
-          key,
-        ),
+        ![
+          "elapsedMs",
+          "triangleVisits",
+          "workUnits",
+          "sameFaceEdges",
+          "refinedSameFaceEdges",
+        ].includes(key),
     ),
   );
   return {
@@ -499,7 +507,7 @@ export function sameFaceSemantic(result: GrassBladeGroundingResult) {
     receipt,
   };
 }
-export function sameFaceHash(result: GrassBladeGroundingResult) {
+export function sameFaceHash(result: SameFaceResult) {
   return createHash("sha256")
     .update(JSON.stringify(sameFaceSemantic(result)))
     .digest("hex");
@@ -534,8 +542,8 @@ export function sameFaceInputHash(
     .digest("hex");
 }
 
-export function drainSameFaceSteps(
-  steps: Generator<string, GrassBladeGroundingResult, void>,
+export function drainSameFaceSteps<Result extends SameFaceResult>(
+  steps: Generator<string, Result, void>,
 ) {
   let operations = 0;
   for (;;) {

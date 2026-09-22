@@ -15,6 +15,7 @@ import type {
   GrassBladeGroundingRequest,
   GrassBladeGroundingResult,
 } from "../../GrassBladeGrounding";
+import type { GrassBladeGroundingResult as LegacyGrassBladeGroundingResult } from "./LegacyGrassBladeGroundingReference";
 
 const entry = fileURLToPath(
   new URL(
@@ -255,7 +256,10 @@ function bytes(array: ArrayBufferView) {
 }
 
 export function grassGroundingWorkerSemanticResult(
-  result: GrassBladeGroundingResult | GrassGroundingWorkerResult,
+  result:
+    | GrassBladeGroundingResult
+    | GrassGroundingWorkerResult
+    | LegacyGrassBladeGroundingResult,
   source: GrassBladeGroundingRequest,
 ) {
   return {

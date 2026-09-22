@@ -2516,6 +2516,75 @@ No water shader or material setting was changed on this evidence.
 Runtime55/56 and their disposable databases are removed. All owned native
 browsers are closed; the protected human playable database is unchanged.
 
+### Regional meadow and grass census — 2026-09-22
+
+- [x] Repair the historical grass-shortcut census without changing geometry,
+  placement or fitting budgets. The total now reports its refined-face subset;
+  canonical-only comparisons and historical savings use the frozen census.
+  Exact attribution is 18,063 = 16,954 + 1,109 and 18,436 = 17,306 + 1,130.
+  Generation passes 44 tests; grounding/same-face/actual worker/client passes
+  316. No semantic golden or frozen reference was changed. Strict worker
+  admission validates the new counter; typed helpers explicitly accept the
+  historical result rather than inventing its missing diagnostic.
+- [x] Implement an independent `grassPalette=regional-v1` fine-meadow trial.
+  Reuse the existing fresh and dry-shoulder reflectance endpoints at full
+  strength, including distinct green values, through the same CPU/TSL tint
+  owner. The original palette/default remains exact. The new grade is captured
+  once, carried in worker identity, and rejects invalid contexts or mismatched
+  results. Noise frequency, terrain/layer eligibility, roots, RNG, dimensions,
+  density, normals, wind, navigation, textures and draw policy are unchanged.
+- [x] Verify 451 resolver tests, 230 material/macro/grass-appearance tests, and
+  32 placement-worker tests. Together with the 360 census cases above, these
+  five receipts contain 1,073 passing tests. Additional helper verification
+  passes 89 worker/client cases, nine selected-v9 pond cases and one historical
+  review52 case; other fixture-specific skips are not passes. The final focused
+  seven-case repeat and 733-root/2,412-source-file no-emit check pass, with
+  zero diagnostics and stable pins. Scoped 16-file lint/format/diff checks pass.
+- [x] Prove non-color instance bytes remain exact and emitted regional RGB
+  matches per-root CPU samples in admitted coastal regions. Historical Haven
+  without coastal tint remains byte-exact in all five arrays. Fresh minified
+  keepNames workers exercise the regional grade and service descriptor.
+  CPU/TSL literal endpoint parity and a nonempty actual texture-graph comparison
+  add no texture samples; this is not measured native GPU cost.
+- [x] Build nine isolated bundles from 997 inputs in build47, retaining all 145
+  protected compiled artifacts. Recheck every build input after the attempt.
+  Initial core01 failed because its fixture deliberately disables meadow tint;
+  the corrected test now proves that invariant instead of demanding a color
+  change there. Initial types01 found unknown-value narrowing and a historical
+  helper type mismatch; both failures are retained, not counted as passes.
+- [ ] Complete native palette appearance and cost comparison. Native95 used the
+  ORIGINAL palette and failed before any qualifying view; native96 was not
+  started. macOS logged an eight-second Dark Wake Thermal Emergency sleep,
+  followed later by 988 seconds of Maintenance Sleep. Do not describe all
+  elapsed time as thermal sleep. Two grounding jobs failed the unchanged
+  250 ms limit: LOD0 cell (11,16), 251.6 ms / 214,029 operations; LOD1 cell
+  (15,18), 250.9 ms / 101,642 operations. Readiness stopped at 120/122.
+  The active_cpu reason counts accumulated slice elapsed time, not thread
+  CPU utilization. Untimestamped failure events cannot establish either
+  failure's order relative to sleep; neither failure was error-deferred.
+- [x] Close the owned browser and stop runtime65; remove its ephemeral database
+  and verify protected state unchanged. Localhost3333 remains available.
+  No GPU retry, safety-setting change, default promotion, native appearance,
+  sustained frame-rate, streaming, 2× cinematic or AAA approval is claimed.
+- [x] Identify both failed cells and their executed-build timing semantics.
+  The terminal one-operation slice is coordinator settlement, not proof of a
+  worker failing on one expensive operation. Cause remains unestablished.
+- [ ] After host stabilization, replay both exact retained-input cells with
+  unchanged caps and per-phase/max-slice diagnostics; timestamp future native
+  terminal events. Then complete matched overview/arrival/shore captures.
+  Continue broader landscape structure, vegetation grouping, natural routes
+  and bank composition; palette changes alone do not finish the island.
+
+Evidence: service-layout `refined-census-*`, `regional-meadow-material01`,
+`regional-meadow-placement-full01`, `regional-meadow-resolver-final01`,
+`regional-meadow-final02`, `regional-meadow-types02`; inland-pond
+`isolated-build47-report.json`, `native95/process.json`,
+`native95-host-suspension.md`, and `runtime65/process.json`.
+The official [Three forest generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/ForestGenerator.js)
+and [terrain generator](https://github.com/mrdoob/three.js/blob/r186/examples/jsm/generators/TerrainGenerator.js)
+inform coherent regional color groups and placement-independent variation,
+not copied demo populations, replacement resource trees or new noise samples.
+
 ### Pond-bank service ground — 2026-09-22
 
 - [x] Author a bounded three-ribbon service apron from the actual pond bank's
@@ -2566,14 +2635,16 @@ browsers are closed; the protected human playable database is unchanged.
   compiled artifacts and localhost3333 remain unchanged. Current lid-open/AC
   observations permitted bounded captures; native92's thermal-protection
   suspension remains failed, not retroactively passed.
-- [ ] Correct two pre-existing historical manager counter assertions separately.
+- [x] Correct two pre-existing historical manager counter assertions separately
+  (closed by the Regional meadow and grass census checkpoint above).
   Failures reproduce with all 13 changed production modules supplied read-only
   from committed `4a5ba06cb`: 18,063 versus 16,954 and 18,436 versus 17,306.
   Current totals include refined-face shortcuts; the frozen oracle counts
   canonical-face shortcuts only. Add explicit refined attribution and use the
   frozen census in historical savings formulas; retain semantic hashes, array
-  equality, original caps and work-reduction assertions. The broader manager
-  suite is not green; no assertion was relaxed for this apron.
+  equality, original caps and work-reduction assertions. This earlier broader
+  manager run was not green; no assertion was relaxed for the apron. The
+  separate repair and passing rerun are recorded in the checkpoint above.
 - [ ] Qualify added shader cost, sustained performance, streaming and motion.
   Three extra ribbon evaluations are real work despite unchanged texture
   samples/draw calls. No thermal, frame-budget or AAA approval is inferred.

@@ -489,7 +489,11 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
         );
         const before = sameFaceInputHash(fixture),
           secondSweptBladeYield = 3 * layout.bladesPerClump + 4;
-        const run = (ground: typeof groundGrassBladeSteps, mutate: boolean) => {
+        const run = (
+          ground:
+            typeof groundGrassBladeSteps | typeof legacyGroundGrassBladeSteps,
+          mutate: boolean,
+        ) => {
           request.wind = { x: zero, z: zero };
           let staged = false,
             groundingYields = 0,
@@ -596,6 +600,7 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
         );
         expect(sameFaceHash(result)).toBe(NATIVE25[id].hash);
         expect(result.receipt.sameFaceEdges).toBeGreaterThan(0);
+        expect(result.receipt.refinedSameFaceEdges).toBe(0);
         expect(result.receipt.triangleVisits).toBeLessThanOrEqual(
           NATIVE25[id].triangleVisits * 0.6,
         );
@@ -860,6 +865,11 @@ describe("bounded indexed edge cursor batches", () => {
         expect(sync.result.status).toBe("ready");
         expect(sync.result.receipt.retainedClumps).toBeGreaterThan(0);
         expect(sync.result.receipt.sameFaceEdges).toBeGreaterThan(0);
+        expect(sync.result.receipt.refinedSameFaceEdges).toBeGreaterThan(0);
+        expect(
+          sync.result.receipt.sameFaceEdges -
+            sync.result.receipt.refinedSameFaceEdges,
+        ).toBe(legacy.result.receipt.sameFaceEdges);
         expect(sync.result.receipt.triangleVisits).toBeGreaterThan(0);
         expect(sync.result.receipt.triangleVisits).toBeLessThan(
           legacy.result.receipt.triangleVisits,

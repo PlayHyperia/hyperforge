@@ -555,7 +555,7 @@ export function applyCompactGrassColorGrade(
   return {
     ...grass,
     albedo: grass.albedo
-      .mul(vec3(...operations.getGrassColorGrade().linearMultipliers))
+      .mul(vec3(...operations.getGrassColorGrade(grade).linearMultipliers))
       .toVar("compactGrassGradedAlbedo"),
   };
 }
@@ -721,8 +721,12 @@ export function applyCompactMeadowTint(
   noise: Node<"float">,
   macroDry: Node<"float"> = float(0),
   strength = 1,
+  grade?: CompactGrassColorGrade,
 ): CompactTerrainLayer {
   const c = COMPACT_TERRAIN_COMPOSITION;
+  const regional =
+    createCompactTerrainColorOperations().grassColorGrade(grade) ===
+    "fine-meadow-regional-v1";
   const dryness = mix(
     float(c.meadowDryLow),
     float(c.meadowDryHigh),
@@ -731,7 +735,9 @@ export function applyCompactMeadowTint(
   const tint = mix(
     mix(
       vec3(c.meadowFreshRed, c.meadowFreshGreen, c.meadowFreshBlue),
-      vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
+      regional
+        ? vec3(c.macroDryRed, c.macroDryGreen, c.macroDryBlue)
+        : vec3(c.meadowDryRed, c.meadowDryGreen, c.meadowDryBlue),
       dryness,
     ),
     vec3(c.macroDryRed, c.macroDryGreen, c.macroDryBlue),
@@ -740,7 +746,7 @@ export function applyCompactMeadowTint(
   return {
     ...grass,
     albedo: grass.albedo.mul(
-      strength === 1
+      regional || strength === 1
         ? tint
         : mix(vec3(1), tint, float(strength)).toVar("coastalMeadowTint"),
     ),

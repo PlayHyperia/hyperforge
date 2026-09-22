@@ -133,6 +133,27 @@ export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
+export type GrassPaletteCandidate = "regional-v1";
+
+/** Explicit fine-meadow reflectance trial; captured once by the terrain owner.
+ * No profile, placement, density, geometry, or lighting selection is changed. */
+export function resolveGrassPaletteCandidate(
+  win?: Window,
+): GrassPaletteCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassPalette") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "regional-v1")
+    throw new Error("Unknown or duplicate grass palette candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Grass palette requires the explicit fine meadow pair");
+  return "regional-v1";
+}
 
 /** Fine-only shading trial, captured once by the terrain owner; no density change. */
 export function resolveGrassLightingCandidate(

@@ -120,6 +120,8 @@ export type GrassBladeGroundingReceipt = {
   triangleVisits: number;
   /** Base edges proved strictly inside their one retained sampled face. */
   sameFaceEdges: number;
+  /** Subset of sameFaceEdges admitted by the refined whole-cell certificate. */
+  refinedSameFaceEdges: number;
   workUnits: number;
   workBudget: number;
   correctionBytes: number;
@@ -514,6 +516,7 @@ export function* groundGrassBladeSteps(
     endpointQueries: 0,
     triangleVisits: 0,
     sameFaceEdges: 0,
+    refinedSameFaceEdges: 0,
     workUnits: 0,
     workBudget,
     correctionBytes: 0,
@@ -734,6 +737,7 @@ export function* groundGrassBladeSteps(
             take();
             receipt.triangleVisits++;
             receipt.sameFaceEdges++;
+            if (refinedInterior) receipt.refinedSameFaceEdges++;
             markSurface(owner, "edge");
             let maxError = 0;
             // Preserve the clipper's exact expression/order at lo=0 and hi=1,

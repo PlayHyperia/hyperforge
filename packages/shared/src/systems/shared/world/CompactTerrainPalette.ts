@@ -7,7 +7,8 @@ import type {
 } from "../../../types/world/terrain";
 
 /** Restart-owned fine-meadow trial, never a change to raw scan calibration. */
-export type CompactGrassColorGrade = "fine-meadow-green-v1";
+export type CompactGrassColorGrade =
+  "fine-meadow-green-v1" | "fine-meadow-regional-v1";
 /** Restart-owned coastal appearance; no terrain-height or navigation change. */
 export type CompactCoastBlend = "detail-v1" | "distribution-v1" | "cavity-v1";
 /** Restart-owned pond appearance; historical modes do not alter grass support. */
@@ -418,6 +419,11 @@ export function createCompactTerrainColorOperations() {
     Object.freeze({
       id: "fine-meadow-green-v1",
       linearMultipliers: Object.freeze([0.95, 1.3, 1.1] as const),
+    });
+  const regionalGrassColorGradeDescriptor: CompactGrassColorGradeDescriptor =
+    Object.freeze({
+      id: "fine-meadow-regional-v1",
+      linearMultipliers: grassColorGradeDescriptor.linearMultipliers,
     });
   const composition = {
     // Fresh/dry grass is a reflectance variation, not bare soil. Give it a
@@ -2555,15 +2561,31 @@ export function createCompactTerrainColorOperations() {
       };
     },
     grassColorGrade(value: unknown): CompactGrassColorGrade | undefined {
-      if (value === undefined || value === grassColorGradeDescriptor.id)
-        return value;
+      if (value === undefined) return undefined;
+      if (value === grassColorGradeDescriptor.id)
+        return grassColorGradeDescriptor.id;
+      if (value === regionalGrassColorGradeDescriptor.id)
+        return regionalGrassColorGradeDescriptor.id;
       throw new Error("Invalid compact grass color grade");
     },
-    getGrassColorGrade(): CompactGrassColorGradeDescriptor {
-      return grassColorGradeDescriptor;
+    getGrassColorGrade(
+      grade?: CompactGrassColorGrade,
+    ): CompactGrassColorGradeDescriptor {
+      return operations.grassColorGrade(grade) ===
+        regionalGrassColorGradeDescriptor.id
+        ? regionalGrassColorGradeDescriptor
+        : grassColorGradeDescriptor;
     },
-    meadowTint(noiseValue: number, macroDry = 0, strength = 1) {
+    meadowTint(
+      noiseValue: number,
+      macroDry = 0,
+      strength = 1,
+      grade?: CompactGrassColorGrade,
+    ) {
       const c = composition;
+      const regional =
+        operations.grassColorGrade(grade) ===
+        regionalGrassColorGradeDescriptor.id;
       const dryness = math.mix(
         c.meadowDryLow,
         c.meadowDryHigh,
@@ -2571,22 +2593,36 @@ export function createCompactTerrainColorOperations() {
       );
       const tint = [
         math.mix(
-          math.mix(c.meadowFreshRed, c.meadowDryRed, dryness),
+          math.mix(
+            c.meadowFreshRed,
+            regional ? c.macroDryRed : c.meadowDryRed,
+            dryness,
+          ),
           c.macroDryRed,
           macroDry,
         ),
         math.mix(
-          math.mix(c.meadowFreshGreen, c.meadowDryGreen, dryness),
+          math.mix(
+            c.meadowFreshGreen,
+            regional ? c.macroDryGreen : c.meadowDryGreen,
+            dryness,
+          ),
           c.macroDryGreen,
           macroDry,
         ),
         math.mix(
-          math.mix(c.meadowFreshBlue, c.meadowDryBlue, dryness),
+          math.mix(
+            c.meadowFreshBlue,
+            regional ? c.macroDryBlue : c.meadowDryBlue,
+            dryness,
+          ),
           c.macroDryBlue,
           macroDry,
         ),
       ];
-      return strength === 1
+      // Regional appearance reuses the authored fresh and dry-shoulder colors
+      // at full strength. No noise-frequency, layer weight or root-policy change.
+      return regional || strength === 1
         ? tint
         : tint.map((channel) => math.mix(1, channel, strength));
     },
@@ -3060,6 +3096,7 @@ export function createCompactTerrainColorOperations() {
         input.surface?.macroField?.coastalMeadow
           ? composition.coastalMeadowTintStrength
           : 1,
+        grade,
       );
       const havenGround = input.surface?.macroField?.havenGround;
       const authored = operations.havenGroundWeights(

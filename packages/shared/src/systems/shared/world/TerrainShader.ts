@@ -1407,6 +1407,7 @@ export function createTerrainMaterial(
       macroField?.coastalMeadow
         ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
         : 1,
+      grassColorGrade,
     );
   }
   if (compactLayers)
@@ -2255,7 +2256,7 @@ export function createTerrainMaterial(
       enumerable: true,
       writable: false,
       configurable: false,
-      value: grassColorOperations.getGrassColorGrade(),
+      value: grassColorOperations.getGrassColorGrade(grassColorGrade),
     });
   if (options.compactHabitat) {
     Object.defineProperty(result, "compactHabitatMaterial", {

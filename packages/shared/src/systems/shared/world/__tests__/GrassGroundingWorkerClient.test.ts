@@ -240,6 +240,20 @@ describe("actual grounding worker client", () => {
         expect(semanticResult(result.state.result, fixture.request)).toEqual(
           semanticResult(expected, fixture.request),
         );
+        expect(result.state.result.receipt.refinedSameFaceEdges).toBe(
+          expected.receipt.refinedSameFaceEdges,
+        );
+        expect(
+          Number.isSafeInteger(
+            result.state.result.receipt.refinedSameFaceEdges,
+          ),
+        ).toBe(true);
+        expect(
+          result.state.result.receipt.refinedSameFaceEdges,
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          result.state.result.receipt.refinedSameFaceEdges,
+        ).toBeLessThanOrEqual(result.state.result.receipt.sameFaceEdges);
         expect(client.terminated).toBe(false);
         expect(client.transportFailure).toBeNull();
         expect(client.cacheReceipt).toEqual({
