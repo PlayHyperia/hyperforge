@@ -12,6 +12,7 @@ import {
   CURVED_MEADOW_APPEARANCE,
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
+  FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_THIN_LEAF_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
@@ -84,6 +85,7 @@ function createOwner(
   profile?: GrassVisualProfile,
   gradedBank = false,
   serviceGround?: CompactTerrainBankVerge,
+  lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
 ) {
   const terrain = gradedBank
     ? validateWorldTerrainProfile({
@@ -150,6 +152,8 @@ function createOwner(
       : candidate
         ? NATURAL_TUFT_APPEARANCE.id
         : undefined,
+    undefined,
+    lighting,
   );
 }
 
@@ -750,6 +754,296 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
             expect(response(half.clone().negate())).toBeCloseTo(0.2, 13);
           }
       }
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
+describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", () => {
+  function foldedOwner() {
+    return createOwner(
+      "fine",
+      true,
+      undefined,
+      true,
+      undefined,
+      FINE_GRASS_LEAF_VOLUME_LIGHTING.id,
+    );
+  }
+
+  function foldedSurface(geometry: THREE.BufferGeometry, blade: number) {
+    const position = geometry.getAttribute("position");
+    const left = new THREE.Vector3().fromBufferAttribute(position, blade * 9);
+    const right = new THREE.Vector3().fromBufferAttribute(
+      position,
+      blade * 9 + 1,
+    );
+    // Tip remains index six: appended center stations seven/eight are not tips.
+    const tip = new THREE.Vector3().fromBufferAttribute(
+      position,
+      blade * 9 + 6,
+    );
+    const center = left.clone().add(right).multiplyScalar(0.5);
+    const halfWidth = left.distanceTo(right) * 0.5;
+    const widthAxis = right.clone().sub(left).normalize();
+    const ridgeAxis = new THREE.Vector3(-widthAxis.z, 0, widthAxis.x);
+    const height = tip.y / 0.95;
+    const arc = tip.clone().sub(center).setY(0);
+    const width = (t: number) =>
+      halfWidth * (1 + 2.06 * t - 5.04 * t * t + 1.98 * t ** 3);
+    const widthDerivative = (t: number) =>
+      halfWidth * (2.06 - 10.08 * t + 5.94 * t * t);
+    return {
+      point(s: number, t: number) {
+        const ridge = width(t) * 0.36 * 16 * t * t * (1 - t) ** 2;
+        return center
+          .clone()
+          .addScaledVector(arc, 0.7 * t + 0.3 * t * t)
+          .addScaledVector(widthAxis, s * width(t))
+          .addScaledVector(ridgeAxis, ridge * (1 - s * s))
+          .setY(height * (1.52 * t - 0.57 * t * t));
+      },
+      tangents(s: number, t: number) {
+        const hw = width(t);
+        const dhw = widthDerivative(t);
+        const ridge = hw * 0.36 * 16 * t * t * (1 - t) ** 2;
+        const ridgeDerivative =
+          0.36 *
+          (dhw * 16 * t * t * (1 - t) ** 2 +
+            hw * 32 * t * (1 - t) * (1 - 2 * t));
+        // At the exact single tip, take the limiting width direction rather
+        // than crossing the zero derivative of a collapsed cross-section.
+        const ps =
+          t === 1
+            ? widthAxis.clone()
+            : widthAxis
+                .clone()
+                .multiplyScalar(hw)
+                .addScaledVector(ridgeAxis, -2 * s * ridge);
+        const pt = arc
+          .clone()
+          .multiplyScalar(0.7 + 0.6 * t)
+          .setY(height * (1.52 - 1.14 * t))
+          .addScaledVector(widthAxis, s * dhw)
+          .addScaledVector(ridgeAxis, ridgeDerivative * (1 - s * s));
+        return [ps, pt] as const;
+      },
+    };
+  }
+
+  function normalWeight(t: number) {
+    const v = Math.min(1, Math.max(0, (t - 0.1) / 0.55));
+    return 0.2 + 0.8 * v * v * (3 - 2 * v);
+  }
+
+  it("matches folded Ps×Pt through yaw, slope, wind, fade and bank height, without a second cosmetic fold", () => {
+    const owner = foldedOwner();
+    try {
+      const material = owner["foldedMaterial"];
+      if (!material?.normalNode || !material.positionNode)
+        throw new Error("Actual folded near material is required");
+      expect(owner["geometryLayout"]).toBe("fine-folded-lancet-v1");
+      expect(material.positionNode).toBe(owner["material"].positionNode);
+      expect(material.normalNode).not.toBe(owner["material"].normalNode);
+      expect(
+        [...graph(material.normalNode)].some((node) =>
+          ["fineGrassTransverseFold", "v_fineGrassWidthAxis"].includes(
+            String(Reflect.get(node, "name")),
+          ),
+        ),
+      ).toBe(false);
+      const geometry = owner["lodGeometries"][0];
+      expect(geometry.getAttribute("position").count).toBe(24 * 9);
+      const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.2, 1000);
+      camera.position.set(25, 19, -31);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld(true);
+      const scenarios = [
+        {
+          x: 339,
+          z: 314,
+          height: 1,
+          ground: [0, 1, 0],
+          scale: 1.1,
+          yaw: 0.7,
+          seconds: 0,
+          distance: 0,
+          fade: 1,
+        },
+        {
+          x: 350,
+          z: 319.5,
+          height: 0.41,
+          ground: [0.4, 0.8, -0.3],
+          scale: 0.7,
+          yaw: -1.2,
+          seconds: 3.7,
+          distance: 0,
+          fade: 1,
+        },
+        {
+          x: 341,
+          z: 314,
+          height: 0.825,
+          ground: [-0.6, 0.7, 0.2],
+          scale: 1.3,
+          yaw: 2.1,
+          seconds: 20,
+          distance: 126,
+          fade: 0.5,
+        },
+      ];
+      let cases = 0;
+      let numericalCases = 0;
+      for (const blade of [0, 23]) {
+        const surface = foldedSurface(geometry, blade);
+        for (const scenario of scenarios) {
+          const ground = vector(scenario.ground).normalize();
+          for (let local = 0; local < 9; local++) {
+            const inputs = inputFor(geometry, blade * 9 + local);
+            inputs.model.identity();
+            inputs.view.copy(camera.matrixWorldInverse);
+            inputs.attributes.instanceOffset = [scenario.x, 28, scenario.z];
+            inputs.attributes.instanceGroundNormal = ground.toArray();
+            inputs.attributes.instanceRotScaleHash = [
+              scenario.yaw,
+              scenario.scale,
+              0.3,
+            ];
+            inputs.time = scenario.seconds;
+            owner["playerPosUniform"]!.value.copy(worldBase(inputs)).add(
+              new THREE.Vector3(scenario.distance, 0, 0),
+            );
+            const [u, t] = inputs.attributes.uv;
+            const s = 2 * u - 1;
+            const [ps, pt] = surface.tangents(s, t);
+            for (const tangent of [ps, pt]) {
+              tangent.y *= scenario.fade * scenario.height;
+              tangent
+                .multiplyScalar(scenario.scale)
+                .applyQuaternion(rotation(inputs));
+            }
+            pt.add(
+              windAmplitude(inputs, 0.86).multiplyScalar(
+                scenario.height * 1.8 * t ** 0.8,
+              ),
+            );
+            const expectedBlade = ps.cross(pt).normalize();
+            // Evaluate the actual position graph independently at nearby
+            // surface parameters; this catches a derivative/sign mismatch.
+            let numericalBlade: THREE.Vector3 | undefined;
+            if (t > 0 && t < 1) {
+              const point = (across: number, along: number) =>
+                vector(
+                  evaluate(material.positionNode!, {
+                    ...inputs,
+                    attributes: {
+                      ...inputs.attributes,
+                      position: surface.point(across, along).toArray(),
+                      uv: [(across + 1) * 0.5, along],
+                    },
+                  }),
+                );
+              const epsilon = 1e-5;
+              const across = point(s + epsilon, t).sub(point(s - epsilon, t));
+              const along = point(s, t + epsilon).sub(point(s, t - epsilon));
+              numericalBlade = across.cross(along).normalize();
+              expect(numericalBlade.distanceTo(expectedBlade)).toBeLessThan(
+                2e-6,
+              );
+              numericalCases++;
+            }
+            for (const front of [true, false]) {
+              inputs.front = front;
+              const expected = ground
+                .clone()
+                .lerp(
+                  expectedBlade.clone().multiplyScalar(front ? 1 : -1),
+                  normalWeight(t),
+                )
+                .normalize()
+                .transformDirection(inputs.view);
+              const actual = vector(evaluate(material.normalNode, inputs));
+              expect(actual.length()).toBeCloseTo(1, 12);
+              expect(actual.distanceTo(expected)).toBeLessThan(1e-5);
+              if (numericalBlade) {
+                const numerical = ground
+                  .clone()
+                  .lerp(
+                    numericalBlade.clone().multiplyScalar(front ? 1 : -1),
+                    normalWeight(t),
+                  )
+                  .normalize()
+                  .transformDirection(inputs.view);
+                expect(actual.distanceTo(numerical)).toBeLessThan(1e-5);
+              }
+              cases++;
+            }
+            const expectedPosition = vector(inputs.attributes.position);
+            expectedPosition.y *= scenario.fade * scenario.height;
+            expectedPosition
+              .multiplyScalar(scenario.scale)
+              .applyQuaternion(rotation(inputs))
+              .add(
+                windAmplitude(inputs, 0.86).multiplyScalar(
+                  scenario.height * t ** 1.8,
+                ),
+              )
+              .add(vector(inputs.attributes.instanceOffset));
+            expect(
+              vector(evaluate(material.positionNode, inputs)).distanceTo(
+                expectedPosition,
+              ),
+            ).toBeLessThan(1e-12);
+          }
+        }
+      }
+      expect(cases).toBe(108);
+      expect(numericalCases).toBe(36);
+      // No per-edge correction is supplied to this base material. Its later
+      // world-Y shear is a separate known normal-accuracy limitation.
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("keeps actual folded nodes finite at full fade and zero wind, including both appended centers", () => {
+    const owner = foldedOwner();
+    try {
+      const material = owner["foldedMaterial"];
+      if (!material?.normalNode || !material.positionNode)
+        throw new Error("Actual folded near material is required");
+      const geometry = owner["lodGeometries"][0];
+      // Simultaneous physical zero-wave phase, not an overridden uniform.
+      const z = -2 / (0.28 - (0.18 * 0.12) / 0.35);
+      const x = (-0.12 * z) / 0.35;
+      for (const blade of [0, 23])
+        for (let local = 0; local < 9; local++)
+          for (const front of [true, false]) {
+            const inputs = inputFor(geometry, blade * 9 + local);
+            inputs.model.identity();
+            inputs.attributes.instanceOffset = [x, 28, z];
+            inputs.attributes.instanceGroundNormal = new THREE.Vector3(
+              0.4,
+              0.8,
+              -0.3,
+            )
+              .normalize()
+              .toArray();
+            inputs.time = 0;
+            inputs.front = front;
+            owner["playerPosUniform"]!.value.copy(worldBase(inputs)).add(
+              new THREE.Vector3(140, 0, 0),
+            );
+            expect(windAmplitude(inputs, 0.86).length()).toBeLessThan(1e-16);
+            const actualNormal = vector(evaluate(material.normalNode, inputs));
+            expect(actualNormal.toArray().every(Number.isFinite)).toBe(true);
+            expect(actualNormal.length()).toBeCloseTo(1, 12);
+            expect(
+              evaluate(material.positionNode, inputs).every(Number.isFinite),
+            ).toBe(true);
+          }
     } finally {
       owner.destroy();
     }

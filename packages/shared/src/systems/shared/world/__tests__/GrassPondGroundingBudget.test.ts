@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { serialize } from "node:v8";
 import { beforeAll, describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
+import { MeshSSSNodeMaterial } from "three/webgpu";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { loadPhysX } from "../../../../physics/PhysXManager";
@@ -27,7 +28,11 @@ import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
+  createClumpGeometry,
+  FINE_GRASS_FOLDED_BLADE_LIGHTING,
+  FINE_GRASS_LEAF_VOLUME_LIGHTING,
 } from "../GrassVisualManager";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { projectGrassAnchors } from "../GrassTerrainProjection";
 import {
@@ -956,6 +961,7 @@ describe.each(cases)("$name", (scenario) => {
       const material = new THREE.MeshBasicMaterial();
       let visual: TerrainVisualManager | undefined;
       let manager: GrassVisualManager | undefined;
+      let historicalRibbonGeometry: THREE.BufferGeometry | undefined;
       let worker: Worker | undefined;
       let groundingWorker: ActualGroundingWorker | undefined;
       let clientPort: ActualGrassGroundingClientPort | undefined;
@@ -1516,7 +1522,7 @@ describe.each(cases)("$name", (scenario) => {
           data: projected,
           geometry: manager["lodGeometries"][lod],
           lod,
-          geometryLayout: "fine-linear-sweep-3seg-v1",
+          geometryLayout: manager.getProfileReceipt().geometryLayout,
           roadClearance: "per-blade-v1",
           ...(bankVerge ? { bankVerge } : {}),
           ...(pondServiceGround ? { pondServiceGround } : {}),
@@ -1534,6 +1540,34 @@ describe.each(cases)("$name", (scenario) => {
               0.55,
           },
         };
+        expect(request.geometryLayout).toBe(
+          usesNativeComposition
+            ? "fine-folded-lancet-v1"
+            : "fine-linear-sweep-3seg-v1",
+        );
+        const actualLayout = getGrassBladeLayout(lod, request.geometryLayout);
+        expect(request.geometry.getAttribute("position").count).toBe(
+          actualLayout.verticesPerClump,
+        );
+        expect(request.geometry.index!.count).toBe(
+          actualLayout.trianglesPerClump * 3,
+        );
+        // The frozen oracle knows ribbon faces only. Keep a real, explicitly
+        // separate historical-shape control; it cannot qualify the new fold.
+        if (usesNativeComposition && lod === 0)
+          historicalRibbonGeometry = createClumpGeometry(
+            24,
+            3,
+            FINE_MEADOW_APPEARANCE,
+          );
+        const historicalShapeRequest: GrassBladeGroundingRequest =
+          usesNativeComposition
+            ? {
+                ...request,
+                geometry: historicalRibbonGeometry ?? request.geometry,
+                geometryLayout: "fine-linear-sweep-3seg-v1",
+              }
+            : request;
         // Keep this exact detached copy for the subsequent cold-worker trial;
         // hashing does not copy live renderer inputs or alter fitting ledgers.
         const reconstructionCopyStarted = performance.now();
@@ -1713,6 +1747,7 @@ describe.each(cases)("$name", (scenario) => {
                     grassRoadClearance: request.roadClearance,
                     habitatComposition: "haven-understory-v1",
                     grassLighting: "leaf-volume-v1",
+                    grassGeometryLayout: request.geometryLayout,
                   },
                 }
               : {}),
@@ -1756,7 +1791,12 @@ describe.each(cases)("$name", (scenario) => {
             grassTints: new Float32Array(),
             groundNormals: new Float32Array(),
           };
-          const fixed = legacyGroundGrassBlades({ ...request, data: empty });
+          const diagnosticRequest = { ...historicalShapeRequest };
+          delete diagnosticRequest.pondServiceGround;
+          const fixed = legacyGroundGrassBlades({
+            ...diagnosticRequest,
+            data: empty,
+          });
           let legacyWork = fixed.receipt.workUnits;
           let legacyTriangles = 0;
           let legacyRetained = 0;
@@ -1770,7 +1810,7 @@ describe.each(cases)("$name", (scenario) => {
               grassTints: projected.grassTints.subarray(i * 4, i * 4 + 4),
               groundNormals: projected.groundNormals.subarray(i * 3, i * 3 + 3),
             };
-            const one = legacyGroundGrassBlades({ ...request, data });
+            const one = legacyGroundGrassBlades({ ...diagnosticRequest, data });
             expect(one.status, `diagnostic oracle clump ${i}`).toBe("ready");
             legacyWork += one.receipt.workUnits - fixed.receipt.workUnits;
             legacyTriangles += one.receipt.triangleVisits;
@@ -1790,7 +1830,7 @@ describe.each(cases)("$name", (scenario) => {
               maximumClumpWork,
               fixedWork: fixed.receipt.workUnits,
               scope:
-                "Frozen per-clump oracle without pond-service wear only; full current production job still failed its cap",
+                "Frozen per-clump historical-ribbon oracle without pond-service wear only; not folded geometry evidence. Full current production job still failed its cap.",
             }),
           );
         }
@@ -2364,16 +2404,18 @@ describe.each(cases)("$name", (scenario) => {
         await clientPort.close();
         clientPort = undefined;
 
-        // The frozen reference predates pond-service wear. Preserve its exact
-        // oracle comparison against a separately capped numerical control,
-        // never against a current request whose shorter swept blades it cannot
-        // represent. This removes only the grounding descriptor: the already
-        // generated placement/colors, projected roots, roads, terrain and town
-        // verge are identical, not a historical population or native packet.
+        // The frozen reference predates pond-service wear and folded faces.
+        // Preserve its exact oracle comparison against a separately capped
+        // numerical control, never against current faces it cannot represent.
+        // Remove service wear and, when needed, select the historical shape.
+        // The generated placement/colors, projected roots, roads, terrain and town
+        // verge are identical. Folded near requests use the historical ribbon
+        // geometry above ONLY for this independent oracle control. All current
+        // nine-vertex worker/handoff/publication checks keep their full caps.
         let oracleRequest = request;
         let oracleResult = result;
-        if (pondServiceGround) {
-          oracleRequest = { ...request };
+        if (pondServiceGround || usesNativeComposition) {
+          oracleRequest = { ...historicalShapeRequest };
           delete oracleRequest.pondServiceGround;
           expect(request.pondServiceGround).toBe(pondServiceGround);
           expect(oracleRequest.data).toBe(request.data);
@@ -2392,6 +2434,9 @@ describe.each(cases)("$name", (scenario) => {
               key,
               lod,
               status: control.state.status,
+              geometryLayout: oracleRequest.geometryLayout,
+              currentGeometryLayout: request.geometryLayout,
+              historicalRibbonControl: usesNativeComposition,
               reason:
                 control.state.status === "failed_budget"
                   ? control.state.reason
@@ -2402,7 +2447,7 @@ describe.each(cases)("$name", (scenario) => {
               wallMs: performance.now() - controlStarted,
               lastPhase: control.lastPhase,
               scope:
-                "No-service-wear numerical control: one full-cell original continuation with unchanged operation/active-time caps, omitting only pondServiceGround from the current projected request. Not historical native input, population or timing; the current wear-enabled request remains independently subject to all worker/handoff/full-pipeline assertions.",
+                "Historical-ribbon/no-service-wear numerical control under unchanged operation/active-time caps. Fine leaf-volume near uses the original seven-vertex geometry; other tiers retain their exact geometry bytes. This frozen-oracle control does not qualify current folded faces. Current geometry remains independently subject to all worker/handoff/full-pipeline assertions.",
             }),
           );
           expect(control.state.status).toBe("ready");
@@ -2458,13 +2503,13 @@ describe.each(cases)("$name", (scenario) => {
               key,
               lod,
               current: currentBuffers,
-              noServiceWearControl: controlBuffers,
+              noServiceWearHistoricalRibbonControl: controlBuffers,
               changedMasks,
               addedRetainedClumps,
               removedRetainedClumps,
               maskExamples,
               scope:
-                "Source-index-aligned current/control output hashes and bounded mask examples. The frozen oracle qualifies only the no-service-wear control; current wear correctness also relies on the separate independently derived deformation/wind/road-clearance tests, not worker/pipeline agreement alone.",
+                "Source-index-aligned current/control hashes and masks: changes can include both physical folded geometry and service wear. The frozen oracle qualifies only the historical-ribbon/no-service-wear control. New folded-face and current-wear correctness require separate independently derived geometry/wind/road-clearance tests, not worker/pipeline agreement alone.",
             }),
           );
           if ("native72" in scenario) {
@@ -2749,9 +2794,71 @@ describe.each(cases)("$name", (scenario) => {
               },
             },
             scope:
-              "Exact current-source CPU array-view hashes after full oracle/pipeline assertions. Source indices refer to projected worker rows. Compare each attribute independently across source A/B runs; only groundColors/grassTints may change in an appearance-only trial. No native buffer or GPU claim.",
+              "Exact current-source CPU array-view hashes after full worker/pipeline assertions and a separately identified historical-ribbon oracle control. Source indices refer to projected worker rows. A geometry trial may change clearance masks/retained rows and swept bounds, not the source placement population. No native buffer or GPU claim.",
           }),
         );
+        if (usesNativeComposition) {
+          const base = manager["material"];
+          const near = manager["materialForLod"](0);
+          const selected = manager["materialForLod"](lod);
+          let baseDisposals = 0,
+            nearDisposals = 0,
+            chunkDisposals = 0;
+          base.addEventListener("dispose", () => baseDisposals++);
+          near.addEventListener("dispose", () => nearDisposals++);
+          expect(near).not.toBe(base);
+          expect(selected).toBe(lod === 0 ? near : base);
+          expect(pipeline.state.result.data.count).toBeGreaterThan(0);
+          manager["createChunkMeshFromWorkerData"](
+            work,
+            { ...output, ...pipeline.state.result.data },
+            lod,
+            grounding,
+            pipeline.state.result,
+          );
+          const mesh = manager["chunks"].get(key)?.mesh;
+          if (!mesh || !(mesh.material instanceof MeshSSSNodeMaterial))
+            throw new Error(
+              "Expected actual folded-profile SSS chunk publication",
+            );
+          expect(mesh.count).toBe(pipeline.state.result.data.count);
+          expect(mesh.material).not.toBe(selected);
+          expect(mesh.material.normalNode).toBe(selected.normalNode);
+          expect(mesh.material.colorNode).toBe(base.colorNode);
+          expect(mesh.material.aoNode).toBe(base.aoNode);
+          expect(mesh.material.userData.grassBladeLayout).toEqual(actualLayout);
+          expect(mesh.material.userData.fineGrassCanopyLighting).toBe(
+            lod === 0
+              ? FINE_GRASS_FOLDED_BLADE_LIGHTING
+              : FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          );
+          expect(
+            Object.getOwnPropertyDescriptor(
+              mesh.material.userData,
+              "fineGrassCanopyLighting",
+            ),
+          ).toMatchObject({ writable: false, configurable: false });
+          expect(mesh.geometry.getAttribute("position").array).toEqual(
+            request.geometry.getAttribute("position").array,
+          );
+          expect(mesh.geometry.getAttribute("grassRootDeltas").array).toEqual(
+            pipeline.state.result.rootDeltas,
+          );
+          mesh.material.addEventListener("dispose", () => chunkDisposals++);
+          manager["retireGrassChunk"](key);
+          expect(manager["chunks"].has(key)).toBe(false);
+          expect([baseDisposals, nearDisposals, chunkDisposals]).toEqual([
+            0, 0, 1,
+          ]);
+          manager.destroy();
+          expect([baseDisposals, nearDisposals, chunkDisposals]).toEqual([
+            1, 1, 1,
+          ]);
+          manager.destroy();
+          expect([baseDisposals, nearDisposals, chunkDisposals]).toEqual([
+            1, 1, 1,
+          ]);
+        }
       } catch (error) {
         failures.push(error);
       } finally {
@@ -2779,6 +2886,7 @@ describe.each(cases)("$name", (scenario) => {
           failures.push(error);
         }
         release(() => manager?.destroy());
+        release(() => historicalRibbonGeometry?.dispose());
         release(() => visual?.dispose());
         release(() => material.dispose());
         // Release native dock actors/exclusions before terrain or physics dies.

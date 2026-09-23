@@ -26,6 +26,7 @@ import {
   FINE_GRASS_THIN_LEAF_LIGHTING,
   FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  FINE_GRASS_FOLDED_BLADE_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -302,6 +303,8 @@ describe("opt-in fine canopy normals (actual graph and geometry, CPU only)", () 
       expect(candidate.getProfileReceipt()).toEqual(
         baseline.getProfileReceipt(),
       );
+      expect(baseline["foldedMaterial"]).toBeNull();
+      expect(candidate["foldedMaterial"]).toBeNull();
       expect(FINE_GRASS_CANOPY_NORMAL_LIGHTING).toEqual({
         id: "canopy-normal-v1",
         rootWeight: 0.2,
@@ -707,9 +710,19 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           "fineGrassCanopyLighting",
         ),
       ).toBe(false);
-      expect(candidate.getProfileReceipt()).toEqual(
-        baseline.getProfileReceipt(),
-      );
+      expect(candidate.getProfileReceipt()).toEqual({
+        ...baseline.getProfileReceipt(),
+        geometryLayout: "fine-folded-lancet-v1",
+      });
+      expect(baseline["foldedMaterial"]).toBeNull();
+      expect(canopy["foldedMaterial"]).toBeNull();
+      expect(Object.isFrozen(FINE_GRASS_FOLDED_BLADE_LIGHTING)).toBe(true);
+      expect(FINE_GRASS_FOLDED_BLADE_LIGHTING).toEqual({
+        ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+        foldTangent: 0,
+        normalSource: "geometry-fold",
+        geometryLayout: "fine-folded-lancet-v1",
+      });
       for (const value of [
         "LEAF-VOLUME-V1",
         " leaf-volume-v1",
@@ -764,7 +777,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
-  it("preserves every geometry byte and pass property while adding only the explicit width varying", () => {
+  it("preserves mid/far geometry bytes and pass properties while explicitly selecting folded near geometry", () => {
     const baseline = fine(),
       canopy = fine("canopy-normal-v1"),
       candidate = fine("leaf-volume-v1");
@@ -831,12 +844,34 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           expect(Object.keys(geometry.attributes)).toEqual(
             Object.keys(original.attributes),
           );
-          for (const key of Object.keys(original.attributes))
-            expect(geometry.attributes[key].array).toEqual(
-              original.attributes[key].array,
+          if (lod === 0) {
+            expect(geometry.getAttribute("position").count).toBe(24 * 9);
+            expect(geometry.index!.count).toBe(24 * 9 * 3);
+            expect(original.getAttribute("position").count).toBe(24 * 7);
+            expect(original.index!.count).toBe(24 * 5 * 3);
+            // The extra rows' center vertices change stride, not population
+            // or deterministic roots/tips. Numerical shape proofs are separate.
+            for (let blade = 0; blade < 24; blade++)
+              for (const vertex of [0, 1, 6])
+                for (const key of Object.keys(original.attributes)) {
+                  const attribute = geometry.attributes[key];
+                  const previous = original.attributes[key];
+                  for (let c = 0; c < attribute.itemSize; c++)
+                    expect(attribute.getComponent(blade * 9 + vertex, c)).toBe(
+                      previous.getComponent(blade * 7 + vertex, c),
+                    );
+                }
+            expect(geometryBytes(geometry) - geometryBytes(original)).toBe(
+              2112,
             );
-          expect(geometry.index!.array).toEqual(original.index!.array);
-          expect(geometryBytes(geometry)).toBe(geometryBytes(original));
+          } else {
+            for (const key of Object.keys(original.attributes))
+              expect(geometry.attributes[key].array).toEqual(
+                original.attributes[key].array,
+              );
+            expect(geometry.index!.array).toEqual(original.index!.array);
+            expect(geometryBytes(geometry)).toBe(geometryBytes(original));
+          }
         }
         const inputs = inputsAt(geometry, 2);
         for (const distance of [0, 125, 140])
@@ -864,8 +899,9 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
-  it("evaluates the real folded graph with correct authored width, both faces, slope, wind and fade", () => {
-    const owner = fine("leaf-volume-v1");
+  it("retains the real cosmetic-fold graph on historical ribbon geometry for both faces, slope, wind and fade", () => {
+    const owner = fine("leaf-volume-v1"),
+      ribbons = fine();
     try {
       const material = owner["material"],
         normalNode = material.normalNode;
@@ -875,7 +911,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       const weightNode = named(normalNode, "fineGrassCanopyNormalWeight");
       let oppositeSides = 0;
       for (let lod = 0; lod < 3; lod++) {
-        const geometry = owner["lodGeometries"][lod];
+        const geometry = ribbons["lodGeometries"][lod];
         const stride = getGrassBladeLayout(
           lod,
           FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
@@ -996,16 +1032,18 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       expect(oppositeSides).toBeGreaterThan(0);
     } finally {
       owner.destroy();
+      ribbons.destroy();
     }
   });
 
-  it("reports actual leaf-normal illumination contrast without requiring today's appearance", () => {
-    const owner = fine("leaf-volume-v1");
+  it("retains historical ribbon illumination diagnostics without treating them as folded-near evidence", () => {
+    const owner = fine("leaf-volume-v1"),
+      ribbons = fine();
     try {
       const material = owner["material"];
       if (!(material instanceof MeshSSSNodeMaterial))
         throw new Error("Expected the actual fine SSS material");
-      const geometry = owner["lodGeometries"][0];
+      const geometry = ribbons["lodGeometries"][0];
       const layout = getGrassBladeLayout(
         0,
         FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
@@ -1191,6 +1229,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       );
     } finally {
       owner.destroy();
+      ribbons.destroy();
     }
   });
 
@@ -1314,13 +1353,10 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     const owner = fine("leaf-volume-v1"),
       canopy = fine("canopy-normal-v1");
     try {
-      const material = owner["material"];
+      const material = owner["materialForLod"](0);
       const bladeNode = named(material.normalNode, "v_curvedGrassNormal");
       const geometry = owner["lodGeometries"][0];
-      const layout = getGrassBladeLayout(
-        0,
-        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
-      );
+      const layout = getGrassBladeLayout(0, "fine-folded-lancet-v1");
       const sun = new THREE.Vector3();
       // Same phase as the retained capture, but hypothetical settled light:
       // production sun sampling + Environment's400m distance/100m Y offset.
@@ -1333,12 +1369,11 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       const incidences: Array<{ physical: number; canopy: number }> = [];
       for (let blade = 0; blade < layout.bladesPerClump; blade++)
         for (const row of [layout.bladeSegments - 1, layout.bladeSegments]) {
-          const vertex =
-            blade * layout.verticesPerBlade +
-            Math.min(row * 2, layout.verticesPerBlade - 1);
+          const vertex = blade * layout.verticesPerBlade + row * 2;
           const inputs = inputsAt(geometry, vertex);
           expect(inputs.uv[1]).toBeGreaterThanOrEqual(0.65);
-          inputs.uv[0] = 0.5; // No artistic transverse fold at the blade center.
+          // Actual edge/tip source normals; the near material does not add a
+          // second cosmetic fold, so this is not a synthetic UV-center sample.
           const viewMatrix = new THREE.Matrix4().fromArray(
             inputs._cameraViewMatrix,
           );
@@ -1617,28 +1652,157 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     },
   );
 
-  it("retains the new nodes and immutable receipt through real grounded owners", async () => {
+  it("uses actual folded source normals only near, shares all other nodes and guards both-face cancellation", () => {
     const owner = fine("leaf-volume-v1");
+    try {
+      const base = owner["material"],
+        near = owner["materialForLod"](0);
+      expect(near).toBe(owner["foldedMaterial"]);
+      expect(near).not.toBe(base);
+      expect(near).toBeInstanceOf(MeshSSSNodeMaterial);
+      expect(owner["materialForLod"](1)).toBe(base);
+      expect(owner["materialForLod"](2)).toBe(base);
+      const nodes = graph(near.normalNode);
+      for (const name of ["v_fineGrassWidthAxis", "fineGrassTransverseFold"])
+        expect(
+          [...nodes].some((node) => Reflect.get(node, "name") === name),
+        ).toBe(false);
+      const blade = named(near.normalNode, "v_curvedGrassNormal");
+      expect(blade).toBe(named(base.normalNode, "v_curvedGrassNormal"));
+      for (const key of [
+        "positionNode",
+        "colorNode",
+        "aoNode",
+        "outputNode",
+      ] as const)
+        expect(near[key]).toBe(base[key]);
+      if (
+        !(near instanceof MeshSSSNodeMaterial) ||
+        !(base instanceof MeshSSSNodeMaterial)
+      )
+        throw new Error("Expected real folded and ribbon SSS materials");
+      for (const key of [
+        "thicknessColorNode",
+        "thicknessDistortionNode",
+        "thicknessAmbientNode",
+        "thicknessAttenuationNode",
+        "thicknessPowerNode",
+        "thicknessScaleNode",
+      ] as const)
+        expect(near[key]).toBe(base[key]);
+      const ownerNodes = [
+        base.positionNode,
+        base.colorNode,
+        base.normalNode,
+        base.outputNode,
+      ].flatMap((node) => [...graph(node)]);
+      const nearNodes = [
+        near.positionNode,
+        near.colorNode,
+        near.normalNode,
+        near.outputNode,
+      ].flatMap((node) => [...graph(node)]);
+      for (const node of nearNodes.filter((node) =>
+        Reflect.get(node, "isUniformNode"),
+      ))
+        expect(ownerNodes.includes(node)).toBe(true);
+      expect(graph(near.positionNode).has(time)).toBe(true);
+      expect(graph(near.positionNode).has(owner["playerPosUniform"])).toBe(
+        true,
+      );
+      // Light uniforms are owner state, not new copies hidden in the near clone.
+      const sun = owner["sunDirUniform"],
+        day = owner["dayIntensityUniform"];
+      owner.updateLighting(new THREE.Vector3(0.2, 0.8, 0.3));
+      owner.updateDayIntensity(0.7);
+      expect(owner["sunDirUniform"]).toBe(sun);
+      expect(owner["dayIntensityUniform"]).toBe(day);
+      expect(sun.value.toArray()).toEqual([0.2, 0.8, 0.3]);
+      expect(day.value).toBe(0.7);
+      const geometry = owner["lodGeometries"][0];
+      for (let index = 0; index < 9; index++)
+        for (const distance of [0, 125, 140])
+          for (const windTime of [0, 2.3])
+            for (const ground of [
+              new THREE.Vector3(0, 1, 0),
+              new THREE.Vector3(0.3, 0.9, -0.2).normalize(),
+            ])
+              for (const front of [false, true]) {
+                const inputs = inputsAt(geometry, index);
+                inputs.instanceOffset[0] = distance;
+                inputs._time[0] = windTime;
+                inputs.instanceGroundNormal = ground.toArray();
+                inputs._frontFacing[0] = front ? 1 : 0;
+                const physical = vector(colorValue(blade, inputs)).normalize();
+                const weight = 0.2 + 0.8 * smooth(0.1, 0.65, inputs.uv[1]);
+                const mixed = ground
+                  .clone()
+                  .lerp(physical.multiplyScalar(front ? 1 : -1), weight);
+                const expected = (
+                  mixed.lengthSq() > 1e-12 ? mixed.normalize() : ground.clone()
+                ).transformDirection(
+                  new THREE.Matrix4().fromArray(inputs._cameraViewMatrix),
+                );
+                const actual = vector(colorValue(near.normalNode, inputs));
+                expect(actual.toArray().every(Number.isFinite)).toBe(true);
+                expect(actual.length()).toBeCloseTo(1, 12);
+                expect(actual.distanceTo(expected)).toBeLessThan(1e-11);
+              }
+      const crossing = 0.1 + 0.55 * (0.5 - Math.sin(Math.asin(0.25) / 3));
+      const inputs = inputsAt(geometry, 7);
+      for (const source of [
+        [0, 0, 0],
+        [0, 1, 0],
+      ])
+        for (const t of [crossing - 1e-4, crossing, crossing + 1e-4, 0.65, 1])
+          for (const front of [false, true]) {
+            inputs.uv[1] = t;
+            inputs._frontFacing[0] = front ? 1 : 0;
+            const result = vector(
+              colorValue(near.normalNode, inputs, new Map([[blade, source]])),
+            );
+            const weight = 0.2 + 0.8 * smooth(0.1, 0.65, t);
+            const y = front ? 1 : 1 - 2 * weight;
+            const expected = y * y > 1e-12 ? Math.sign(y) : 1;
+            expect(result.toArray().every(Number.isFinite)).toBe(true);
+            expect(
+              result.distanceTo(new THREE.Vector3(0, expected, 0)),
+            ).toBeLessThan(1e-12);
+          }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("retains selected near/mid/far nodes and immutable receipts through real grounded owners", async () => {
+    const owner = fine("leaf-volume-v1");
+    const base = owner["material"],
+      near = owner["materialForLod"](0);
+    let baseDisposals = 0,
+      nearDisposals = 0,
+      representativeDisposals = 0;
+    base.addEventListener("dispose", () => baseDisposals++);
+    near.addEventListener("dispose", () => nearDisposals++);
     try {
       for (let lod = 0; lod < 3; lod++) {
         const geometry = owner["lodGeometries"][lod].clone();
-        const layout = getGrassBladeLayout(
-          lod,
-          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
-        );
+        const layout = getGrassBladeLayout(lod, "fine-folded-lancet-v1");
+        const selected = owner["materialForLod"](lod);
         const clone = createGroundedGrassMaterial(
-          owner["material"],
+          selected,
           geometry,
           new Float32Array(layout.bladesPerClump * layout.rootComponents),
           1,
           lod,
-          FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+          "fine-folded-lancet-v1",
         );
         try {
           for (const key of ["normalNode", "colorNode", "aoNode"] as const)
-            expect(clone[key]).toBe(owner["material"][key]);
+            expect(clone[key]).toBe(selected[key]);
           expect(clone.userData.fineGrassCanopyLighting).toEqual(
-            FINE_GRASS_LEAF_VOLUME_LIGHTING,
+            lod === 0
+              ? FINE_GRASS_FOLDED_BLADE_LIGHTING
+              : FINE_GRASS_LEAF_VOLUME_LIGHTING,
           );
         } finally {
           clone.dispose();
@@ -1652,14 +1816,28 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           !(object.material instanceof MeshSSSNodeMaterial)
         )
           throw new Error("Expected real grounded fine owner");
-        expect(object.material.normalNode).toBe(owner["material"].normalNode);
+        expect(object.geometry.getAttribute("position").count).toBe(216);
+        expect(object.geometry.index!.count).toBe(648);
+        expect(object.material).not.toBe(near);
+        expect(object.material.normalNode).toBe(near.normalNode);
+        expect(object.material.colorNode).toBe(base.colorNode);
+        expect(object.material.aoNode).toBe(base.aoNode);
+        expect(
+          graph(object.material.positionNode).has(
+            requireNode(near.positionNode),
+          ),
+        ).toBe(true);
+        object.material.addEventListener(
+          "dispose",
+          () => representativeDisposals++,
+        );
         expect(
           Object.getOwnPropertyDescriptor(
             object.material.userData,
             "fineGrassCanopyLighting",
           ),
         ).toEqual({
-          value: FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          value: FINE_GRASS_FOLDED_BLADE_LIGHTING,
           enumerable: true,
           writable: false,
           configurable: false,
@@ -1670,9 +1848,15 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
         inspected = true;
       });
       expect(inspected).toBe(true);
+      expect([baseDisposals, nearDisposals, representativeDisposals]).toEqual([
+        0, 0, 1,
+      ]);
     } finally {
       owner.destroy();
     }
+    expect([baseDisposals, nearDisposals]).toEqual([1, 1]);
+    owner.destroy();
+    expect([baseDisposals, nearDisposals]).toEqual([1, 1]);
   });
 });
 

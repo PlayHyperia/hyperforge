@@ -1,5 +1,38 @@
 # Compact island environment art: next delivery slice
 
+## 2026-09-22 — Folded grass source checkpoint; native qualification still open
+
+- [x] Added an explicit near-only folded-lancet geometry study to the existing
+  fine-meadow/leaf-volume opt-in. Ordinary and unlit/canopy-only fine profiles
+  retain their geometry; mid/far ribbon geometry remains unchanged.
+- [x] Preserved deterministic roots/tips and all three longitudinal intervals.
+  Near blades add two ridge vertices: 7→9 vertices and 5→9 triangles per blade.
+  This is an explicit +80% near-triangle cost, not a free shading improvement.
+  Configured density, resolution, rendering distances and safety budgets did not change.
+- [x] Coupled the new layout to full-face CPU grounding, road/wind bounds, GPU
+  root/mask addressing and near-only geometry-derived normals. Shared light,
+  time and player uniforms remain borrowed; the near material does not stack
+  the historical cosmetic transverse fold on top of physical geometry.
+- [x] 857 applicable checks passed: 698 retained-system regressions, 153 focused
+  geometry/material/grounding/wind checks, and six current-v10-asset pond cases.
+  Fourteen older-overlay pond cases were not enabled; no skipped test is counted.
+  Shared no-emit type check: 760 roots / 2,466 sources, zero diagnostics; all nine
+  changed source/test files pass lint and formatting. This is not native GPU proof.
+- [x] Independent mathematical/ownership review found no new blocker. Normal
+  accuracy still omits the pre-existing final per-edge root-height shear and
+  smooth normals approximate the triangulated surface; neither is called perfect.
+- [ ] Compile and inspect a fresh isolated native WebGPU capture against build69,
+  with unchanged cameras, full density and resolution, complete population
+  receipts, wind and pond-side contact. Do not claim visual acceptance yet.
+- [ ] Measure the added geometry/material cost, inspect ordinary traversal/LOD,
+  and address lower-canopy/pond-turf appearance before any default promotion.
+
+Evidence: service-layout logs `grass-folded-regression01`,
+`grass-folded-integration01`, `grass-folded-pond-v10-01`,
+`grass-folded-types01`, `grass-folded-lint02` and `grass-folded-style01`.
+The first-run rounding-test failure is retained as `grass-folded-cpu01`. The source-only checkpoint does not replace the playable
+localhost:3333 bundle. The Mac already restarted; no additional reboot requested.
+
 ## 2026-09-22 — Matched terrain GPU diagnostic complete; incremental cost inconclusive
 
 - [x] Four fresh A–B–B–A native WebGPU runs completed with 12 usable timestamp

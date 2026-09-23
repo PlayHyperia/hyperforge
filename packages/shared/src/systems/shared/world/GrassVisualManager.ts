@@ -85,6 +85,7 @@ import {
 } from "./GrassGroundingGpu";
 import {
   getGrassBladeLayout,
+  FINE_GRASS_FOLDED_BLADE_INDICES,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
@@ -142,7 +143,7 @@ export const GRASS_CONFIG = {
   CLUMP_INNER_RATIO: 0.05,
 
   // -- Blade shape ----------------------------------------------------------
-  /** Segments per blade (4 rows of 2 verts + 1 tip = 9 verts) */
+  /** Ribbon segments: 3 paired rows plus 1 tip = 7 vertices. */
   BLADE_SEGMENTS: 3,
   /** Blade width scales with height: width = height * WIDTH_RATIO */
   BLADE_WIDTH_RATIO: 0.04,
@@ -270,6 +271,16 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   PROGRESSIVE_ROOTS: true,
 } as const);
 
+/** Near-only geometry study: a rounded transverse ridge and lancet outline.
+ * Adds two vertices/four triangles per blade, never removes clumps. Native
+ * appearance, clearance and cost must qualify before any default promotion. */
+export const FINE_GRASS_FOLDED_BLADE_SHAPE = Object.freeze({
+  ...FINE_MEADOW_APPEARANCE,
+  GEOMETRY_LAYOUT: "fine-folded-lancet-v1" as FineGrassGeometryLayout,
+  BLADE_WIDTH_POLYNOMIAL: Object.freeze([1, 2.06, -5.04, 1.98] as const),
+  BLADE_RIDGE_TANGENT: 0.36,
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -293,9 +304,9 @@ export const FINE_GRASS_CANOPY_NORMAL_LIGHTING = Object.freeze({
   upperStart: 0.65,
 } as const);
 
-/** Shading-only leaf volume; upper leaves follow the deformed, folded blade
- * normal instead of forcing both faces toward terrain-up. Root blending remains
- * local to the lower leaf; no folded geometry or physical self-shadow claim. */
+/** Historical ribbon lighting, retained at mid/far LOD. The near study replaces
+ * this cosmetic transverse fold with its geometry-derived normals. Root
+ * blending stays local; neither path claims physical leaf self-shadowing. */
 export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
   id: "leaf-volume-v1",
   rootWeight: 0.2,
@@ -310,16 +321,27 @@ export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
   tipBrightness: 1.12,
 } as const);
 
+/** The near mesh supplies its own transverse normals; never stack the
+ * historical cosmetic fold on top of its physical cross-section. */
+export const FINE_GRASS_FOLDED_BLADE_LIGHTING = Object.freeze({
+  ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  foldTangent: 0,
+  normalSource: "geometry-fold",
+  geometryLayout: "fine-folded-lancet-v1",
+} as const);
+
 function publishFineGrassCanopyLighting(
   material: MeshStandardNodeMaterial,
   candidate: GrassLightingCandidate,
+  folded = false,
 ): void {
   Object.defineProperty(material.userData, "fineGrassCanopyLighting", {
     enumerable: true,
     configurable: false,
     writable: false,
-    value:
-      candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+    value: folded
+      ? FINE_GRASS_FOLDED_BLADE_LIGHTING
+      : candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
         ? FINE_GRASS_LEAF_VOLUME_LIGHTING
         : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   });
@@ -418,7 +440,17 @@ export function createClumpGeometry(
   bladesPerClump = GRASS_CONFIG.BLADES_PER_CLUMP,
   bladeSegments = GRASS_CONFIG.BLADE_SEGMENTS,
   shape: GrassBladeShape = GRASS_CONFIG,
+  crossSection?: "folded-lancet-v1",
 ): THREE.BufferGeometry {
+  const folded = crossSection === "folded-lancet-v1";
+  if (
+    (crossSection !== undefined && !folded) ||
+    (folded &&
+      (bladeSegments !== 3 || shape.BLADE_CONTROL_HEIGHT === undefined))
+  )
+    throw new Error(
+      "Folded grass requires the explicit three-segment curved layout",
+    );
   const N = bladesPerClump;
   const segs = bladeSegments;
   const { CLUMP_RADIUS, CLUMP_INNER_RATIO } = GRASS_CONFIG;
@@ -437,8 +469,8 @@ export function createClumpGeometry(
   const controlArcRatio = shape.BLADE_CONTROL_ARC_RATIO ?? 0;
   const tipHeight = shape.BLADE_TIP_HEIGHT ?? 1;
 
-  const vertsPerBlade = segs * 2 + 1;
-  const trisPerBlade = (segs - 1) * 2 + 1;
+  const vertsPerBlade = folded ? 9 : segs * 2 + 1;
+  const trisPerBlade = folded ? 9 : (segs - 1) * 2 + 1;
   const totalVerts = vertsPerBlade * N;
   const totalIdx = trisPerBlade * 3 * N;
 
@@ -545,6 +577,38 @@ export function createClumpGeometry(
       return [nx / length, ny / length, nz / length];
     };
 
+    const foldedWidth = (t: number) => {
+      const [a, b, c, d] = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_WIDTH_POLYNOMIAL;
+      return w * 0.5 * (a + b * t + c * t * t + d * t * t * t);
+    };
+    const foldedNormal = (t: number, s: number) => {
+      // P=C+s*hw*S+f*(1-s²)*H, H=(-sr,0,cr). Derive both tangents
+      // from that same surface; the old ribbon normal is not valid at edges.
+      const [, b, c, d] = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_WIDTH_POLYNOMIAL;
+      const hw = foldedWidth(t);
+      const dhw = w * 0.5 * (b + 2 * c * t + 3 * d * t * t);
+      const g = 16 * t * t * (1 - t) * (1 - t);
+      const dg = 32 * t * (1 - t) * (1 - 2 * t);
+      const ridge = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_RIDGE_TANGENT;
+      const f = hw * ridge * g;
+      const df = ridge * (dhw * g + hw * dg);
+      const arcDerivative =
+        2 * ((1 - t) * controlArcRatio + t * (1 - controlArcRatio));
+      const psx = hw * cr + 2 * s * f * sr;
+      const psz = hw * sr - 2 * s * f * cr;
+      const ptx =
+        curveDirX * arcDerivative + s * dhw * cr - df * (1 - s * s) * sr;
+      const pty =
+        2 * ((1 - t) * controlHeight + t * (tipHeight - controlHeight)) * h;
+      const ptz =
+        curveDirZ * arcDerivative + s * dhw * sr + df * (1 - s * s) * cr;
+      const nx = -psz * pty;
+      const ny = psz * ptx - psx * ptz;
+      const nz = psx * pty;
+      const length = Math.hypot(nx, ny, nz);
+      return [nx / length, ny / length, nz / length];
+    };
+
     for (let i = 0; i < segs; i++) {
       const t = i / segs;
       const y = curved
@@ -562,6 +626,7 @@ export function createClumpGeometry(
         hw = w * 0.5 * Math.pow(1.0 - taperedHeight * taper, widthFalloffPower);
       if (upperWidthGain !== 0)
         hw *= 1 + upperWidthGain * THREE.MathUtils.smoothstep(t, 0, 0.5);
+      if (folded && i !== 0) hw = foldedWidth(t);
       // Keep the historical arithmetic exact when no leaning control is
       // selected. The fine candidate changes only the middle control point;
       // root and tip remain byte-identical, with no extra random draws.
@@ -574,12 +639,14 @@ export function createClumpGeometry(
 
       for (let side = 0; side < 2; side++) {
         const lx = side === 0 ? -hw : hw;
+        const surfaceNormal =
+          folded && i !== 0 ? foldedNormal(t, side * 2 - 1) : normal;
         positions[vi * 3] = lx * cr + arcX + ox;
         positions[vi * 3 + 1] = y;
         positions[vi * 3 + 2] = lx * sr + arcZ + oz;
-        normals[vi * 3] = normal[0];
-        normals[vi * 3 + 1] = normal[1];
-        normals[vi * 3 + 2] = normal[2];
+        normals[vi * 3] = surfaceNormal[0];
+        normals[vi * 3 + 1] = surfaceNormal[1];
+        normals[vi * 3 + 2] = surfaceNormal[2];
         uvs[vi * 2] = side;
         uvs[vi * 2 + 1] = t;
         vi++;
@@ -596,6 +663,30 @@ export function createClumpGeometry(
     uvs[vi * 2] = 0.5;
     uvs[vi * 2 + 1] = 1.0;
     vi++;
+
+    if (folded) {
+      for (const t of [1 / 3, 2 / 3]) {
+        const arc = 2 * (1 - t) * t * controlArcRatio + t * t;
+        const ridge =
+          foldedWidth(t) *
+          FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_RIDGE_TANGENT *
+          16 *
+          t *
+          t *
+          (1 - t) *
+          (1 - t);
+        positions[vi * 3] = curveDirX * arc + ox - ridge * sr;
+        positions[vi * 3 + 1] =
+          (2 * (1 - t) * t * controlHeight + t * t * tipHeight) * h;
+        positions[vi * 3 + 2] = curveDirZ * arc + oz + ridge * cr;
+        normals.set(foldedNormal(t, 0), vi * 3);
+        uvs.set([0.5, t], vi * 2);
+        vi++;
+      }
+      for (const index of FINE_GRASS_FOLDED_BLADE_INDICES)
+        indices[ii++] = baseVert + index;
+      continue;
+    }
 
     for (let i = 0; i < segs - 1; i++) {
       const bv = baseVert + i * 2;
@@ -834,6 +925,8 @@ export class GrassVisualManager implements QuadTreeListener {
   private waterThreshold: number;
   private chunks = new Map<string, GrassChunk>();
   private material: MeshStandardNodeMaterial;
+  private foldedMaterial: MeshStandardNodeMaterial | null = null;
+  private foldedBladeNormalNode: MeshStandardNodeMaterial["normalNode"] = null;
   private lodGeometries: THREE.BufferGeometry[];
 
   private frustum = new THREE.Frustum();
@@ -1176,20 +1269,53 @@ export class GrassVisualManager implements QuadTreeListener {
     );
 
     this.geometryLayout = this.fineMeadow
-      ? FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
+      ? this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+        ? FINE_GRASS_FOLDED_BLADE_SHAPE.GEOMETRY_LAYOUT
+        : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
       : undefined;
     this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((_, lod) => {
       const layout = getGrassBladeLayout(lod, this.geometryLayout);
       return createClumpGeometry(
         layout.bladesPerClump,
         layout.bladeSegments,
-        this.meadowAppearance ?? GRASS_CONFIG,
+        this.geometryLayout === "fine-folded-lancet-v1" && lod === 0
+          ? FINE_GRASS_FOLDED_BLADE_SHAPE
+          : (this.meadowAppearance ?? GRASS_CONFIG),
+        this.geometryLayout === "fine-folded-lancet-v1" && lod === 0
+          ? "folded-lancet-v1"
+          : undefined,
       );
     });
     this.material = this.createMaterial();
     // Construct only after all profile checks and material setup. A failed
     // native Worker construction must not leak the already-owned GPU objects.
     try {
+      if (this.geometryLayout === "fine-folded-lancet-v1") {
+        if (!this.foldedBladeNormalNode)
+          throw new Error("Folded grass requires its physical normal graph");
+        // Clone once so near/far materials share time, player and light
+        // uniforms. Calling createMaterial twice would orphan uniform owners.
+        this.foldedMaterial = this.material.clone();
+        this.foldedMaterial.normalNode = this.foldedBladeNormalNode;
+        if (this.foldedMaterial instanceof MeshSSSNodeMaterial)
+          publishFineGrassLighting(this.foldedMaterial);
+        if (this.habitatComposition)
+          Object.defineProperty(
+            this.foldedMaterial.userData,
+            "compactHabitatComposition",
+            {
+              enumerable: true,
+              configurable: false,
+              writable: false,
+              value: this.habitatComposition,
+            },
+          );
+        publishFineGrassCanopyLighting(
+          this.foldedMaterial,
+          this.lightingCandidate,
+          true,
+        );
+      }
       this.groundingWorker = groundingWorkerSetup
         ? new GrassGroundingWorkerCoordinator(
             groundingWorkerSetup.createPort(),
@@ -1199,6 +1325,7 @@ export class GrassVisualManager implements QuadTreeListener {
     } catch (error) {
       this.lodGeometries.forEach((geometry) => geometry.dispose());
       this.material.dispose();
+      this.foldedMaterial?.dispose();
       throw error;
     }
     if (this.compactMeadow) {
@@ -1428,9 +1555,10 @@ export class GrassVisualManager implements QuadTreeListener {
       this.minimumLodLevel,
       this.geometryLayout,
     );
+    const baseMaterial = this.materialForLod(this.minimumLodLevel);
     const material = this.compactMeadow
       ? createGroundedGrassMaterial(
-          this.material,
+          baseMaterial,
           geo,
           new Float32Array(layout.bladesPerClump * layout.rootComponents),
           1,
@@ -1440,13 +1568,17 @@ export class GrassVisualManager implements QuadTreeListener {
             ? new Uint32Array([2 ** layout.bladesPerClump - 1])
             : undefined,
         )
-      : this.material;
+      : baseMaterial;
     // NodeMaterial clones userData through JSON; restore the immutable receipt
     // on the actual representative owner without changing any shader nodes.
     if (material instanceof MeshSSSNodeMaterial)
       publishFineGrassLighting(material);
     if (this.lightingCandidate)
-      publishFineGrassCanopyLighting(material, this.lightingCandidate);
+      publishFineGrassCanopyLighting(
+        material,
+        this.lightingCandidate,
+        baseMaterial === this.foldedMaterial,
+      );
     const mesh = createStorageInstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
@@ -1459,7 +1591,7 @@ export class GrassVisualManager implements QuadTreeListener {
       await precompileObject(mesh);
     } finally {
       geo.dispose();
-      if (material !== this.material) material.dispose();
+      if (material !== baseMaterial) material.dispose();
       mesh.dispose();
     }
   }
@@ -1676,7 +1808,11 @@ export class GrassVisualManager implements QuadTreeListener {
     if (chunk) {
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
       chunk.mesh.geometry.dispose();
-      if (chunk.mesh.material !== this.material) chunk.mesh.material.dispose();
+      if (
+        chunk.mesh.material !== this.material &&
+        chunk.mesh.material !== this.foldedMaterial
+      )
+        chunk.mesh.material.dispose();
       chunk.mesh.dispose();
       this.chunks.delete(key);
     }
@@ -2381,7 +2517,8 @@ export class GrassVisualManager implements QuadTreeListener {
       );
 
     const geo = this.lodGeometries[lodLevel].clone();
-    let material = this.material;
+    const baseMaterial = this.materialForLod(lodLevel);
+    let material = baseMaterial;
     let mesh: THREE.InstancedMesh | null = null;
     try {
       geo.setAttribute(
@@ -2405,7 +2542,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
       if (blades)
         material = createGroundedGrassMaterial(
-          this.material,
+          baseMaterial,
           geo,
           blades.rootDeltas,
           data.count,
@@ -2416,10 +2553,14 @@ export class GrassVisualManager implements QuadTreeListener {
       if (material instanceof MeshSSSNodeMaterial)
         publishFineGrassLighting(material);
       if (this.lightingCandidate)
-        publishFineGrassCanopyLighting(material, this.lightingCandidate);
+        publishFineGrassCanopyLighting(
+          material,
+          this.lightingCandidate,
+          baseMaterial === this.foldedMaterial,
+        );
       // Three clones userData through JSON. Rebind the admitted terrain field
       // so each grounded chunk retains the same immutable material owner.
-      if (this.habitatComposition && material !== this.material)
+      if (this.habitatComposition && material !== baseMaterial)
         Object.defineProperty(material.userData, "compactHabitatComposition", {
           enumerable: true,
           writable: false,
@@ -2502,7 +2643,7 @@ export class GrassVisualManager implements QuadTreeListener {
     } catch (error) {
       mesh?.removeFromParent();
       geo.dispose();
-      if (material !== this.material) material.dispose();
+      if (material !== baseMaterial) material.dispose();
       mesh?.dispose();
       throw error;
     }
@@ -2668,6 +2809,7 @@ export class GrassVisualManager implements QuadTreeListener {
     for (const key of this.chunks.keys()) this.retireGrassChunk(key);
     this.lodGeometries.forEach((g) => g.dispose());
     if (this.material) this.material.dispose();
+    this.foldedMaterial?.dispose();
     if (this.container.parent) this.container.parent.remove(this.container);
   }
 
@@ -3031,11 +3173,18 @@ export class GrassVisualManager implements QuadTreeListener {
 
   // -- TSL Material ---------------------------------------------------------
 
+  private materialForLod(lod: number): MeshStandardNodeMaterial {
+    return lod === 0 && this.foldedMaterial
+      ? this.foldedMaterial
+      : this.material;
+  }
+
   private createMaterial(): MeshStandardNodeMaterial {
     const compactMeadow = this.compactMeadow;
     const appearance = this.meadowAppearance;
-    // The validated terrain owner selects lighting, independently of blade
-    // shape/density. Callers without that owner retain their legacy graph.
+    // The validated terrain owner selects physical lighting. The explicit
+    // fine leaf-volume study also selects near folded geometry; density is
+    // unchanged. Callers without that owner retain their legacy graph.
     const terrainProfile = this.workerSetup?.terrainConfig.TERRAIN_PROFILE;
     const compactPhysical =
       terrainProfile?.kind === "compact-candidate" &&
@@ -3477,20 +3626,21 @@ export class GrassVisualManager implements QuadTreeListener {
           pow(dot(curved, curved).max(1e-12), 0.5),
         );
       }
+      const canopyNormalWeight = this.lightingCandidate
+        ? mix(
+            float(lightingRecipe.rootWeight),
+            float(lightingRecipe.upperWeight),
+            smoothstep(
+              float(lightingRecipe.rootEnd),
+              float(lightingRecipe.upperStart),
+              t,
+            ),
+          ).toVar("fineGrassCanopyNormalWeight")
+        : float(appearance.BLADE_NORMAL_WEIGHT);
       const mixedNormal = mix(
         terrainNormal,
         shadingBladeNormal.mul(faceDirection),
-        this.lightingCandidate
-          ? mix(
-              float(lightingRecipe.rootWeight),
-              float(lightingRecipe.upperWeight),
-              smoothstep(
-                float(lightingRecipe.rootEnd),
-                float(lightingRecipe.upperStart),
-                t,
-              ),
-            ).toVar("fineGrassCanopyNormalWeight")
-          : float(appearance.BLADE_NORMAL_WEIGHT),
+        canopyNormalWeight,
       );
       // Guard the final shading mixture too; both select operands stay finite.
       const mixedLengthSq = dot(mixedNormal, mixedNormal);
@@ -3504,6 +3654,22 @@ export class GrassVisualManager implements QuadTreeListener {
               )
           : mixedNormal.normalize(),
       );
+      if (this.geometryLayout === "fine-folded-lancet-v1") {
+        const physicalNormal = mix(
+          terrainNormal,
+          fragmentBladeNormal.mul(faceDirection),
+          canopyNormalWeight,
+        );
+        const lengthSq = dot(physicalNormal, physicalNormal);
+        this.foldedBladeNormalNode = cameraViewMatrix.transformDirection(
+          lengthSq
+            .greaterThan(1e-12)
+            .select(
+              physicalNormal.div(pow(lengthSq.max(1e-12), 0.5)),
+              terrainNormal,
+            ),
+        );
+      }
       // The existing per-edge root-height correction is applied afterwards by
       // GrassGroundingGpu. Its small cross-blade warp is not in this smooth N.
     }

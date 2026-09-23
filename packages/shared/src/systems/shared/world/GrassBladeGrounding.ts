@@ -11,6 +11,7 @@ import {
 } from "./CompactTerrainPalette";
 import {
   getGrassBladeLayout,
+  FINE_GRASS_FOLDED_BLADE_INDICES,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
@@ -94,7 +95,8 @@ export function captureGrassBankVerge(
   if (
     captured &&
     request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
-    request.geometryLayout !== "fine-linear-sweep-near4-v1"
+    request.geometryLayout !== "fine-linear-sweep-near4-v1" &&
+    request.geometryLayout !== "fine-folded-lancet-v1"
   )
     throw new Error("Invalid grass bank-verge descriptor");
   return captured;
@@ -259,7 +261,9 @@ function* validateGeometry(
     bladesPerClump: blades,
     bladeSegments: segments,
     verticesPerBlade,
+    trianglesPerClump,
   } = getGrassBladeLayout(lod, geometryLayout);
+  const foldedNear = geometryLayout === "fine-folded-lancet-v1" && lod === 0;
   const vertices = blades * verticesPerBlade;
   const position = geometry.getAttribute("position"),
     normal = geometry.getAttribute("normal"),
@@ -289,7 +293,7 @@ function* validateGeometry(
     !index ||
     index.itemSize !== 1 ||
     index.normalized ||
-    index.count !== blades * ((segments - 1) * 2 + 1) * 3 ||
+    index.count !== trianglesPerClump * 3 ||
     geometry.groups.length ||
     Object.keys(geometry.morphAttributes).length ||
     geometry.drawRange.start !== 0 ||
@@ -326,12 +330,26 @@ function* validateGeometry(
       ) <= 0
     )
       throw new Error("Invalid grass grounding blade root");
-    for (let row = 0; row < segments - 1; row++) {
-      const a = first + row * 2;
-      for (const value of [a, a + 1, a + 2, a + 1, a + 3, a + 2])
-        expectIndex(value);
+    if (foldedNear) {
+      for (let row = 1; row <= 2; row++) {
+        const center = first + 6 + row;
+        if (
+          uv.getX(center) !== 0.5 ||
+          uv.getY(center) !== Math.fround(row / segments) ||
+          position.getY(center) !== position.getY(first + row * 2)
+        )
+          throw new Error("Invalid grass grounding folded center topology");
+      }
+      for (const value of FINE_GRASS_FOLDED_BLADE_INDICES)
+        expectIndex(first + value);
+    } else {
+      for (let row = 0; row < segments - 1; row++) {
+        const a = first + row * 2;
+        for (const value of [a, a + 1, a + 2, a + 1, a + 3, a + 2])
+          expectIndex(value);
+      }
+      for (const value of [tip - 2, tip - 1, tip]) expectIndex(value);
     }
-    for (const value of [tip - 2, tip - 1, tip]) expectIndex(value);
   }
   for (let v = 0; v < vertices; v++) {
     yield "geometry_vertex";
@@ -1277,7 +1295,7 @@ export function* groundGrassBladeSteps(
       let minY = Infinity,
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
-        // One blade is a bounded batch: at most seven vertices / fourteen
+        // One blade is a bounded batch: at most nine vertices / eighteen
         // transforms at LOD0. Keep every suspension point and floating-point
         // expression. A zero-height vertex has identical fade endpoints, so
         // evaluate its one distinct point once rather than charging/computing
