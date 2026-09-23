@@ -756,11 +756,11 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
           getGrassBladeLayout(lod, "fine-meadow-ribbon-v1"),
         );
         expect(material.userData.fineGrassCanopyLighting).toMatchObject({
-          normalSource: "geometry-ribbon",
-          foldTangent: 0,
+          normalSource: "geometry-ribbon-relief",
+          foldTangent: Math.tan((18 * Math.PI) / 180),
           geometryLayout: "fine-meadow-ribbon-v1",
         });
-        // This is the physical ribbon normal graph, not the old cosmetic fold.
+        // The explicit field owns its modest shading relief at every tier.
         expect(owner["materialForLod"](lod)).toBe(owner["foldedMaterial"]);
         expect(owner["materialForLod"](lod).normalNode).toBe(
           owner["foldedBladeNormalNode"],

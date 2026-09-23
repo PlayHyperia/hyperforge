@@ -430,10 +430,13 @@ const FINE_GRASS_SHEATH_BLADE_LIGHTING = Object.freeze({
   geometryLayout: FINE_GRASS_CLOSE_DETAIL.geometryLayout,
 });
 
-const FINE_GRASS_MEADOW_FIELD_LIGHTING = Object.freeze({
+/** Shading-only transverse relief on the explicit meadow field. The ribbon
+ * silhouette, surface fitting and wind envelope remain physical and unchanged;
+ * this small normal bend is not leaf thickness or self-shadowing. */
+export const FINE_GRASS_MEADOW_FIELD_LIGHTING = Object.freeze({
   ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
-  foldTangent: 0,
-  normalSource: "geometry-ribbon",
+  foldTangent: Math.tan((18 * Math.PI) / 180),
+  normalSource: "geometry-ribbon-relief",
   geometryLayout: FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT,
 });
 
@@ -3548,7 +3551,12 @@ export class GrassVisualManager implements QuadTreeListener {
         : new MeshStandardNodeMaterial();
     mat.name = appearance?.id ?? "legacy-blades-v1";
     if (this.lightingCandidate)
-      publishFineGrassCanopyLighting(mat, this.lightingCandidate);
+      publishFineGrassCanopyLighting(
+        mat,
+        this.lightingCandidate,
+        false,
+        this.geometryLayout,
+      );
     if (this.habitatComposition)
       Object.defineProperty(mat.userData, "compactHabitatComposition", {
         enumerable: true,
@@ -3963,8 +3971,12 @@ export class GrassVisualManager implements QuadTreeListener {
         );
       const leafVolume =
         this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
+      const meadowField =
+        this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT;
       const lightingRecipe = leafVolume
-        ? FINE_GRASS_LEAF_VOLUME_LIGHTING
+        ? meadowField
+          ? FINE_GRASS_MEADOW_FIELD_LIGHTING
+          : FINE_GRASS_LEAF_VOLUME_LIGHTING
         : FINE_GRASS_CANOPY_NORMAL_LIGHTING;
       let shadingBladeNormal = fragmentBladeNormal;
       if (leafVolume) {
@@ -3989,7 +4001,7 @@ export class GrassVisualManager implements QuadTreeListener {
         const fold = uv()
           .x.mul(2)
           .sub(1)
-          .mul(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTangent)
+          .mul(lightingRecipe.foldTangent)
           .mul(
             float(1).sub(
               smoothstep(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTipStart, 1, t),
@@ -4032,7 +4044,11 @@ export class GrassVisualManager implements QuadTreeListener {
       if (usesGrassBladeHeightFlex(this.geometryLayout)) {
         const physicalNormal = mix(
           terrainNormal,
-          fragmentBladeNormal.mul(faceDirection),
+          // Folded meshes already have transverse geometry normals. Only the
+          // explicit flat-ribbon field uses the labelled shading relief.
+          (meadowField ? shadingBladeNormal : fragmentBladeNormal).mul(
+            faceDirection,
+          ),
           canopyNormalWeight,
         );
         const lengthSq = dot(physicalNormal, physicalNormal);

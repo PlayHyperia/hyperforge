@@ -3464,8 +3464,8 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             );
             expect(mesh.material.userData.fineGrassCanopyLighting).toEqual({
               ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
-              foldTangent: 0,
-              normalSource: "geometry-ribbon",
+              foldTangent: Math.tan((18 * Math.PI) / 180),
+              normalSource: "geometry-ribbon-relief",
               geometryLayout: "fine-meadow-ribbon-v1",
             });
             expect(

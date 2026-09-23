@@ -27,6 +27,7 @@ import {
   FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_FOLDED_BLADE_LIGHTING,
+  FINE_GRASS_MEADOW_FIELD_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -53,6 +54,7 @@ function manager(
   habitat?: ConstructorParameters<typeof GrassVisualManager>[14],
   lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
   grassColorGrade?: GrassWorkerSetup["compactGrassColorGrade"],
+  geometry?: ConstructorParameters<typeof GrassVisualManager>[17],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -92,6 +94,8 @@ function manager(
     appearanceCandidate,
     habitat,
     lighting,
+    undefined,
+    geometry,
   );
 }
 
@@ -623,6 +627,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
   const fine = (
     lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
     grassColorGrade?: GrassWorkerSetup["compactGrassColorGrade"],
+    geometry?: ConstructorParameters<typeof GrassVisualManager>[17],
   ) =>
     manager(
       FINE_MEADOW_GRASS_VISUAL_PROFILE,
@@ -632,6 +637,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       undefined,
       lighting,
       grassColorGrade,
+      geometry,
     );
   const smooth = (low: number, high: number, value: number) => {
     const x = Math.max(0, Math.min(1, (value - low) / (high - low)));
@@ -1769,6 +1775,129 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             owner.destroy();
           }
         }
+      }
+    },
+  );
+
+  it.each([0, 1, 2])(
+    "bounds meadow shading relief at LOD%i and shares the other material nodes",
+    (lod) => {
+      const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
+      try {
+        const material = owner["materialForLod"](lod);
+        const base = owner["material"];
+        const geometry = owner["lodGeometries"][lod];
+        expect(material.userData.fineGrassCanopyLighting).toEqual({
+          ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          foldTangent: Math.tan(Math.PI / 10),
+          normalSource: "geometry-ribbon-relief",
+          geometryLayout: "fine-meadow-ribbon-v1",
+        });
+        expect(Object.isFrozen(FINE_GRASS_MEADOW_FIELD_LIGHTING)).toBe(true);
+        for (const key of [
+          "positionNode",
+          "colorNode",
+          "aoNode",
+          "outputNode",
+        ] as const)
+          expect(material[key]).toBe(base[key]);
+        const bladeNode = named(material.normalNode, "v_curvedGrassNormal");
+        const widthNode = named(material.normalNode, "v_fineGrassWidthAxis");
+        const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+        for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+          const input = inputsAt(geometry, blade * layout.verticesPerBlade + 2);
+          if (blade % 2) {
+            input.instanceGroundNormal = new THREE.Vector3(0.2, 1, -0.3)
+              .normalize()
+              .toArray();
+            input._time = [3.7];
+          }
+          for (const [u, t] of [
+            [0, 0.65],
+            [0.5, 0.65],
+            [1, 0.65],
+            [0, 0.85],
+            [1, 0.85],
+            [0, 0.35],
+            [1, 0.35],
+            [0, 1],
+            [1, 1],
+            [0, 0],
+          ]) {
+            input.uv = [u, t];
+            const physical = vector(colorValue(bladeNode, input)).normalize();
+            const width = vector(colorValue(widthNode, input));
+            const transverse = width
+              .addScaledVector(physical, -width.dot(physical))
+              .normalize();
+            const offset =
+              (2 * u - 1) * Math.tan(Math.PI / 10) * (1 - smooth(0.75, 1, t));
+            const relieved = physical
+              .clone()
+              .addScaledVector(transverse, offset)
+              .normalize();
+            expect(physical.angleTo(relieved)).toBeLessThanOrEqual(
+              Math.PI / 10 + 1e-12,
+            );
+            for (const face of [-1, 1]) {
+              input._frontFacing = [face === 1 ? 1 : 0];
+              const expected = new THREE.Vector3()
+                .fromArray(input.instanceGroundNormal)
+                .lerp(
+                  relieved.clone().multiplyScalar(face),
+                  0.2 + 0.8 * smooth(0.1, 0.65, t),
+                )
+                .normalize()
+                .transformDirection(
+                  new THREE.Matrix4().fromArray(input._cameraViewMatrix),
+                );
+              const actual = vector(colorValue(material.normalNode, input));
+              expect(actual.toArray().every(Number.isFinite)).toBe(true);
+              expect(actual.length()).toBeCloseTo(1, 12);
+              expect(actual.distanceTo(expected)).toBeLessThan(1e-11);
+            }
+          }
+        }
+        // Valid interpolated cancellation and parallel transverse input must be
+        // finite; the guard is exercised in the actual graph, not a mock shader.
+        const input = inputsAt(geometry, 2);
+        const crossing = 0.1 + 0.55 * (0.5 - Math.sin(Math.asin(0.25) / 3));
+        for (const normal of [
+          [0, 0, 0],
+          [0, 1, 0],
+        ])
+          for (const width of [
+            [0, 0, 0],
+            [0, 1, 0],
+          ])
+            for (const [u, t, face] of [
+              [0, 0.65, 1],
+              [0.5, 0.65, 1],
+              [1, 0.65, 1],
+              [0, crossing, -1],
+              [0.5, crossing, -1],
+              [1, crossing, -1],
+              [0.5, crossing - 1e-4, -1],
+              [0.5, crossing + 1e-4, -1],
+              [0, crossing, 1],
+              [0.5, crossing, 1],
+              [1, crossing, 1],
+            ]) {
+              input.uv = [u, t];
+              input._frontFacing = [face === 1 ? 1 : 0];
+              const value = colorValue(
+                material.normalNode,
+                input,
+                new Map([
+                  [bladeNode, normal],
+                  [widthNode, width],
+                ]),
+              );
+              expect(value.every(Number.isFinite)).toBe(true);
+              expect(Math.hypot(...value)).toBeCloseTo(1, 12);
+            }
+      } finally {
+        owner.destroy();
       }
     },
   );
