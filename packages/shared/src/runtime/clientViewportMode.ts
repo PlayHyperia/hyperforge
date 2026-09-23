@@ -134,7 +134,7 @@ export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassGeometryCandidate =
-  "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1";
+  "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -240,7 +240,7 @@ export function resolveGrassLightingCandidate(
   return values[0];
 }
 
-/** Explicit close detail/root composition without changing population or range.
+/** Explicit grass geometry/composition; the field candidate also adds density.
  * Omission retains the historical geometry; capture once with the terrain owner. */
 export function resolveGrassGeometryCandidate(
   win?: Window,
@@ -254,12 +254,20 @@ export function resolveGrassGeometryCandidate(
     values.length !== 1 ||
     (values[0] !== "sheath-close-v1" &&
       values[0] !== "rooted-fan-v1" &&
-      values[0] !== "meadow-canopy-v1")
+      values[0] !== "meadow-canopy-v1" &&
+      values[0] !== "meadow-field-v1")
   )
     throw new Error("Unknown or duplicate grass geometry candidate");
   if (resolveGrassLightingCandidate(windowRef) !== "leaf-volume-v1")
     throw new Error(
       "Grass geometry requires the explicit leaf-volume fine meadow",
+    );
+  if (
+    values[0] === "meadow-field-v1" &&
+    (params?.has("grassCoverage") || params?.has("grassCoverageCell"))
+  )
+    throw new Error(
+      "Dense meadow field cannot mix a single-cell coverage trial",
     );
   return values[0];
 }
@@ -820,6 +828,7 @@ export function evaluateStreamingRenderProfileApplication(
     const fineMeadow = profile.grassProfile === "fine-meadow-v1";
     const grass = applied.grass;
     if (!grass) return finish("grass_unavailable");
+    const meadowField = grass.geometryCandidate === "meadow-field-v1";
     if (
       grass.schemaVersion !== 1 ||
       grass.profileId !== profile.grassProfile ||
@@ -829,18 +838,24 @@ export function evaluateStreamingRenderProfileApplication(
       grass.terrainProfileIdentity.length > 16384 ||
       grass.minimumLodLevel !== (fineMeadow ? 0 : 1) ||
       grass.clumpSpacingMultiplier !==
-        (fineMeadow ? 1 : denseMeadow ? 2.5 : 4) ||
-      grass.clumpSpacing !== (fineMeadow ? 0.7 : denseMeadow ? 1.75 : 2.8) ||
+        (fineMeadow ? (meadowField ? 0.5 / 0.7 : 1) : denseMeadow ? 2.5 : 4) ||
+      grass.clumpSpacing !==
+        (fineMeadow ? (meadowField ? 0.5 : 0.7) : denseMeadow ? 1.75 : 2.8) ||
       grass.maxRenderDistance !== 140 ||
       grass.maxChunksPerFrame !== 1 ||
       grass.castShadow !== false ||
       grass.destroyed !== false ||
+      (grass.geometryLayout === "fine-meadow-ribbon-v1" && !meadowField) ||
       (grass.geometryCandidate !== undefined &&
         (!fineMeadow ||
-          grass.geometryLayout !== "fine-folded-sheath-near5-v1" ||
+          grass.geometryLayout !==
+            (meadowField
+              ? "fine-meadow-ribbon-v1"
+              : "fine-folded-sheath-near5-v1") ||
           (grass.geometryCandidate !== "sheath-close-v1" &&
             grass.geometryCandidate !== "rooted-fan-v1" &&
-            grass.geometryCandidate !== "meadow-canopy-v1")))
+            grass.geometryCandidate !== "meadow-canopy-v1" &&
+            !meadowField)))
     )
       return finish("grass_profile");
     if (fineMeadow) {
@@ -851,9 +866,10 @@ export function evaluateStreamingRenderProfileApplication(
         placement.cellSize !== 25 ||
         placement.nearLodDistance !== 40 ||
         placement.detailLodDistance !==
-          (grass.geometryLayout === "fine-folded-sheath-near5-v1"
+          (grass.geometryLayout === "fine-folded-sheath-near5-v1" || meadowField
             ? 12
             : undefined) ||
+        (meadowField && placement.coverageTrial !== undefined) ||
         !Number.isSafeInteger(placement.liveCells) ||
         placement.liveCells < 0
       )

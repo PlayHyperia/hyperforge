@@ -568,7 +568,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     },
   );
 
-  it.each(["rooted-fan-v1", "meadow-canopy-v1"] as const)(
+  it.each(["rooted-fan-v1", "meadow-canopy-v1", "meadow-field-v1"] as const)(
     "rejects composed grass without the explicit leaf-volume selection: %s",
     async (selection) => {
       let unexpected: Awaited<ReturnType<typeof fixture>> | undefined;
@@ -721,6 +721,90 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       baseline.close();
       candidate.close();
     }
+  });
+
+  it("selects the denser ribbon field explicitly at all three grounded LODs", async () => {
+    const f = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+    );
+    try {
+      const owner = f.owner;
+      expect(owner.getProfileReceipt()).toMatchObject({
+        geometryCandidate: "meadow-field-v1",
+        geometryLayout: "fine-meadow-ribbon-v1",
+        clumpSpacing: 0.5,
+        clumpSpacingMultiplier: 0.5 / 0.7,
+        maxRenderDistance: 140,
+        placement: { cellSize: 25, nearLodDistance: 40, detailLodDistance: 12 },
+      });
+      const warmed: number[] = [];
+      await owner.precompileRepresentativeChunk(async (object) => {
+        const mesh = object as THREE.InstancedMesh;
+        expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
+        const material = mesh.material;
+        if (Array.isArray(material))
+          throw new Error("One field material required");
+        const lod = warmed.length;
+        warmed.push(mesh.geometry.getAttribute("position").count);
+        expect(material.userData.grassBladeLayout).toBe(
+          getGrassBladeLayout(lod, "fine-meadow-ribbon-v1"),
+        );
+        expect(material.userData.fineGrassCanopyLighting).toMatchObject({
+          normalSource: "geometry-ribbon",
+          foldTangent: 0,
+          geometryLayout: "fine-meadow-ribbon-v1",
+        });
+        // This is the physical ribbon normal graph, not the old cosmetic fold.
+        expect(owner["materialForLod"](lod)).toBe(owner["foldedMaterial"]);
+        expect(owner["materialForLod"](lod).normalNode).toBe(
+          owner["foldedBladeNormalNode"],
+        );
+      });
+      expect(warmed).toEqual([147, 105, 60]);
+      for (const work of owner["liveWorkUnits"].values()) {
+        const inputs = [0, 1, 2].map((lod) =>
+          owner["createWorkerInput"](work, work.key, lod),
+        );
+        expect(inputs[0].clumpSpacing).toBe(0.5);
+        expect(inputs[0].spacingMul).toBe(1);
+        expect(inputs[1]).toEqual(inputs[0]);
+        expect(inputs[2]).toEqual(inputs[0]);
+        expect(inputs[0].placementCoverage).toBeUndefined();
+      }
+      for (const [distance, lod] of [
+        [0, 0],
+        [20, 1],
+        [60, 2],
+      ]) {
+        owner["lodFocusX"] = f.work.bounds.maxX + distance;
+        owner["lodFocusZ"] = (f.work.bounds.minZ + f.work.bounds.maxZ) / 2;
+        expect(owner["getLodLevel"](f.work)).toBe(lod);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects mixing the dense field and the historical single-cell coverage trial", async () => {
+    await expect(
+      fixture(
+        undefined,
+        {
+          id: "sixty-centimetre-cell-v1",
+          cell: { schemaVersion: 1, size: 25, indexX: 15, indexZ: 14 },
+        },
+        16,
+        undefined,
+        "leaf-volume-v1",
+        "meadow-field-v1",
+      ),
+    ).rejects.toThrow("cannot mix");
   });
 
   it("honors both close-detail hysteresis boundaries, multi-tier jumps and transformed-parent safety", async () => {
@@ -2683,6 +2767,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     "sheath-close-v1",
     "rooted-fan-v1",
     "meadow-canopy-v1",
+    "meadow-field-v1",
   ] as const)(
     "stops precompilation after real owner teardown without submitting another tier, candidate=%s",
     async (geometryCandidate) => {
@@ -2716,14 +2801,26 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
           material.addEventListener("dispose", () => sampleMaterialDisposals++);
           await pending;
         });
-        expect(submitted).toEqual([geometryCandidate ? 360 : 216]);
+        expect(submitted).toEqual([
+          geometryCandidate === "meadow-field-v1"
+            ? 147
+            : geometryCandidate
+              ? 360
+              : 216,
+        ]);
         expect(sampleGeometryDisposals).toBe(0);
         f.owner.destroy();
         release!();
         await expect(warmup).rejects.toThrow(
           "Grass destroyed during precompilation",
         );
-        expect(submitted).toEqual([geometryCandidate ? 360 : 216]);
+        expect(submitted).toEqual([
+          geometryCandidate === "meadow-field-v1"
+            ? 147
+            : geometryCandidate
+              ? 360
+              : 216,
+        ]);
         expect(sampleGeometryDisposals).toBe(1);
         expect(sampleMaterialDisposals).toBe(1);
         let lateSubmissions = 0;

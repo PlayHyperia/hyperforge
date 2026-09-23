@@ -4,7 +4,18 @@ export type FineGrassGeometryLayout =
   | "fine-linear-sweep-3seg-v1"
   | "fine-linear-sweep-near4-v1"
   | "fine-folded-lancet-v1"
-  | "fine-folded-sheath-near5-v1";
+  | "fine-folded-sheath-near5-v1"
+  | "fine-meadow-ribbon-v1";
+
+/** Three grounded LODs, with full placement density at every distance. */
+export function usesGrassCloseDetailLods(
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return (
+    geometryLayout === "fine-folded-sheath-near5-v1" ||
+    geometryLayout === "fine-meadow-ribbon-v1"
+  );
+}
 
 /** Geometry and flex are separate contracts: the remapped far ribbon keeps
  * height-consistent wind without claiming a folded transverse surface. */
@@ -13,7 +24,8 @@ export function usesGrassBladeHeightFlex(
 ): boolean {
   return (
     geometryLayout === "fine-folded-lancet-v1" ||
-    geometryLayout === "fine-folded-sheath-near5-v1"
+    geometryLayout === "fine-folded-sheath-near5-v1" ||
+    geometryLayout === "fine-meadow-ribbon-v1"
   );
 }
 
@@ -130,6 +142,11 @@ const layouts = Object.freeze({
     tier("fine-folded-sheath-near5-v1", 1, 24, 3, 9, 9),
     tier("fine-folded-sheath-near5-v1", 2, 12, 2),
   ]),
+  "fine-meadow-ribbon-v1": Object.freeze([
+    tier("fine-meadow-ribbon-v1", 0, 21, 3),
+    tier("fine-meadow-ribbon-v1", 1, 21, 2),
+    tier("fine-meadow-ribbon-v1", 2, 12, 2),
+  ]),
 });
 
 export type GrassBladeLayout = ReturnType<typeof tier>;
@@ -146,7 +163,8 @@ export function getGrassBladeLayout(
       geometryLayout !== "fine-linear-sweep-3seg-v1" &&
       geometryLayout !== "fine-linear-sweep-near4-v1" &&
       geometryLayout !== "fine-folded-lancet-v1" &&
-      geometryLayout !== "fine-folded-sheath-near5-v1")
+      geometryLayout !== "fine-folded-sheath-near5-v1" &&
+      geometryLayout !== "fine-meadow-ribbon-v1")
   )
     throw new Error("Invalid grass blade layout");
   return layouts[geometryLayout ?? "ordinary-v1"][lod];

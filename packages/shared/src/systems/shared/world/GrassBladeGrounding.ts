@@ -99,7 +99,8 @@ export function captureGrassBankVerge(
     request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
     request.geometryLayout !== "fine-linear-sweep-near4-v1" &&
     request.geometryLayout !== "fine-folded-lancet-v1" &&
-    request.geometryLayout !== "fine-folded-sheath-near5-v1"
+    request.geometryLayout !== "fine-folded-sheath-near5-v1" &&
+    request.geometryLayout !== "fine-meadow-ribbon-v1"
   )
     throw new Error("Invalid grass bank-verge descriptor");
   return captured;

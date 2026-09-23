@@ -798,6 +798,7 @@ describe.each([
   "sheath-close-v1",
   "rooted-fan-v1",
   "meadow-canopy-v1",
+  "meadow-field-v1",
 ] as const)(
   "explicit %s geometry selection",
   (geometry: GrassGeometryCandidate) => {
@@ -933,6 +934,7 @@ describe.each([
         "sheath-close-v1",
         "rooted-fan-v1",
         "meadow-canopy-v1",
+        "meadow-field-v1",
       ] as const) {
         if (other === geometry) continue;
         for (const values of [
@@ -3531,6 +3533,63 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
       ).toBe("grass_profile");
     }
     // This validates observed configuration, not population completion or cost.
+    const fieldGrass: StreamingGrassProfileReceipt = {
+      ...closeGrass,
+      geometryCandidate: "meadow-field-v1",
+      geometryLayout: "fine-meadow-ribbon-v1",
+      clumpSpacing: 0.5,
+      clumpSpacingMultiplier: 0.5 / 0.7,
+    };
+    expect(
+      evaluateStreamingRenderProfileApplication(fine, requested, {
+        ...state,
+        grass: fieldGrass,
+      }).ready,
+    ).toBe(true);
+    for (const change of [
+      { geometryCandidate: undefined },
+      { geometryCandidate: "meadow-canopy-v1" as const },
+      { geometryLayout: "fine-folded-sheath-near5-v1" as const },
+      { geometryLayout: undefined },
+      { clumpSpacing: 0.7 },
+      { clumpSpacingMultiplier: 1 },
+      { placement: { ...fieldGrass.placement!, detailLodDistance: undefined } },
+      {
+        placement: {
+          ...fieldGrass.placement!,
+          coverageTrial: {
+            id: "sixty-centimetre-cell-v1" as const,
+            cell: {
+              schemaVersion: 1 as const,
+              size: 25 as const,
+              indexX: 12,
+              indexZ: 11,
+            },
+          },
+        },
+      },
+    ]) {
+      expect(
+        evaluateStreamingRenderProfileApplication(fine, requested, {
+          ...state,
+          grass: { ...fieldGrass, ...change },
+        }).ready,
+      ).toBe(false);
+    }
+    for (const coverage of [
+      "grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=12,11",
+      "grassCoverageCell=12,11",
+      "grassCoverage=",
+    ])
+      expect(() =>
+        resolveGrassGeometryCandidate(
+          makeWindow(
+            "/stream.html",
+            "?streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1&" +
+              coverage,
+          ),
+        ),
+      ).toThrow("cannot mix");
     for (const change of [
       { profileId: "compact-meadow-v2" as const },
       { minimumLodLevel: 1 },

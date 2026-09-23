@@ -15,6 +15,7 @@ import {
   type GrassWorkerInput,
   type GrassWorkerOutput,
 } from "../../../../utils/workers/GrassWorker";
+import { createGrassPlacementCellOperations } from "../../../../utils/workers/GrassPlacementCell";
 import {
   STREAMING_TERRAIN_QUADTREE_RESOLUTION,
   TerrainSystem,
@@ -35,8 +36,12 @@ import {
   createClumpGeometry,
   FINE_GRASS_FOLDED_BLADE_LIGHTING,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  FINE_GRASS_MEADOW_FIELD_COMPOSITION,
 } from "../GrassVisualManager";
-import { getGrassBladeLayout } from "../GrassBladeLayout";
+import {
+  getGrassBladeLayout,
+  usesGrassBladeHeightFlex,
+} from "../GrassBladeLayout";
 import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
 import { projectGrassAnchors } from "../GrassTerrainProjection";
 import {
@@ -53,6 +58,7 @@ import {
   GrassGroundingPreparationContinuation,
   prepareGrassGroundingHandoffSteps,
 } from "../GrassGroundingHandoff";
+import { GrassGroundingWorkerCoordinator } from "../GrassGroundingWorkerCoordinator";
 import {
   GrassGroundingWorkerClient,
   type GrassGroundingClientSettled,
@@ -431,6 +437,38 @@ const meadowCanopyCases = [...native144Cases, native146Case].map((source) => ({
       source.nativeSheath.scope,
   },
 }));
+
+// New placement, not a replay or resampling of the old source population.
+// Preserve the real terrain/exclusion owners but deliberately do not inherit
+// nativeSheath: its source counts and folded-layout assertions remain historical.
+const meadowFieldCases = [...native144Cases, native146Case].flatMap((source) =>
+  ([0, 1, 2] as const).map((lod) => ({
+    name: `meadow field LOD${lod} ${source.key} actual v10 work budget`,
+    test: `fits unsliced meadow field LOD${lod} ${source.key} new half-metre grid with unchanged caps`,
+    enabled: source.enabled,
+    label: `MEADOW_FIELD_LOD${lod}_${source.key.toUpperCase()}`,
+    nodes: source.nodes,
+    resolutions: source.resolutions,
+    focus:
+      lod === 0
+        ? source.focus
+        : ([
+            source.bounds.maxX + (lod === 1 ? 20 : 60),
+            (source.bounds.minZ + source.bounds.maxZ) / 2,
+          ] as const),
+    lod,
+    key: source.key,
+    bounds: source.bounds,
+    geometryCandidate: "meadow-field-v1" as const,
+    meadowField: {
+      worldConfigSHA256: source.nativeSheath.worldConfigSHA256,
+      worldAreasSHA256: source.nativeSheath.worldAreasSHA256,
+      serviceCourt: source.nativeSheath.id === "native146",
+      scope:
+        "Fresh full 25m cell at 0.5m spacing, with actual v10 terrain/road/exclusion owners and the production meadow-field ribbon template. All placement, retention, masks, swept bounds and work are newly measured. No historical source-count, source-index or mask equality; no truncation, cap increase, native scheduling, art or performance qualification.",
+    },
+  })),
+);
 
 const historicalCases = [
   {
@@ -929,6 +967,7 @@ type PondGroundingScenario =
   | typeof native146Case
   | (typeof rootedFanCases)[number]
   | (typeof meadowCanopyCases)[number]
+  | (typeof meadowFieldCases)[number]
   | (typeof historicalCases)[number];
 
 // Keep the original tuple's exact union members: combining two variadic
@@ -938,6 +977,7 @@ const cases: readonly PondGroundingScenario[] = [
   native146Case,
   ...rootedFanCases,
   ...meadowCanopyCases,
+  ...meadowFieldCases,
   ...historicalCases,
 ];
 
@@ -972,6 +1012,8 @@ const fittingReconstructionSourcePaths = [
     "../GrassVisualManager.ts",
     "../GrassTerrainProjection.ts",
     "../GrassGroundingHandoff.ts",
+    "../GrassGroundingWorkerCoordinator.ts",
+    "../GrassBladeLayout.ts",
     "../GrassGroundingPipeline.ts",
     "../CompactTerrainPalette.ts",
     "../RoadNetworkSystem.ts",
@@ -1051,7 +1093,9 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
     scenario.test,
     async () => {
       const lod = "lod" in scenario ? scenario.lod : 0;
+      const isMeadowField = "meadowField" in scenario;
       const usesNativeComposition =
+        isMeadowField ||
         "nativeSheath" in scenario ||
         "native52" in scenario ||
         "native72" in scenario ||
@@ -1064,6 +1108,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         "native121" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
+        isMeadowField ||
         "nativeSheath" in scenario ||
         "native82" in scenario ||
         "native86" in scenario ||
@@ -1073,13 +1118,15 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         "native121" in scenario ||
         "native95" in scenario;
       const reconstructionObservation =
-        "nativeSheath" in scenario
-          ? scenario.nativeSheath
-          : "native121" in scenario
-            ? scenario.native121
-            : "native118" in scenario
-              ? scenario.native118
-              : null;
+        "meadowField" in scenario
+          ? scenario.meadowField
+          : "nativeSheath" in scenario
+            ? scenario.nativeSheath
+            : "native121" in scenario
+              ? scenario.native121
+              : "native118" in scenario
+                ? scenario.native118
+                : null;
       const reconstructionAssets = reconstructionObservation
         ? [
             {
@@ -1104,12 +1151,16 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
       const reconstructionSources = reconstructionObservation
         ? [
             ...new Set(
-              "native121" in scenario || "nativeSheath" in scenario
+              isMeadowField ||
+                "native121" in scenario ||
+                "nativeSheath" in scenario
                 ? [
                     ...fittingReconstructionSourcePaths,
                     ...groundingWorkerSourcePins.map((pin) => pin.path),
-                    ...("nativeSheath" in scenario &&
-                    scenario.nativeSheath.id === "native146"
+                    ...(("meadowField" in scenario &&
+                      scenario.meadowField.serviceCourt) ||
+                    ("nativeSheath" in scenario &&
+                      scenario.nativeSheath.id === "native146")
                       ? [
                           "../CompactServiceCourtSystem.ts",
                           "../CompactServiceCourt.ts",
@@ -1142,6 +1193,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
       let groundingWorker: ActualGroundingWorker | undefined;
       let clientPort: ActualGrassGroundingClientPort | undefined;
       let groundingClient: GrassGroundingWorkerClient | undefined;
+      let coordinator: GrassGroundingWorkerCoordinator | undefined;
       let publishedWorkerResult:
         | Extract<
             ReturnType<typeof legacyGroundGrassBlades>,
@@ -1152,11 +1204,17 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
       let serviceCourts: CompactServiceCourtSystem | undefined;
       const failures: unknown[] = [];
       reconstruction: try {
-        if ("native121" in scenario || "nativeSheath" in scenario) {
+        if (
+          isMeadowField ||
+          "native121" in scenario ||
+          "nativeSheath" in scenario
+        ) {
           evidence(
             `${scenario.label}_SOURCE_INPUT_PINS`,
             JSON.stringify({
-              historicalObservation: reconstructionObservation,
+              ...(isMeadowField
+                ? { candidateScenario: reconstructionObservation }
+                : { historicalObservation: reconstructionObservation }),
               nodeVersion: process.version,
               assets: reconstructionAssets,
               sourcePins: reconstructionSources,
@@ -1240,8 +1298,9 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           ]);
         }
         if (
-          "nativeSheath" in scenario &&
-          scenario.nativeSheath.id === "native146"
+          ("meadowField" in scenario && scenario.meadowField.serviceCourt) ||
+          ("nativeSheath" in scenario &&
+            scenario.nativeSheath.id === "native146")
         ) {
           // Native145's saved outlyingBank authority includes these four live
           // footing exclusions inside cell15_17. Terrain/roads/docks omit this
@@ -1337,7 +1396,11 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         }
         if ("native86" in scenario)
           expect(nodes.map((node) => node.resolution)).toEqual([128]);
-        if ("native95" in scenario || "nativeSheath" in scenario)
+        if (
+          "native95" in scenario ||
+          "nativeSheath" in scenario ||
+          "meadowField" in scenario
+        )
           expect(nodes.map((node) => node.resolution)).toEqual(
             scenario.resolutions,
           );
@@ -1395,7 +1458,8 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               "native108" in scenario ||
               "native118" in scenario ||
               "native121" in scenario ||
-              "nativeSheath" in scenario) &&
+              "nativeSheath" in scenario ||
+              isMeadowField) &&
               step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
@@ -1669,7 +1733,20 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             ),
           ).toMatchObject({ minX: 427, maxX: 435, minZ: 414, maxZ: 417 });
         expect(input.placementDistribution).toBe("fine-cell-stratified-v1");
-        expect(input.clumpSpacing).toBe(0.7);
+        expect(input.clumpSpacing).toBe(isMeadowField ? 0.5 : 0.7);
+        if (isMeadowField) {
+          expect(input.spacingMul).toBe(1);
+          expect(input.placementCoverage).toBeUndefined();
+          expect(input.placementCell).toMatchObject({ size: 25 });
+          expect(
+            createGrassPlacementCellOperations().resolveDomain(input).maxCount,
+          ).toBe(2500);
+          expect(manager.getProfileReceipt().placement).toMatchObject({
+            cellSize: 25,
+            detailLodDistance: 12,
+            nearLodDistance: 40,
+          });
+        }
         worker = new Worker(
           `const {parentPort}=require('node:worker_threads');
         globalThis.self={postMessage:(message,transfers)=>parentPort.postMessage(message,transfers)};
@@ -1692,6 +1769,12 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             actualWorker.postMessage(request);
           });
         const output = await execute(input);
+        if (isMeadowField) {
+          expect(output.count).toBeGreaterThan(0);
+          expect(output.count).toBeLessThanOrEqual(2500);
+          for (const [key, stride] of attributes)
+            expect(output[key]).toHaveLength(output.count * stride);
+        }
         if ("native52" in scenario)
           expect(output.count).toBe(scenario.native52.inputClumps);
         const ownSurface = visual.getRetainedSurface(nodes[0])!;
@@ -1724,7 +1807,11 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             { centerX: 250, centerZ: 450, size: 100, resolution: 64 },
           ]);
         }
-        if ("native95" in scenario || "nativeSheath" in scenario) {
+        if (
+          "native95" in scenario ||
+          "nativeSheath" in scenario ||
+          "meadowField" in scenario
+        ) {
           expect(
             region.surfaces.map((surface) => [
               surface.centerX,
@@ -1772,11 +1859,13 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           },
         };
         expect(request.geometryLayout).toBe(
-          "nativeSheath" in scenario
-            ? "fine-folded-sheath-near5-v1"
-            : usesNativeComposition
-              ? "fine-folded-lancet-v1"
-              : "fine-linear-sweep-3seg-v1",
+          isMeadowField
+            ? "fine-meadow-ribbon-v1"
+            : "nativeSheath" in scenario
+              ? "fine-folded-sheath-near5-v1"
+              : usesNativeComposition
+                ? "fine-folded-lancet-v1"
+                : "fine-linear-sweep-3seg-v1",
         );
         const actualLayout = getGrassBladeLayout(lod, request.geometryLayout);
         if ("geometryCandidate" in scenario) {
@@ -1807,6 +1896,43 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           );
           expect(request.workBudget).toBeUndefined();
         }
+        if (isMeadowField) {
+          expect(actualLayout).toMatchObject(
+            [
+              {
+                bladesPerClump: 21,
+                bladeSegments: 3,
+                verticesPerBlade: 7,
+                verticesPerClump: 147,
+                trianglesPerClump: 105,
+                rootComponents: 2,
+              },
+              {
+                bladesPerClump: 21,
+                bladeSegments: 2,
+                verticesPerBlade: 5,
+                verticesPerClump: 105,
+                trianglesPerClump: 63,
+                rootComponents: 2,
+              },
+              {
+                bladesPerClump: 12,
+                bladeSegments: 2,
+                verticesPerBlade: 5,
+                verticesPerClump: 60,
+                trianglesPerClump: 36,
+                rootComponents: 2,
+              },
+            ][lod],
+          );
+          expect(usesGrassBladeHeightFlex(request.geometryLayout)).toBe(true);
+          expect(request.geometry.userData.grassRootComposition).toEqual(
+            FINE_GRASS_MEADOW_FIELD_COMPOSITION,
+          );
+          expect(projected.count).toBeGreaterThan(0);
+          expect(projected.count).toBeLessThanOrEqual(output.count);
+          expect(request.workBudget).toBeUndefined();
+        }
         expect(request.geometry.getAttribute("position").count).toBe(
           actualLayout.verticesPerClump,
         );
@@ -1815,14 +1941,14 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         );
         // The frozen oracle knows ribbon faces only. Keep a real, explicitly
         // separate historical-shape control; it cannot qualify the new fold.
-        if (usesNativeComposition && lod === 0)
+        if (usesNativeComposition && !isMeadowField && lod === 0)
           historicalRibbonGeometry = createClumpGeometry(
             24,
             3,
             FINE_MEADOW_APPEARANCE,
           );
         const historicalShapeRequest: GrassBladeGroundingRequest =
-          usesNativeComposition
+          usesNativeComposition && !isMeadowField
             ? {
                 ...request,
                 geometry: historicalRibbonGeometry ?? request.geometry,
@@ -1946,7 +2072,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             }),
           );
         }
-        if ("nativeSheath" in scenario) {
+        if ("nativeSheath" in scenario || "meadowField" in scenario) {
           expect(pondServiceGround).toBeDefined();
           expect(pondServiceGround).toEqual(setup.pondServiceGround);
           const packet = createGrassGroundingWorkerRequest(request);
@@ -1956,7 +2082,9 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               key,
               lod,
               focus: scenario.focus,
-              historicalObservation: scenario.nativeSheath,
+              ...("meadowField" in scenario
+                ? { candidateScenario: scenario.meadowField }
+                : { historicalObservation: scenario.nativeSheath }),
               geometryCandidate: manager.getProfileReceipt().geometryCandidate,
               terrainSeed: setup.seed,
               terrainProfileIdentity:
@@ -1986,7 +2114,10 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 positions: bufferReceipt(snapshot.positions),
                 indices: bufferReceipt(snapshot.indices),
               })),
-              scope: scenario.nativeSheath.scope,
+              scope:
+                "meadowField" in scenario
+                  ? scenario.meadowField.scope
+                  : scenario.nativeSheath.scope,
             }),
           );
         }
@@ -2097,7 +2228,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             phaseAudit: audit,
           }),
         );
-        if (result.status === "defer") {
+        if (result.status === "defer" && !isMeadowField) {
           // Attribution only: independent per-clump oracle work is not a passing
           // full-job result and never changes the production continuation cap.
           const empty = {
@@ -2155,6 +2286,33 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         expect(result.receipt.workBudget).toBe(1_000_000);
         expect(result.receipt.workUnits).toBeLessThanOrEqual(1_000_000);
         if (result.status !== "ready") throw new Error(result.reason);
+        if (isMeadowField) {
+          expect(result.receipt.processedClumps).toBe(projected.count);
+          expect(result.receipt.maxAcceptedBaseError).toBeLessThanOrEqual(0.02);
+          expect(result.rootDeltas).toHaveLength(
+            result.data.count * actualLayout.bladesPerClump * 2,
+          );
+          expect(result.bladeVisibility).toHaveLength(result.data.count);
+          const validBits = 2 ** actualLayout.bladesPerClump - 1;
+          let previousSource = -1;
+          let visibleBlades = 0;
+          for (let row = 0; row < result.data.count; row++) {
+            const source = result.sourceIndices[row];
+            expect(source).toBeGreaterThan(previousSource);
+            expect(source).toBeLessThan(projected.count);
+            previousSource = source;
+            let mask = result.bladeVisibility![row];
+            expect(mask).toBeGreaterThan(0);
+            expect(mask).toBeLessThanOrEqual(validBits);
+            while (mask) {
+              visibleBlades++;
+              mask &= mask - 1;
+            }
+          }
+          expect(result.receipt.roadClearance?.retainedBlades).toBe(
+            visibleBlades,
+          );
+        }
         if ("native52" in scenario)
           expect(result.data.count).toBe(scenario.native52.retainedClumps);
 
@@ -2379,7 +2537,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           throw new Error(
             `Actual cached pond worker ${cachedResult.state.status}`,
           );
-        if ("nativeSheath" in scenario) {
+        if ("nativeSheath" in scenario || isMeadowField) {
           expect(cachedResult.work.operations).toBeLessThan(1_000_000);
           expect(cachedResult.work.activeMs).toBeLessThan(250);
         }
@@ -2725,262 +2883,393 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         await clientPort.close();
         clientPort = undefined;
 
-        // The frozen reference predates pond-service wear and folded faces.
-        // Preserve its exact oracle comparison against a separately capped
-        // numerical control, never against current faces it cannot represent.
-        // Remove service wear and, when needed, select the historical shape.
-        // The generated placement/colors, projected roots, roads, terrain and town
-        // verge are identical. Folded near requests use the historical ribbon
-        // geometry above ONLY for this independent oracle control. All current
-        // folded-face worker/handoff/publication checks keep their full caps.
-        let oracleRequest = request;
-        let oracleResult = result;
-        if (pondServiceGround || usesNativeComposition) {
-          oracleRequest = { ...historicalShapeRequest };
-          delete oracleRequest.pondServiceGround;
-          expect(request.pondServiceGround).toBe(pondServiceGround);
-          expect(oracleRequest.data).toBe(request.data);
-          expect(oracleRequest.surfaces).toBe(request.surfaces);
-          expect(oracleRequest.roadSegments).toBe(request.roadSegments);
-          expect(oracleRequest.bankVerge).toBe(request.bankVerge);
-          const controlStarted = performance.now();
-          const control = new GrassGroundingContinuation(
-            groundGrassBladeSteps(oracleRequest),
-            isCurrent,
+        if (isMeadowField) {
+          // Fresh actual coordinator: prepare/copy each retained owner once,
+          // then repeat the whole unsliced cell through the warm owner cache.
+          // Neither run resets the fitting ledger between handoff and publish.
+          clientPort = new ActualGrassGroundingClientPort(
+            groundingWorkerSource,
           );
-          while (control.state.status === "running") control.advance();
-          evidence(
-            `${scenario.label}_NO_SERVICE_WEAR_CONTROL`,
-            JSON.stringify({
-              key,
-              lod,
-              status: control.state.status,
-              geometryLayout: oracleRequest.geometryLayout,
-              currentGeometryLayout: request.geometryLayout,
-              historicalRibbonControl: usesNativeComposition,
-              reason:
-                control.state.status === "failed_budget"
-                  ? control.state.reason
-                  : null,
-              operations: control.operations,
-              activeMs: control.activeMs,
-              maximumSliceMs: control.maximumSliceMs,
-              wallMs: performance.now() - controlStarted,
-              lastPhase: control.lastPhase,
-              scope:
-                "Historical-ribbon/no-service-wear numerical control under unchanged operation/active-time caps. Fine leaf-volume near uses the original seven-vertex geometry; other tiers retain their exact geometry bytes. This frozen-oracle control does not qualify current folded faces. Current geometry remains independently subject to all worker/handoff/full-pipeline assertions.",
-            }),
+          await clientPort.ready();
+          coordinator = new GrassGroundingWorkerCoordinator(
+            clientPort,
+            (surface) => retainedVisual.isRetainedSurfaceCurrent(surface),
           );
-          expect(control.state.status).toBe("ready");
-          if (control.state.status !== "ready")
-            throw new Error("No-service-wear control " + control.state.status);
-          oracleResult = control.state.result;
-          expect(oracleResult.receipt.workBudget).toBe(1_000_000);
-          expect(oracleResult.receipt.workUnits).toBeLessThanOrEqual(1_000_000);
-
-          const masks = (grounded: typeof result) =>
-            new Map(
-              Array.from(
-                grounded.sourceIndices,
-                (source, index) =>
-                  [source, grounded.bladeVisibility![index]] as const,
-              ),
+          for (const cacheState of ["cold", "warm"] as const) {
+            const coordinatorInputs = setup.prepareGroundingInputs!(bounds);
+            const job = coordinator.createJob(
+              { ...request, data: output },
+              coordinatorInputs,
+              (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+              (x, z) => terrain["isGrassExcludedAt"](x, z),
+              () => region.isCurrent() && coordinatorInputs.isCurrent(),
             );
-          const currentMasks = masks(result);
-          const controlMasks = masks(oracleResult);
-          const maskExamples: Array<{
-            sourceIndex: number;
-            current: number;
-            control: number;
-          }> = [];
-          let changedMasks = 0;
-          let addedRetainedClumps = 0;
-          let removedRetainedClumps = 0;
-          for (
-            let sourceIndex = 0;
-            sourceIndex < projected.count;
-            sourceIndex++
-          ) {
-            const current = currentMasks.get(sourceIndex) ?? 0;
-            const previous = controlMasks.get(sourceIndex) ?? 0;
-            if (currentMasks.has(sourceIndex) && !controlMasks.has(sourceIndex))
-              addedRetainedClumps++;
-            if (!currentMasks.has(sourceIndex) && controlMasks.has(sourceIndex))
-              removedRetainedClumps++;
-            if (current === previous) continue;
-            changedMasks++;
-            if (maskExamples.length < 16)
-              maskExamples.push({
-                sourceIndex,
-                current,
-                control: previous,
-              });
-          }
-          const currentBuffers = groundedBufferReceipts(result);
-          const controlBuffers = groundedBufferReceipts(oracleResult);
-          evidence(
-            `${scenario.label}_SERVICE_WEAR_COMPARISON`,
-            JSON.stringify({
-              key,
-              lod,
-              current: currentBuffers,
-              noServiceWearHistoricalRibbonControl: controlBuffers,
-              changedMasks,
-              addedRetainedClumps,
-              removedRetainedClumps,
-              maskExamples,
-              scope:
-                "Source-index-aligned current/control hashes and masks: changes can include both physical folded geometry and service wear. The frozen oracle qualifies only the historical-ribbon/no-service-wear control. New folded-face and current-wear correctness require separate independently derived geometry/wind/road-clearance tests, not worker/pipeline agreement alone.",
-            }),
-          );
-          if ("native72" in scenario) {
-            // This exact southwest cell overlaps the admitted apron. Keep the
-            // previously exposed difference observable; other cells need not
-            // change, and no numerical delta/count is invented as a golden.
-            expect(changedMasks).toBeGreaterThan(0);
-            expect(currentBuffers.bladeVisibility.sha256).not.toBe(
-              controlBuffers.bladeVisibility.sha256,
-            );
-          }
-        }
-
-        // One-clump frozen-reference evaluations provide ONLY the independent
-        // numerical oracle for oracleResult. They never divide/reset the cap
-        // of the full-cell control or current worker/pipeline installations.
-        const expectedData = Object.fromEntries(
-          attributes.map(([key]) => [key, [] as number[]]),
-        ) as Record<(typeof attributes)[number][0], number[]>;
-        const expectedIndices: number[] = [];
-        const expectedDeltas: number[] = [];
-        const expectedVisibility: number[] = [];
-        const expectedRejections = {
-          terrain_edge: 0,
-          pad: 0,
-          road: 0,
-          water: 0,
-        };
-        let expectedEndpointQueries = 0;
-        let expectedMaxEndpointCorrection = 0;
-        let expectedMaxCorrectedBaseError = 0;
-        let expectedMaxAcceptedBaseError = 0;
-        let expectedRetainedBlades = 0;
-        let expectedPartialClumps = 0;
-        let expectedMaskedBlades = 0;
-        const expectedDependencies = new Map<
-          GrassBladeGroundingRequest["ownSurface"],
-          Set<"endpoint" | "edge" | "envelope">
-        >();
-        let expectedBounds: typeof result.sweptBounds = null;
-        for (let i = 0; i < projected.count; i++) {
-          const one = {
-            count: 1,
-            offsets: projected.offsets.subarray(i * 3, i * 3 + 3),
-            rotScaleHash: projected.rotScaleHash.subarray(i * 3, i * 3 + 3),
-            groundColors: projected.groundColors.subarray(i * 3, i * 3 + 3),
-            grassTints: projected.grassTints.subarray(i * 4, i * 4 + 4),
-            groundNormals: projected.groundNormals.subarray(i * 3, i * 3 + 3),
-          };
-          const legacy = legacyGroundGrassBlades({
-            ...oracleRequest,
-            data: one,
-          });
-          expect(legacy.status, `legacy oracle clump ${i}`).toBe("ready");
-          if (legacy.status !== "ready") throw new Error(legacy.reason);
-          expectedEndpointQueries += legacy.receipt.endpointQueries;
-          expectedMaxEndpointCorrection = Math.max(
-            expectedMaxEndpointCorrection,
-            legacy.receipt.maxEndpointCorrection,
-          );
-          expectedMaxCorrectedBaseError = Math.max(
-            expectedMaxCorrectedBaseError,
-            legacy.receipt.maxCorrectedBaseError,
-          );
-          expectedMaxAcceptedBaseError = Math.max(
-            expectedMaxAcceptedBaseError,
-            legacy.receipt.maxAcceptedBaseError,
-          );
-          for (const reason of Object.keys(expectedRejections) as Array<
-            keyof typeof expectedRejections
-          >)
-            expectedRejections[reason] += legacy.receipt.rejected[reason];
-          expectedRetainedBlades +=
-            legacy.receipt.roadClearance!.retainedBlades;
-          expectedPartialClumps += legacy.receipt.roadClearance!.partialClumps;
-          expectedMaskedBlades +=
-            legacy.receipt.roadClearance!.maskedRetainedBlades;
-          for (const dependency of legacy.dependencies) {
-            let uses = expectedDependencies.get(dependency.surface);
-            if (!uses) {
-              uses = new Set();
-              expectedDependencies.set(dependency.surface, uses);
+            for (
+              let advance = 0;
+              advance < 10_000 && job.state.status === "running";
+              advance++
+            ) {
+              job.advance();
+              const reservation = coordinator.receipt;
+              expect(reservation.reservedOwners).toBeLessThanOrEqual(
+                GRASS_GROUNDING_WORKER_LIMITS.maximumCachedSurfaces,
+              );
+              expect(reservation.reservedInputBytes).toBeLessThanOrEqual(
+                GRASS_GROUNDING_WORKER_LIMITS.maximumInputBytes,
+              );
+              expect(reservation.reservedDerivedBytes).toBeLessThanOrEqual(
+                GRASS_GROUNDING_WORKER_LIMITS.maximumDerivedBytes,
+              );
+              const remoteId = job.transportJobId;
+              if (remoteId !== null) {
+                // This bounded two-run fixture has no owner replacement or
+                // eviction. Fail if it unexpectedly dispatches another kind.
+                expect([
+                  "worker_surface_dispatch",
+                  "worker_fit_dispatch",
+                ]).toContain(job.lastPhase);
+                await clientPort.waitFor(
+                  job.lastPhase === "worker_surface_dispatch"
+                    ? "surface_prepared"
+                    : "result",
+                  remoteId,
+                );
+              }
             }
-            for (const use of dependency.uses) uses.add(use);
+            evidence(
+              `${scenario.label}_COORDINATOR_${cacheState.toUpperCase()}`,
+              JSON.stringify({
+                key,
+                lod,
+                state:
+                  job.state.status === "ready"
+                    ? { status: "ready" }
+                    : job.state,
+                operations: job.operations,
+                activeMs: job.activeMs,
+                maximumSliceMs: job.cumulativeMaximumSliceMs,
+                lastPhase: job.lastPhase,
+                coordinator: coordinator.receipt,
+                output:
+                  job.state.status === "ready"
+                    ? groundedBufferReceipts(job.state.result)
+                    : null,
+                scope:
+                  "Actual production coordinator with real retained surfaces, worker bundle, projection/handoff and publication. Cold per-owner admission is accounted separately; warm reuse does not remove any fitting charge. Full new-grid cell, unchanged caps, no native scheduling or rendering claim.",
+              }),
+            );
+            expect(job.state.status).toBe("ready");
+            if (job.state.status !== "ready")
+              throw new Error(
+                `Meadow field ${cacheState} coordinator ${job.state.status}`,
+              );
+            expect(job.operations).toBeLessThan(1_000_000);
+            expect(job.activeMs).toBeLessThan(250);
+            expect(job.state.result.receipt.processedClumps).toBe(
+              projected.count,
+            );
+            const { grounding: coordinatedGrounding, ...coordinatedNumerical } =
+              job.state.result;
+            expect(
+              grassGroundingWorkerSemanticResult(coordinatedNumerical, request),
+            ).toEqual(grassGroundingWorkerSemanticResult(result, request));
+            expect(coordinatedGrounding).toEqual(
+              publishedWorkerResult.grounding,
+            );
+            expect(coordinator.receipt.preparedOwners).toBe(
+              region.surfaces.length,
+            );
+            expect(coordinator.receipt.cacheOwners).toBe(
+              region.surfaces.length,
+            );
+            expect(coordinator.receipt.lastAdmissionFailure).toBeNull();
+            expect(coordinator.receipt.lastFittingFailure).toBeUndefined();
+            if (cacheState === "warm")
+              expect(coordinator.receipt.cacheHits).toBeGreaterThanOrEqual(
+                region.surfaces.length,
+              );
+            for (const [index, [key]] of attributes.entries())
+              expect(projected[key]).toEqual(inputBefore[index]);
           }
-          if (!legacy.data.count) continue;
-          expect(legacy.sourceIndices).toEqual(new Uint32Array([0]));
-          expectedIndices.push(i);
-          expectedDeltas.push(...legacy.rootDeltas);
-          expectedVisibility.push(...legacy.bladeVisibility!);
-          for (const [key] of attributes)
-            expectedData[key].push(...legacy.data[key]);
-          const bounds = legacy.sweptBounds!;
-          if (!expectedBounds) expectedBounds = { ...bounds };
-          else {
-            expectedBounds.minX = Math.min(expectedBounds.minX, bounds.minX);
-            expectedBounds.maxX = Math.max(expectedBounds.maxX, bounds.maxX);
-            expectedBounds.minY = Math.min(expectedBounds.minY, bounds.minY);
-            expectedBounds.maxY = Math.max(expectedBounds.maxY, bounds.maxY);
-            expectedBounds.minZ = Math.min(expectedBounds.minZ, bounds.minZ);
-            expectedBounds.maxZ = Math.max(expectedBounds.maxZ, bounds.maxZ);
-          }
+          coordinator.destroy();
+          coordinator = undefined;
+          await clientPort.close();
+          clientPort = undefined;
         }
-        for (const [index, [key]] of attributes.entries()) {
-          expect(projected[key]).toEqual(inputBefore[index]);
-          expect(oracleResult.data[key]).toEqual(
-            new Float32Array(expectedData[key]),
+
+        // The frozen legacy reference does not admit this new layout or its
+        // height-flex response. Never relabel its geometry to make it pass.
+        // New-grid correctness is checked above/below on the actual full cell;
+        // independent shape/flex/clearance unit tests remain a separate gate.
+        if (!isMeadowField) {
+          // The frozen reference predates pond-service wear and folded faces.
+          // Preserve its exact oracle comparison against a separately capped
+          // numerical control, never against current faces it cannot represent.
+          // Remove service wear and, when needed, select the historical shape.
+          // The generated placement/colors, projected roots, roads, terrain and town
+          // verge are identical. Folded near requests use the historical ribbon
+          // geometry above ONLY for this independent oracle control. All current
+          // folded-face worker/handoff/publication checks keep their full caps.
+          let oracleRequest = request;
+          let oracleResult = result;
+          if (pondServiceGround || usesNativeComposition) {
+            oracleRequest = { ...historicalShapeRequest };
+            delete oracleRequest.pondServiceGround;
+            expect(request.pondServiceGround).toBe(pondServiceGround);
+            expect(oracleRequest.data).toBe(request.data);
+            expect(oracleRequest.surfaces).toBe(request.surfaces);
+            expect(oracleRequest.roadSegments).toBe(request.roadSegments);
+            expect(oracleRequest.bankVerge).toBe(request.bankVerge);
+            const controlStarted = performance.now();
+            const control = new GrassGroundingContinuation(
+              groundGrassBladeSteps(oracleRequest),
+              isCurrent,
+            );
+            while (control.state.status === "running") control.advance();
+            evidence(
+              `${scenario.label}_NO_SERVICE_WEAR_CONTROL`,
+              JSON.stringify({
+                key,
+                lod,
+                status: control.state.status,
+                geometryLayout: oracleRequest.geometryLayout,
+                currentGeometryLayout: request.geometryLayout,
+                historicalRibbonControl: usesNativeComposition,
+                reason:
+                  control.state.status === "failed_budget"
+                    ? control.state.reason
+                    : null,
+                operations: control.operations,
+                activeMs: control.activeMs,
+                maximumSliceMs: control.maximumSliceMs,
+                wallMs: performance.now() - controlStarted,
+                lastPhase: control.lastPhase,
+                scope:
+                  "Historical-ribbon/no-service-wear numerical control under unchanged operation/active-time caps. Fine leaf-volume near uses the original seven-vertex geometry; other tiers retain their exact geometry bytes. This frozen-oracle control does not qualify current folded faces. Current geometry remains independently subject to all worker/handoff/full-pipeline assertions.",
+              }),
+            );
+            expect(control.state.status).toBe("ready");
+            if (control.state.status !== "ready")
+              throw new Error(
+                "No-service-wear control " + control.state.status,
+              );
+            oracleResult = control.state.result;
+            expect(oracleResult.receipt.workBudget).toBe(1_000_000);
+            expect(oracleResult.receipt.workUnits).toBeLessThanOrEqual(
+              1_000_000,
+            );
+
+            const masks = (grounded: typeof result) =>
+              new Map(
+                Array.from(
+                  grounded.sourceIndices,
+                  (source, index) =>
+                    [source, grounded.bladeVisibility![index]] as const,
+                ),
+              );
+            const currentMasks = masks(result);
+            const controlMasks = masks(oracleResult);
+            const maskExamples: Array<{
+              sourceIndex: number;
+              current: number;
+              control: number;
+            }> = [];
+            let changedMasks = 0;
+            let addedRetainedClumps = 0;
+            let removedRetainedClumps = 0;
+            for (
+              let sourceIndex = 0;
+              sourceIndex < projected.count;
+              sourceIndex++
+            ) {
+              const current = currentMasks.get(sourceIndex) ?? 0;
+              const previous = controlMasks.get(sourceIndex) ?? 0;
+              if (
+                currentMasks.has(sourceIndex) &&
+                !controlMasks.has(sourceIndex)
+              )
+                addedRetainedClumps++;
+              if (
+                !currentMasks.has(sourceIndex) &&
+                controlMasks.has(sourceIndex)
+              )
+                removedRetainedClumps++;
+              if (current === previous) continue;
+              changedMasks++;
+              if (maskExamples.length < 16)
+                maskExamples.push({
+                  sourceIndex,
+                  current,
+                  control: previous,
+                });
+            }
+            const currentBuffers = groundedBufferReceipts(result);
+            const controlBuffers = groundedBufferReceipts(oracleResult);
+            evidence(
+              `${scenario.label}_SERVICE_WEAR_COMPARISON`,
+              JSON.stringify({
+                key,
+                lod,
+                current: currentBuffers,
+                noServiceWearHistoricalRibbonControl: controlBuffers,
+                changedMasks,
+                addedRetainedClumps,
+                removedRetainedClumps,
+                maskExamples,
+                scope:
+                  "Source-index-aligned current/control hashes and masks: changes can include both physical folded geometry and service wear. The frozen oracle qualifies only the historical-ribbon/no-service-wear control. New folded-face and current-wear correctness require separate independently derived geometry/wind/road-clearance tests, not worker/pipeline agreement alone.",
+              }),
+            );
+            if ("native72" in scenario) {
+              // This exact southwest cell overlaps the admitted apron. Keep the
+              // previously exposed difference observable; other cells need not
+              // change, and no numerical delta/count is invented as a golden.
+              expect(changedMasks).toBeGreaterThan(0);
+              expect(currentBuffers.bladeVisibility.sha256).not.toBe(
+                controlBuffers.bladeVisibility.sha256,
+              );
+            }
+          }
+
+          // One-clump frozen-reference evaluations provide ONLY the independent
+          // numerical oracle for oracleResult. They never divide/reset the cap
+          // of the full-cell control or current worker/pipeline installations.
+          const expectedData = Object.fromEntries(
+            attributes.map(([key]) => [key, [] as number[]]),
+          ) as Record<(typeof attributes)[number][0], number[]>;
+          const expectedIndices: number[] = [];
+          const expectedDeltas: number[] = [];
+          const expectedVisibility: number[] = [];
+          const expectedRejections = {
+            terrain_edge: 0,
+            pad: 0,
+            road: 0,
+            water: 0,
+          };
+          let expectedEndpointQueries = 0;
+          let expectedMaxEndpointCorrection = 0;
+          let expectedMaxCorrectedBaseError = 0;
+          let expectedMaxAcceptedBaseError = 0;
+          let expectedRetainedBlades = 0;
+          let expectedPartialClumps = 0;
+          let expectedMaskedBlades = 0;
+          const expectedDependencies = new Map<
+            GrassBladeGroundingRequest["ownSurface"],
+            Set<"endpoint" | "edge" | "envelope">
+          >();
+          let expectedBounds: typeof result.sweptBounds = null;
+          for (let i = 0; i < projected.count; i++) {
+            const one = {
+              count: 1,
+              offsets: projected.offsets.subarray(i * 3, i * 3 + 3),
+              rotScaleHash: projected.rotScaleHash.subarray(i * 3, i * 3 + 3),
+              groundColors: projected.groundColors.subarray(i * 3, i * 3 + 3),
+              grassTints: projected.grassTints.subarray(i * 4, i * 4 + 4),
+              groundNormals: projected.groundNormals.subarray(i * 3, i * 3 + 3),
+            };
+            const legacy = legacyGroundGrassBlades({
+              ...oracleRequest,
+              data: one,
+            });
+            expect(legacy.status, `legacy oracle clump ${i}`).toBe("ready");
+            if (legacy.status !== "ready") throw new Error(legacy.reason);
+            expectedEndpointQueries += legacy.receipt.endpointQueries;
+            expectedMaxEndpointCorrection = Math.max(
+              expectedMaxEndpointCorrection,
+              legacy.receipt.maxEndpointCorrection,
+            );
+            expectedMaxCorrectedBaseError = Math.max(
+              expectedMaxCorrectedBaseError,
+              legacy.receipt.maxCorrectedBaseError,
+            );
+            expectedMaxAcceptedBaseError = Math.max(
+              expectedMaxAcceptedBaseError,
+              legacy.receipt.maxAcceptedBaseError,
+            );
+            for (const reason of Object.keys(expectedRejections) as Array<
+              keyof typeof expectedRejections
+            >)
+              expectedRejections[reason] += legacy.receipt.rejected[reason];
+            expectedRetainedBlades +=
+              legacy.receipt.roadClearance!.retainedBlades;
+            expectedPartialClumps +=
+              legacy.receipt.roadClearance!.partialClumps;
+            expectedMaskedBlades +=
+              legacy.receipt.roadClearance!.maskedRetainedBlades;
+            for (const dependency of legacy.dependencies) {
+              let uses = expectedDependencies.get(dependency.surface);
+              if (!uses) {
+                uses = new Set();
+                expectedDependencies.set(dependency.surface, uses);
+              }
+              for (const use of dependency.uses) uses.add(use);
+            }
+            if (!legacy.data.count) continue;
+            expect(legacy.sourceIndices).toEqual(new Uint32Array([0]));
+            expectedIndices.push(i);
+            expectedDeltas.push(...legacy.rootDeltas);
+            expectedVisibility.push(...legacy.bladeVisibility!);
+            for (const [key] of attributes)
+              expectedData[key].push(...legacy.data[key]);
+            const bounds = legacy.sweptBounds!;
+            if (!expectedBounds) expectedBounds = { ...bounds };
+            else {
+              expectedBounds.minX = Math.min(expectedBounds.minX, bounds.minX);
+              expectedBounds.maxX = Math.max(expectedBounds.maxX, bounds.maxX);
+              expectedBounds.minY = Math.min(expectedBounds.minY, bounds.minY);
+              expectedBounds.maxY = Math.max(expectedBounds.maxY, bounds.maxY);
+              expectedBounds.minZ = Math.min(expectedBounds.minZ, bounds.minZ);
+              expectedBounds.maxZ = Math.max(expectedBounds.maxZ, bounds.maxZ);
+            }
+          }
+          for (const [index, [key]] of attributes.entries()) {
+            expect(projected[key]).toEqual(inputBefore[index]);
+            expect(oracleResult.data[key]).toEqual(
+              new Float32Array(expectedData[key]),
+            );
+          }
+          expect(oracleResult.sourceIndices).toEqual(
+            new Uint32Array(expectedIndices),
+          );
+          expect(oracleResult.rootDeltas).toEqual(
+            new Float32Array(expectedDeltas),
+          );
+          expect(oracleResult.bladeVisibility).toEqual(
+            new Uint32Array(expectedVisibility),
+          );
+          expect(oracleResult.sweptBounds).toEqual(expectedBounds);
+          expect(oracleResult.receipt.processedClumps).toBe(projected.count);
+          expect(oracleResult.receipt.retainedClumps).toBe(
+            expectedIndices.length,
+          );
+          expect(oracleResult.receipt.endpointQueries).toBe(
+            expectedEndpointQueries,
+          );
+          expect(oracleResult.receipt.maxEndpointCorrection).toBe(
+            expectedMaxEndpointCorrection,
+          );
+          expect(oracleResult.receipt.maxCorrectedBaseError).toBe(
+            expectedMaxCorrectedBaseError,
+          );
+          expect(oracleResult.receipt.maxAcceptedBaseError).toBe(
+            expectedMaxAcceptedBaseError,
+          );
+          expect(oracleResult.receipt.rejected).toEqual(expectedRejections);
+          expect(oracleResult.receipt.roadClearance).toEqual({
+            mode: "per-blade-v1",
+            retainedBlades: expectedRetainedBlades,
+            partialClumps: expectedPartialClumps,
+            maskedRetainedBlades: expectedMaskedBlades,
+            visibilityBytes:
+              expectedVisibility.length * Uint32Array.BYTES_PER_ELEMENT,
+          });
+          expect(oracleResult.dependencies).toEqual(
+            [...expectedDependencies].map(([surface, uses]) => ({
+              surface,
+              uses: [...uses],
+            })),
           );
         }
-        expect(oracleResult.sourceIndices).toEqual(
-          new Uint32Array(expectedIndices),
-        );
-        expect(oracleResult.rootDeltas).toEqual(
-          new Float32Array(expectedDeltas),
-        );
-        expect(oracleResult.bladeVisibility).toEqual(
-          new Uint32Array(expectedVisibility),
-        );
-        expect(oracleResult.sweptBounds).toEqual(expectedBounds);
-        expect(oracleResult.receipt.processedClumps).toBe(projected.count);
-        expect(oracleResult.receipt.retainedClumps).toBe(
-          expectedIndices.length,
-        );
-        expect(oracleResult.receipt.endpointQueries).toBe(
-          expectedEndpointQueries,
-        );
-        expect(oracleResult.receipt.maxEndpointCorrection).toBe(
-          expectedMaxEndpointCorrection,
-        );
-        expect(oracleResult.receipt.maxCorrectedBaseError).toBe(
-          expectedMaxCorrectedBaseError,
-        );
-        expect(oracleResult.receipt.maxAcceptedBaseError).toBe(
-          expectedMaxAcceptedBaseError,
-        );
-        expect(oracleResult.receipt.rejected).toEqual(expectedRejections);
-        expect(oracleResult.receipt.roadClearance).toEqual({
-          mode: "per-blade-v1",
-          retainedBlades: expectedRetainedBlades,
-          partialClumps: expectedPartialClumps,
-          maskedRetainedBlades: expectedMaskedBlades,
-          visibilityBytes:
-            expectedVisibility.length * Uint32Array.BYTES_PER_ELEMENT,
-        });
-        expect(oracleResult.dependencies).toEqual(
-          [...expectedDependencies].map(([surface, uses]) => ({
-            surface,
-            uses: [...uses],
-          })),
-        );
 
         const pipelineStarted = performance.now();
         const pipeline = new GrassGroundingContinuation(
@@ -3050,6 +3339,16 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           );
           expect(pipeline.state.result.receipt.geometryLayout).toBe(
             "fine-folded-sheath-near5-v1",
+          );
+        }
+        if (isMeadowField) {
+          expect(pipeline.operations).toBeLessThan(1_000_000);
+          expect(pipeline.activeMs).toBeLessThan(250);
+          expect(pipeline.state.result.receipt.processedClumps).toBe(
+            projected.count,
+          );
+          expect(pipeline.state.result.receipt.geometryLayout).toBe(
+            "fine-meadow-ribbon-v1",
           );
         }
         expect(pipeline.state.result.sourceIndices).toEqual(
@@ -3124,8 +3423,9 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 ecologicalNormals: bufferReceipt(grounding.ecologicalNormals),
               },
             },
-            scope:
-              "Exact current-source CPU array-view hashes after full worker/pipeline assertions and a separately identified historical-ribbon oracle control. Source indices refer to projected worker rows. A geometry trial may change clearance masks/retained rows and swept bounds, not the source placement population. No native buffer or GPU claim.",
+            scope: isMeadowField
+              ? "Exact current-source CPU array-view hashes after unsliced core, actual cached-worker, cold/warm coordinator, handoff/publication and full-pipeline agreement. Source indices refer only to this fresh half-metre grid; no historical placement/mask equality or legacy-layout oracle claim. No native buffer or GPU claim."
+              : "Exact current-source CPU array-view hashes after full worker/pipeline assertions and a separately identified historical-ribbon oracle control. Source indices refer to projected worker rows. A geometry trial may change clearance masks/retained rows and swept bounds, not the source placement population. No native buffer or GPU claim.",
           }),
         );
         if (usesNativeComposition) {
@@ -3138,7 +3438,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           base.addEventListener("dispose", () => baseDisposals++);
           near.addEventListener("dispose", () => nearDisposals++);
           expect(near).not.toBe(base);
-          expect(selected).toBe(lod === 0 ? near : base);
+          expect(selected).toBe(isMeadowField || lod === 0 ? near : base);
           expect(pipeline.state.result.data.count).toBeGreaterThan(0);
           manager["createChunkMeshFromWorkerData"](
             work,
@@ -3158,7 +3458,20 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           expect(mesh.material.colorNode).toBe(base.colorNode);
           expect(mesh.material.aoNode).toBe(base.aoNode);
           expect(mesh.material.userData.grassBladeLayout).toEqual(actualLayout);
-          if ("nativeSheath" in scenario) {
+          if (isMeadowField) {
+            expect(mesh.material.userData.fineGrassCanopyLighting).toBe(
+              selected.userData.fineGrassCanopyLighting,
+            );
+            expect(mesh.material.userData.fineGrassCanopyLighting).toEqual({
+              ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+              foldTangent: 0,
+              normalSource: "geometry-ribbon",
+              geometryLayout: "fine-meadow-ribbon-v1",
+            });
+            expect(
+              Object.isFrozen(mesh.material.userData.fineGrassCanopyLighting),
+            ).toBe(true);
+          } else if ("nativeSheath" in scenario) {
             expect(mesh.material.userData.fineGrassCanopyLighting).toBe(
               selected.userData.fineGrassCanopyLighting,
             );
@@ -3223,6 +3536,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           failures.push(error);
         }
         release(() => groundingClient?.destroy());
+        release(() => coordinator?.destroy());
         try {
           await clientPort?.close();
         } catch (error) {
@@ -3236,7 +3550,11 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         release(() => serviceCourts?.destroy());
         release(() => docks?.destroy());
         release(() => world.destroy());
-        if ("native121" in scenario || "nativeSheath" in scenario)
+        if (
+          isMeadowField ||
+          "native121" in scenario ||
+          "nativeSheath" in scenario
+        )
           release(() => {
             const pinsBefore = [
               ...reconstructionSources,

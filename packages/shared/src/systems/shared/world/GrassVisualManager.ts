@@ -88,6 +88,7 @@ import {
   getGrassBladeLayout,
   isFoldedGrassBladeLayout,
   usesGrassBladeHeightFlex,
+  usesGrassCloseDetailLods,
   FINE_GRASS_FOLDED_BLADE_INDICES,
   FINE_GRASS_HEIGHT_FLEX_RESPONSE,
   type FineGrassGeometryLayout,
@@ -346,6 +347,31 @@ export const FINE_GRASS_MEADOW_CANOPY_SHAPE = Object.freeze({
   ROOT_COMPOSITION: "meadow-canopy-v1",
 } as const);
 
+/** Explicit denser field: seven three-leaf fans per near/middle clump,
+ * redistributing geometry from each leaf into more slender plants per square
+ * metre. This changes placement, fitting and distant cost; it is not
+ * a default or a promise of cheaper rendering. Historical recipes stay intact.
+ */
+export const FINE_GRASS_MEADOW_FIELD_COMPOSITION = Object.freeze({
+  ...FINE_GRASS_MEADOW_CANOPY_COMPOSITION,
+  id: "meadow-field-v1",
+  clumpSpacing: 0.5,
+  widthFactors: Object.freeze([0.95, 1.05, 0.8] as const),
+  arcFactors: Object.freeze([1.1, 1, 0.8] as const),
+} as const);
+
+export const FINE_GRASS_MEADOW_FIELD_SHAPE = Object.freeze({
+  ...FINE_MEADOW_APPEARANCE,
+  GEOMETRY_LAYOUT: "fine-meadow-ribbon-v1" as FineGrassGeometryLayout,
+  ROOT_COMPOSITION: "meadow-field-v1",
+  BLADE_WIDTH_RATIO: 0.028,
+  BLADE_ARC_RATIO: 0.4,
+  // A narrow basal sheath avoids broad rectangular feet. The full upper
+  // ribbon width is unchanged; this is not a reduction in plant population.
+  BLADE_BASE_WIDTH_FACTOR: 0.25,
+  BLADE_FULL_WIDTH_HEIGHT: 0.2,
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -401,6 +427,13 @@ const FINE_GRASS_SHEATH_BLADE_LIGHTING = Object.freeze({
   geometryLayout: FINE_GRASS_CLOSE_DETAIL.geometryLayout,
 });
 
+const FINE_GRASS_MEADOW_FIELD_LIGHTING = Object.freeze({
+  ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  foldTangent: 0,
+  normalSource: "geometry-ribbon",
+  geometryLayout: FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT,
+});
+
 function publishFineGrassCanopyLighting(
   material: MeshStandardNodeMaterial,
   candidate: GrassLightingCandidate,
@@ -411,13 +444,16 @@ function publishFineGrassCanopyLighting(
     enumerable: true,
     configurable: false,
     writable: false,
-    value: folded
-      ? geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
-        ? FINE_GRASS_SHEATH_BLADE_LIGHTING
-        : FINE_GRASS_FOLDED_BLADE_LIGHTING
-      : candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
-        ? FINE_GRASS_LEAF_VOLUME_LIGHTING
-        : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+    value:
+      geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+        ? FINE_GRASS_MEADOW_FIELD_LIGHTING
+        : folded
+          ? geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+            ? FINE_GRASS_SHEATH_BLADE_LIGHTING
+            : FINE_GRASS_FOLDED_BLADE_LIGHTING
+          : candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+            ? FINE_GRASS_LEAF_VOLUME_LIGHTING
+            : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   });
 }
 
@@ -443,8 +479,11 @@ type GrassBladeShape = Pick<
   BLADE_WIDTH_FALLOFF_POWER?: number;
   /** Additional upper-leaf width; zero at the root, full gain at half height. */
   BLADE_UPPER_WIDTH_GAIN?: number;
+  BLADE_BASE_WIDTH_FACTOR?: number;
+  BLADE_FULL_WIDTH_HEIGHT?: number;
   PROGRESSIVE_ROOTS?: boolean;
-  ROOT_COMPOSITION?: "progressive-fan-v1" | "meadow-canopy-v1";
+  ROOT_COMPOSITION?:
+    "progressive-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
   BLADE_CONTROL_HEIGHT?: number;
   /** Quadratic control-point XZ offset as a fraction of the unchanged tip arc. */
   BLADE_CONTROL_ARC_RATIO?: number;
@@ -517,11 +556,16 @@ export function createClumpGeometry(
   shape: GrassBladeShape = GRASS_CONFIG,
   crossSection?: "folded-lancet-v1" | "folded-sheath-v1",
 ): THREE.BufferGeometry {
-  const meadowCanopy = shape.ROOT_COMPOSITION === "meadow-canopy-v1";
+  const meadowField = shape.ROOT_COMPOSITION === "meadow-field-v1";
+  const meadowCanopy =
+    shape.ROOT_COMPOSITION === "meadow-canopy-v1" || meadowField;
   const rootedFan =
     shape.ROOT_COMPOSITION === "progressive-fan-v1" || meadowCanopy;
+  const canopyComposition = meadowField
+    ? FINE_GRASS_MEADOW_FIELD_COMPOSITION
+    : FINE_GRASS_MEADOW_CANOPY_COMPOSITION;
   const fanComposition = meadowCanopy
-    ? FINE_GRASS_MEADOW_CANOPY_COMPOSITION
+    ? canopyComposition
     : FINE_GRASS_ROOTED_FAN_COMPOSITION;
   if (
     shape.ROOT_COMPOSITION !== undefined &&
@@ -682,13 +726,12 @@ export function createClumpGeometry(
     if (meadowCanopy && b % fanComposition.bladesPerFan === 0)
       meadowCanopyHeight = variedBladeHeight;
     const h = meadowCanopy
-      ? meadowCanopyHeight *
-        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.heightFactors[canopyRole]
+      ? meadowCanopyHeight * canopyComposition.heightFactors[canopyRole]
       : variedBladeHeight;
     const w = meadowCanopy
       ? meadowCanopyHeight *
         BLADE_WIDTH_RATIO *
-        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.widthFactors[canopyRole]
+        canopyComposition.widthFactors[canopyRole]
       : h * BLADE_WIDTH_RATIO;
 
     const curveSample = rng() - 0.5;
@@ -701,8 +744,7 @@ export function createClumpGeometry(
       (0.8 + rng() * 0.4) *
       (shape.TUFT_ARC_FACTORS?.[fanIndex] ?? 1);
     const arcDist = meadowCanopy
-      ? variedArcDist *
-        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.arcFactors[canopyRole]
+      ? variedArcDist * canopyComposition.arcFactors[canopyRole]
       : variedArcDist;
     const curveDirX = Math.cos(curveAngle) * arcDist;
     const curveDirZ = Math.sin(curveAngle) * arcDist;
@@ -792,6 +834,17 @@ export function createClumpGeometry(
         hw = w * 0.5 * Math.pow(1.0 - taperedHeight * taper, widthFalloffPower);
       if (upperWidthGain !== 0)
         hw *= 1 + upperWidthGain * THREE.MathUtils.smoothstep(t, 0, 0.5);
+      if (shape.BLADE_BASE_WIDTH_FACTOR !== undefined) {
+        const factor = shape.BLADE_BASE_WIDTH_FACTOR;
+        hw *=
+          factor +
+          (1 - factor) *
+            THREE.MathUtils.smoothstep(
+              t,
+              0,
+              shape.BLADE_FULL_WIDTH_HEIGHT ?? 0.2,
+            );
+      }
       if (folded && (i !== 0 || sheath)) hw = foldedWidth(t);
       // Keep the historical arithmetic exact when no leaning control is
       // selected. The fine candidate changes only the middle control point;
@@ -1312,7 +1365,8 @@ export class GrassVisualManager implements QuadTreeListener {
       geometryCandidate !== undefined &&
       ((geometryCandidate !== FINE_GRASS_CLOSE_DETAIL.id &&
         geometryCandidate !== FINE_GRASS_ROOTED_FAN_COMPOSITION.id &&
-        geometryCandidate !== FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id) ||
+        geometryCandidate !== FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id &&
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id) ||
         lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
     )
       throw new Error(
@@ -1332,6 +1386,13 @@ export class GrassVisualManager implements QuadTreeListener {
       : undefined;
     if (this.coverageTrial && !this.fineMeadow)
       throw new Error("Grass coverage trial requires the explicit fine meadow");
+    if (
+      this.coverageTrial &&
+      geometryCandidate === FINE_GRASS_MEADOW_FIELD_COMPOSITION.id
+    )
+      throw new Error(
+        "Dense meadow field cannot mix a single-cell coverage trial",
+      );
     const clearanceField = Object.getOwnPropertyDescriptor(
       profile,
       "roadClearance",
@@ -1462,8 +1523,10 @@ export class GrassVisualManager implements QuadTreeListener {
       Math.floor(profile.maxChunksPerFrame ?? 2),
     );
     this.clumpSpacing =
-      GRASS_CONFIG.CLUMP_SPACING *
-      Math.max(1, profile.clumpSpacingMultiplier ?? 1);
+      geometryCandidate === FINE_GRASS_MEADOW_FIELD_COMPOSITION.id
+        ? FINE_GRASS_MEADOW_FIELD_COMPOSITION.clumpSpacing
+        : GRASS_CONFIG.CLUMP_SPACING *
+          Math.max(1, profile.clumpSpacingMultiplier ?? 1);
     this.minimumLodLevel = THREE.MathUtils.clamp(
       Math.floor(profile.minimumLodLevel ?? 0),
       0,
@@ -1478,13 +1541,15 @@ export class GrassVisualManager implements QuadTreeListener {
     );
 
     this.geometryLayout = this.fineMeadow
-      ? geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id ||
-        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id ||
-        geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
-        ? FINE_GRASS_CLOSE_DETAIL.geometryLayout
-        : this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
-          ? FINE_GRASS_FOLDED_BLADE_SHAPE.GEOMETRY_LAYOUT
-          : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
+      ? geometryCandidate === FINE_GRASS_MEADOW_FIELD_COMPOSITION.id
+        ? FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+        : geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id ||
+            geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id ||
+            geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
+          ? FINE_GRASS_CLOSE_DETAIL.geometryLayout
+          : this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+            ? FINE_GRASS_FOLDED_BLADE_SHAPE.GEOMETRY_LAYOUT
+            : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
       : undefined;
     this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((_, lod) => {
       const layout = getGrassBladeLayout(lod, this.geometryLayout);
@@ -1492,13 +1557,15 @@ export class GrassVisualManager implements QuadTreeListener {
       return createClumpGeometry(
         layout.bladesPerClump,
         layout.bladeSegments,
-        geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
-          ? FINE_GRASS_MEADOW_CANOPY_SHAPE
-          : geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
-            ? FINE_GRASS_ROOTED_FAN_SHAPE
-            : folded
-              ? FINE_GRASS_FOLDED_BLADE_SHAPE
-              : (this.meadowAppearance ?? GRASS_CONFIG),
+        geometryCandidate === FINE_GRASS_MEADOW_FIELD_COMPOSITION.id
+          ? FINE_GRASS_MEADOW_FIELD_SHAPE
+          : geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
+            ? FINE_GRASS_MEADOW_CANOPY_SHAPE
+            : geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
+              ? FINE_GRASS_ROOTED_FAN_SHAPE
+              : folded
+                ? FINE_GRASS_FOLDED_BLADE_SHAPE
+                : (this.meadowAppearance ?? GRASS_CONFIG),
         folded
           ? layout.bladeSegments === 5
             ? "folded-sheath-v1"
@@ -1551,8 +1618,9 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if (this.compactMeadow) {
       let radius = 0;
-      const lastGroundedTier =
-        this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout ? 2 : 1;
+      const lastGroundedTier = usesGrassCloseDetailLods(this.geometryLayout)
+        ? 2
+        : 1;
       for (let tier = this.minimumLodLevel; tier <= lastGroundedTier; tier++) {
         const positions = this.lodGeometries[tier].getAttribute("position");
         for (let i = 0; i < positions.count; i++)
@@ -1578,7 +1646,7 @@ export class GrassVisualManager implements QuadTreeListener {
       const g = this.lodGeometries[i];
       const layout = getGrassBladeLayout(i, this.geometryLayout);
       const range = this.fineMeadow
-        ? this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+        ? usesGrassCloseDetailLods(this.geometryLayout)
           ? ["<12m", "12–40m", "40–140m"][i]
           : i === 0
             ? "<40m"
@@ -1597,7 +1665,7 @@ export class GrassVisualManager implements QuadTreeListener {
       `[GrassVisualManager] ${tierDescs.length} LOD tiers | ` +
         `spacing ${this.clumpSpacing}m | min LOD${this.minimumLodLevel} | ` +
         (this.fineMeadow
-          ? this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+          ? usesGrassCloseDetailLods(this.geometryLayout)
             ? "cells25m | detail12m/near40m (10% hysteresis) | "
             : "cells25m | near40m (36/44m hysteresis) | "
           : "") +
@@ -1659,7 +1727,7 @@ export class GrassVisualManager implements QuadTreeListener {
               mode: "world-cells-v1" as const,
               cellSize: 25 as const,
               nearLodDistance: 40 as const,
-              ...(this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+              ...(usesGrassCloseDetailLods(this.geometryLayout)
                 ? { detailLodDistance: FINE_GRASS_CLOSE_DETAIL.detailDistance }
                 : {}),
               liveCells: this.liveWorkUnits.size,
@@ -1766,10 +1834,9 @@ export class GrassVisualManager implements QuadTreeListener {
   async precompileRepresentativeChunk(
     precompileObject: (object: THREE.Object3D) => Promise<void>,
   ): Promise<void> {
-    const tiers =
-      this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
-        ? [0, 1, 2]
-        : [this.minimumLodLevel];
+    const tiers = usesGrassCloseDetailLods(this.geometryLayout)
+      ? [0, 1, 2]
+      : [this.minimumLodLevel];
     // Detail introduces three distinct root-addressing/normal programs. Warm
     // every admitted tier during startup, not on the first boundary crossing.
     for (const lod of tiers) {
@@ -2096,7 +2163,7 @@ export class GrassVisualManager implements QuadTreeListener {
       inputs &&
       (ticket.lodLevel === 1 ||
         (manager.fineMeadow && ticket.lodLevel === 0) ||
-        (manager.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout &&
+        (usesGrassCloseDetailLods(manager.geometryLayout) &&
           ticket.lodLevel === 2))
         ? {
             data,
@@ -3140,14 +3207,13 @@ export class GrassVisualManager implements QuadTreeListener {
   private spacingMultiplierForLod(lod: number): number {
     // The candidate's tier2 is the former middle geometry, not the sparse
     // ordinary far tier. Keep the same full placement grid at every range.
-    return this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+    return usesGrassCloseDetailLods(this.geometryLayout)
       ? FINE_GRASS_CLOSE_DETAIL.spacingMultiplier
       : GRASS_CONFIG.LOD_TIERS[lod].spacingMul;
   }
 
   private fineLodBoundary(lod: number): number {
-    return this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout &&
-      lod === 0
+    return usesGrassCloseDetailLods(this.geometryLayout) && lod === 0
       ? FINE_GRASS_CLOSE_DETAIL.detailDistance
       : FINE_GRASS_CLOSE_DETAIL.nearDistance;
   }
@@ -3164,7 +3230,7 @@ export class GrassVisualManager implements QuadTreeListener {
         this.lodFocusX,
         this.lodFocusZ,
       );
-      if (this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout) {
+      if (usesGrassCloseDetailLods(this.geometryLayout)) {
         if (distanceSquared < FINE_GRASS_CLOSE_DETAIL.detailDistance ** 2)
           return 0;
         return distanceSquared < FINE_GRASS_CLOSE_DETAIL.nearDistance ** 2
@@ -3456,7 +3522,8 @@ export class GrassVisualManager implements QuadTreeListener {
   // -- TSL Material ---------------------------------------------------------
 
   private materialForLod(lod: number): MeshStandardNodeMaterial {
-    return isFoldedGrassBladeLayout(lod, this.geometryLayout) &&
+    return (isFoldedGrassBladeLayout(lod, this.geometryLayout) ||
+      this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT) &&
       this.foldedMaterial
       ? this.foldedMaterial
       : this.material;
@@ -4184,7 +4251,7 @@ export class GrassVisualManager implements QuadTreeListener {
       ),
     );
     const tiers = GRASS_CONFIG.LOD_TIERS;
-    if (this.geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout) {
+    if (usesGrassCloseDetailLods(this.geometryLayout)) {
       // Cross every boundary independently, including multi-tier camera jumps.
       // A jump may settle in the intermediate band while one boundary is still
       // inside its hysteresis window; it must not flap or bypass that window.
