@@ -86,6 +86,7 @@ import {
 import {
   getGrassBladeLayout,
   FINE_GRASS_FOLDED_BLADE_INDICES,
+  FINE_GRASS_HEIGHT_FLEX_RESPONSE,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
@@ -253,16 +254,16 @@ export const FINE_MEADOW_APPEARANCE = Object.freeze({
   // addressing together; the three-segment revision remains available.
   GEOMETRY_LAYOUT: "fine-linear-sweep-3seg-v1" as FineGrassGeometryLayout,
   BLADE_HEIGHT_MIN: 0.38,
-  BLADE_HEIGHT_MAX: 0.86,
+  BLADE_HEIGHT_MAX: FINE_GRASS_HEIGHT_FLEX_RESPONSE.maximumHeight,
   BLADE_WIDTH_RATIO: 0.045,
   BLADE_TAPER: 0.85,
   BLADE_TAPER_POWER: 2,
   BLADE_WIDTH_FALLOFF_POWER: 1,
   BLADE_UPPER_WIDTH_GAIN: 0.35,
   BLADE_ARC_RATIO: 0.48,
-  BLADE_CONTROL_HEIGHT: 0.76,
+  BLADE_CONTROL_HEIGHT: FINE_GRASS_HEIGHT_FLEX_RESPONSE.controlHeight,
   BLADE_CONTROL_ARC_RATIO: 0.35,
-  BLADE_TIP_HEIGHT: 0.95,
+  BLADE_TIP_HEIGHT: FINE_GRASS_HEIGHT_FLEX_RESPONSE.tipHeight,
   BLADE_NORMAL_WEIGHT: 0.2,
   ROOT_BRIGHTNESS: 0.98,
   TIP_BRIGHTNESS: 1.2,
@@ -3471,7 +3472,26 @@ export class GrassVisualManager implements QuadTreeListener {
         float(1),
       ).toVar("naturalGrassFade");
       const wt = time.mul(uWindSpeed);
-      const bend = pow(t, float(1.8));
+      const heightFlex = this.geometryLayout === "fine-folded-lancet-v1";
+      const c = appearance.BLADE_CONTROL_HEIGHT;
+      const q = appearance.BLADE_TIP_HEIGHT;
+      const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
+      const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
+      // Recover uncompressed source height; bank wear and distance fade are
+      // applied separately. The root denominator is guarded in both branches.
+      // Scaling only the wind amplitude would leave the sparse tip interval
+      // over-bent: distribute flex quadratically over actual blade height too.
+      const heightFraction = curve.div(q);
+      const flexAmplitude = rawPosition.y
+        .mul(scale)
+        .div(curve.max(1e-5).mul(uBladeHeight))
+        .min(1);
+      const bend = heightFlex
+        ? heightFraction
+            .mul(heightFraction)
+            .mul(flexAmplitude)
+            .toVar("naturalGrassHeightFlex")
+        : pow(t, float(1.8));
       // Chunk-local offsets repeat at each chunk boundary. Key both waves to
       // the actual world-space clump base, not to an animated blade vertex.
       const displacement = vec3(
@@ -3538,21 +3558,24 @@ export class GrassVisualManager implements QuadTreeListener {
       const horizontalNormal = turnToGround(
         vec3(sourceNormal.x, float(0), sourceNormal.z),
       ).toVar("naturalGrassHorizontalNormal");
-      const c = appearance.BLADE_CONTROL_HEIGHT;
-      const q = appearance.BLADE_TIP_HEIGHT;
-      const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
-      const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
       // Both guarded denominators are exact on retained non-root vertices.
       // Roots have t=B(t)=d=0, so their wind correction remains exactly zero.
-      const k = curve
-        .mul(1.8)
-        .div(
-          t
-            .max(1e-5)
-            .mul(scale)
-            .mul(rawPosition.y.max(1e-5))
-            .mul(curveDerivative),
-        );
+      // D is proportional to B(t)^2 for the explicit flex path. Therefore
+      // D'/D divided by the source vertical derivative is 2/(scale*rawY).
+      // The per-blade height cap is constant along the ideal blade surface;
+      // it changes amplitude, not this derivative. D remains exactly zero at
+      // the root, so its guarded finite coefficient contributes zero there.
+      const k = heightFlex
+        ? float(2).div(scale.mul(rawPosition.y.max(1e-5)))
+        : curve
+            .mul(1.8)
+            .div(
+              t
+                .max(1e-5)
+                .mul(scale)
+                .mul(rawPosition.y.max(1e-5))
+                .mul(curveDerivative),
+            );
       const deformedNormal = horizontalNormal
         .mul(fade)
         .mul(bankHeightScale)

@@ -11,6 +11,7 @@ import {
 } from "./CompactTerrainPalette";
 import {
   getGrassBladeLayout,
+  getGrassBladeWindFactor,
   FINE_GRASS_FOLDED_BLADE_INDICES,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
@@ -1006,6 +1007,7 @@ export function* groundGrassBladeSteps(
     box: TerrainGridBounds,
     transform: (v: number, fade: number, target: Point) => void,
     bankHeightScale: number,
+    scale: number,
   ): Generator<string, number, void> {
     if (!bladeBounds) throw new Error("Missing grass blade bounds scratch");
     let mask = allBlades,
@@ -1041,7 +1043,12 @@ export function* groundGrassBladeSteps(
               bladeBounds[b + 1] = bladeBounds[b + 3] = -Infinity;
               const end = (blade + 1) * verticesPerBlade;
               for (let v = blade * verticesPerBlade; v < end; v++) {
-                const windFactor = uv.getY(v) ** 1.8;
+                const windFactor = getGrassBladeWindFactor(
+                  uv.getY(v),
+                  position.getY(v),
+                  scale,
+                  geometryLayout,
+                );
                 for (let fade = 0; fade < 2; fade++) {
                   take();
                   transform(v, fade, point);
@@ -1310,7 +1317,12 @@ export function* groundGrassBladeSteps(
           px = position.getX(v),
           pz = position.getZ(v);
         const correction = deltas[d] * (1 - u) + deltas[d + 1] * u;
-        const windFactor = uv.getY(v) ** 1.8;
+        const windFactor = getGrassBladeWindFactor(
+          uv.getY(v),
+          position.getY(v),
+          scale,
+          geometryLayout,
+        );
         const windX = wind.x * bankHeightScale * windFactor,
           windZ = wind.z * bankHeightScale * windFactor;
         const rx = (px * cos - pz * sin) * scale,
@@ -1345,6 +1357,7 @@ export function* groundGrassBladeSteps(
             box,
             transform,
             bankHeightScale,
+            scale,
           );
           if (!visibleBlades) rejection = "road";
         } else if (yield* roadsNear(box)) rejection = "road";

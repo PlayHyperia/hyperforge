@@ -21,6 +21,105 @@ import { gridGeometry } from "./terrain-grid.fixture";
 
 const layoutId = "fine-folded-lancet-v1" as const;
 
+// Independent of the production layout/wind helper: source height recovers
+// physical leaf height, while B/.95 is its normalized longitudinal height.
+function foldedFlex(t: number, rawY: number, scale: number) {
+  const height = 1.52 * t - 0.57 * t * t;
+  const relativeHeight = Math.min(
+    1,
+    (scale * rawY) / (Math.max(height, 1e-5) * 0.86),
+  );
+  return relativeHeight * (height / 0.95) ** 2;
+}
+
+function bankFixture(heightScale: number) {
+  return {
+    minX: -3,
+    maxX: 3,
+    minZ: -3,
+    maxZ: 3,
+    feather: 2,
+    wearStart: 0.1,
+    wearEnd: 0.8,
+    minimumScale: 0.55,
+    heightScale,
+    wear: [],
+    wornHeightScale: heightScale,
+    grassTint: [0.96, 0.88, 1] as const,
+    tipBrightness: 1.08,
+  };
+}
+
+type BladeBox = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
+/** Exact flat retained-plane oracle, with the actual authored buffers and
+ * Float32 instance scale/yaw. No production wind or clearance math is reused. */
+function bladeBoxes(
+  f: ReturnType<typeof fixture>,
+  bankHeight: number,
+  legacy = false,
+): BladeBox[] {
+  const position = f.geometry.getAttribute("position");
+  const uv = f.geometry.getAttribute("uv");
+  const [yaw, scale] = f.request.data.rotScaleHash;
+  return Array.from({ length: f.layout.bladesPerClump }, (_, blade) => {
+    const box = {
+      minX: Infinity,
+      maxX: -Infinity,
+      minZ: Infinity,
+      maxZ: -Infinity,
+    };
+    for (let local = 0; local < f.layout.verticesPerBlade; local++) {
+      const vertex = blade * f.layout.verticesPerBlade + local;
+      const t = uv.getY(vertex);
+      const flex = legacy
+        ? t ** 1.8
+        : foldedFlex(t, position.getY(vertex), scale);
+      const x =
+        (position.getX(vertex) * Math.cos(yaw) -
+          position.getZ(vertex) * Math.sin(yaw)) *
+        scale;
+      const z =
+        (position.getX(vertex) * Math.sin(yaw) +
+          position.getZ(vertex) * Math.cos(yaw)) *
+        scale;
+      const dx = f.request.wind.x * bankHeight * flex;
+      const dz = f.request.wind.z * bankHeight * flex;
+      box.minX = Math.min(box.minX, x - dx - 0.00001);
+      box.maxX = Math.max(box.maxX, x + dx + 0.00001);
+      box.minZ = Math.min(box.minZ, z - dz - 0.00001);
+      box.maxZ = Math.max(box.maxZ, z + dz + 0.00001);
+    }
+    return box;
+  });
+}
+
+// The vertical road spans every fixture blade in Z. Its exact hard-exclusion
+// interval is [left, left + width], with no implicit shoulder feather.
+function roadMask(boxes: readonly BladeBox[], left: number, width: number) {
+  return boxes.reduce(
+    (mask, box, blade) =>
+      box.maxX >= left && box.minX <= left + width ? mask : mask | (1 << blade),
+    0,
+  );
+}
+
+function roadAt(left: number, width: number) {
+  return {
+    startX: left + width / 2,
+    endX: left + width / 2,
+    startZ: -5,
+    endZ: 5,
+    width,
+    blendWidth: 0,
+  };
+}
+
 /** Real generated blades and retained terrain; these CPU proofs are not GPU
  * contact, visual quality, native performance or acceptance evidence. */
 function fixture(lod: 0 | 1 | 2 = 0, size = 100) {
@@ -170,6 +269,199 @@ describe("explicit folded-lancet topology and CPU grounding", () => {
     },
   );
 
+  it.each(
+    ([0, 1, 2] as const).flatMap((lod) =>
+      [0.7, 1, 1.3].flatMap((scale) =>
+        [1, 0.65].map((bankHeight) => ({ lod, scale, bankHeight })),
+      ),
+    ),
+  )(
+    "fits height-consistent LOD$lod sweeps and road masks at scale$scale / bank$bankHeight",
+    ({ lod, scale, bankHeight }) => {
+      const f = fixture(lod);
+      try {
+        f.request.data.rotScaleHash[0] = 0.73;
+        f.request.data.rotScaleHash[1] = scale;
+        const request = {
+          ...f.request,
+          bankVerge: bankFixture(bankHeight),
+          roadClearance: "per-blade-v1" as const,
+        };
+        const boxes = bladeBoxes(f, bankHeight);
+        const result = groundGrassBlades(request);
+        if (result.status !== "ready" || !result.sweptBounds)
+          throw new Error("Expected complete real-geometry sweep");
+        expect(result.data.count).toBe(1);
+        expect(result.bladeVisibility?.[0]).toBe(
+          2 ** f.layout.bladesPerClump - 1,
+        );
+        for (const axis of ["X", "Z"] as const) {
+          expect(result.sweptBounds[`min${axis}`]).toBeCloseTo(
+            Math.min(...boxes.map((box) => box[`min${axis}`])),
+            9,
+          );
+          expect(result.sweptBounds[`max${axis}`]).toBeCloseTo(
+            Math.max(...boxes.map((box) => box[`max${axis}`])),
+            9,
+          );
+        }
+        const position = f.geometry.getAttribute("position");
+        const uv = f.geometry.getAttribute("uv");
+        const actualScale = f.request.data.rotScaleHash[1];
+        for (let blade = 0; blade < f.layout.bladesPerClump; blade++)
+          for (const side of [0, 1]) {
+            const vertex = blade * f.layout.verticesPerBlade + side;
+            expect(uv.getY(vertex)).toBe(0);
+            expect(position.getY(vertex)).toBe(0);
+            expect(foldedFlex(0, position.getY(vertex), actualScale)).toBe(0);
+            expect(Math.abs(result.rootDeltas[blade * 2 + side])).toBeLessThan(
+              1e-12,
+            );
+          }
+        const maxHeight = Math.max(
+          ...Array.from({ length: position.count }, (_, i) => position.getY(i)),
+        );
+        expect(result.sweptBounds.minY).toBeCloseTo(20 - 0.00001, 9);
+        expect(result.sweptBounds.maxY).toBeCloseTo(
+          20 + maxHeight * actualScale * bankHeight + 0.00001,
+          9,
+        );
+        // A nonzero-width road through the middle of actual blade extrema
+        // exercises retained and hidden blades at every scale and every LOD.
+        const sorted = boxes.map((box) => box.maxX).sort((a, b) => a - b);
+        const middle = Math.floor(sorted.length / 2);
+        const left = (sorted[middle - 1] + sorted[middle]) / 2;
+        const width = 0.05;
+        const expectedMask = roadMask(boxes, left, width);
+        expect(expectedMask).toBeGreaterThan(0);
+        expect(expectedMask).toBeLessThan(2 ** f.layout.bladesPerClump - 1);
+        const masked = groundGrassBlades({
+          ...request,
+          roadSegments: [roadAt(left, width)],
+        });
+        if (masked.status !== "ready") throw new Error(masked.reason);
+        expect(masked.data.count).toBe(1);
+        expect(masked.bladeVisibility?.[0]).toBe(expectedMask);
+        expect(masked.rootDeltas).toEqual(result.rootDeltas);
+        expect(masked.receipt.workBudget).toBe(1_000_000);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([0, 1] as const)(
+    "masks an actual LOD%s intermediate-row sweep missed by the old exponent",
+    (lod) => {
+      const f = fixture(lod);
+      try {
+        f.request.data.rotScaleHash[1] = 1.3;
+        let witness:
+          | { blade: number; left: number; mask: number; oldMask: number }
+          | undefined;
+        // Bounded deterministic selection, never geometry mutation: find a
+        // real blade/yaw where the new intermediate row extends beyond the
+        // entire old blade AABB. A mere larger per-vertex factor is insufficient.
+        for (let angle = 0; angle < 128 && !witness; angle++) {
+          f.request.data.rotScaleHash[0] = (angle * Math.PI * 2) / 128;
+          const current = bladeBoxes(f, 1);
+          const previous = bladeBoxes(f, 1, true);
+          for (let blade = 0; blade < current.length; blade++) {
+            if (current[blade].maxX - previous[blade].maxX <= 0.0001) continue;
+            const left = (current[blade].maxX + previous[blade].maxX) / 2;
+            const mask = roadMask(current, left, 0.002);
+            const oldMask = roadMask(previous, left, 0.002);
+            if (mask && !(mask & (1 << blade)) && oldMask & (1 << blade)) {
+              witness = { blade, left, mask, oldMask };
+              break;
+            }
+          }
+        }
+        expect(
+          witness,
+          "Actual intermediate-row under-bound witness",
+        ).toBeDefined();
+        if (!witness) throw new Error("No deterministic wind-envelope witness");
+        const position = f.geometry.getAttribute("position");
+        const uv = f.geometry.getAttribute("uv");
+        const first = witness.blade * f.layout.verticesPerBlade;
+        expect(
+          Array.from({ length: f.layout.verticesPerBlade }, (_, i) => first + i)
+            .filter((v) => uv.getY(v) > 0 && uv.getY(v) < 1)
+            .some(
+              (v) =>
+                foldedFlex(
+                  uv.getY(v),
+                  position.getY(v),
+                  f.request.data.rotScaleHash[1],
+                ) >
+                uv.getY(v) ** 1.8,
+            ),
+        ).toBe(true);
+        expect(witness.oldMask & (1 << witness.blade)).not.toBe(0);
+        const result = groundGrassBlades({
+          ...f.request,
+          roadClearance: "per-blade-v1",
+          roadSegments: [roadAt(witness.left, 0.002)],
+        });
+        if (result.status !== "ready") throw new Error(result.reason);
+        expect(result.data.count).toBe(1);
+        expect(result.bladeVisibility?.[0]).toBe(witness.mask);
+        expect(result.bladeVisibility![0] & (1 << witness.blade)).toBe(0);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each([0, 1, 2] as const)(
+    "retains exact exponent sweeps for historical LOD%s layouts",
+    (lod) => {
+      const f = fixture(lod);
+      const geometry = createClumpGeometry(
+        f.layout.bladesPerClump,
+        f.layout.bladeSegments,
+        FINE_GRASS_FOLDED_BLADE_SHAPE,
+      );
+      try {
+        f.request.data.rotScaleHash[0] = 0.73;
+        f.request.data.rotScaleHash[1] = 1.3;
+        const legacy = {
+          ...f,
+          geometry,
+          layout: getGrassBladeLayout(lod, "fine-linear-sweep-3seg-v1"),
+        };
+        const boxes = bladeBoxes(legacy, 1, true);
+        for (const geometryLayout of [
+          undefined,
+          "fine-linear-sweep-3seg-v1",
+        ] as const) {
+          const result = groundGrassBlades({
+            ...f.request,
+            geometry,
+            geometryLayout,
+          });
+          if (result.status !== "ready" || !result.sweptBounds)
+            throw new Error("Expected retained historical sweep");
+          expect(result.data.count).toBe(1);
+          for (const axis of ["X", "Z"] as const) {
+            expect(result.sweptBounds[`min${axis}`]).toBeCloseTo(
+              Math.min(...boxes.map((box) => box[`min${axis}`])),
+              9,
+            );
+            expect(result.sweptBounds[`max${axis}`]).toBeCloseTo(
+              Math.max(...boxes.map((box) => box[`max${axis}`])),
+              9,
+            );
+          }
+        }
+      } finally {
+        geometry.dispose();
+        f.close();
+      }
+    },
+  );
+
   it("admits only the explicit fine layout for existing bank deformation", () => {
     const bankVerge = {
       minX: -3,
@@ -274,7 +566,9 @@ describe("explicit folded-lancet topology and CPU grounding", () => {
           throw new Error("Expected nonempty swept bounds");
         const t = f.geometry.getAttribute("uv").getY(center);
         expect(swept.sweptBounds.maxX).toBeCloseTo(
-          6 + f.request.wind.x * t ** 1.8 + 0.00001,
+          6 +
+            f.request.wind.x * foldedFlex(t, position.getY(center), 1) +
+            0.00001,
           8,
         );
         const culled = groundGrassBlades(request);

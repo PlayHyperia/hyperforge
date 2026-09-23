@@ -1,5 +1,25 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — Height-consistent grass wind verified; silhouette still unfinished
+
+- [x] Explicit folded-layout wind now scales with authored blade height and instance scale, with a coupled normal derivative. Historical unselected layouts keep their original response. Both whole-clump terrain bounds and per-blade road sweeps use the same response; intermediate rows can extend farther than the old curve even when the tip does not.
+- [x] Source verification: **698 regression tests**, **180 integration tests**, **6 current v10 pond cases** (14 other fixture cases skipped), **10 private admission checks**, scoped lint, and **760-root / 2,466-source no-emit typecheck with zero diagnostics**. The first two integration failures are retained; tests now distinguish actual Float32 geometry from ideal height and intentionally changed motion from unchanged geometry/material channels.
+- [x] Native **142 / build71 / runtime112**: four matching native141 cameras, 1280×720/DPR1, daylight phase 0.56, full configured density/flowers, unchanged near/mid geometry buffers and 35 terrain texture reads. Actual submitted near/mid vertex shaders contain the new flex and normal response. The nine-bundle isolated build leaves all 145 protected compiled outputs unchanged.
+- [x] Acceptance counts are recorded, not assumed identical: bank **75,947 → 75,965**, woodland **59,416 → 59,433**, flower close **57,061 → 57,078**, landing **79,650 → 79,669**. New wind bounds change some accepted clumps/masks; this is not a configured density increase. Per-cell source-index, mask digest and visible-blade deltas are retained.
+- [x] A **6.002-second** natural-wind recording completed with 60 observations, no captured GPU error/device loss and an unchanged camera; all 179 encoded frames decode. Sampled frames were inspected, not continuous playback. Owned browser/server/temporary database cleaned up; persistent playable world and localhost:3333 remain unchanged and HTTP200. Existing missing cow-model 404 remains deferred.
+- [ ] **Visual finish is not accepted.** Root and independent review find only a small/neutral visual change: hard segment elbows, blunt-looking bases and bright substrate gaps remain. Wider views retain fullness but show little meaningful improvement. Natural wind phases were not locked, so still differences are not causal animation proof.
+- [ ] Next: isolate authored blade rest-curve and longitudinal sampling under calm and extreme wind, then address basal silhouette/contact. Do not repeat lighting/amplitude-only iterations as a substitute for correcting geometry. Native far-LOD/traversal, full motion review, GPU root-contact and performance acceptance remain open. No production/default promotion.
+
+Reference basis: [GPUOpen procedural grass](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) separates curved geometry, derivative normals and wind; its mesh-shader implementation is not claimed as a WebGPU feature here.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/native142/`,
+`grass-height-flex-native-review01.json`; service-layout logs
+`grass-height-flex-regression01`, `grass-height-flex-integration02`,
+`grass-height-flex-pond-v10-01`, `grass-height-flex-types01`,
+`grass-height-flex-lint01`, `grass-height-flex-preflight01`,
+`grass-height-flex-build71-01`, `grass-height-flex-native142-01`,
+`grass-height-flex-video-decode01`. Source delta remains explicit and opt-in.
+
 ## 2026-09-22 — Folded grass native review: partial progress, not promotion
 
 - [x] Built isolated build70 from the checkpoint: exactly three grass source

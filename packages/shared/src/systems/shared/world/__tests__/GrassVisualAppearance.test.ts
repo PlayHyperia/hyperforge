@@ -777,7 +777,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
-  it("preserves mid/far geometry bytes and pass properties while explicitly selecting folded near geometry", () => {
+  it("preserves mid/far geometry bytes and pass properties while selecting folded near geometry and all-LOD height flex", () => {
     const baseline = fine(),
       canopy = fine("canopy-normal-v1"),
       candidate = fine("leaf-volume-v1");
@@ -874,12 +874,72 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           }
         }
         const inputs = inputsAt(geometry, 2);
+        const selectedMaterial = candidate["materialForLod"](lod);
+        const selectedBladeNormal = named(
+          selectedMaterial.normalNode,
+          "v_curvedGrassNormal",
+        );
+        const oldBladeNormal = named(a.normalNode, "v_curvedGrassNormal");
+        const canopyBladeNormal = named(
+          canopy["material"].normalNode,
+          "v_curvedGrassNormal",
+        );
+        expect(selectedMaterial.positionNode).toBe(b.positionNode);
+        let changedPositions = 0,
+          changedDeformedNormals = 0;
         for (const distance of [0, 125, 140])
           for (const windTime of [0, 2.3]) {
             inputs.instanceOffset[0] = distance;
             inputs._time[0] = windTime;
+            // All LODs intentionally use height-consistent flex, but geometry,
+            // terrain alignment, fade and unrelated material channels do not
+            // change. Evaluate the actual selected owner, including near's
+            // physical-normal clone, against the historical wind graph.
+            const previousPosition = colorValue(a.positionNode, inputs);
+            const actualPosition = colorValue(
+              selectedMaterial.positionNode,
+              inputs,
+            );
+            expect(colorValue(canopy["material"].positionNode, inputs)).toEqual(
+              previousPosition,
+            );
+            const t = inputs.uv[1];
+            const curve = 1.52 * t - 0.57 * t * t;
+            const amplitude = Math.min(
+              1,
+              (inputs.instanceRotScaleHash[1] * inputs.position[1]) /
+                (Math.max(curve, 1e-5) * 0.86),
+            );
+            const factorDelta = amplitude * (curve / 0.95) ** 2 - t ** 1.8;
+            const expectedDelta = [
+              Math.sin(windTime * 1.8 + distance * 0.35) *
+                0.15 *
+                0.86 *
+                factorDelta,
+              0,
+              Math.sin(windTime * 1.8 * 0.67 + distance * 0.18 + 2) *
+                0.15 *
+                0.86 *
+                0.55 *
+                factorDelta,
+            ];
+            for (let axis = 0; axis < 3; axis++)
+              expect(actualPosition[axis] - previousPosition[axis]).toBeCloseTo(
+                expectedDelta[axis],
+                12,
+              );
+            expect(actualPosition[1]).toBe(previousPosition[1]);
+            if (
+              vector(actualPosition).distanceTo(vector(previousPosition)) > 1e-6
+            )
+              changedPositions++;
+            const oldNormal = colorValue(oldBladeNormal, inputs);
+            expect(colorValue(canopyBladeNormal, inputs)).toEqual(oldNormal);
+            const selectedNormal = colorValue(selectedBladeNormal, inputs);
+            expect(selectedNormal.every(Number.isFinite)).toBe(true);
+            if (vector(selectedNormal).distanceTo(vector(oldNormal)) > 1e-6)
+              changedDeformedNormals++;
             for (const key of [
-              "positionNode",
               "aoNode",
               "thicknessAttenuationNode",
               "thicknessScaleNode",
@@ -891,6 +951,8 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                 colorValue(a[key], inputs),
               );
           }
+        expect(changedPositions).toBeGreaterThan(0);
+        expect(changedDeformedNormals).toBeGreaterThan(0);
       }
     } finally {
       baseline.destroy();

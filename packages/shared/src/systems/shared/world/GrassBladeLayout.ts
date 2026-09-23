@@ -5,6 +5,38 @@ export type FineGrassGeometryLayout =
   | "fine-linear-sweep-near4-v1"
   | "fine-folded-lancet-v1";
 
+/** Shared opt-in flex contract. World wind keeps its configured maximum, while
+ * shorter/scaled blades flex in proportion to their own authored height.
+ * B(t) is the same vertical quadratic used by the geometry and normal graph. */
+export const FINE_GRASS_HEIGHT_FLEX_RESPONSE = Object.freeze({
+  id: "height-flex-v1",
+  controlHeight: 0.76,
+  tipHeight: 0.95,
+  maximumHeight: 0.86,
+} as const);
+
+/** CPU counterpart of the actual vertex response, including the exact root
+ * limit. Inputs are already admitted geometry/instance values. Both road and
+ * whole-clump sweeps must use this: intermediate rows can exceed t^1.8 even
+ * though the tip never exceeds the previous configured wind amplitude. */
+export function getGrassBladeWindFactor(
+  t: number,
+  sourceY: number,
+  scale: number,
+  geometryLayout?: FineGrassGeometryLayout,
+): number {
+  if (geometryLayout !== "fine-folded-lancet-v1") return t ** 1.8;
+  const { controlHeight, tipHeight, maximumHeight } =
+    FINE_GRASS_HEIGHT_FLEX_RESPONSE;
+  const curve = t * (2 * controlHeight + t * (tipHeight - 2 * controlHeight));
+  const amplitude = Math.min(
+    1,
+    (scale * sourceY) / (Math.max(curve, 1e-5) * maximumHeight),
+  );
+  const heightFraction = curve / tipHeight;
+  return amplitude * heightFraction * heightFraction;
+}
+
 /** Existing edge/root/tip vertices stay at 0..6. Only the two interior
  * centerline vertices are appended, at 7 and 8 respectively. */
 export const FINE_GRASS_FOLDED_BLADE_INDICES = Object.freeze([
