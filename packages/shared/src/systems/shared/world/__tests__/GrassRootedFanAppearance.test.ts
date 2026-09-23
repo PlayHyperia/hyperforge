@@ -172,12 +172,15 @@ describe("explicit progressive rooted-fan source geometry", () => {
     expect(FINE_GRASS_ROOTED_FAN_COMPOSITION).toEqual({
       id: "rooted-fan-v1",
       bladesPerFan: 4,
-      centerRadius: 0.52,
+      centerRadius: 0.7,
       rootRadius: 0.025,
       facingJitter: 0.16,
       curveJitter: 0.12,
     });
     expect(Object.isFrozen(FINE_GRASS_ROOTED_FAN_COMPOSITION)).toBe(true);
+    expect(FINE_GRASS_ROOTED_FAN_COMPOSITION.centerRadius).toBe(
+      GRASS_CONFIG.CLUMP_RADIUS,
+    );
     expect(Object.isFrozen(FINE_GRASS_ROOTED_FAN_SHAPE)).toBe(true);
     expect(FINE_GRASS_ROOTED_FAN_SHAPE).toEqual({
       ...FINE_GRASS_FOLDED_BLADE_SHAPE,
@@ -250,10 +253,10 @@ describe("explicit progressive rooted-fan source geometry", () => {
             .reduce((sum, r) => sum.add(r), new THREE.Vector3())
             .multiplyScalar(0.25);
           expect(center.y).toBe(0);
-          expect(center.length()).toBeLessThanOrEqual(0.52 + 1e-7);
+          expect(center.length()).toBeLessThanOrEqual(0.7 + 1e-7);
           expect(center.length()).toBeGreaterThan(0.1);
           const angle = fan * Math.PI * (3 - Math.sqrt(5));
-          const radius = 0.52 * Math.sqrt(radialFractions[fan]);
+          const radius = 0.7 * Math.sqrt(radialFractions[fan]);
           expect(
             center.distanceTo(
               new THREE.Vector3(
@@ -291,6 +294,64 @@ describe("explicit progressive rooted-fan source geometry", () => {
             expect(centers[i].distanceTo(centers[j])).toBeGreaterThan(0.1);
       } finally {
         g.dispose();
+      }
+    },
+  );
+
+  it.each(VARIANTS)(
+    "spreads the actual $name root footprint to the clump radius at every prefix",
+    (variant) => {
+      // These are source-root metrics, not a rendered coverage oracle. They
+      // exclude leaf reach, wind, terrain fit, masks, camera and occlusion.
+      // Freeze the progressive radial stations independently of the generator;
+      // its exported radius must not define this test's expected footprint.
+      const fractions = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375];
+      for (const count of [24, 12, 4]) {
+        const g = make(variant, count);
+        try {
+          const roots = Array.from({ length: count }, (_, blade) =>
+            root(g, blade * variant.stride),
+          );
+          const radii = roots.map((point) => Math.hypot(point.x, point.z));
+          const prefixFractions = fractions.slice(0, count / 4);
+          const meanFraction =
+            prefixFractions.reduce((sum, value) => sum + value, 0) /
+            prefixFractions.length;
+          const meanSquaredRadius =
+            roots.reduce((sum, point) => sum + point.lengthSq(), 0) / count;
+          // Four cardinal offsets cancel their cross terms about each fan
+          // center. Thus mean(|root|²) = R² * mean(station) + ringRadius².
+          const expectedMeanSquaredRadius =
+            0.7 ** 2 * meanFraction + 0.025 ** 2;
+          const priorNarrowMeanSquaredRadius =
+            0.52 ** 2 * meanFraction + 0.025 ** 2;
+          expect(meanSquaredRadius).toBeCloseTo(expectedMeanSquaredRadius, 7);
+          expect(meanSquaredRadius - priorNarrowMeanSquaredRadius).toBeCloseTo(
+            (0.7 ** 2 - 0.52 ** 2) * meanFraction,
+            7,
+          );
+          expect(Math.max(...radii)).toBeCloseTo(
+            0.7 * Math.sqrt(Math.max(...prefixFractions)) + 0.025,
+            7,
+          );
+          expect(Math.min(...radii)).toBeCloseTo(
+            0.7 * Math.sqrt(Math.min(...prefixFractions)) - 0.025,
+            7,
+          );
+          expect(Math.max(...radii)).toBeLessThan(GRASS_CONFIG.CLUMP_RADIUS);
+          for (const point of roots) expect(point.y).toBe(0);
+          // Spreading centers must not enlarge the four-root local fan ring.
+          for (let first = 0; first < count; first += 4) {
+            const center = roots
+              .slice(first, first + 4)
+              .reduce((sum, point) => sum.add(point), new THREE.Vector3())
+              .multiplyScalar(0.25);
+            for (const point of roots.slice(first, first + 4))
+              expect(point.distanceTo(center)).toBeCloseTo(0.025, 7);
+          }
+        } finally {
+          g.dispose();
+        }
       }
     },
   );

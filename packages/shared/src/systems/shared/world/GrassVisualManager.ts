@@ -311,7 +311,7 @@ export const FINE_GRASS_CLOSE_DETAIL = Object.freeze({
 export const FINE_GRASS_ROOTED_FAN_COMPOSITION = Object.freeze({
   id: "rooted-fan-v1",
   bladesPerFan: 4,
-  centerRadius: 0.52,
+  centerRadius: 0.7,
   rootRadius: 0.025,
   facingJitter: 0.16,
   curveJitter: 0.12,

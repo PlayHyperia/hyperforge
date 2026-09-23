@@ -1,5 +1,17 @@
 # Hyperia graphics reference library
 
+## 2026-09-23 — Wider rooted-fan trial verified in source; native coverage pending
+
+- [x] The sole production delta is opt-in `FINE_GRASS_ROOTED_FAN_COMPOSITION.centerRadius` **0.52 → 0.7**. No default, population, blade count/dimensions, topology, material, light, exposure, resolution or budget change. Historical non-fan geometry remains byte-checked. This supersedes the preceding test-only handoff; its RED evidence/backup remain historical.
+- [x] Added independent actual-Float32 root moment/extrema and local-ring checks for all three geometry tiers and 24/12/4-blade prefixes. **94 geometry/appearance tests pass**, plus the final 21-case affected repeat. These root metrics do not establish rendered coverage, terrain fit or occlusion.
+- [x] **639 integration tests pass on the unchanged rerun; 12 actual-v10 cases pass** (14 other asset-fixture cases skipped). Full shared/explicit tests: **763 roots / 2,469 source files, zero type diagnostics**, stable hashes. Scoped lint/style and whitespace checks pass; initial formatting failure was corrected without changing test semantics.
+- [ ] **Retain the first integration failure as an open reliability observation:** the unchanged legacy 0.6m-coverage fixture `gcell_v1_12_11` reached **250.143831ms active CPU** against its unchanged 250ms cap. It uses no rooted-fan selector. Its isolated rerun and the full repeated suite pass; this is not proof that the intermittent deadline issue is solved or caused only by host load.
+- [x] Actual-v10 candidate cells `13_17 / 12_16 / 15_17` complete at **983,211 / 975,349 / 986,712** geometric work units, leaving only **1.68% / 2.47% / 1.33%** headroom. Handoff/publication active CPU is **117.69 / 111.91 / 201.31ms**. The bank retains **1,071 clumps / 25,480 visible blades / 224 masked blades**, versus 1,082 / 25,778 / 190 in the narrower fan trial: genuine recomputed clearance, not a population reduction setting. These are CPU fixture results, not native frame-rate qualification.
+- [ ] Isolated **build76/runtime117/native151** must prove the single scalar source delta against immutable build75, then compare actual views against historical native150 with matched cameras/configuration. This is a distinct-build visual comparison, not a fresh same-build timing pair. Inspect both outer coverage and central gaps, repeated fan shapes, attachment, boundary masks and LOD transitions.
+- [ ] The separate bounded visibility ABAB GPU-cost helper is preparation only until actually run and reviewed. No reduced-scene result can qualify shipping performance. Prior approximately 19ms world-pass timing, cold combined-worker failures, full traversal/streaming and AAA acceptance remain open.
+
+Evidence: service-layout `grass-rooted-spread-*` logs and `grass-rooted-fan-native-review01.json` → `spreadTrial`. Source hash `4255a13ad1ec5213530f532d6adbcc82da38942c6bbca51d1ba1a20de5fa67b8`; final test hash `6dd183ee1ef38a82f73c50d66440cf21af14fbc25639dc475606ba650d039eda`. Protected playable bundles and saved database are not promoted or replaced.
+
 ## 2026-09-23 — Restart-safe handoff; spread trial remains test-only
 
 - [x] Completed source and native-comparison evidence are pushed through **b88dcd5b988972dbd3c6474c85595c5aa8daf6a6** on `codex/sol-duel-stream-launch`; the remote branch was checked directly. No new production rendering change is included in this handoff.
