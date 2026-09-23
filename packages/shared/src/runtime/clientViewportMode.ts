@@ -133,7 +133,8 @@ export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
-export type GrassGeometryCandidate = "sheath-close-v1" | "rooted-fan-v1";
+export type GrassGeometryCandidate =
+  "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -251,7 +252,9 @@ export function resolveGrassGeometryCandidate(
   if (!values.length) return undefined;
   if (
     values.length !== 1 ||
-    (values[0] !== "sheath-close-v1" && values[0] !== "rooted-fan-v1")
+    (values[0] !== "sheath-close-v1" &&
+      values[0] !== "rooted-fan-v1" &&
+      values[0] !== "meadow-canopy-v1")
   )
     throw new Error("Unknown or duplicate grass geometry candidate");
   if (resolveGrassLightingCandidate(windowRef) !== "leaf-volume-v1")
@@ -836,7 +839,8 @@ export function evaluateStreamingRenderProfileApplication(
         (!fineMeadow ||
           grass.geometryLayout !== "fine-folded-sheath-near5-v1" ||
           (grass.geometryCandidate !== "sheath-close-v1" &&
-            grass.geometryCandidate !== "rooted-fan-v1")))
+            grass.geometryCandidate !== "rooted-fan-v1" &&
+            grass.geometryCandidate !== "meadow-canopy-v1")))
     )
       return finish("grass_profile");
     if (fineMeadow) {

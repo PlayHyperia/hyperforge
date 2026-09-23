@@ -5,6 +5,8 @@ import { getGrassBladeWindFactor } from "../GrassBladeLayout";
 import {
   createClumpGeometry,
   FINE_GRASS_FOLDED_BLADE_SHAPE,
+  FINE_GRASS_MEADOW_CANOPY_COMPOSITION,
+  FINE_GRASS_MEADOW_CANOPY_SHAPE,
   FINE_GRASS_ROOTED_FAN_COMPOSITION,
   FINE_GRASS_ROOTED_FAN_SHAPE,
   GRASS_CONFIG,
@@ -555,6 +557,478 @@ describe("explicit progressive rooted-fan source geometry", () => {
         ).toBeUndefined();
     } finally {
       [...ordinary, ...historical].forEach((g) => g.dispose());
+    }
+  });
+});
+
+// These independent literals define the trial, rather than deriving its
+// expected dimensions from the candidate's own exported factors.
+const CANOPY_HEIGHT_FACTORS = [0.68, 0.84, 1] as const;
+const CANOPY_WIDTH_FACTORS = [0.62, 0.72, 0.86] as const;
+const CANOPY_ARC_FACTORS = [1.12, 1, 0.78] as const;
+const ROOTED_FAN_NATIVE164_HASHES = {
+  sheath5: [
+    "3a97ef4de90b18e755850a7671c357985376579197312f0d708c76790f1015ba",
+    "a7f81673bf10c4699755ba690eff357209ac457210611b50e3789b0f132bcc8b",
+    NATIVE_HASHES.sheath5[2],
+    NATIVE_HASHES.sheath5[3],
+  ],
+  folded3: [
+    "1517f89202778bb2c54b2db0d908eeecebd9c4037be0a81512fbf6e16a40d015",
+    "d574d1a7a742756e3a3c0df879e3d6c131d36ad1b538fc723a347b47f2bfaac7",
+    NATIVE_HASHES.folded3[2],
+    NATIVE_HASHES.folded3[3],
+  ],
+  ribbon2: [
+    "6ccfec3cb1247a8fa52bca49ce2726af6569767cf1408ff7252355a0a580f8f1",
+    "aea9a6e2e624f868ee2e9453cfbdf1fe81579ff6cc5dde765f74c5efe23fd4da",
+    NATIVE_HASHES.ribbon2[2],
+    NATIVE_HASHES.ribbon2[3],
+  ],
+} as const;
+
+function makeCanopy(variant: Variant, blades = 24) {
+  return createClumpGeometry(
+    blades,
+    variant.segments,
+    FINE_GRASS_MEADOW_CANOPY_SHAPE,
+    variant.crossSection,
+  );
+}
+
+function canopyWidthEnvelope(variant: Variant, t: number) {
+  if (variant.crossSection) {
+    const polynomial = 1 + 2.06 * t - 5.04 * t * t + 1.98 * t ** 3;
+    if (variant.name !== "sheath5") return polynomial;
+    const u = Math.max(0, Math.min(1, t / 0.2));
+    return polynomial * (0.25 + 0.75 * u * u * (3 - 2 * u));
+  }
+  const u = Math.max(0, Math.min(1, t / 0.5));
+  return (1 - 0.85 * t * t) * (1 + 0.35 * u * u * (3 - 2 * u));
+}
+
+/** Measure width at the first non-root row, not the narrow sheath root.
+ * Ratio tests separately constrain this measurement against the old geometry,
+ * so a wrong candidate width cannot certify its own passing normal oracle. */
+class CanopySurface {
+  readonly root: THREE.Vector3;
+  readonly widthAxis: THREE.Vector3;
+  readonly ridgeAxis: THREE.Vector3;
+  readonly arc: THREE.Vector3;
+  readonly height: number;
+  readonly halfWidth: number;
+
+  constructor(
+    g: THREE.BufferGeometry,
+    readonly variant: Variant,
+    blade: number,
+  ) {
+    const first = blade * variant.stride;
+    this.root = root(g, first);
+    const across = vector(g, "position", first + 3).sub(
+      vector(g, "position", first + 2),
+    );
+    this.halfWidth =
+      across.length() /
+      (2 * canopyWidthEnvelope(variant, 1 / variant.segments));
+    this.widthAxis = across.normalize();
+    this.ridgeAxis = new THREE.Vector3(-this.widthAxis.z, 0, this.widthAxis.x);
+    const tip = vector(g, "position", first + 2 * variant.segments);
+    this.height = tip.y / 0.95;
+    this.arc = tip.sub(this.root).setY(0);
+  }
+
+  point(s: number, t: number) {
+    const halfWidth = this.halfWidth * canopyWidthEnvelope(this.variant, t);
+    const ridge = this.variant.crossSection
+      ? halfWidth * 0.36 * 16 * t * t * (1 - t) ** 2
+      : 0;
+    return this.root
+      .clone()
+      .addScaledVector(this.arc, 0.7 * t + 0.3 * t * t)
+      .addScaledVector(this.widthAxis, s * halfWidth)
+      .addScaledVector(this.ridgeAxis, (1 - s * s) * ridge)
+      .setY(this.height * (1.52 * t - 0.57 * t * t));
+  }
+}
+
+describe("explicit meadow canopy source geometry", () => {
+  it("freezes its separate composition and rejects mixed or unknown recipes", () => {
+    expect(FINE_GRASS_MEADOW_CANOPY_COMPOSITION).toEqual({
+      ...FINE_GRASS_ROOTED_FAN_COMPOSITION,
+      id: "meadow-canopy-v1",
+      bladesPerFan: 3,
+      rootRadius: 0.065,
+      heightFactors: CANOPY_HEIGHT_FACTORS,
+      widthFactors: CANOPY_WIDTH_FACTORS,
+      arcFactors: CANOPY_ARC_FACTORS,
+    });
+    expect(Object.isFrozen(FINE_GRASS_MEADOW_CANOPY_COMPOSITION)).toBe(true);
+    for (const factors of [
+      FINE_GRASS_MEADOW_CANOPY_COMPOSITION.heightFactors,
+      FINE_GRASS_MEADOW_CANOPY_COMPOSITION.widthFactors,
+      FINE_GRASS_MEADOW_CANOPY_COMPOSITION.arcFactors,
+    ])
+      expect(Object.isFrozen(factors)).toBe(true);
+    expect(FINE_GRASS_MEADOW_CANOPY_SHAPE).toEqual({
+      ...FINE_GRASS_ROOTED_FAN_SHAPE,
+      ROOT_COMPOSITION: "meadow-canopy-v1",
+    });
+    expect(Object.isFrozen(FINE_GRASS_MEADOW_CANOPY_SHAPE)).toBe(true);
+    const unknown = { ...FINE_GRASS_MEADOW_CANOPY_SHAPE };
+    Reflect.set(unknown, "ROOT_COMPOSITION", "meadow-canopy-v2");
+    for (const shape of [
+      unknown,
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, PROGRESSIVE_ROOTS: false },
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, TUFT_BLADES: 4 },
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, TUFT_HEIGHT_FACTORS: [0.5] },
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, TUFT_ARC_FACTORS: [1.5] },
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, TUFT_CENTER_RADIUS: 0.5 },
+      { ...FINE_GRASS_MEADOW_CANOPY_SHAPE, TUFT_ROOT_RADIUS: 0.1 },
+    ])
+      expect(() =>
+        createClumpGeometry(24, 5, shape, "folded-sheath-v1"),
+      ).toThrow();
+  });
+
+  it.each(VARIANTS)(
+    "keeps deterministic 24/12/4 prefixes, topology and immutable ownership in $name",
+    (variant) => {
+      const geometries = [24, 12, 4].map((count) => makeCanopy(variant, count));
+      const repeat = makeCanopy(variant);
+      try {
+        expect(digest(repeat)).toBe(digest(geometries[0]));
+        for (const [i, count] of [24, 12, 4].entries()) {
+          const g = geometries[i];
+          expect(g.getAttribute("position").count).toBe(count * variant.stride);
+          expect(g.index!.count).toBe(count * variant.triangles * 3);
+          expect(g.index!.array).toBeInstanceOf(Uint16Array);
+          expect(
+            Object.getOwnPropertyDescriptor(g.userData, "grassRootComposition"),
+          ).toEqual({
+            value: FINE_GRASS_MEADOW_CANOPY_COMPOSITION,
+            enumerable: true,
+            configurable: false,
+            writable: false,
+          });
+          for (const name of ["position", "normal", "uv"])
+            expect(g.getAttribute(name).array).toEqual(
+              geometries[0]
+                .getAttribute(name)
+                .array.slice(0, g.getAttribute(name).array.length),
+            );
+          expect(g.index!.array).toEqual(
+            geometries[0].index!.array.slice(0, g.index!.count),
+          );
+        }
+      } finally {
+        [...geometries, repeat].forEach((g) => g.dispose());
+      }
+    },
+  );
+
+  it.each(VARIANTS)(
+    "applies each rotated fan role to actual Float32 stature, width and arc in $name",
+    (variant) => {
+      const g = makeCanopy(variant),
+        baseline = make(variant);
+      try {
+        expect(g.getAttribute("uv").array).toEqual(
+          baseline.getAttribute("uv").array,
+        );
+        expect(g.index!.array).toEqual(baseline.index!.array);
+        for (let blade = 0; blade < 24; blade++) {
+          const fan = Math.floor(blade / 3);
+          const role = (blade + fan) % 3;
+          const actual = new CanopySurface(g, variant, blade);
+          const previous = new CanopySurface(baseline, variant, blade);
+          const fanHeight = new CanopySurface(baseline, variant, fan * 3)
+            .height;
+          const heightRatio =
+            (fanHeight / previous.height) * CANOPY_HEIGHT_FACTORS[role];
+          expect(actual.height / fanHeight).toBeCloseTo(
+            CANOPY_HEIGHT_FACTORS[role],
+            6,
+          );
+          expect(actual.halfWidth / previous.halfWidth).toBeCloseTo(
+            heightRatio * CANOPY_WIDTH_FACTORS[role],
+            5,
+          );
+          expect(2 * actual.halfWidth).toBeCloseTo(
+            fanHeight *
+              CANOPY_HEIGHT_FACTORS[role] *
+              0.045 *
+              CANOPY_WIDTH_FACTORS[role],
+            7,
+          );
+          expect(actual.arc.length() / previous.arc.length()).toBeCloseTo(
+            heightRatio * CANOPY_ARC_FACTORS[role],
+            6,
+          );
+          // Fan cardinality changes the nominal direction, never the old
+          // per-blade facing/curvature random samples.
+          const golden = Math.PI * (3 - Math.sqrt(5));
+          const angle = fan * golden + ((blade % 3) / 3) * Math.PI * 2;
+          const oldAngle =
+            Math.floor(blade / 4) * golden + ((blade % 4) / 4) * Math.PI * 2;
+          const rotate = (v: THREE.Vector3) =>
+            new THREE.Vector3(
+              v.x * Math.cos(angle - oldAngle) -
+                v.z * Math.sin(angle - oldAngle),
+              v.y,
+              v.x * Math.sin(angle - oldAngle) +
+                v.z * Math.cos(angle - oldAngle),
+            );
+          expect(
+            actual.arc
+              .clone()
+              .normalize()
+              .distanceTo(rotate(previous.arc).normalize()),
+          ).toBeLessThan(2e-6);
+          expect(
+            actual.widthAxis.distanceTo(rotate(previous.widthAxis)),
+          ).toBeLessThan(2e-5);
+          for (let row = 0; row < variant.segments; row++) {
+            const first = blade * variant.stride + row * 2;
+            const width = vector(g, "position", first).distanceTo(
+              vector(g, "position", first + 1),
+            );
+            const oldWidth = vector(baseline, "position", first).distanceTo(
+              vector(baseline, "position", first + 1),
+            );
+            expect(width).toBeCloseTo(
+              oldWidth * heightRatio * CANOPY_WIDTH_FACTORS[role],
+              6,
+            );
+          }
+          for (let local = 0; local < variant.stride; local++) {
+            const v = blade * variant.stride + local;
+            expect(g.getAttribute("position").getY(v)).toBeCloseTo(
+              baseline.getAttribute("position").getY(v) * heightRatio,
+              7,
+            );
+          }
+        }
+      } finally {
+        g.dispose();
+        baseline.dispose();
+      }
+    },
+  );
+
+  it.each(VARIANTS)(
+    "forms eight progressive three-root plants with a bounded partial prefix in $name",
+    (variant) => {
+      const stations = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625];
+      for (const count of [24, 12, 4]) {
+        const g = makeCanopy(variant, count);
+        try {
+          const roots = Array.from({ length: count }, (_, blade) =>
+            root(g, blade * variant.stride),
+          );
+          for (let fan = 0; fan < Math.ceil(count / 3); fan++) {
+            const angle = fan * Math.PI * (3 - Math.sqrt(5));
+            const radius = 0.7 * Math.sqrt(stations[fan]);
+            const center = new THREE.Vector3(
+              Math.cos(angle) * radius,
+              0,
+              Math.sin(angle) * radius,
+            );
+            for (let blade = 0; blade < Math.min(3, count - fan * 3); blade++) {
+              const direction = angle + (blade / 3) * Math.PI * 2;
+              const expected = center
+                .clone()
+                .add(
+                  new THREE.Vector3(
+                    Math.cos(direction) * 0.065,
+                    0,
+                    Math.sin(direction) * 0.065,
+                  ),
+                );
+              expect(roots[fan * 3 + blade].distanceTo(expected)).toBeLessThan(
+                1e-7,
+              );
+              expect(roots[fan * 3 + blade].y).toBe(0);
+            }
+          }
+          const maximumRootRadius = Math.max(
+            ...roots.map((point) => point.length()),
+          );
+          expect(maximumRootRadius).toBeLessThanOrEqual(
+            0.7 * Math.sqrt(0.875) + 0.065 + 1e-7,
+          );
+          if (count === 24) expect(maximumRootRadius).toBeGreaterThan(0.7);
+        } finally {
+          g.dispose();
+        }
+      }
+      // This is an authored-root bound, not reuse of historical road/water fits.
+    },
+  );
+
+  it("retains roots, role dimensions and directions across the actual near/mid/far tiers", () => {
+    const geometries = VARIANTS.map((variant) =>
+      makeCanopy(variant, variant.name === "ribbon2" ? 12 : 24),
+    );
+    try {
+      for (const [i, variant] of VARIANTS.entries())
+        for (
+          let blade = 0;
+          blade < (variant.name === "ribbon2" ? 12 : 24);
+          blade++
+        ) {
+          const actual = new CanopySurface(geometries[i], variant, blade);
+          const near = new CanopySurface(geometries[0], VARIANTS[0], blade);
+          expect(actual.root.distanceTo(near.root)).toBeLessThan(1e-7);
+          expect(actual.arc.distanceTo(near.arc)).toBeLessThan(1e-7);
+          expect(actual.height).toBe(near.height);
+          expect(actual.halfWidth).toBeCloseTo(near.halfWidth, 7);
+          expect(actual.widthAxis.distanceTo(near.widthAxis)).toBeLessThan(
+            2e-5,
+          );
+        }
+    } finally {
+      geometries.forEach((g) => g.dispose());
+    }
+  });
+
+  it.each(VARIANTS)(
+    "matches measured-width independent surfaces, normals and nondegenerate winding in $name",
+    (variant) => {
+      const g = makeCanopy(variant);
+      try {
+        for (const attribute of Object.values(g.attributes))
+          expect(Array.from(attribute.array).every(Number.isFinite)).toBe(true);
+        for (let blade = 0; blade < 24; blade++) {
+          const surface = new CanopySurface(g, variant, blade);
+          for (let local = 0; local < variant.stride; local++) {
+            const v = blade * variant.stride + local;
+            const t = g.getAttribute("uv").getY(v),
+              s = 2 * g.getAttribute("uv").getX(v) - 1;
+            const actual = vector(g, "normal", v);
+            expect(actual.length()).toBeCloseTo(1, 6);
+            expect(
+              vector(g, "position", v).distanceTo(surface.point(s, t)),
+            ).toBeLessThan(2e-6);
+            if (t === 1) {
+              const tangent = surface.arc
+                .clone()
+                .multiplyScalar(1.3)
+                .setY(surface.height * 0.38);
+              expect(
+                actual.distanceTo(
+                  surface.widthAxis.clone().cross(tangent).normalize(),
+                ),
+              ).toBeLessThan(3e-5);
+            } else {
+              const e = 1e-5;
+              const ds = surface
+                .point(s + e, t)
+                .sub(surface.point(s - e, t))
+                .normalize();
+              const dt = surface
+                .point(s, t + e)
+                .sub(surface.point(s, t - e))
+                .normalize();
+              expect(Math.abs(actual.dot(ds))).toBeLessThan(3e-5);
+              expect(Math.abs(actual.dot(dt))).toBeLessThan(3e-5);
+              expect(actual.dot(ds.cross(dt).normalize())).toBeGreaterThan(
+                0.99999,
+              );
+            }
+          }
+          for (let triangle = 0; triangle < variant.triangles; triangle++) {
+            const abc = [0, 1, 2].map((i) =>
+              g.index!.getX(3 * (blade * variant.triangles + triangle) + i),
+            );
+            for (const v of abc) {
+              expect(v).toBeGreaterThanOrEqual(blade * variant.stride);
+              expect(v).toBeLessThan((blade + 1) * variant.stride);
+            }
+            const [a, b, c] = abc.map((v) => vector(g, "position", v));
+            const cross = b.sub(a).cross(c.sub(a));
+            expect(cross.length()).toBeGreaterThan(1e-8);
+            const normals = abc.reduce(
+              (sum, v) => sum.add(vector(g, "normal", v)),
+              new THREE.Vector3(),
+            );
+            expect(cross.dot(normals)).toBeGreaterThan(0);
+          }
+        }
+      } finally {
+        g.dispose();
+      }
+    },
+  );
+
+  it.each(VARIANTS)(
+    "bounds every source height and height-flex amplitude by the shared plant envelope in $name",
+    (variant) => {
+      const g = makeCanopy(variant),
+        baseline = make(variant);
+      try {
+        g.computeBoundingBox();
+        g.computeBoundingSphere();
+        expect(g.boundingBox!.min.y).toBe(0);
+        expect(g.boundingBox!.max.y).toBeLessThanOrEqual(0.86 * 0.95 + 1e-7);
+        expect(Number.isFinite(g.boundingSphere!.radius)).toBe(true);
+        for (let blade = 0; blade < 24; blade++) {
+          const surface = new CanopySurface(g, variant, blade);
+          const fan = Math.floor(blade / 3),
+            role = (blade + fan) % 3;
+          const fanHeight = new CanopySurface(baseline, variant, fan * 3)
+            .height;
+          expect(surface.height).toBeCloseTo(
+            fanHeight * CANOPY_HEIGHT_FACTORS[role],
+            7,
+          );
+          expect(surface.height).toBeLessThanOrEqual(fanHeight + 1e-7);
+          expect(surface.height).toBeLessThanOrEqual(0.86 + 1e-7);
+          for (let local = 0; local < variant.stride; local++) {
+            const v = blade * variant.stride + local,
+              t = g.getAttribute("uv").getY(v),
+              y = g.getAttribute("position").getY(v);
+            expect(g.boundingBox!.containsPoint(vector(g, "position", v))).toBe(
+              true,
+            );
+            for (const scale of [0.7, 1, 1.3]) {
+              const actual = getGrassBladeWindFactor(
+                t,
+                y,
+                scale,
+                "fine-folded-sheath-near5-v1",
+              );
+              const curve = 1.52 * t - 0.57 * t * t;
+              const sharedPlantEnvelope =
+                Math.min(1, (fanHeight * scale) / 0.86) * (curve / 0.95) ** 2;
+              const expected =
+                Math.min(1, (surface.height * scale) / 0.86) *
+                (y / (surface.height * 0.95)) ** 2;
+              expect(actual).toBeCloseTo(expected, 6);
+              expect(actual).toBeGreaterThanOrEqual(0);
+              expect(actual).toBeLessThanOrEqual(sharedPlantEnvelope + 1e-7);
+              expect(actual).toBeLessThanOrEqual(1 + 1e-7);
+              if (t === 0) expect(actual).toBe(0);
+            }
+          }
+        }
+      } finally {
+        g.dispose();
+        baseline.dispose();
+      }
+    },
+  );
+
+  it("retains all three immutable native164 rooted-fan attribute hashes", () => {
+    for (const variant of VARIANTS) {
+      const g = make(variant, variant.name === "ribbon2" ? 12 : 24);
+      try {
+        expect(attributeHashes(g)).toEqual(
+          ROOTED_FAN_NATIVE164_HASHES[variant.name],
+        );
+      } finally {
+        g.dispose();
+      }
     }
   });
 });

@@ -794,7 +794,11 @@ describe("explicit fine leaf-volume lighting selection", () => {
   });
 });
 
-describe.each(["sheath-close-v1", "rooted-fan-v1"] as const)(
+describe.each([
+  "sheath-close-v1",
+  "rooted-fan-v1",
+  "meadow-canopy-v1",
+] as const)(
   "explicit %s geometry selection",
   (geometry: GrassGeometryCandidate) => {
     const fine =
@@ -925,20 +929,27 @@ describe.each(["sheath-close-v1", "rooted-fan-v1"] as const)(
     });
 
     it("rejects either ordering of different valid geometry selectors", () => {
-      for (const values of [
-        [geometry, otherGeometry],
-        [otherGeometry, geometry],
-      ])
-        expect(() =>
-          resolveGrassGeometryCandidate(
-            makeWindow(
-              "/stream.html",
-              `?${fine}&${lighting}&${values
-                .map((value) => `grassGeometry=${value}`)
-                .join("&")}`,
+      for (const other of [
+        "sheath-close-v1",
+        "rooted-fan-v1",
+        "meadow-canopy-v1",
+      ] as const) {
+        if (other === geometry) continue;
+        for (const values of [
+          [geometry, other],
+          [other, geometry],
+        ])
+          expect(() =>
+            resolveGrassGeometryCandidate(
+              makeWindow(
+                "/stream.html",
+                `?${fine}&${lighting}&${values
+                  .map((value) => `grassGeometry=${value}`)
+                  .join("&")}`,
+              ),
             ),
-          ),
-        ).toThrow("Unknown or duplicate grass geometry candidate");
+          ).toThrow("Unknown or duplicate grass geometry candidate");
+      }
     });
 
     it.each([false, true])(
@@ -966,6 +977,15 @@ describe.each(["sheath-close-v1", "rooted-fan-v1"] as const)(
           expect(
             Object.prototype.hasOwnProperty.call(captured, "geometry"),
           ).toBe(enabled);
+          if (enabled)
+            expect(
+              Object.getOwnPropertyDescriptor(captured, "geometry"),
+            ).toEqual({
+              value: geometry,
+              enumerable: true,
+              configurable: false,
+              writable: false,
+            });
           input.location.search = `?${fine}&${lighting}${enabled ? "" : `&${selected}`}`;
           terrain["getCompactGrassColorGrade"]();
           expect(terrain["grassVisualSelection"]).toBe(captured);
@@ -3447,6 +3467,7 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     for (const geometryCandidate of [
       "sheath-close-v1",
       "rooted-fan-v1",
+      "meadow-canopy-v1",
     ] as const) {
       const selectedGrass = { ...closeGrass, geometryCandidate };
       expect(
@@ -3490,6 +3511,11 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
       "rooted-fan-v1 ",
       "rooted-fan-v2",
       "sheath-close-v2",
+      "MEADOW-CANOPY-V1",
+      " meadow-canopy-v1",
+      "meadow-canopy-v1 ",
+      "meadow-canopy-v2",
+      "meadow-canopy",
       null,
       1,
       {},

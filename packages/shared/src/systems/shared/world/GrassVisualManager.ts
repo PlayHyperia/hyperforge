@@ -322,6 +322,28 @@ export const FINE_GRASS_ROOTED_FAN_SHAPE = Object.freeze({
   ROOT_COMPOSITION: "progressive-fan-v1",
 } as const);
 
+/** Mixed meadow stature, not a density or quality reduction. Eight three-leaf
+ * fans spread the same 24 blades over more plants, each with two finer leaves
+ * and a taller one. Rotate roles between fans so the tallest leaf does not
+ * repeat one compass bearing.
+ * The same deterministic prefix is used at every LOD and freshly ground-fit.
+ * Wider root spacing separates the leaf silhouettes without adding vertices.
+ */
+export const FINE_GRASS_MEADOW_CANOPY_COMPOSITION = Object.freeze({
+  ...FINE_GRASS_ROOTED_FAN_COMPOSITION,
+  id: "meadow-canopy-v1",
+  bladesPerFan: 3,
+  rootRadius: 0.065,
+  heightFactors: Object.freeze([0.68, 0.84, 1] as const),
+  widthFactors: Object.freeze([0.62, 0.72, 0.86] as const),
+  arcFactors: Object.freeze([1.12, 1, 0.78] as const),
+} as const);
+
+export const FINE_GRASS_MEADOW_CANOPY_SHAPE = Object.freeze({
+  ...FINE_GRASS_FOLDED_BLADE_SHAPE,
+  ROOT_COMPOSITION: "meadow-canopy-v1",
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -420,7 +442,7 @@ type GrassBladeShape = Pick<
   /** Additional upper-leaf width; zero at the root, full gain at half height. */
   BLADE_UPPER_WIDTH_GAIN?: number;
   PROGRESSIVE_ROOTS?: boolean;
-  ROOT_COMPOSITION?: "progressive-fan-v1";
+  ROOT_COMPOSITION?: "progressive-fan-v1" | "meadow-canopy-v1";
   BLADE_CONTROL_HEIGHT?: number;
   /** Quadratic control-point XZ offset as a fraction of the unchanged tip arc. */
   BLADE_CONTROL_ARC_RATIO?: number;
@@ -493,7 +515,12 @@ export function createClumpGeometry(
   shape: GrassBladeShape = GRASS_CONFIG,
   crossSection?: "folded-lancet-v1" | "folded-sheath-v1",
 ): THREE.BufferGeometry {
-  const rootedFan = shape.ROOT_COMPOSITION === "progressive-fan-v1";
+  const meadowCanopy = shape.ROOT_COMPOSITION === "meadow-canopy-v1";
+  const rootedFan =
+    shape.ROOT_COMPOSITION === "progressive-fan-v1" || meadowCanopy;
+  const fanComposition = meadowCanopy
+    ? FINE_GRASS_MEADOW_CANOPY_COMPOSITION
+    : FINE_GRASS_ROOTED_FAN_COMPOSITION;
   if (
     shape.ROOT_COMPOSITION !== undefined &&
     (!rootedFan ||
@@ -552,6 +579,7 @@ export function createClumpGeometry(
   let vi = 0;
   let ii = 0;
   let tuftHeight = 0;
+  let meadowCanopyHeight = 0;
 
   for (let b = 0; b < N; b++) {
     // Base-two radical inverse distributes each prefix across the whole disk.
@@ -574,13 +602,10 @@ export function createClumpGeometry(
     const tuftAngle = (tuft ?? 0) * GOLDEN_ANGLE;
     const fanAngle =
       tuftAngle + (fanIndex / (shape.TUFT_BLADES ?? 1)) * Math.PI * 2;
-    const rootedFanIndex = Math.floor(
-      b / FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan,
-    );
+    const rootedFanIndex = Math.floor(b / fanComposition.bladesPerFan);
     const rootedFanAngle =
       rootedFanIndex * GOLDEN_ANGLE +
-      ((b % FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan) /
-        FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan) *
+      ((b % fanComposition.bladesPerFan) / fanComposition.bladesPerFan) *
         Math.PI *
         2;
     const angle = rootedFan
@@ -610,17 +635,16 @@ export function createClumpGeometry(
       }
     }
     const fanCenterRadius =
-      FINE_GRASS_ROOTED_FAN_COMPOSITION.centerRadius *
-      Math.sqrt(fanRadiusFraction);
+      fanComposition.centerRadius * Math.sqrt(fanRadiusFraction);
     const ox = rootedFan
       ? Math.cos(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
-        Math.cos(angle) * FINE_GRASS_ROOTED_FAN_COMPOSITION.rootRadius
+        Math.cos(angle) * fanComposition.rootRadius
       : tuft === null
         ? Math.cos(angle) * r + Math.cos(angle + 1.3) * jitter
         : Math.cos(tuftAngle) * tuftRadius + Math.cos(fanAngle) * rootRadius;
     const oz = rootedFan
       ? Math.sin(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
-        Math.sin(angle) * FINE_GRASS_ROOTED_FAN_COMPOSITION.rootRadius
+        Math.sin(angle) * fanComposition.rootRadius
       : tuft === null
         ? Math.sin(angle) * r + Math.sin(angle + 1.3) * jitter
         : Math.sin(tuftAngle) * tuftRadius + Math.sin(fanAngle) * rootRadius;
@@ -628,10 +652,7 @@ export function createClumpGeometry(
     const facingAngle =
       angle +
       Math.PI * 0.5 +
-      (rng() - 0.5) *
-        (rootedFan
-          ? 2 * FINE_GRASS_ROOTED_FAN_COMPOSITION.facingJitter
-          : Math.PI);
+      (rng() - 0.5) * (rootedFan ? 2 * fanComposition.facingJitter : Math.PI);
     const cr = Math.cos(facingAngle);
     const sr = Math.sin(facingAngle);
 
@@ -652,20 +673,35 @@ export function createClumpGeometry(
     // One height hierarchy per rooted tuft, rather than four independently
     // prominent leaves. Still consume each original per-blade random sample.
     if (tuft !== null && fanIndex === 0) tuftHeight = variedHeight;
-    const h =
+    const variedBladeHeight =
       (tuft === null ? variedHeight : tuftHeight) *
       (shape.TUFT_HEIGHT_FACTORS?.[fanIndex] ?? 1);
-    const w = h * BLADE_WIDTH_RATIO;
+    const canopyRole = (b + rootedFanIndex) % fanComposition.bladesPerFan;
+    if (meadowCanopy && b % fanComposition.bladesPerFan === 0)
+      meadowCanopyHeight = variedBladeHeight;
+    const h = meadowCanopy
+      ? meadowCanopyHeight *
+        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.heightFactors[canopyRole]
+      : variedBladeHeight;
+    const w = meadowCanopy
+      ? h *
+        BLADE_WIDTH_RATIO *
+        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.widthFactors[canopyRole]
+      : h * BLADE_WIDTH_RATIO;
 
     const curveSample = rng() - 0.5;
     const curveAngle = rootedFan
-      ? angle + curveSample * 2 * FINE_GRASS_ROOTED_FAN_COMPOSITION.curveJitter
+      ? angle + curveSample * 2 * fanComposition.curveJitter
       : angle + curveSample * Math.PI * 0.6;
-    const arcDist =
+    const variedArcDist =
       h *
       BLADE_ARC_RATIO *
       (0.8 + rng() * 0.4) *
       (shape.TUFT_ARC_FACTORS?.[fanIndex] ?? 1);
+    const arcDist = meadowCanopy
+      ? variedArcDist *
+        FINE_GRASS_MEADOW_CANOPY_COMPOSITION.arcFactors[canopyRole]
+      : variedArcDist;
     const curveDirX = Math.cos(curveAngle) * arcDist;
     const curveDirZ = Math.sin(curveAngle) * arcDist;
 
@@ -864,7 +900,7 @@ export function createClumpGeometry(
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
   if (rootedFan)
     Object.defineProperty(geo.userData, "grassRootComposition", {
-      value: FINE_GRASS_ROOTED_FAN_COMPOSITION,
+      value: fanComposition,
       enumerable: true,
       configurable: false,
       writable: false,
@@ -1273,7 +1309,8 @@ export class GrassVisualManager implements QuadTreeListener {
     if (
       geometryCandidate !== undefined &&
       ((geometryCandidate !== FINE_GRASS_CLOSE_DETAIL.id &&
-        geometryCandidate !== FINE_GRASS_ROOTED_FAN_COMPOSITION.id) ||
+        geometryCandidate !== FINE_GRASS_ROOTED_FAN_COMPOSITION.id &&
+        geometryCandidate !== FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id) ||
         lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
     )
       throw new Error(
@@ -1440,7 +1477,8 @@ export class GrassVisualManager implements QuadTreeListener {
 
     this.geometryLayout = this.fineMeadow
       ? geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id ||
-        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
+        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id ||
+        geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
         ? FINE_GRASS_CLOSE_DETAIL.geometryLayout
         : this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
           ? FINE_GRASS_FOLDED_BLADE_SHAPE.GEOMETRY_LAYOUT
@@ -1452,11 +1490,13 @@ export class GrassVisualManager implements QuadTreeListener {
       return createClumpGeometry(
         layout.bladesPerClump,
         layout.bladeSegments,
-        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
-          ? FINE_GRASS_ROOTED_FAN_SHAPE
-          : folded
-            ? FINE_GRASS_FOLDED_BLADE_SHAPE
-            : (this.meadowAppearance ?? GRASS_CONFIG),
+        geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
+          ? FINE_GRASS_MEADOW_CANOPY_SHAPE
+          : geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
+            ? FINE_GRASS_ROOTED_FAN_SHAPE
+            : folded
+              ? FINE_GRASS_FOLDED_BLADE_SHAPE
+              : (this.meadowAppearance ?? GRASS_CONFIG),
         folded
           ? layout.bladeSegments === 5
             ? "folded-sheath-v1"

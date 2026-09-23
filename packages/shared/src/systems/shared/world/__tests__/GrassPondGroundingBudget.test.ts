@@ -418,6 +418,20 @@ const rootedFanCases = [...native144Cases, native146Case].map((source) => ({
   },
 }));
 
+const meadowCanopyCases = [...native144Cases, native146Case].map((source) => ({
+  ...source,
+  name: `meadow canopy LOD0 ${source.key} actual v10 work budget`,
+  test: `fits meadow canopy ${source.key} using actual v10 owners and unchanged caps`,
+  label: `MEADOW_CANOPY_${source.key.toUpperCase()}`,
+  geometryCandidate: "meadow-canopy-v1" as const,
+  nativeSheath: {
+    ...source.nativeSheath,
+    scope:
+      "New eight-fan meadow-canopy geometry evaluated against the same historical source-placement scenario and retained owners. Retention, masks, swept bounds and cost are measured anew, not equated to historical sheath or rooted-fan outcomes. " +
+      source.nativeSheath.scope,
+  },
+}));
+
 const historicalCases = [
   {
     name: "native121 startup LOD0 western pond work budget",
@@ -914,6 +928,7 @@ type PondGroundingScenario =
   | (typeof native144Cases)[number]
   | typeof native146Case
   | (typeof rootedFanCases)[number]
+  | (typeof meadowCanopyCases)[number]
   | (typeof historicalCases)[number];
 
 // Keep the original tuple's exact union members: combining two variadic
@@ -922,6 +937,7 @@ const cases: readonly PondGroundingScenario[] = [
   ...native144Cases,
   native146Case,
   ...rootedFanCases,
+  ...meadowCanopyCases,
   ...historicalCases,
 ];
 
@@ -1763,6 +1779,17 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               : "fine-linear-sweep-3seg-v1",
         );
         const actualLayout = getGrassBladeLayout(lod, request.geometryLayout);
+        if ("geometryCandidate" in scenario) {
+          expect(manager.getProfileReceipt().geometryCandidate).toBe(
+            scenario.geometryCandidate,
+          );
+          expect(request.geometry.userData.grassRootComposition.id).toBe(
+            scenario.geometryCandidate,
+          );
+          expect(
+            Object.isFrozen(request.geometry.userData.grassRootComposition),
+          ).toBe(true);
+        }
         if ("nativeSheath" in scenario) {
           expect(actualLayout).toMatchObject({
             bladesPerClump: 24,
