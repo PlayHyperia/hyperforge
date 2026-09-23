@@ -56,6 +56,8 @@ async function fixture(
   coverageTrial?: GrassPlacementCoverageTrial,
   resolution = 16,
   groundingPort?: GrassGroundingWorkerPort,
+  lightingCandidate?: "leaf-volume-v1",
+  geometryCandidate?: "sheath-close-v1",
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -192,7 +194,7 @@ async function fixture(
     (bounds) => visual.captureRetainedSurfaceRegion(bounds),
     "fine-meadow-v1",
     undefined,
-    undefined,
+    lightingCandidate,
     groundingPort
       ? {
           mode: "worker-v1",
@@ -201,6 +203,7 @@ async function fixture(
             visual.isRetainedSurfaceCurrent(surface),
         }
       : undefined,
+    geometryCandidate,
   );
   owner.setPlayerPosition(385, 374);
   owner["lodFocusX"] = 385;
@@ -250,6 +253,260 @@ async function fixture(
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("preserves full placement and old distant templates while publishing all three close-detail tiers", async () => {
+    const baseline = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+    );
+    const candidate = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "sheath-close-v1",
+    );
+    try {
+      const owner = candidate.owner;
+      expect(owner.getProfileReceipt()).toMatchObject({
+        geometryLayout: "fine-folded-sheath-near5-v1",
+        clumpSpacing: 0.7,
+        maxRenderDistance: 140,
+        placement: { cellSize: 25, nearLodDistance: 40, detailLodDistance: 12 },
+      });
+      expect(
+        baseline.owner.getProfileReceipt().placement?.detailLodDistance,
+      ).toBeUndefined();
+      const warmed: number[] = [];
+      let disposedGeometry = 0;
+      let disposedMaterial = 0;
+      await owner.precompileRepresentativeChunk(async (object) => {
+        expect(object).toBeInstanceOf(THREE.InstancedMesh);
+        const mesh = object as THREE.InstancedMesh;
+        const material = mesh.material;
+        if (Array.isArray(material))
+          throw new Error("One warmup material required");
+        const lod = warmed.length;
+        warmed.push(mesh.geometry.getAttribute("position").count);
+        expect(material.userData.grassBladeLayout).toBe(
+          getGrassBladeLayout(lod, "fine-folded-sheath-near5-v1"),
+        );
+        expect(material.userData.fineGrassCanopyLighting.normalSource).toBe(
+          lod < 2 ? "geometry-fold" : undefined,
+        );
+        mesh.geometry.addEventListener("dispose", () => disposedGeometry++);
+        material.addEventListener("dispose", () => disposedMaterial++);
+      });
+      // This verifies actual warmup object lifecycle, not a native compilation.
+      expect(warmed).toEqual([360, 216, 60]);
+      expect(disposedGeometry).toBe(3);
+      expect(disposedMaterial).toBe(3);
+      for (const [candidateLod, oldLod] of [
+        [1, 0],
+        [2, 1],
+      ]) {
+        const a = owner["lodGeometries"][candidateLod],
+          b = baseline.owner["lodGeometries"][oldLod];
+        for (const key of ["position", "normal", "uv"])
+          expect(a.getAttribute(key).array).toEqual(b.getAttribute(key).array);
+        expect(a.index!.array).toEqual(b.index!.array);
+      }
+      const inputs = [0, 1, 2].map((lod) =>
+        owner["createWorkerInput"](candidate.work, candidate.work.key, lod),
+      );
+      expect(inputs[0].spacingMul).toBe(1);
+      expect(inputs[1]).toEqual(inputs[0]);
+      expect(inputs[2]).toEqual(inputs[0]);
+      let firstOutput: GrassWorkerOutput | undefined;
+      for (const lod of [0, 1, 2] as const) {
+        owner["lodFocusX"] = candidate.work.bounds.maxX + [0, 20, 60][lod];
+        owner["lodFocusZ"] =
+          (candidate.work.bounds.minZ + candidate.work.bounds.maxZ) / 2;
+        if (lod)
+          owner["pendingLodSwap"].set(candidate.work.key, {
+            node: candidate.node,
+            work: candidate.work,
+            desiredLod: lod,
+          });
+        const queued = await candidate.queue(lod, lod !== 0);
+        if (firstOutput)
+          for (const key of [
+            "offsets",
+            "rotScaleHash",
+            "groundColors",
+            "grassTints",
+            "groundNormals",
+          ] as const)
+            expect(queued.output[key]).toEqual(firstOutput[key]);
+        else firstOutput = queued.output;
+        owner["processSettledWorkerResults"]();
+        expect(candidate.finish()).toBe(1);
+        const chunk = owner["chunks"].get(candidate.work.key)!;
+        expect(chunk.lodLevel).toBe(lod);
+        expect(chunk.mesh.count).toBeGreaterThan(0);
+        const descriptor = getGrassBladeLayout(
+          lod,
+          "fine-folded-sheath-near5-v1",
+        );
+        expect(chunk.mesh.geometry.getAttribute("position").count).toBe(
+          [360, 216, 60][lod],
+        );
+        expect(chunk.mesh.geometry.index!.count / 3).toBe([408, 216, 36][lod]);
+        expect(chunk.mesh.geometry.getAttribute("grassRootDeltas").count).toBe(
+          chunk.mesh.count * descriptor.bladesPerClump,
+        );
+        const material = chunk.mesh.material;
+        if (Array.isArray(material))
+          throw new Error("One grounded material required");
+        expect(material.userData.grassBladeLayout).toBe(descriptor);
+        expect(material.userData.fineGrassCanopyLighting.normalSource).toBe(
+          lod < 2 ? "geometry-fold" : undefined,
+        );
+        if (lod < 2)
+          expect(material.userData.fineGrassCanopyLighting.geometryLayout).toBe(
+            "fine-folded-sheath-near5-v1",
+          );
+        expect(owner.getProfileReceipt().grounding?.failedChunks).toBe(0);
+        expect(
+          owner["completedGrounding"]
+            .get(candidate.work.key)!
+            .region.isCurrent(),
+        ).toBe(true);
+      }
+    } finally {
+      baseline.close();
+      candidate.close();
+    }
+  });
+
+  it("honors both close-detail hysteresis boundaries, multi-tier jumps and transformed-parent safety", async () => {
+    const f = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "sheath-close-v1",
+    );
+    try {
+      const focus = (distance: number) => {
+        f.owner["lodFocusX"] = f.work.bounds.maxX + distance;
+        f.owner["lodFocusZ"] = (f.work.bounds.minZ + f.work.bounds.maxZ) / 2;
+      };
+      const swap = async (lod: 0 | 1 | 2, distance: number) => {
+        focus(distance);
+        f.owner["pendingLodSwap"].set(f.work.key, {
+          node: f.node,
+          work: f.work,
+          desiredLod: lod,
+        });
+        await f.queue(lod, true);
+        f.owner["processSettledWorkerResults"]();
+        expect(f.finish()).toBe(1);
+        expect(f.owner["chunks"].get(f.work.key)!.lodLevel).toBe(lod);
+      };
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      expect(f.finish()).toBe(1);
+      for (const [distance, expected] of [
+        [13.199, 0],
+        [13.201, 1],
+        [42, 1],
+        [44.001, 2],
+      ]) {
+        focus(distance);
+        expect(f.owner["desiredLod"](f.work)).toBe(expected);
+      }
+      await swap(2, 60);
+      for (const [distance, expected] of [
+        [36.001, 2],
+        [35.999, 1],
+        [11, 1],
+        [10.799, 0],
+      ]) {
+        focus(distance);
+        expect(f.owner["desiredLod"](f.work)).toBe(expected);
+      }
+      await swap(1, 20);
+      for (const [distance, expected] of [
+        [44, 1],
+        [44.001, 2],
+        [10.801, 1],
+        [10.799, 0],
+      ]) {
+        focus(distance);
+        expect(f.owner["desiredLod"](f.work)).toBe(expected);
+      }
+      focus(1000);
+      f.container.position.x = 1;
+      f.container.updateMatrixWorld(true);
+      expect(f.owner["desiredLod"](f.work)).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("publishes five-section detail through the real grounding worker without changing the sync result", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const sync = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "sheath-close-v1",
+    );
+    const worker = await fixture(
+      undefined,
+      undefined,
+      16,
+      port,
+      "leaf-volume-v1",
+      "sheath-close-v1",
+    );
+    try {
+      await sync.queue();
+      sync.owner["processSettledWorkerResults"]();
+      expect(sync.finish()).toBe(1);
+      await worker.queue();
+      worker.owner["processSettledWorkerResults"]();
+      let uploads = 0;
+      const deadline = performance.now() + 10000;
+      while (
+        worker.owner["groundingJobs"].get(worker.work.key)?.job.state.status ===
+        "running"
+      ) {
+        uploads += worker.owner["advanceGroundingJob"]();
+        if (performance.now() >= deadline)
+          throw new Error("Sheath grounding worker deadline");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(uploads).toBe(1);
+      const a = sync.owner["chunks"].get(sync.work.key)!.mesh,
+        b = worker.owner["chunks"].get(worker.work.key)!.mesh;
+      expect(b.count).toBe(a.count);
+      for (const key of Object.keys(a.geometry.attributes))
+        expect(b.geometry.getAttribute(key).array, key).toEqual(
+          a.geometry.getAttribute(key).array,
+        );
+      expect(b.geometry.boundingBox).toEqual(a.geometry.boundingBox);
+      expect(worker.owner.getProfileReceipt().grounding).toMatchObject({
+        execution: "worker-v1",
+        failedChunks: 0,
+        completedChunks: 1,
+      });
+    } finally {
+      sync.close();
+      worker.close();
+    }
+  });
+
   it("publishes through the actual grounding worker with identical mesh attributes and one upload per advance", async () => {
     const port = new ActualGrassGroundingClientPort(
       (await bundleGrassGroundingWorker()).source,
@@ -1766,6 +2023,64 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.close();
     }
   });
+
+  it.each([undefined, "sheath-close-v1"] as const)(
+    "stops precompilation after real owner teardown without submitting another tier, candidate=%s",
+    async (geometryCandidate) => {
+      const f = await fixture(
+        undefined,
+        undefined,
+        16,
+        undefined,
+        "leaf-volume-v1",
+        geometryCandidate,
+      );
+      let release: (() => void) | undefined;
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const submitted: number[] = [];
+      let sampleGeometryDisposals = 0;
+      let sampleMaterialDisposals = 0;
+      try {
+        const warmup = f.owner.precompileRepresentativeChunk(async (object) => {
+          const mesh = object as THREE.InstancedMesh;
+          expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
+          const material = mesh.material;
+          if (Array.isArray(material))
+            throw new Error("One warmup material required");
+          submitted.push(mesh.geometry.getAttribute("position").count);
+          mesh.geometry.addEventListener(
+            "dispose",
+            () => sampleGeometryDisposals++,
+          );
+          material.addEventListener("dispose", () => sampleMaterialDisposals++);
+          await pending;
+        });
+        expect(submitted).toEqual([geometryCandidate ? 360 : 216]);
+        expect(sampleGeometryDisposals).toBe(0);
+        f.owner.destroy();
+        release!();
+        await expect(warmup).rejects.toThrow(
+          "Grass destroyed during precompilation",
+        );
+        expect(submitted).toEqual([geometryCandidate ? 360 : 216]);
+        expect(sampleGeometryDisposals).toBe(1);
+        expect(sampleMaterialDisposals).toBe(1);
+        let lateSubmissions = 0;
+        await expect(
+          f.owner.precompileRepresentativeChunk(async () => {
+            lateSubmissions++;
+          }),
+        ).rejects.toThrow("Grass destroyed during precompilation");
+        expect(lateSubmissions).toBe(0);
+        expect(f.container.children).toHaveLength(0);
+      } finally {
+        release?.();
+        f.close();
+      }
+    },
+  );
 
   it("precompiles the actual fine LOD0 storage layout and disposes only its private sample", async () => {
     const f = await fixture();

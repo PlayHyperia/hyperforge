@@ -3,7 +3,30 @@
 export type FineGrassGeometryLayout =
   | "fine-linear-sweep-3seg-v1"
   | "fine-linear-sweep-near4-v1"
-  | "fine-folded-lancet-v1";
+  | "fine-folded-lancet-v1"
+  | "fine-folded-sheath-near5-v1";
+
+/** Geometry and flex are separate contracts: the remapped far ribbon keeps
+ * height-consistent wind without claiming a folded transverse surface. */
+export function usesGrassBladeHeightFlex(
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return (
+    geometryLayout === "fine-folded-lancet-v1" ||
+    geometryLayout === "fine-folded-sheath-near5-v1"
+  );
+}
+
+export function isFoldedGrassBladeLayout(
+  lod: number,
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return (
+    (geometryLayout === "fine-folded-lancet-v1" && lod === 0) ||
+    (geometryLayout === "fine-folded-sheath-near5-v1" &&
+      (lod === 0 || lod === 1))
+  );
+}
 
 /** Shared opt-in flex contract. World wind keeps its configured maximum, while
  * shorter/scaled blades flex in proportion to their own authored height.
@@ -25,7 +48,7 @@ export function getGrassBladeWindFactor(
   scale: number,
   geometryLayout?: FineGrassGeometryLayout,
 ): number {
-  if (geometryLayout !== "fine-folded-lancet-v1") return t ** 1.8;
+  if (!usesGrassBladeHeightFlex(geometryLayout)) return t ** 1.8;
   const { controlHeight, tipHeight, maximumHeight } =
     FINE_GRASS_HEIGHT_FLEX_RESPONSE;
   const curve = t * (2 * controlHeight + t * (tipHeight - 2 * controlHeight));
@@ -43,6 +66,23 @@ export const FINE_GRASS_FOLDED_BLADE_INDICES = Object.freeze([
   0, 1, 7, 0, 7, 2, 1, 3, 7, 2, 7, 4, 7, 8, 4, 7, 3, 8, 3, 5, 8, 4, 8, 6, 8, 5,
   6,
 ] as const);
+
+/** Five uniform longitudinal segments, two root endpoints and one tip.
+ * Centers 11..14 follow the four paired interior rows; no six-segment layout
+ * is admitted by the production grounding/worker contract. */
+const FINE_GRASS_SHEATH_BLADE_INDICES = Object.freeze([
+  0, 1, 11, 0, 11, 2, 1, 3, 11, 2, 11, 4, 11, 12, 4, 11, 3, 12, 3, 5, 12, 4, 12,
+  6, 12, 13, 6, 12, 5, 13, 5, 7, 13, 6, 13, 8, 13, 14, 8, 13, 7, 14, 7, 9, 14,
+  8, 14, 10, 14, 9, 10,
+] as const);
+
+export function getFoldedGrassBladeIndices(
+  segments: number,
+): readonly number[] {
+  if (segments === 3) return FINE_GRASS_FOLDED_BLADE_INDICES;
+  if (segments === 5) return FINE_GRASS_SHEATH_BLADE_INDICES;
+  throw new Error("Invalid folded grass blade segment count");
+}
 
 function tier(
   geometryLayout: FineGrassGeometryLayout | "ordinary-v1",
@@ -85,6 +125,11 @@ const layouts = Object.freeze({
     tier("fine-folded-lancet-v1", 1, 12, 2),
     tier("fine-folded-lancet-v1", 2, 4, 1),
   ]),
+  "fine-folded-sheath-near5-v1": Object.freeze([
+    tier("fine-folded-sheath-near5-v1", 0, 24, 5, 15, 17),
+    tier("fine-folded-sheath-near5-v1", 1, 24, 3, 9, 9),
+    tier("fine-folded-sheath-near5-v1", 2, 12, 2),
+  ]),
 });
 
 export type GrassBladeLayout = ReturnType<typeof tier>;
@@ -100,7 +145,8 @@ export function getGrassBladeLayout(
     (geometryLayout !== undefined &&
       geometryLayout !== "fine-linear-sweep-3seg-v1" &&
       geometryLayout !== "fine-linear-sweep-near4-v1" &&
-      geometryLayout !== "fine-folded-lancet-v1")
+      geometryLayout !== "fine-folded-lancet-v1" &&
+      geometryLayout !== "fine-folded-sheath-near5-v1")
   )
     throw new Error("Invalid grass blade layout");
   return layouts[geometryLayout ?? "ordinary-v1"][lod];

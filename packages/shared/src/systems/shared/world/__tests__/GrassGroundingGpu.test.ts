@@ -19,6 +19,7 @@ import {
 } from "../GrassTerrainProjection";
 import {
   createClumpGeometry,
+  FINE_GRASS_FOLDED_BLADE_SHAPE,
   FINE_MEADOW_APPEARANCE,
 } from "../GrassVisualManager";
 
@@ -123,16 +124,30 @@ function bindingGeometry(
   count: number,
   geometryLayout?: FineGrassGeometryLayout,
 ): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    "position",
-    new THREE.BufferAttribute(
-      new Float32Array(
-        getGrassBladeLayout(lod, geometryLayout).verticesPerClump * 3,
+  const tier = getGrassBladeLayout(lod, geometryLayout);
+  const actualSheath = geometryLayout === "fine-folded-sheath-near5-v1";
+  const geometry = actualSheath
+    ? createClumpGeometry(
+        tier.bladesPerClump,
+        tier.bladeSegments,
+        FINE_GRASS_FOLDED_BLADE_SHAPE,
+        lod === 0
+          ? "folded-sheath-v1"
+          : lod === 1
+            ? "folded-lancet-v1"
+            : undefined,
+      )
+    : new THREE.BufferGeometry();
+  if (!actualSheath)
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        new Float32Array(
+          getGrassBladeLayout(lod, geometryLayout).verticesPerClump * 3,
+        ),
+        3,
       ),
-      3,
-    ),
-  );
+    );
   geometry.setAttribute(
     "instanceOffset",
     new THREE.InstancedBufferAttribute(
@@ -168,6 +183,17 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       trianglesPerClump: 216,
       rootComponents: 2,
     });
+    for (const lod of [0, 1, 2])
+      expect(
+        getGrassBladeLayout(lod, "fine-folded-sheath-near5-v1"),
+      ).toMatchObject({
+        bladesPerClump: [24, 24, 12][lod],
+        bladeSegments: [5, 3, 2][lod],
+        verticesPerBlade: [15, 9, 5][lod],
+        verticesPerClump: [360, 216, 60][lod],
+        trianglesPerClump: [408, 216, 36][lod],
+        rootComponents: 2,
+      });
     for (const lod of [-1, 3, 0.5, NaN, Infinity])
       expect(() => getGrassBladeLayout(lod)).toThrow(/layout/);
     for (const layout of [
@@ -176,6 +202,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       "ordinary-v1",
       {},
       "fine-linear-sweep-near5-v1",
+      "fine-folded-sheath-near6-v1",
     ])
       expect(() =>
         getGrassBladeLayout(0, layout as FineGrassGeometryLayout),
@@ -187,6 +214,8 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       [216, "fine-linear-sweep-3seg-v1"],
       [168, "fine-linear-sweep-near4-v1"],
       [168, "fine-folded-lancet-v1"],
+      [216, "fine-folded-sheath-near5-v1"],
+      [432, "fine-folded-sheath-near5-v1"],
     ] as const) {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute(
@@ -382,6 +411,15 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       count: 4096,
       geometryLayout: "fine-folded-lancet-v1" as const,
     },
+    ...[1276, 4096].flatMap((count) =>
+      [0, 1, 2].map((lod) => ({
+        lod,
+        count,
+        blades: [24, 24, 12][lod],
+        vertices: [15, 9, 5][lod],
+        geometryLayout: "fine-folded-sheath-near5-v1" as const,
+      })),
+    ),
   ])(
     "keeps LOD$lod count$count correction capacity and every boundary address exact",
     ({ lod, blades, vertices, count, geometryLayout }) => {
@@ -398,7 +436,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       let material: MeshStandardNodeMaterial | undefined;
       try {
         // Reject cross-tier correction layouts before publishing any binding.
-        const otherBlades = lod === 0 ? 12 : 24;
+        const otherBlades = blades === 24 ? 12 : 24;
         expect(() =>
           createGroundedGrassMaterial(
             base,
@@ -505,6 +543,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
         "fine-linear-sweep-3seg-v1",
         "fine-linear-sweep-near4-v1",
         "fine-folded-lancet-v1",
+        "fine-folded-sheath-near5-v1",
       ] as const
     ).flatMap((geometryLayout) =>
       [0, 1, 2].map((lod) => ({ geometryLayout, lod })),
@@ -654,181 +693,264 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
     },
   );
 
-  it("addresses folded centers 7/8 within their own blade and interpolates the actual root pair at u=0.5 without vertex-input bindings", () => {
-    const geometry = createClumpGeometry(
-      24,
-      3,
-      FINE_MEADOW_APPEARANCE,
-      "folded-lancet-v1",
-    );
-    const base = new MeshStandardNodeMaterial();
-    base.positionNode = vec3(0);
-    const count = 3;
-    const deltas = Float32Array.from(
-      { length: count * 24 * 2 },
-      (_, i) => (i + 1) / 4,
-    );
-    const masks = new Uint32Array([1, 1 << 23, 0x555555]);
-    geometry.setAttribute(
-      "instanceOffset",
-      new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3),
-    );
-    let material: MeshStandardNodeMaterial | undefined;
-    try {
-      expect(geometry.getAttribute("position").count).toBe(216);
-      expect(geometry.getIndex()?.count).toBe(24 * 27);
-      // The seven-vertex historical/default descriptor must not interpret
-      // centers as the next blade. Near4 also has nine vertices: exact folded
-      // index topology is validated by CPU admission, not this address binder.
-      for (const wrong of [undefined, "fine-linear-sweep-3seg-v1"] as const) {
+  it.each([
+    {
+      geometryLayout: "fine-folded-lancet-v1",
+      lod: 0,
+      blades: 24,
+      segments: 3,
+      vertices: 9,
+      triangles: 9,
+      crossSection: "folded-lancet-v1",
+      centers: [7, 8],
+    },
+    {
+      geometryLayout: "fine-folded-sheath-near5-v1",
+      lod: 0,
+      blades: 24,
+      segments: 5,
+      vertices: 15,
+      triangles: 17,
+      crossSection: "folded-sheath-v1",
+      centers: [11, 12, 13, 14],
+    },
+    {
+      geometryLayout: "fine-folded-sheath-near5-v1",
+      lod: 1,
+      blades: 24,
+      segments: 3,
+      vertices: 9,
+      triangles: 9,
+      crossSection: "folded-lancet-v1",
+      centers: [7, 8],
+    },
+    {
+      geometryLayout: "fine-folded-sheath-near5-v1",
+      lod: 2,
+      blades: 12,
+      segments: 2,
+      vertices: 5,
+      triangles: 3,
+      crossSection: undefined,
+      centers: [],
+    },
+  ] as const)(
+    "addresses every actual $geometryLayout LOD$lod vertex, center and root pair without new vertex-input bindings",
+    ({
+      geometryLayout,
+      lod,
+      blades,
+      segments,
+      vertices,
+      triangles,
+      crossSection,
+      centers,
+    }) => {
+      const geometry = createClumpGeometry(
+        blades,
+        segments,
+        FINE_GRASS_FOLDED_BLADE_SHAPE,
+        crossSection,
+      );
+      const base = new MeshStandardNodeMaterial();
+      base.positionNode = vec3(0);
+      const count = 3;
+      const deltas = Float32Array.from(
+        { length: count * blades * 2 },
+        (_, i) => (i + 1) / 4,
+      );
+      const masks = new Uint32Array([
+        1,
+        1 << (blades - 1),
+        0x555555 & (2 ** blades - 1),
+      ]);
+      geometry.setAttribute(
+        "instanceOffset",
+        new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3),
+      );
+      let material: MeshStandardNodeMaterial | undefined;
+      try {
+        expect(geometry.getAttribute("position").count).toBe(blades * vertices);
+        expect(geometry.getIndex()?.count).toBe(blades * triangles * 3);
+        // Historical/default tier descriptors must not interpret a new stride
+        // or population. Equal stride alone is not a topology proof: exact
+        // folded index order is validated by CPU admission, not this binder.
+        for (const wrong of [undefined, "fine-linear-sweep-3seg-v1"] as const) {
+          expect(() =>
+            createGroundedGrassMaterial(
+              base,
+              geometry,
+              deltas,
+              count,
+              lod,
+              wrong,
+              masks,
+            ),
+          ).toThrow(/binding/);
+          expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+            false,
+          );
+          expect(geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)).toBe(
+            false,
+          );
+        }
         expect(() =>
           createGroundedGrassMaterial(
             base,
             geometry,
             deltas,
             count,
-            0,
-            wrong,
-            masks,
+            lod,
+            geometryLayout,
+            new Uint32Array([1, 2 ** blades, 1]),
           ),
-        ).toThrow(/binding/);
+        ).toThrow(/visibility/);
         expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
         expect(geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)).toBe(
           false,
         );
-      }
-      material = createGroundedGrassMaterial(
-        base,
-        geometry,
-        deltas,
-        count,
-        0,
-        "fine-folded-lancet-v1",
-        masks,
-      );
-      const roots = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
-      const visibility = geometry.getAttribute(
-        GRASS_BLADE_VISIBILITY_ATTRIBUTE,
-      );
-      if (
-        !(roots instanceof StorageBufferAttribute) ||
-        !(visibility instanceof StorageBufferAttribute)
-      )
-        throw new Error("Missing actual folded storage bindings");
-      const selected = material.positionNode;
-      if (!(selected instanceof THREE.Node))
-        throw new Error("Missing actual folded position graph");
-      expect(selected.type).toBe("ConditionalNode");
-      const condition = childNode(selected, "condNode");
-      const nodes = new Set<Node>();
-      selected.traverse((node) => nodes.add(node));
-      const mixes = [...nodes].filter(
-        (node) =>
-          node.type === "MathNode" && Reflect.get(node, "method") === "mix",
-      );
-      expect(mixes).toHaveLength(1);
-      const mix = mixes[0];
-      const rootAccess = childNode(childNode(mix, "aNode"), "node");
-      expect(rootAccess.type).toBe("StorageArrayElementNode");
-      expect(Reflect.get(childNode(rootAccess, "node"), "value")).toBe(roots);
-      const address = childNode(rootAccess, "indexNode");
-      const uv = geometry.getAttribute("uv");
-      // Interpret only the actual constructed scalar root mix and its bound
-      // storage/UV leaves; no renderer or replacement shader is simulated.
-      const scalar = (node: Node, instance: number, vertex: number): number => {
-        if (node.type === "VarNode" || node.type === "ConvertNode")
-          return scalar(childNode(node, "node"), instance, vertex);
-        if (node.type === "MathNode" && Reflect.get(node, "method") === "mix") {
-          const a = scalar(childNode(node, "aNode"), instance, vertex);
-          const b = scalar(childNode(node, "bNode"), instance, vertex);
-          const t = scalar(childNode(node, "cNode"), instance, vertex);
-          return a * (1 - t) + b * t;
-        }
-        if (node.type !== "SplitNode")
-          throw new Error("Unexpected actual root interpolation node");
-        const component: unknown = Reflect.get(node, "components");
-        const source = childNode(node, "node");
-        if (
-          source.type === "AttributeNode" &&
-          Reflect.get(source, "_attributeName") === "uv" &&
-          component === "x"
-        )
-          return uv.getX(vertex);
-        if (
-          source.type !== "StorageArrayElementNode" ||
-          Reflect.get(childNode(source, "node"), "value") !== roots ||
-          (component !== "x" && component !== "y")
-        )
-          throw new Error(
-            "Root interpolation must use its own vec2 storage and actual uv.x",
-          );
-        const index = storageAddress(
-          childNode(source, "indexNode"),
-          instance,
-          vertex,
+        material = createGroundedGrassMaterial(
+          base,
+          geometry,
+          deltas,
+          count,
+          lod,
+          geometryLayout,
+          masks,
         );
-        return component === "x" ? roots.getX(index) : roots.getY(index);
-      };
-      for (const instance of [0, 1, 2])
-        for (let blade = 0; blade < 24; blade++) {
-          const root = instance * 24 + blade;
-          for (let local = 0; local < 9; local++) {
-            const vertex = blade * 9 + local;
-            expect(storageAddress(address, instance, vertex)).toBe(root);
-            expect(
-              storageAddress(condition, instance, vertex, masks[instance]),
-            ).toBe(Number((masks[instance] & (1 << blade)) !== 0));
-            const u = uv.getX(vertex);
-            expect(scalar(mix, instance, vertex)).toBe(
-              deltas[root * 2] * (1 - u) + deltas[root * 2 + 1] * u,
-            );
+        const roots = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
+        const visibility = geometry.getAttribute(
+          GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+        );
+        if (
+          !(roots instanceof StorageBufferAttribute) ||
+          !(visibility instanceof StorageBufferAttribute)
+        )
+          throw new Error("Missing actual folded storage bindings");
+        const selected = material.positionNode;
+        if (!(selected instanceof THREE.Node))
+          throw new Error("Missing actual folded position graph");
+        expect(selected.type).toBe("ConditionalNode");
+        const condition = childNode(selected, "condNode");
+        const nodes = new Set<Node>();
+        selected.traverse((node) => nodes.add(node));
+        const mixes = [...nodes].filter(
+          (node) =>
+            node.type === "MathNode" && Reflect.get(node, "method") === "mix",
+        );
+        expect(mixes).toHaveLength(1);
+        const mix = mixes[0];
+        const rootAccess = childNode(childNode(mix, "aNode"), "node");
+        expect(rootAccess.type).toBe("StorageArrayElementNode");
+        expect(Reflect.get(childNode(rootAccess, "node"), "value")).toBe(roots);
+        const address = childNode(rootAccess, "indexNode");
+        const uv = geometry.getAttribute("uv");
+        // Interpret only the actual constructed scalar root mix and its bound
+        // storage/UV leaves; no renderer or replacement shader is simulated.
+        const scalar = (
+          node: Node,
+          instance: number,
+          vertex: number,
+        ): number => {
+          if (node.type === "VarNode" || node.type === "ConvertNode")
+            return scalar(childNode(node, "node"), instance, vertex);
+          if (
+            node.type === "MathNode" &&
+            Reflect.get(node, "method") === "mix"
+          ) {
+            const a = scalar(childNode(node, "aNode"), instance, vertex);
+            const b = scalar(childNode(node, "bNode"), instance, vertex);
+            const t = scalar(childNode(node, "cNode"), instance, vertex);
+            return a * (1 - t) + b * t;
           }
-          for (const center of [7, 8]) {
-            const vertex = blade * 9 + center;
-            expect(uv.getX(vertex)).toBe(0.5);
-            expect(uv.getY(vertex)).toBe(Math.fround((center - 6) / 3));
-            expect(scalar(mix, instance, vertex)).toBe(
-              (deltas[root * 2] + deltas[root * 2 + 1]) / 2,
+          if (node.type !== "SplitNode")
+            throw new Error("Unexpected actual root interpolation node");
+          const component: unknown = Reflect.get(node, "components");
+          const source = childNode(node, "node");
+          if (
+            source.type === "AttributeNode" &&
+            Reflect.get(source, "_attributeName") === "uv" &&
+            component === "x"
+          )
+            return uv.getX(vertex);
+          if (
+            source.type !== "StorageArrayElementNode" ||
+            Reflect.get(childNode(source, "node"), "value") !== roots ||
+            (component !== "x" && component !== "y")
+          )
+            throw new Error(
+              "Root interpolation must use its own vec2 storage and actual uv.x",
             );
-            if (blade < 23) {
+          const index = storageAddress(
+            childNode(source, "indexNode"),
+            instance,
+            vertex,
+          );
+          return component === "x" ? roots.getX(index) : roots.getY(index);
+        };
+        for (const instance of [0, 1, 2])
+          for (let blade = 0; blade < blades; blade++) {
+            const root = instance * blades + blade;
+            for (let local = 0; local < vertices; local++) {
+              const vertex = blade * vertices + local;
+              expect(storageAddress(address, instance, vertex)).toBe(root);
               expect(
-                storageAddress(address, instance, vertex + 9 - center),
-              ).toBe(root + 1);
-              expect(storageAddress(address, instance, vertex)).not.toBe(
-                storageAddress(address, instance, vertex + 9 - center),
+                storageAddress(condition, instance, vertex, masks[instance]),
+              ).toBe(Number((masks[instance] & (1 << blade)) !== 0));
+              const u = uv.getX(vertex);
+              expect(scalar(mix, instance, vertex)).toBe(
+                deltas[root * 2] * (1 - u) + deltas[root * 2 + 1] * u,
               );
             }
+            for (const center of centers) {
+              const vertex = blade * vertices + center;
+              expect(uv.getX(vertex)).toBe(0.5);
+              expect(uv.getY(vertex)).toBe(
+                Math.fround((center - 2 * segments) / segments),
+              );
+              expect(scalar(mix, instance, vertex)).toBe(
+                (deltas[root * 2] + deltas[root * 2 + 1]) / 2,
+              );
+              if (blade < blades - 1) {
+                expect(
+                  storageAddress(address, instance, vertex + vertices - center),
+                ).toBe(root + 1);
+                expect(storageAddress(address, instance, vertex)).not.toBe(
+                  storageAddress(address, instance, vertex + vertices - center),
+                );
+              }
+            }
           }
+        // These two runtime arrays must not add vertex inputs to the existing
+        // eight-buffer production layout. Native compilation remains a later gate.
+        const storage = [...nodes].filter(
+          (node) => node.type === "StorageBufferNode",
+        );
+        expect(storage).toHaveLength(2);
+        for (const node of storage) {
+          expect(Reflect.get(node, "bufferCount")).toBe(0);
+          expect(Reflect.get(node, "access")).toBe("readOnly");
         }
-      // These two runtime arrays must not add vertex inputs to the existing
-      // eight-buffer production layout. Native compilation remains a later gate.
-      const storage = [...nodes].filter(
-        (node) => node.type === "StorageBufferNode",
-      );
-      expect(storage).toHaveLength(2);
-      for (const node of storage) {
-        expect(Reflect.get(node, "bufferCount")).toBe(0);
-        expect(Reflect.get(node, "access")).toBe("readOnly");
+        expect(new Set(storage.map((node) => node.nodeType))).toEqual(
+          new Set(["vec2", "uint"]),
+        );
+        expect(
+          [...nodes]
+            .filter((node) => node.type === "AttributeNode")
+            .map((node) => Reflect.get(node, "_attributeName"))
+            .sort(),
+        ).toEqual(["instanceOffset", "uv"]);
+        for (const binding of [roots, visibility])
+          expect(binding).not.toBeInstanceOf(THREE.InstancedBufferAttribute);
+        expect(roots.array.byteLength).toBe(count * blades * 2 * 4);
+        expect(visibility.array.byteLength).toBe(count * 4);
+      } finally {
+        material?.dispose();
+        geometry.dispose();
+        base.dispose();
       }
-      expect(new Set(storage.map((node) => node.nodeType))).toEqual(
-        new Set(["vec2", "uint"]),
-      );
-      expect(
-        [...nodes]
-          .filter((node) => node.type === "AttributeNode")
-          .map((node) => Reflect.get(node, "_attributeName"))
-          .sort(),
-      ).toEqual(["instanceOffset", "uv"]);
-      for (const binding of [roots, visibility])
-        expect(binding).not.toBeInstanceOf(THREE.InstancedBufferAttribute);
-      expect(roots.array.byteLength).toBe(count * 24 * 2 * 4);
-      expect(visibility.array.byteLength).toBe(count * 4);
-    } finally {
-      material?.dispose();
-      geometry.dispose();
-      base.dispose();
-    }
-  });
+    },
+  );
 
   it.each([1, 2])(
     "retains the historical LOD%s root/mask graph for the folded near-only layout",

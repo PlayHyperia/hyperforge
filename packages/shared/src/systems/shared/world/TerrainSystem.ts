@@ -205,6 +205,7 @@ import {
   resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
+  resolveGrassGeometryCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -459,6 +460,7 @@ export class TerrainSystem extends System {
         coverageTrial: ReturnType<typeof resolveGrassCoverageTrial>;
         roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
         lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
+        geometry?: ReturnType<typeof resolveGrassGeometryCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -876,6 +878,7 @@ export class TerrainSystem extends System {
       const coverageTrial = resolveGrassCoverageTrial();
       const roadClearance = resolveGrassRoadClearance();
       const lighting = resolveGrassLightingCandidate();
+      const geometry = resolveGrassGeometryCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -891,6 +894,7 @@ export class TerrainSystem extends System {
         coverageTrial,
         ...(roadClearance ? { roadClearance } : {}),
         ...(lighting ? { lighting } : {}),
+        ...(geometry ? { geometry } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3010,6 +3014,7 @@ export class TerrainSystem extends System {
                 this.quadTreeVisualManager!.isRetainedSurfaceCurrent(surface),
             }
           : undefined,
+        grassSelection.geometry,
       );
 
       if (grassSelection.flowers) {

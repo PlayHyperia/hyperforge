@@ -507,7 +507,7 @@ describe("physical folded lancet source geometry (CPU only)", () => {
   });
 });
 
-describe("explicit five/six-section basal sheath generator study (not selected in-world)", () => {
+describe("explicit five/six-section basal sheath generator geometry", () => {
   function parameters(segments: number): [number, number][] {
     const rows: [number, number][] = [];
     for (let row = 0; row < segments; row++)

@@ -133,6 +133,7 @@ export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
+export type GrassGeometryCandidate = "sheath-close-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -209,6 +210,25 @@ export function resolveGrassLightingCandidate(
   )
     throw new Error("Grass lighting requires the explicit fine meadow pair");
   return values[0];
+}
+
+/** Add close detail without changing the existing meadow population or range.
+ * Omission retains the historical geometry; capture once with the terrain owner. */
+export function resolveGrassGeometryCandidate(
+  win?: Window,
+): GrassGeometryCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassGeometry") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "sheath-close-v1")
+    throw new Error("Unknown or duplicate grass geometry candidate");
+  if (resolveGrassLightingCandidate(windowRef) !== "leaf-volume-v1")
+    throw new Error(
+      "Grass geometry requires the explicit leaf-volume fine meadow",
+    );
+  return "sheath-close-v1";
 }
 
 /** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
@@ -607,6 +627,8 @@ export type StreamingGrassProfileReceipt = {
     readonly coverageTrial?: GrassPlacementCoverageTrial;
     cellSize: 25;
     nearLodDistance: 40;
+    /** Extra detail within cells intersecting 12m; population boundary stays 40m. */
+    detailLodDistance?: 12;
     liveCells: number;
   };
   grounding?: {
@@ -757,6 +779,10 @@ export function evaluateStreamingRenderProfileApplication(
         placement.mode !== "world-cells-v1" ||
         placement.cellSize !== 25 ||
         placement.nearLodDistance !== 40 ||
+        placement.detailLodDistance !==
+          (grass.geometryLayout === "fine-folded-sheath-near5-v1"
+            ? 12
+            : undefined) ||
         !Number.isSafeInteger(placement.liveCells) ||
         placement.liveCells < 0
       )

@@ -12,7 +12,8 @@ import {
 import {
   getGrassBladeLayout,
   getGrassBladeWindFactor,
-  FINE_GRASS_FOLDED_BLADE_INDICES,
+  getFoldedGrassBladeIndices,
+  isFoldedGrassBladeLayout,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
@@ -97,7 +98,8 @@ export function captureGrassBankVerge(
     captured &&
     request.geometryLayout !== "fine-linear-sweep-3seg-v1" &&
     request.geometryLayout !== "fine-linear-sweep-near4-v1" &&
-    request.geometryLayout !== "fine-folded-lancet-v1"
+    request.geometryLayout !== "fine-folded-lancet-v1" &&
+    request.geometryLayout !== "fine-folded-sheath-near5-v1"
   )
     throw new Error("Invalid grass bank-verge descriptor");
   return captured;
@@ -264,7 +266,7 @@ function* validateGeometry(
     verticesPerBlade,
     trianglesPerClump,
   } = getGrassBladeLayout(lod, geometryLayout);
-  const foldedNear = geometryLayout === "fine-folded-lancet-v1" && lod === 0;
+  const folded = isFoldedGrassBladeLayout(lod, geometryLayout);
   const vertices = blades * verticesPerBlade;
   const position = geometry.getAttribute("position"),
     normal = geometry.getAttribute("normal"),
@@ -331,9 +333,9 @@ function* validateGeometry(
       ) <= 0
     )
       throw new Error("Invalid grass grounding blade root");
-    if (foldedNear) {
-      for (let row = 1; row <= 2; row++) {
-        const center = first + 6 + row;
+    if (folded) {
+      for (let row = 1; row < segments; row++) {
+        const center = tip + row;
         if (
           uv.getX(center) !== 0.5 ||
           uv.getY(center) !== Math.fround(row / segments) ||
@@ -341,7 +343,7 @@ function* validateGeometry(
         )
           throw new Error("Invalid grass grounding folded center topology");
       }
-      for (const value of FINE_GRASS_FOLDED_BLADE_INDICES)
+      for (const value of getFoldedGrassBladeIndices(segments))
         expectIndex(first + value);
     } else {
       for (let row = 0; row < segments - 1; row++) {
@@ -1302,7 +1304,7 @@ export function* groundGrassBladeSteps(
       let minY = Infinity,
         maxY = -Infinity;
       for (let v = 0; v < position.count; v++) {
-        // One blade is a bounded batch: at most nine vertices / eighteen
+        // One blade is a bounded batch: at most fifteen vertices / thirty
         // transforms at LOD0. Keep every suspension point and floating-point
         // expression. A zero-height vertex has identical fade endpoints, so
         // evaluate its one distinct point once rather than charging/computing

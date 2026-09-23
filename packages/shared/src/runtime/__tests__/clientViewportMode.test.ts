@@ -25,6 +25,7 @@ import {
   resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
+  resolveGrassGeometryCandidate,
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
@@ -42,6 +43,7 @@ import {
   type StreamingRenderAppliedState,
   type StreamingGrassProfileReceipt,
   type GrassPaletteCandidate,
+  type GrassGeometryCandidate,
   type RootedFlowerCandidate,
 } from "../clientViewportMode";
 
@@ -711,6 +713,164 @@ describe("explicit fine leaf-volume lighting selection", () => {
       world.destroy();
     }
   });
+});
+
+describe("explicit close sheath geometry selection", () => {
+  const fine =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+  const lighting = "grassLighting=leaf-volume-v1";
+  const geometry: GrassGeometryCandidate = "sheath-close-v1";
+  const selected = `grassGeometry=${geometry}`;
+
+  it("never infers geometry from omission, appearance, lighting or profile", () => {
+    expect(resolveGrassGeometryCandidate()).toBeUndefined();
+    for (const path of ["/play", "/stream.html", "/"])
+      for (const query of [
+        "",
+        fine,
+        `${fine}&${lighting}`,
+        "grassLighting=invalid",
+      ])
+        expect(
+          resolveGrassGeometryCandidate(makeWindow(path, `?${query}`)),
+        ).toBeUndefined();
+  });
+
+  it("admits the exact fine/leaf-volume pair without changing renderer or population selectors", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ]) {
+      const baseline = makeWindow(path, `?${prefix}${fine}&${lighting}`);
+      const candidate = makeWindow(
+        path,
+        `${baseline.location.search}&${selected}`,
+      );
+      expect(resolveGrassGeometryCandidate(candidate)).toBe(geometry);
+      expect(resolveGrassGeometryCandidate(baseline)).toBeUndefined();
+      expect(resolveGrassLightingCandidate(candidate)).toBe("leaf-volume-v1");
+      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
+      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+        resolveExplicitStreamingRenderProfile(baseline),
+      );
+      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+        resolveClientViewportRuntimeProfile(baseline),
+      );
+      expect(resolveGrassCoverageTrial(candidate)).toEqual(
+        resolveGrassCoverageTrial(baseline),
+      );
+      expect(resolveGrassGroundingExecution(candidate)).toEqual(
+        resolveGrassGroundingExecution(baseline),
+      );
+      expect(resolveGrassRoadClearance(candidate)).toEqual(
+        resolveGrassRoadClearance(baseline),
+      );
+      expect(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(candidate),
+        ),
+      ).toEqual(
+        resolveStreamingRenderPreferences(
+          1280,
+          720,
+          resolveExplicitStreamingRenderProfile(baseline),
+        ),
+      );
+    }
+  });
+
+  it.each([
+    "",
+    "SHEATH-CLOSE-V1",
+    " sheath-close-v1",
+    "sheath-close-v1 ",
+    "sheath-close-v1\n",
+    "sheath-close-v2",
+    "folded-sheath-v1",
+    "sheath-close-v1,other",
+  ])("fails closed on noncanonical geometry %j", (value) => {
+    expect(() =>
+      resolveGrassGeometryCandidate(
+        makeWindow(
+          "/stream.html",
+          `?${fine}&${lighting}&grassGeometry=${encodeURIComponent(value)}`,
+        ),
+      ),
+    ).toThrow("grass geometry");
+  });
+
+  it("rejects duplicates and incompatible lighting, profiles and viewport owners", () => {
+    for (const query of [
+      "",
+      fine,
+      lighting,
+      `grassAppearance=fine-meadow-v1&${lighting}`,
+      `streamRenderProfile=island-fine-meadow-720p60-v1&${lighting}`,
+      `${fine}&grassLighting=canopy-normal-v1`,
+      `${fine}&${lighting}&${lighting}`,
+      `${fine}&${lighting}&${selected}`,
+      `${fine}&${lighting}&grassGeometry=`,
+      `${fine}&${lighting}&grassAppearance=fine-meadow-v1`,
+      `${fine}&${lighting}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+      `${fine}&${lighting}&embedded=true`,
+      `${fine}&${lighting}&embedded=false&embedded=false`,
+      `${fine}&${lighting}&streamFps=30`,
+      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1&grassLighting=leaf-volume-v1",
+    ])
+      expect(() =>
+        resolveGrassGeometryCandidate(
+          makeWindow("/stream.html", `?${query}&${selected}`),
+        ),
+      ).toThrow();
+    expect(() =>
+      resolveGrassGeometryCandidate(
+        makeWindow("/play", `?${fine}&${lighting}&${selected}`),
+      ),
+    ).toThrow();
+    const embedded = makeWindow(
+      "/stream.html",
+      `?${fine}&${lighting}&${selected}`,
+    );
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveGrassGeometryCandidate(embedded)).toThrow();
+  });
+
+  it.each([false, true])(
+    "captures geometry selection once on the real terrain owner, selected=%s",
+    (enabled) => {
+      const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const input = makeWindow(
+        "/stream.html",
+        `?${fine}&${lighting}${enabled ? `&${selected}` : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: input,
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.geometry).toBe(enabled ? geometry : undefined);
+        expect(Object.prototype.hasOwnProperty.call(captured, "geometry")).toBe(
+          enabled,
+        );
+        input.location.search = `?${fine}&${lighting}${enabled ? "" : `&${selected}`}`;
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+        expect(captured.geometry).toBe(enabled ? geometry : undefined);
+      } finally {
+        if (previous) Object.defineProperty(globalThis, "window", previous);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
 });
 
 describe("client resource-pool startup ordering", () => {
@@ -2377,12 +2537,16 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,
     );
     expect(source.match(/resolveGrassRoadClearance\(\)/gu)).toHaveLength(1);
+    expect(source.match(/resolveGrassGeometryCandidate\(\)/gu)).toHaveLength(1);
+    expect(capture).toContain(
+      "const geometry = resolveGrassGeometryCandidate();",
+    );
     expect(source.match(/resolveGrassPaletteCandidate\(\)/gu)).toHaveLength(1);
     expect(capture).toContain(
       "const palette = resolveGrassPaletteCandidate();",

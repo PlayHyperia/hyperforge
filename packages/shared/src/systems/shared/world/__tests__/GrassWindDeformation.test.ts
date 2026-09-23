@@ -13,6 +13,7 @@ import {
   DENSE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
   FINE_GRASS_FOLDED_BLADE_SHAPE,
+  FINE_GRASS_CLOSE_DETAIL,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_THIN_LEAF_LIGHTING,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
@@ -90,6 +91,7 @@ function createOwner(
   gradedBank = false,
   serviceGround?: CompactTerrainBankVerge,
   lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
+  geometryCandidate?: ConstructorParameters<typeof GrassVisualManager>[17],
 ) {
   const terrain = gradedBank
     ? validateWorldTerrainProfile({
@@ -158,6 +160,8 @@ function createOwner(
         : undefined,
     undefined,
     lighting,
+    undefined,
+    geometryCandidate,
   );
 }
 
@@ -765,7 +769,10 @@ describe("fine meadow thin-leaf lighting (actual CPU nodes and policy algebra)",
 });
 
 describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", () => {
-  function foldedOwner(serviceGround?: CompactTerrainBankVerge) {
+  function foldedOwner(
+    serviceGround?: CompactTerrainBankVerge,
+    geometryCandidate?: ConstructorParameters<typeof GrassVisualManager>[17],
+  ) {
     return createOwner(
       "fine",
       true,
@@ -773,6 +780,7 @@ describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", 
       true,
       serviceGround,
       FINE_GRASS_LEAF_VOLUME_LIGHTING.id,
+      geometryCandidate,
     );
   }
 
@@ -780,31 +788,57 @@ describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", 
     geometry: THREE.BufferGeometry,
     blade: number,
     lod = 0,
+    geometryLayout:
+      | "fine-folded-lancet-v1"
+      | "fine-folded-sheath-near5-v1" = "fine-folded-lancet-v1",
   ) {
-    const layout = getGrassBladeLayout(lod, "fine-folded-lancet-v1");
+    const layout = getGrassBladeLayout(lod, geometryLayout);
+    const closeDetail = geometryLayout === "fine-folded-sheath-near5-v1";
+    const folded = closeDetail ? lod < 2 : lod === 0;
+    const sheath = closeDetail && lod === 0;
     const first = blade * layout.verticesPerBlade;
     const position = geometry.getAttribute("position");
     const left = new THREE.Vector3().fromBufferAttribute(position, first);
     const right = new THREE.Vector3().fromBufferAttribute(position, first + 1);
-    // Tip remains index six: appended center stations seven/eight are not tips.
+    // Tip follows the paired rows, before any appended center stations.
     const tip = new THREE.Vector3().fromBufferAttribute(
       position,
       first + layout.bladeSegments * 2,
     );
     const center = left.clone().add(right).multiplyScalar(0.5);
-    const halfWidth = left.distanceTo(right) * 0.5;
+    const halfWidth = (left.distanceTo(right) * 0.5) / (sheath ? 0.25 : 1);
     const widthAxis = right.clone().sub(left).normalize();
     const ridgeAxis = new THREE.Vector3(-widthAxis.z, 0, widthAxis.x);
     const height = tip.y / 0.95;
     const arc = tip.clone().sub(center).setY(0);
+    const sheathGain = (t: number) => {
+      if (!sheath) return 1;
+      const v = Math.min(1, Math.max(0, t / 0.2));
+      return 0.25 + 0.75 * v * v * (3 - 2 * v);
+    };
     const width = (t: number) => {
-      if (lod === 0)
-        return halfWidth * (1 + 2.06 * t - 5.04 * t * t + 1.98 * t ** 3);
+      if (folded)
+        return (
+          halfWidth *
+          (1 + 2.06 * t - 5.04 * t * t + 1.98 * t ** 3) *
+          sheathGain(t)
+        );
       const v = Math.min(1, Math.max(0, t * 2));
       return halfWidth * (1 - 0.85 * t * t) * (1 + 0.35 * v * v * (3 - 2 * v));
     };
     const widthDerivative = (t: number) => {
-      if (lod === 0) return halfWidth * (2.06 - 10.08 * t + 5.94 * t * t);
+      if (folded) {
+        const derivative = halfWidth * (2.06 - 10.08 * t + 5.94 * t * t);
+        if (!sheath) return derivative;
+        const v = Math.min(1, Math.max(0, t / 0.2));
+        const gainDerivative = (0.75 * 6 * v * (1 - v)) / 0.2;
+        return (
+          derivative * sheathGain(t) +
+          halfWidth *
+            (1 + 2.06 * t - 5.04 * t * t + 1.98 * t ** 3) *
+            gainDerivative
+        );
+      }
       const v = Math.min(1, Math.max(0, t * 2));
       const gain = 1 + 0.35 * v * v * (3 - 2 * v);
       const gainDerivative =
@@ -816,8 +850,7 @@ describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", 
     return {
       height,
       point(s: number, t: number) {
-        const ridge =
-          lod === 0 ? width(t) * 0.36 * 16 * t * t * (1 - t) ** 2 : 0;
+        const ridge = folded ? width(t) * 0.36 * 16 * t * t * (1 - t) ** 2 : 0;
         return center
           .clone()
           .addScaledVector(arc, 0.7 * t + 0.3 * t * t)
@@ -828,13 +861,12 @@ describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", 
       tangents(s: number, t: number) {
         const hw = width(t);
         const dhw = widthDerivative(t);
-        const ridge = lod === 0 ? hw * 0.36 * 16 * t * t * (1 - t) ** 2 : 0;
-        const ridgeDerivative =
-          lod === 0
-            ? 0.36 *
-              (dhw * 16 * t * t * (1 - t) ** 2 +
-                hw * 32 * t * (1 - t) * (1 - 2 * t))
-            : 0;
+        const ridge = folded ? hw * 0.36 * 16 * t * t * (1 - t) ** 2 : 0;
+        const ridgeDerivative = folded
+          ? 0.36 *
+            (dhw * 16 * t * t * (1 - t) ** 2 +
+              hw * 32 * t * (1 - t) * (1 - 2 * t))
+          : 0;
         // At the exact single tip, take the limiting width direction rather
         // than crossing the zero derivative of a collapsed cross-section.
         const ps =
@@ -1251,6 +1283,336 @@ describe("physical folded grass deformation (actual CPU nodes, not GPU proof)", 
         // coverage is not invented by pretending it owns an interior vertex.
       } finally {
         geometries.forEach((geometry) => geometry.dispose());
+        owner.destroy();
+      }
+    },
+  );
+
+  it.each([0, 1, 2] as const)(
+    "deforms every actual close-detail LOD%s vertex with its selected physical or ribbon material",
+    (lod) => {
+      const owner = foldedOwner(pondServiceGround, FINE_GRASS_CLOSE_DETAIL.id);
+      try {
+        const geometryLayout = "fine-folded-sheath-near5-v1";
+        expect(owner["geometryLayout"]).toBe(geometryLayout);
+        const geometry = owner["lodGeometries"][lod];
+        const layout = getGrassBladeLayout(lod, geometryLayout);
+        const material = owner["materialForLod"](lod);
+        expect(material).toBe(
+          lod < 2 ? owner["foldedMaterial"] : owner["material"],
+        );
+        expect(geometry.getAttribute("position").count).toBe(
+          [360, 216, 60][lod],
+        );
+        expect(geometry.index!.count).toBe([1224, 648, 108][lod]);
+        expect(material.positionNode).toBe(owner["material"].positionNode);
+        const nodes = [...graph(material.normalNode)];
+        const bladeNormal = nodes.find(
+          (node) => Reflect.get(node, "name") === "v_curvedGrassNormal",
+        );
+        if (!bladeNormal)
+          throw new Error("Missing selected deformed normal varying");
+        expect(
+          nodes.some(
+            (node) => Reflect.get(node, "name") === "fineGrassTransverseFold",
+          ),
+        ).toBe(lod === 2);
+        // Real simultaneous zero-wave phase; do not replace shader uniforms.
+        const zeroZ = -2 / (0.28 - (0.18 * 0.12) / 0.35);
+        const zeroX = (-0.12 * zeroZ) / 0.35;
+        const scenes = [
+          {
+            x: 339,
+            z: 314,
+            bank: 1,
+            ground: [0, 1, 0],
+            yaw: 0.7,
+            distance: 0,
+            fade: 1,
+            axis: "x",
+            sign: 1,
+          },
+          {
+            x: 348,
+            z: 314,
+            bank: 0.65,
+            ground: [0.4, 0.8, -0.3],
+            yaw: -1.2,
+            distance: 0,
+            fade: 1,
+            axis: "z",
+            sign: -1,
+          },
+          {
+            x: 384,
+            z: 436,
+            bank: 0.48,
+            ground: [-0.6, 0.7, 0.2],
+            yaw: 2.1,
+            distance: 126,
+            fade: 0.5,
+            axis: "x",
+            sign: -1,
+          },
+          {
+            x: zeroX,
+            z: zeroZ,
+            bank: 1,
+            ground: [0.4, 0.8, -0.3],
+            yaw: 0.7,
+            distance: 140,
+            fade: 0,
+            axis: "x",
+            sign: 0,
+          },
+        ] as const;
+        let cases = 0;
+        let rootCases = 0;
+        let finiteDifferenceCases = 0;
+        let sheathJoinCases = 0;
+        const sheathJoinErrors = { coarse: 0, half: 0, fine: 0 };
+        for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+          const surface = foldedSurface(geometry, blade, lod, geometryLayout);
+          for (const scale of [0.7, 1, 1.3])
+            for (const scene of scenes)
+              for (let local = 0; local < layout.verticesPerBlade; local++) {
+                const inputs = inputFor(
+                  geometry,
+                  blade * layout.verticesPerBlade + local,
+                );
+                inputs.model.identity();
+                inputs.view.makeRotationY(0.4);
+                inputs.attributes.instanceOffset = [scene.x, 28, scene.z];
+                inputs.attributes.instanceGroundNormal = vector([
+                  ...scene.ground,
+                ])
+                  .normalize()
+                  .toArray();
+                inputs.attributes.instanceRotScaleHash = [
+                  scene.yaw,
+                  scale,
+                  0.3,
+                ];
+                const tip = 2 * layout.bladeSegments;
+                const authoredT =
+                  local > tip
+                    ? (local - tip) / layout.bladeSegments
+                    : local === tip
+                      ? 1
+                      : Math.floor(local / 2) / layout.bladeSegments;
+                const authoredU = local >= tip ? 0.5 : local % 2;
+                expect(inputs.attributes.uv).toEqual([
+                  authoredU,
+                  Math.fround(authoredT),
+                ]);
+                if (scene.sign === 0) inputs.time = 0;
+                else {
+                  const phaseOffset =
+                    scene.axis === "x"
+                      ? 0.35 * scene.x + 0.12 * scene.z
+                      : 0.18 * scene.x + 0.28 * scene.z + 2;
+                  let target = scene.sign === 1 ? Math.PI / 2 : Math.PI * 1.5;
+                  target +=
+                    Math.ceil((phaseOffset - target) / (2 * Math.PI)) *
+                    2 *
+                    Math.PI;
+                  inputs.time =
+                    (target - phaseOffset) /
+                    (1.8 * (scene.axis === "x" ? 1 : 0.67));
+                }
+                owner["playerPosUniform"].value
+                  .copy(worldBase(inputs))
+                  .add(new THREE.Vector3(scene.distance, 0, 0));
+                const wind = windAmplitude(inputs, 0.86);
+                if (scene.sign === 0) expect(wind.length()).toBeLessThan(1e-16);
+                else
+                  expect(wind[scene.axis]).toBeCloseTo(
+                    scene.sign * 0.15 * 0.86 * (scene.axis === "x" ? 1 : 0.55),
+                    13,
+                  );
+                const [u, t] = inputs.attributes.uv;
+                const s = 2 * u - 1;
+                const caseContext = JSON.stringify({
+                  lod,
+                  blade,
+                  local,
+                  u,
+                  t,
+                  scale,
+                  bank: scene.bank,
+                  fade: scene.fade,
+                  yaw: scene.yaw,
+                  axis: scene.axis,
+                  sign: scene.sign,
+                });
+                const factor = heightFlex(inputs);
+                const expectedPosition = vector(inputs.attributes.position);
+                expectedPosition.y *= scene.fade * scene.bank;
+                expectedPosition
+                  .multiplyScalar(scale)
+                  .applyQuaternion(rotation(inputs))
+                  .addScaledVector(wind, scene.bank * factor)
+                  .add(vector(inputs.attributes.instanceOffset));
+                expect(
+                  vector(evaluate(material.positionNode, inputs)).distanceTo(
+                    expectedPosition,
+                  ),
+                ).toBeLessThan(1e-12);
+                if (local < 2) {
+                  expect(factor).toBe(0);
+                  rootCases++;
+                }
+                const [ps, pt] = surface.tangents(s, t);
+                for (const tangent of [ps, pt]) {
+                  tangent.y *= scene.fade * scene.bank;
+                  tangent
+                    .multiplyScalar(scale)
+                    .applyQuaternion(rotation(inputs));
+                }
+                pt.addScaledVector(
+                  wind,
+                  scene.bank * heightFlexDerivative(t, surface.height, scale),
+                );
+                const expectedBlade = ps.cross(pt);
+                const actualBlade = vector(evaluate(bladeNormal, inputs));
+                expect(actualBlade.toArray().every(Number.isFinite)).toBe(true);
+                expect(actualBlade.length()).toBeCloseTo(1, 12);
+                // Full distance collapse has no generally unique surface
+                // normal. Check its real finite fallback, not a physical claim.
+                const compareNormal =
+                  scene.fade > 0 && expectedBlade.lengthSq() > 1e-18;
+                if (compareNormal) {
+                  expectedBlade.normalize();
+                  expect(
+                    actualBlade.distanceTo(expectedBlade),
+                    caseContext,
+                  ).toBeLessThan(1e-5);
+                }
+                // All vertices above use the selected real geometry. Bound the
+                // additional finite-difference/facing work to endpoint blades.
+                if (blade === 0 || blade === layout.bladesPerClump - 1) {
+                  if (compareNormal && t > 0 && t < 1) {
+                    const point = (across: number, along: number) =>
+                      vector(
+                        evaluate(material.positionNode, {
+                          ...inputs,
+                          attributes: {
+                            ...inputs.attributes,
+                            position: surface.point(across, along).toArray(),
+                            uv: [(across + 1) * 0.5, along],
+                          },
+                        }),
+                      );
+                    const epsilon = 1e-5;
+                    const across = point(s + epsilon, t).sub(
+                      point(s - epsilon, t),
+                    );
+                    const differenceNormal = (alongStep: number) =>
+                      across
+                        .clone()
+                        .cross(
+                          point(s, t + alongStep).sub(point(s, t - alongStep)),
+                        )
+                        .normalize();
+                    let numerical = differenceNormal(epsilon);
+                    if (lod === 0 && authoredT === 0.2) {
+                      // The smooth sheath joins constant width gain at t=.2:
+                      // its first derivative is continuous, its second is not.
+                      // Central along-differences therefore converge O(step)
+                      // here. Refine only this join, retaining the across step
+                      // to avoid cancellation after adding world coordinates.
+                      const half = differenceNormal(5e-6);
+                      const fine = differenceNormal(1e-6);
+                      sheathJoinErrors.coarse = Math.max(
+                        sheathJoinErrors.coarse,
+                        numerical.distanceTo(expectedBlade),
+                      );
+                      sheathJoinErrors.half = Math.max(
+                        sheathJoinErrors.half,
+                        half.distanceTo(expectedBlade),
+                      );
+                      sheathJoinErrors.fine = Math.max(
+                        sheathJoinErrors.fine,
+                        fine.distanceTo(expectedBlade),
+                      );
+                      numerical = fine;
+                      sheathJoinCases++;
+                    }
+                    expect(
+                      numerical.distanceTo(expectedBlade),
+                      caseContext,
+                    ).toBeLessThan(2e-6);
+                    expect(
+                      actualBlade.distanceTo(numerical),
+                      caseContext,
+                    ).toBeLessThan(1e-5);
+                    finiteDifferenceCases++;
+                  }
+                  for (const front of [false, true]) {
+                    inputs.front = front;
+                    const actual = vector(
+                      evaluate(material.normalNode, inputs),
+                    );
+                    expect(actual.toArray().every(Number.isFinite)).toBe(true);
+                    expect(actual.length()).toBeCloseTo(1, 12);
+                    if (!compareNormal) continue;
+                    const shaded = expectedBlade.clone();
+                    if (lod === 2) {
+                      const source = vector(inputs.attributes.normal);
+                      const width = new THREE.Vector3(source.z, 0, -source.x)
+                        .normalize()
+                        .applyQuaternion(rotation(inputs));
+                      width.addScaledVector(
+                        expectedBlade,
+                        -width.dot(expectedBlade),
+                      );
+                      width.divideScalar(
+                        Math.sqrt(Math.max(width.lengthSq(), 1e-12)),
+                      );
+                      const v = Math.max(0, Math.min(1, (t - 0.75) / 0.25));
+                      const fold =
+                        (2 * u - 1) *
+                        Math.tan((24 * Math.PI) / 180) *
+                        (1 - v * v * (3 - 2 * v));
+                      shaded.addScaledVector(width, fold).normalize();
+                    }
+                    const ground = vector(
+                      inputs.attributes.instanceGroundNormal,
+                    );
+                    const mixed = ground
+                      .clone()
+                      .lerp(
+                        shaded.multiplyScalar(front ? 1 : -1),
+                        normalWeight(t),
+                      );
+                    const expected = (
+                      mixed.lengthSq() > 1e-12 ? mixed.normalize() : ground
+                    ).transformDirection(inputs.view);
+                    expect(actual.distanceTo(expected)).toBeLessThan(2e-5);
+                  }
+                }
+                cases++;
+              }
+        }
+        expect(cases).toBe([360, 216, 60][lod] * 3 * scenes.length);
+        expect(rootCases).toBe([24, 24, 12][lod] * 2 * 3 * scenes.length);
+        expect(finiteDifferenceCases).toBe([12, 6, 2][lod] * 2 * 3 * 3);
+        expect(sheathJoinCases).toBe(lod === 0 ? 3 * 2 * 3 * 3 : 0);
+        if (lod === 0) {
+          // Convergence evidence, not a relaxed geometric/normal tolerance.
+          // Maxima span both edges/center, endpoint blades, all scales and
+          // positive-fade bank/wind cases, including the original coarse failure.
+          const context = JSON.stringify(sheathJoinErrors);
+          expect(sheathJoinErrors.half, context).toBeLessThan(
+            sheathJoinErrors.coarse * 0.75,
+          );
+          expect(sheathJoinErrors.fine, context).toBeLessThan(
+            sheathJoinErrors.half * 0.5,
+          );
+        }
+        // Per-edge grounding corrections add a later world-Y shear; this is
+        // manager material arithmetic, not contact, native GPU or performance proof.
+      } finally {
         owner.destroy();
       }
     },

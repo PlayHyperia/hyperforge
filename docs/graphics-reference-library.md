@@ -1,5 +1,21 @@
 # Hyperia graphics reference library
 
+## 2026-09-23 — Close-detail grass source checkpoint; native acceptance pending
+
+- [x] Added explicit `grassGeometry=sheath-close-v1`, requiring the admitted fine-meadow/leaf-volume pair. Omission retains the historical path. Terrain captures the selection once; no default or localhost:3333 playable-build promotion.
+- [x] Added three bounded tiers: close **24 blades / 5 segments / 360 vertices / 408 triangles**, middle **24 / 3 / 216 / 216**, distant **12 / 2 / 60 / 36** per clump. Middle/distant geometry bytes match the prior near/middle templates. Full placement spacing and 140m range are preserved; there is no density or resolution reduction.
+- [x] The new 12m detail and existing 40m population boundaries use distance to **25m cell bounds**, not a per-blade radius, with independent 10% hysteresis and tested multi-tier camera jumps. Fresh narrower-root grounding, exact index/stride admission, masks and real worker transfers cover all three tiers; six segments remain study-only. Existing work/correction budgets stay unchanged.
+- [x] All three representative shader layouts are prepared serially at startup. Independent review found teardown could otherwise submit later tiers from disposed owners: two tests reproduce the failure before the fix and now prove cancellation plus sample disposal. Actual native shader compilation remains a separate gate.
+- [x] Final focused integration: **761 tests / seven suites pass**. Full shared plus explicit affected tests: **761 roots / 2,467 source files, zero type diagnostics**, stable source hashes; scoped lint passes. The final broader regression rerun passes **660 tests / 14 suites**, for **1,421 passing tests across 21 suites**.
+- [x] Failure history is retained: the first manager run used the wrong manifest environment; the first wind finite-difference check crossed the sheath's C1 join with too large a step (now refined with explicit convergence and unchanged tolerances); the first integration run had a stale exact startup-field assertion; the teardown reproduction failed as expected before correction.
+- [x] All 145 protected compiled outputs and the retained lock remain unchanged; localhost:3333 responds HTTP200. No isolated graphics runtime or capture was launched for this checkpoint. Existing unrelated local changes are preserved, not swept into the source commit.
+- [ ] Next: root-review the prepared private capture harness, then isolated build72/runtime113, fresh same-build baseline native143 and candidate native144. Match cameras, full flowers/population, daylight and resolution; inspect root contact/silhouette, actual shader outputs, clearance, continuous wind and LOD transitions. Collect matched frame and GPU-pass timings without treating pass sums or RAF cadence as exclusive grass cost.
+- [ ] No new native game capture, GPU timing or visual approval exists for this close-detail integration yet. Needle-like lower silhouette, substrate contact, density continuity and real-world performance remain unaccepted. This checkpoint is restart-safe source progress, **not AAA acceptance**; private build/capture evidence pins remain unfilled until those runs succeed.
+
+Reference basis: [GPUOpen procedural grass](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) informs curved geometry and derivative normals; no mesh-shader support is claimed. The previously inspected [Grassworks reference](https://grassworks.techredux.co/demo) informs silhouette/root integration only; no source or assets copied.
+
+Evidence: service-layout logs `grass-close-integration03`, `grass-close-regression02`, `grass-close-types01`, `grass-close-lint02`, `grass-close-teardown-before01`; earlier failures and all prior native evidence remain retained.
+
 ## 2026-09-22 — Grass silhouette study: five segments favored; not enabled in-world
 
 - [x] Added an explicit generator-only five/six-segment basal-sheath study: quarter-width roots, unchanged blade population/RNG/tips, derivative-consistent normals. Historical geometry hashes remain unchanged. No world profile, manager, worker or playable build selects the study.
