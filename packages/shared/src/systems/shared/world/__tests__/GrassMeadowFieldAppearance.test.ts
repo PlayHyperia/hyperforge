@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import {
@@ -26,9 +27,9 @@ const TIERS = [
 ] as const;
 type Tier = (typeof TIERS)[number];
 // Independent literals, not expectations derived from candidate exports.
-const HEIGHTS = [0.68, 0.84, 1] as const;
+const HEIGHTS = [0.52, 0.84, 1] as const;
 const WIDTHS = [0.95, 1.05, 0.8] as const;
-const ARCS = [1.1, 1, 0.8] as const;
+const ARCS = [1.3, 1, 0.8] as const;
 
 function make(tier: Tier) {
   return createClumpGeometry(
@@ -147,6 +148,53 @@ describe("explicit dense meadow ribbon source geometry", () => {
   );
 
   it.each(TIERS)(
+    "preserves the captured field roots and middle/tall ribbons byte-for-byte at LOD$lod",
+    (tier) => {
+      // Independent native169 source-buffer fingerprints, captured before the
+      // low-layer change. These protect the other roles without rebuilding
+      // expected buffers from the candidate constants or generator.
+      const middleTall = [
+        "73880966f5374e2a93296c63879635310557ecbaa684d48358cd6d6e702b8c7b",
+        "073e7da623b4c02ac79010a3babbbf9a086cefc13054f54e9ffd9cd5f441e487",
+        "0112f840a43142853b381408bde5496c59e3ef145aa512d30803465ebe21d788",
+      ];
+      const roots = [
+        "5c050702519bcebefb8fb48ce13374a044cda6e6789667d38f5ee7d4fa69c11a",
+        "5c050702519bcebefb8fb48ce13374a044cda6e6789667d38f5ee7d4fa69c11a",
+        "9408f07d5e4f1543ab81e3d8e7066feb085988c30c79cf6def6b58a787d70635",
+      ];
+      const geometry = make(tier);
+      try {
+        const ribbonHash = createHash("sha256");
+        const rootHash = createHash("sha256");
+        for (const name of ["position", "normal", "uv"]) {
+          const attribute = geometry.getAttribute(name);
+          for (let blade = 0; blade < tier.blades; blade++) {
+            const start = blade * tier.stride * attribute.itemSize;
+            if ((blade + Math.floor(blade / 3)) % 3 !== 0)
+              ribbonHash.update(
+                Buffer.from(
+                  attribute.array.slice(
+                    start,
+                    start + tier.stride * attribute.itemSize,
+                  ).buffer,
+                ),
+              );
+            if (name === "position")
+              rootHash.update(
+                Buffer.from(attribute.array.slice(start, start + 6).buffer),
+              );
+          }
+        }
+        expect(ribbonHash.digest("hex")).toBe(middleTall[tier.lod]);
+        expect(rootHash.digest("hex")).toBe(roots[tier.lod]);
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it.each(TIERS)(
     "keeps shared plant stature and slimmer meter-scale widths/reach at LOD$lod",
     (tier) => {
       const geometry = make(tier);
@@ -178,7 +226,11 @@ describe("explicit dense meadow ribbon source geometry", () => {
           expect(
             Math.abs(tip.y - plantHeight * HEIGHTS[role] * 0.95),
           ).toBeLessThan(1e-7);
-          expect(tip.y).toBe(oldTip.y);
+          if (role === 0)
+            expect(Math.abs(tip.y - (oldTip.y * 0.52) / 0.68)).toBeLessThan(
+              1e-7,
+            );
+          else expect(tip.y).toBe(oldTip.y);
           expect(center.distanceTo(oldCenter)).toBeLessThan(1e-7);
           const arc = tip.clone().sub(center).setY(0);
           const oldArc = oldTip.clone().sub(oldCenter).setY(0);

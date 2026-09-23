@@ -356,8 +356,11 @@ export const FINE_GRASS_MEADOW_FIELD_COMPOSITION = Object.freeze({
   ...FINE_GRASS_MEADOW_CANOPY_COMPOSITION,
   id: "meadow-field-v1",
   clumpSpacing: 0.5,
+  // Give each plant a lower, outward-reaching leaf without widening the
+  // middle/tall silhouette or adding plants. Refit the full swept footprint.
+  heightFactors: Object.freeze([0.52, 0.84, 1] as const),
   widthFactors: Object.freeze([0.95, 1.05, 0.8] as const),
-  arcFactors: Object.freeze([1.1, 1, 0.8] as const),
+  arcFactors: Object.freeze([1.3, 1, 0.8] as const),
 } as const);
 
 export const FINE_GRASS_MEADOW_FIELD_SHAPE = Object.freeze({
