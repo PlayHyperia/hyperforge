@@ -1000,9 +1000,21 @@ export function* groundGrassBladeSteps(
   const deltas = new Float32Array(data.count * blades * 2),
     retained: number[] = [];
   const visibility = perBladeRoads ? new Uint32Array(data.count) : undefined;
-  // One bounded scratch allocation per job, reused across clumps and roads.
-  // Bounds are constructed only after a whole-clump road hit, not in meadows.
+  // Fixed clump-local fitting scratch, reused across every clump and road.
+  // The main sweep already evaluates these exact XZ extrema. Borrowed source
+  // checks below allow road admission to reuse them without a second transform.
   const bladeBounds = perBladeRoads ? new Float64Array(blades * 4) : undefined;
+  // At the largest admitted layout these add 11,928 bytes: 360 * 4 doubles,
+  // 24 * 2 doubles and 24 flags. This is core-layout-bounded fitting scratch,
+  // not retained topology counted by the worker's maximumDerivedBytes limit.
+  // Doubles preserve exact attribute reads and signed zero across suspension.
+  const sweptBladeSources = perBladeRoads
+    ? new Float64Array(blades * verticesPerBlade * 4)
+    : undefined;
+  const sweptBladeWind = perBladeRoads
+    ? new Float64Array(blades * 2)
+    : undefined;
+  const sweptBladeReusable = perBladeRoads ? new Uint8Array(blades) : undefined;
   const allBlades = (1 << blades) - 1;
   const bladeBox: TerrainGridBounds = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
   const roadBladeVisibility = function* (
@@ -1011,7 +1023,13 @@ export function* groundGrassBladeSteps(
     bankHeightScale: number,
     scale: number,
   ): Generator<string, number, void> {
-    if (!bladeBounds) throw new Error("Missing grass blade bounds scratch");
+    if (
+      !bladeBounds ||
+      !sweptBladeSources ||
+      !sweptBladeWind ||
+      !sweptBladeReusable
+    )
+      throw new Error("Missing grass blade bounds scratch");
     let mask = allBlades,
       built = false;
     seenRoads.clear();
@@ -1041,9 +1059,45 @@ export function* groundGrassBladeSteps(
             for (let blade = 0; blade < blades; blade++) {
               yield "road_blade_bounds";
               const b = blade * 4;
+              const windX = Object.getOwnPropertyDescriptor(wind, "x"),
+                windZ = Object.getOwnPropertyDescriptor(wind, "z");
+              let reuse =
+                sweptBladeReusable[blade] === 1 &&
+                windX !== undefined &&
+                windZ !== undefined &&
+                "value" in windX &&
+                "value" in windZ &&
+                Object.is(windX.value, sweptBladeWind[blade * 2]) &&
+                Object.is(windZ.value, sweptBladeWind[blade * 2 + 1]);
+              const end = (blade + 1) * verticesPerBlade;
+              if (reuse) {
+                for (let v = blade * verticesPerBlade; v < end; v++) {
+                  // Charge each bounded live-source check, not just transforms.
+                  // Attribute versions alone miss writes without needsUpdate.
+                  take();
+                  const source = v * 4;
+                  if (
+                    !Object.is(position.getX(v), sweptBladeSources[source]) ||
+                    !Object.is(
+                      position.getY(v),
+                      sweptBladeSources[source + 1],
+                    ) ||
+                    !Object.is(
+                      position.getZ(v),
+                      sweptBladeSources[source + 2],
+                    ) ||
+                    !Object.is(uv.getY(v), sweptBladeSources[source + 3])
+                  ) {
+                    reuse = false;
+                    break;
+                  }
+                }
+              }
+              if (reuse) continue;
+              // Changed borrowed inputs retain the original per-vertex,
+              // two-fade evaluation and charges after this same blade yield.
               bladeBounds[b] = bladeBounds[b + 2] = Infinity;
               bladeBounds[b + 1] = bladeBounds[b + 3] = -Infinity;
-              const end = (blade + 1) * verticesPerBlade;
               for (let v = blade * verticesPerBlade; v < end; v++) {
                 const windFactor = getGrassBladeWindFactor(
                   uv.getY(v),
@@ -1320,6 +1374,9 @@ export function* groundGrassBladeSteps(
       box.maxX = box.maxZ = -Infinity;
       let minY = Infinity,
         maxY = -Infinity;
+      // Never borrow an earlier clump's cache. State 2 is accumulation in
+      // progress; only a completely visited blade may become reusable (1).
+      sweptBladeReusable?.fill(0);
       for (let v = 0; v < position.count; v++) {
         // One blade is a bounded batch: at most fifteen vertices / thirty
         // transforms at LOD0. Keep every suspension point and floating-point
@@ -1338,14 +1395,17 @@ export function* groundGrassBladeSteps(
           py = position.getY(v),
           pz = position.getZ(v);
         const correction = deltas[d] * (1 - u) + deltas[d + 1] * u;
+        const t = uv.getY(v);
         const windFactor = getGrassBladeWindFactor(
-          uv.getY(v),
+          t,
           py,
           scale,
           geometryLayout,
         );
-        const windX = wind.x * bankHeightScale * windFactor,
-          windZ = wind.z * bankHeightScale * windFactor;
+        const windAmplitudeX = wind.x,
+          windAmplitudeZ = wind.z,
+          windX = windAmplitudeX * bankHeightScale * windFactor,
+          windZ = windAmplitudeZ * bankHeightScale * windFactor;
         const rx = (px * cos - pz * sin) * scale,
           rz = (px * sin + pz * cos) * scale,
           scaledY = py * bankHeightScale * scale;
@@ -1357,6 +1417,32 @@ export function* groundGrassBladeSteps(
             Object.is(px, fittedRootSource[root]) &&
             Object.is(py, fittedRootSource[root + 1]) &&
             Object.is(pz, fittedRootSource[root + 2]);
+        if (
+          bladeBounds &&
+          sweptBladeSources &&
+          sweptBladeWind &&
+          sweptBladeReusable
+        ) {
+          const source = v * 4;
+          sweptBladeSources[source] = px;
+          sweptBladeSources[source + 1] = py;
+          sweptBladeSources[source + 2] = pz;
+          sweptBladeSources[source + 3] = t;
+          if (localVertex === 0) {
+            const b = blade * 4;
+            bladeBounds[b] = bladeBounds[b + 2] = Infinity;
+            bladeBounds[b + 1] = bladeBounds[b + 3] = -Infinity;
+            sweptBladeWind[blade * 2] = windAmplitudeX;
+            sweptBladeWind[blade * 2 + 1] = windAmplitudeZ;
+            // Numeric samples determine these bounds; inspect live property
+            // descriptors only when a road actually needs to reuse them.
+            sweptBladeReusable[blade] = 2;
+          } else if (
+            !Object.is(windAmplitudeX, sweptBladeWind[blade * 2]) ||
+            !Object.is(windAmplitudeZ, sweptBladeWind[blade * 2 + 1])
+          )
+            sweptBladeReusable[blade] = 0;
+        }
         for (let fade = 0; fade < (scaledY === 0 ? 1 : 2); fade++) {
           if (reuseRoot) {
             point.x = fittedRootWorld[root];
@@ -1366,14 +1452,31 @@ export function* groundGrassBladeSteps(
             take();
             applyTransform(rx, scaledY * fade, rz, point);
           }
-          box.minX = Math.min(box.minX, point.x - windX - NUMERIC_GUARD);
-          box.maxX = Math.max(box.maxX, point.x + windX + NUMERIC_GUARD);
-          box.minZ = Math.min(box.minZ, point.z - windZ - NUMERIC_GUARD);
-          box.maxZ = Math.max(box.maxZ, point.z + windZ + NUMERIC_GUARD);
+          const vertexMinX = point.x - windX - NUMERIC_GUARD,
+            vertexMaxX = point.x + windX + NUMERIC_GUARD,
+            vertexMinZ = point.z - windZ - NUMERIC_GUARD,
+            vertexMaxZ = point.z + windZ + NUMERIC_GUARD;
+          box.minX = Math.min(box.minX, vertexMinX);
+          box.maxX = Math.max(box.maxX, vertexMaxX);
+          box.minZ = Math.min(box.minZ, vertexMinZ);
+          box.maxZ = Math.max(box.maxZ, vertexMaxZ);
+          if (bladeBounds) {
+            const b = blade * 4;
+            bladeBounds[b] = Math.min(bladeBounds[b], vertexMinX);
+            bladeBounds[b + 1] = Math.max(bladeBounds[b + 1], vertexMaxX);
+            bladeBounds[b + 2] = Math.min(bladeBounds[b + 2], vertexMinZ);
+            bladeBounds[b + 3] = Math.max(bladeBounds[b + 3], vertexMaxZ);
+          }
           const correctedY = point.y + correction;
           minY = Math.min(minY, correctedY - NUMERIC_GUARD);
           maxY = Math.max(maxY, correctedY + NUMERIC_GUARD);
         }
+        if (
+          sweptBladeReusable &&
+          localVertex === verticesPerBlade - 1 &&
+          sweptBladeReusable[blade] === 2
+        )
+          sweptBladeReusable[blade] = 1;
       }
       if (
         ![box.minX, box.maxX, box.minZ, box.maxZ, minY, maxY].every(

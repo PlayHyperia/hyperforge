@@ -1007,7 +1007,9 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
           // The overlapping-owner fixture defers after its first complete
           // envelope but before processedClumps is incremented. Preserve all
           // historical charges except duplicate zero-height fade work, two
-          // reused root transforms per blade, and the new coverage proof.
+          // reused root transforms per blade, verified road-bound reuse, and
+          // the new coverage proof. Each unchanged road vertex replaces two
+          // transforms with one charged live-input check.
           // The reversed two-owner case skips one pair per
           // envelope after one proof. The three-owner overlapping case checks
           // the touching pair, then finds the overlap on its second proof pair
@@ -1021,14 +1023,23 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             trace.filter((phase) => phase === "coverage_owner_pair"),
           ).toHaveLength(proofPairs);
           const skippedOverlapChecks = fixtureIndex === 2 ? envelopes : 0;
-          const reusedRootsPerEnvelope =
-            getGrassBladeLayout(item.request.lod, item.request.geometryLayout)
-              .bladesPerClump * 2;
+          const layout = getGrassBladeLayout(
+            item.request.lod,
+            item.request.geometryLayout,
+          );
+          const reusedRootsPerEnvelope = layout.bladesPerClump * 2;
+          const roadBlades = trace.filter(
+            (phase) => phase === "road_blade_bounds",
+          ).length;
+          expect(roadBlades).toBe(
+            fixtureIndex === 1 ? 2 * layout.bladesPerClump : 0,
+          );
           expect(serial.result.receipt.workUnits).toBe(
             reference.receipt.workUnits -
               (zeroHeightVertices + reusedRootsPerEnvelope) * envelopes +
               proofPairs -
-              skippedOverlapChecks,
+              skippedOverlapChecks -
+              roadBlades * layout.verticesPerBlade,
           );
           if (serial.result.status === "ready" && reference.status === "ready")
             expect(serial.result.bladeVisibility).toEqual(

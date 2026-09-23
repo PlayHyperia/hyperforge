@@ -58,6 +58,7 @@ async function fixture(
   groundingPort?: GrassGroundingWorkerPort,
   lightingCandidate?: "leaf-volume-v1",
   geometryCandidate?: "sheath-close-v1",
+  roadClearance?: "per-blade-v1",
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -96,160 +97,195 @@ async function fixture(
       worker.postMessage(input);
     });
   }
-  await DataManager.getInstance().initialize();
-  const world = new World();
-  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-  const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
-  await terrain.init();
-  terrain["loadWaterBodiesFromManifest"]();
-  terrain["loadFlatZonesFromManifest"]();
-  terrain["subscribeRoadNetworkEvents"]();
-  await roads.init();
-  await roads.start();
-  const setup = {
-    ...terrain["buildGrassWorkerSetup"](),
-    ...(grade ? { compactGrassColorGrade: grade } : {}),
-  };
-  const colorOperations = createCompactTerrainColorOperations();
-  const material = new THREE.MeshBasicMaterial();
-  const visual = new TerrainVisualManager(
-    { minSize: 100, maxDepth: 4, resolution, rootChunkRadius: 0 },
-    terrain["buildChunkTerrainProvider"](),
-    new THREE.Group(),
-    material,
-    setup.terrainConfig,
-    setup.seed,
-    setup.biomeCenters,
-    setup.biomes,
-  );
-  const tree = visual.getQuadTree();
-  const nodes = [-100, 0, 100].flatMap((dx) =>
-    [-100, 0, 100].map((dz) =>
-      tree.createNode(null, null, 100, 350 + dx, 350 + dz, 4),
-    ),
-  );
-  for (const node of nodes) visual["generateChunkSync"](node);
-  const node = nodes[4];
-  const container = new THREE.Group();
-  const owner = new GrassVisualManager(
-    setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
-    container,
-    (leaf) => visual.getRetainedSurface(leaf),
-    (x, z) => terrain["getHeightAtComputed"](x, z),
-    setup.terrainConfig.WATER_THRESHOLD,
-    (x, z) => terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
-    (x, z) => terrain["isGrassExcludedAt"](x, z),
-    (x, z, eligibility) => {
-      const base = terrain.getTerrainColorAt(x, z, true, eligibility);
-      if (!grade) return base;
-      // Explicit CPU provider and real shared palette, not a browser route or
-      // private TerrainSystem cache override. Native startup proves selection.
-      const height = terrain["getHeightAtComputed"](x, z);
-      const dx =
-        terrain["getHeightAtComputed"](x + 0.5, z) -
-        terrain["getHeightAtComputed"](x - 0.5, z);
-      const dz =
-        terrain["getHeightAtComputed"](x, z + 0.5) -
-        terrain["getHeightAtComputed"](x, z - 0.5);
-      const gradient = Math.sqrt(dx * dx + dz * dz);
-      return {
-        ...base,
-        ...colorOperations.sample({
-          grassColorGrade: grade,
-          noiseValue: sampleNoiseCPU(
-            x,
-            z,
-            TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
-          ),
-          meadowNoise: sampleNoiseCPU(
-            x,
-            z,
-            COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale,
-          ),
-          distortNoise: sampleNoiseCPU(
-            x,
-            z,
-            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
-          ),
-          slope: 1 - 1 / Math.sqrt(1 + gradient * gradient),
-          roadInfluence: terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
-          surface: {
-            x,
-            z,
-            height,
-            pond: terrain["getCompactPondMaterial"](),
-            macroField: terrain["getCompactMacroMaterial"](),
-            plantingLobes: setup.compactPlantingLobes,
-          },
-        }),
-      };
-    },
-    setup,
-    {
-      ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
-      ...(coverageTrial ? { coverageTrial } : {}),
-    },
-    undefined,
-    (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
-    (bounds) => visual.captureRetainedSurfaceRegion(bounds),
-    "fine-meadow-v1",
-    undefined,
-    lightingCandidate,
-    groundingPort
-      ? {
-          mode: "worker-v1",
-          createPort: () => groundingPort,
-          isSurfaceCurrent: (surface) =>
-            visual.isRetainedSurfaceCurrent(surface),
-        }
-      : undefined,
-    geometryCandidate,
-  );
-  owner.setPlayerPosition(385, 374);
-  owner["lodFocusX"] = 385;
-  owner["lodFocusZ"] = 374;
-  owner.onNodeNeedsGeometry(node);
-  const work = owner["liveWorkUnits"].get("gcell_v1_15_14")!;
-  async function queue(lod = 0, swap = false, target = work) {
-    const input = owner["createWorkerInput"](target, target.key, lod);
-    const ticket = owner["createWorkerTicket"](target, target.key, lod, swap);
-    const output = await execute(input);
-    owner["settleWorkerResult"](ticket, output);
-    return { input, ticket, output };
+  const setupDisposals: (() => void)[] = [];
+  try {
+    await DataManager.getInstance().initialize();
+    const world = new World();
+    setupDisposals.push(() => world.destroy());
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const roads = world.register(
+      "roads",
+      RoadNetworkSystem,
+    ) as RoadNetworkSystem;
+    await terrain.init();
+    terrain["loadWaterBodiesFromManifest"]();
+    terrain["loadFlatZonesFromManifest"]();
+    terrain["subscribeRoadNetworkEvents"]();
+    await roads.init();
+    await roads.start();
+    const setup = {
+      ...terrain["buildGrassWorkerSetup"](),
+      ...(grade ? { compactGrassColorGrade: grade } : {}),
+    };
+    const colorOperations = createCompactTerrainColorOperations();
+    const material = new THREE.MeshBasicMaterial();
+    setupDisposals.push(() => material.dispose());
+    const visual = new TerrainVisualManager(
+      { minSize: 100, maxDepth: 4, resolution, rootChunkRadius: 0 },
+      terrain["buildChunkTerrainProvider"](),
+      new THREE.Group(),
+      material,
+      setup.terrainConfig,
+      setup.seed,
+      setup.biomeCenters,
+      setup.biomes,
+    );
+    setupDisposals.push(() => visual.dispose());
+    const tree = visual.getQuadTree();
+    const nodes = [-100, 0, 100].flatMap((dx) =>
+      [-100, 0, 100].map((dz) =>
+        tree.createNode(null, null, 100, 350 + dx, 350 + dz, 4),
+      ),
+    );
+    for (const node of nodes) visual["generateChunkSync"](node);
+    const node = nodes[4];
+    const container = new THREE.Group();
+    const owner = new GrassVisualManager(
+      setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
+      container,
+      (leaf) => visual.getRetainedSurface(leaf),
+      (x, z) => terrain["getHeightAtComputed"](x, z),
+      setup.terrainConfig.WATER_THRESHOLD,
+      (x, z) => terrain["calculateRoadInfluenceAtVertex"](x, z, 0, 0),
+      (x, z) => terrain["isGrassExcludedAt"](x, z),
+      (x, z, eligibility) => {
+        const base = terrain.getTerrainColorAt(x, z, true, eligibility);
+        if (!grade) return base;
+        // Explicit CPU provider and real shared palette, not a browser route or
+        // private TerrainSystem cache override. Native startup proves selection.
+        const height = terrain["getHeightAtComputed"](x, z);
+        const dx =
+          terrain["getHeightAtComputed"](x + 0.5, z) -
+          terrain["getHeightAtComputed"](x - 0.5, z);
+        const dz =
+          terrain["getHeightAtComputed"](x, z + 0.5) -
+          terrain["getHeightAtComputed"](x, z - 0.5);
+        const gradient = Math.sqrt(dx * dx + dz * dz);
+        return {
+          ...base,
+          ...colorOperations.sample({
+            grassColorGrade: grade,
+            noiseValue: sampleNoiseCPU(
+              x,
+              z,
+              TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+            ),
+            meadowNoise: sampleNoiseCPU(
+              x,
+              z,
+              COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale,
+            ),
+            distortNoise: sampleNoiseCPU(
+              x,
+              z,
+              TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+            ),
+            slope: 1 - 1 / Math.sqrt(1 + gradient * gradient),
+            roadInfluence: terrain["calculateRoadInfluenceAtVertex"](
+              x,
+              z,
+              0,
+              0,
+            ),
+            surface: {
+              x,
+              z,
+              height,
+              pond: terrain["getCompactPondMaterial"](),
+              macroField: terrain["getCompactMacroMaterial"](),
+              plantingLobes: setup.compactPlantingLobes,
+            },
+          }),
+        };
+      },
+      setup,
+      {
+        ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
+        ...(coverageTrial ? { coverageTrial } : {}),
+        ...(roadClearance ? { roadClearance } : {}),
+      },
+      undefined,
+      (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+      (bounds) => visual.captureRetainedSurfaceRegion(bounds),
+      "fine-meadow-v1",
+      undefined,
+      lightingCandidate,
+      groundingPort
+        ? {
+            mode: "worker-v1",
+            createPort: () => groundingPort,
+            isSurfaceCurrent: (surface) =>
+              visual.isRetainedSurfaceCurrent(surface),
+          }
+        : undefined,
+      geometryCandidate,
+    );
+    setupDisposals.push(() => owner.destroy());
+    owner.setPlayerPosition(385, 374);
+    owner["lodFocusX"] = 385;
+    owner["lodFocusZ"] = 374;
+    owner.onNodeNeedsGeometry(node);
+    const work = owner["liveWorkUnits"].get("gcell_v1_15_14")!;
+    async function queue(lod = 0, swap = false, target = work) {
+      const input = owner["createWorkerInput"](target, target.key, lod);
+      const ticket = owner["createWorkerTicket"](target, target.key, lod, swap);
+      const output = await execute(input);
+      owner["settleWorkerResult"](ticket, output);
+      return { input, ticket, output };
+    }
+    function finish(key = work.key) {
+      let slices = 0,
+        uploads = 0;
+      while (
+        owner["groundingJobs"].get(key)?.job.state.status === "running" &&
+        slices++ < 1000
+      )
+        uploads += owner["advanceGroundingJob"]();
+      expect(slices).toBeLessThan(1000);
+      return uploads;
+    }
+    return {
+      world,
+      terrain,
+      setup,
+      visual,
+      tree,
+      nodes,
+      node,
+      owner,
+      container,
+      work,
+      queue,
+      execute,
+      finish,
+      close() {
+        void worker.terminate();
+        owner.destroy();
+        visual.dispose();
+        material.dispose();
+        world.destroy();
+      },
+    };
+  } catch (error) {
+    // A rejected async setup cannot return its close method to the caller.
+    // Release every resource already created, including the placement worker.
+    const cleanupErrors: unknown[] = [];
+    for (const dispose of setupDisposals.reverse()) {
+      try {
+        dispose();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    try {
+      await worker.terminate();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length)
+      throw new Error([String(error), ...cleanupErrors.map(String)].join("\n"));
+    throw error;
   }
-  function finish(key = work.key) {
-    let slices = 0,
-      uploads = 0;
-    while (
-      owner["groundingJobs"].get(key)?.job.state.status === "running" &&
-      slices++ < 1000
-    )
-      uploads += owner["advanceGroundingJob"]();
-    expect(slices).toBeLessThan(1000);
-    return uploads;
-  }
-  return {
-    world,
-    terrain,
-    setup,
-    visual,
-    tree,
-    nodes,
-    node,
-    owner,
-    container,
-    work,
-    queue,
-    execute,
-    finish,
-    close() {
-      void worker.terminate();
-      owner.destroy();
-      visual.dispose();
-      material.dispose();
-      world.destroy();
-    },
-  };
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
@@ -1938,34 +1974,347 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     }
   });
 
-  it("cancels a running opposite-LOD grounding job before it can replace a still-correct mesh", async () => {
-    const f = await fixture();
-    try {
-      await f.queue();
-      f.owner["processSettledWorkerResults"]();
-      f.finish();
-      const original = f.owner["chunks"].get(f.work.key)!.mesh;
-      f.owner["lodFocusX"] = 450;
-      f.owner["lodFocusZ"] = 362.5;
-      f.owner["pendingLodSwap"].set(f.work.key, {
-        node: f.node,
-        work: f.work,
-        desiredLod: 1,
-      });
-      await f.queue(1, true);
-      f.owner["processSettledWorkerResults"]();
-      const job = f.owner["groundingJobs"].get(f.work.key)!.job;
-      expect(job.state.status).toBe("running");
-      f.owner["lodFocusX"] = 385;
-      f.owner["cancelObsoleteLodWork"]();
-      expect(job.state.status).toBe("cancelled");
-      expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
-      expect(f.owner["advanceGroundingJob"]()).toBe(0);
-      expect(f.owner["chunks"].get(f.work.key)!.mesh).toBe(original);
-    } finally {
-      f.close();
-    }
-  });
+  it.each([
+    {
+      name: "historical 0→1→0",
+      candidate: false,
+      from: 0,
+      to: 1,
+      home: -15,
+      away: 50,
+    },
+    {
+      name: "close detail 0→1→0",
+      candidate: true,
+      from: 0,
+      to: 1,
+      home: 0,
+      away: 20,
+    },
+    {
+      name: "close detail 1→0→1",
+      candidate: true,
+      from: 1,
+      to: 0,
+      home: 20,
+      away: 0,
+    },
+    {
+      name: "close detail 1→2→1",
+      candidate: true,
+      from: 1,
+      to: 2,
+      home: 20,
+      away: 60,
+    },
+    {
+      name: "close detail 2→1→2",
+      candidate: true,
+      from: 2,
+      to: 1,
+      home: 60,
+      away: 20,
+    },
+  ] as const)(
+    "cancels a running opposite-LOD grounding job before it can replace a still-correct mesh: $name",
+    async (scenario) => {
+      // Retain the historical real-placement-worker/local-grounding case. New
+      // tiers additionally exercise an actual pending grounding-worker reply.
+      const port = scenario.candidate
+        ? new ActualGrassGroundingClientPort(
+            (await bundleGrassGroundingWorker()).source,
+          )
+        : undefined;
+      let ownedFixture: Awaited<ReturnType<typeof fixture>> | undefined;
+      try {
+        if (port) await port.ready();
+        const f = (ownedFixture = await fixture(
+          undefined,
+          undefined,
+          16,
+          port,
+          scenario.candidate ? "leaf-volume-v1" : undefined,
+          scenario.candidate ? "sheath-close-v1" : undefined,
+          scenario.candidate ? "per-blade-v1" : undefined,
+        ));
+        const focus = (distance: number) => {
+          f.owner["lodFocusX"] = f.work.bounds.maxX + distance;
+          f.owner["lodFocusZ"] = (f.work.bounds.minZ + f.work.bounds.maxZ) / 2;
+        };
+        focus(scenario.home);
+        const initial = await f.queue(scenario.from);
+        f.owner["processSettledWorkerResults"]();
+        if (port) {
+          let uploads = 0;
+          const deadline = performance.now() + 10000;
+          while (
+            f.owner["groundingJobs"].get(f.work.key)?.job.state.status ===
+            "running"
+          ) {
+            const uploaded = f.owner["advanceGroundingJob"]();
+            expect(uploaded).toBeLessThanOrEqual(1);
+            uploads += uploaded;
+            if (performance.now() >= deadline)
+              throw new Error(
+                "Opposite-LOD initial worker publication deadline",
+              );
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          expect(uploads).toBe(1);
+        } else expect(f.finish()).toBe(1);
+
+        const current = f.owner["chunks"].get(f.work.key);
+        if (!current)
+          throw new Error("Initial grounded cell must be published");
+        const original = current.mesh;
+        const material = original.material;
+        if (Array.isArray(material))
+          throw new Error("One grounded material required");
+        const geometryLayout = scenario.candidate
+          ? "fine-folded-sheath-near5-v1"
+          : "fine-linear-sweep-3seg-v1";
+        const layout = getGrassBladeLayout(scenario.from, geometryLayout);
+        expect(current.lodLevel).toBe(scenario.from);
+        expect(original.count).toBeGreaterThan(0);
+        expect(material.userData.grassBladeLayout).toBe(layout);
+        expect(layout.verticesPerBlade).toBe(
+          scenario.candidate ? [15, 9, 5][scenario.from] : 7,
+        );
+        expect(original.geometry.getAttribute("position").count).toBe(
+          scenario.candidate ? [360, 216, 60][scenario.from] : 168,
+        );
+        expect(original.geometry.index?.count).toBe(
+          scenario.candidate ? [1224, 648, 108][scenario.from] : 360,
+        );
+        for (const name of ["position", "normal", "uv"])
+          expect(original.geometry.getAttribute(name).array).toEqual(
+            f.owner["lodGeometries"][scenario.from].getAttribute(name).array,
+          );
+        const roots = original.geometry.getAttribute("grassRootDeltas");
+        const masks = original.geometry.getAttribute("grassBladeVisibility");
+        expect(roots.itemSize).toBe(2);
+        expect(roots.count).toBe(original.count * layout.bladesPerClump);
+        let visibleBlades = 0;
+        if (scenario.candidate) {
+          expect(masks.count).toBe(original.count);
+          if (!(masks.array instanceof Uint32Array))
+            throw new Error("Published blade masks must remain Uint32");
+          for (const mask of masks.array) {
+            expect(mask).toBeGreaterThan(0);
+            expect(mask).toBeLessThan(2 ** layout.bladesPerClump);
+            for (let bits = mask; bits; bits &= bits - 1) visibleBlades++;
+          }
+        } else expect(masks).toBeUndefined();
+        const grounding = original.userData.grassBladeGrounding;
+        const sourceIndices = grounding.sourceIndices;
+        if (!(sourceIndices instanceof Uint32Array))
+          throw new Error("Actual admitted source indices required");
+        expect(sourceIndices.length).toBe(original.count);
+        expect(
+          sourceIndices.every((index) => index < initial.output.count),
+        ).toBe(true);
+        if (scenario.candidate)
+          expect(grounding.roadClearance.retainedBlades).toBe(visibleBlades);
+        else expect(grounding.roadClearance).toBeUndefined();
+        const attributes = Object.entries(original.geometry.attributes).map(
+          ([name, attribute]) => ({
+            name,
+            attribute,
+            values: attribute.array.slice(),
+          }),
+        );
+        const initialSources = sourceIndices.slice();
+        const originalAdmission = f.owner["completedGrounding"].get(f.work.key);
+        if (!originalAdmission)
+          throw new Error("Initial grounding lease required");
+        let geometryDisposals = 0;
+        let materialDisposals = 0;
+        original.geometry.addEventListener(
+          "dispose",
+          () => geometryDisposals++,
+        );
+        material.addEventListener("dispose", () => materialDisposals++);
+
+        focus(scenario.away);
+        expect(f.owner["desiredLod"](f.work)).toBe(scenario.to);
+        f.owner["pendingLodSwap"].set(f.work.key, {
+          node: f.node,
+          work: f.work,
+          desiredLod: scenario.to,
+        });
+        const queued = await f.queue(scenario.to, true);
+        if (scenario.candidate) {
+          expect(initial.input.spacingMul).toBe(1);
+          expect(queued.input).toEqual(initial.input);
+          for (const name of [
+            "offsets",
+            "rotScaleHash",
+            "groundColors",
+            "grassTints",
+            "groundNormals",
+          ] as const)
+            expect(queued.output[name]).toEqual(initial.output[name]);
+        }
+        f.owner["processSettledWorkerResults"]();
+        const entry = f.owner["groundingJobs"].get(f.work.key);
+        if (!entry) throw new Error("Opposite-LOD grounding job required");
+        const job = entry.job;
+        expect(job.state.status).toBe("running");
+        let pendingReply: number | null = null;
+        if (port) {
+          expect(job).toBeInstanceOf(GrassGroundingWorkerJob);
+          const deadline = performance.now() + 10000;
+          while (job.lastPhase !== "worker_fit_dispatch") {
+            expect(f.owner["advanceGroundingJob"]()).toBe(0);
+            expect(job.state.status).toBe("running");
+            if (performance.now() >= deadline)
+              throw new Error("Opposite-LOD cached worker dispatch deadline");
+            // Do not yield after the actual dispatch: the cancellation occurs
+            // before the real reply can be delivered to the main event loop.
+            if (job.lastPhase !== "worker_fit_dispatch")
+              await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          const coordinator = f.owner["groundingWorker"];
+          if (!coordinator)
+            throw new Error("Actual grounding coordinator required");
+          expect(coordinator["pending"]?.kind).toBe("start_cached");
+          expect(coordinator["client"]["slot"]?.settled).toBeNull();
+          pendingReply = coordinator.receipt.transportJobId;
+          expect(coordinator.receipt.reservedInputBytes).toBeGreaterThan(
+            coordinator.receipt.cacheInputBytes,
+          );
+        }
+
+        focus(scenario.home);
+        expect(f.owner["desiredLod"](f.work)).toBe(scenario.from);
+        f.owner["cancelObsoleteLodWork"]();
+        expect(job.state.status).toBe("cancelled");
+        expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
+        expect(f.owner["pendingLodSwap"].has(f.work.key)).toBe(false);
+        expect(f.owner["advanceGroundingJob"]()).toBe(0);
+        expect(f.owner["chunks"].get(f.work.key)?.mesh).toBe(original);
+
+        if (port) {
+          if (pendingReply === null)
+            throw new Error("Real pending reply identity required");
+          // This is the worker's unmodified terminal response, whether its
+          // cancellation won the race or a ready response was already in flight.
+          const reply = await port.waitFor("result", pendingReply);
+          expect(reply.jobId).toBe(pendingReply);
+          expect(["cancelled", "ready"]).toContain(reply.state.status);
+          const coordinator = f.owner["groundingWorker"];
+          if (!coordinator)
+            throw new Error("Actual grounding coordinator required");
+          const deadline = performance.now() + 10000;
+          while (
+            coordinator.receipt.activeGeneration !== null ||
+            coordinator.receipt.phase !== "idle"
+          ) {
+            expect(f.owner["advanceGroundingJob"]()).toBe(0);
+            if (performance.now() >= deadline)
+              throw new Error(
+                "Cancelled opposite-LOD payload release deadline",
+              );
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          expect(coordinator.receipt.transportJobId).toBeNull();
+          expect(coordinator.receipt.reservedOwners).toBe(
+            coordinator.receipt.cacheOwners,
+          );
+          expect(coordinator.receipt.reservedInputBytes).toBe(
+            coordinator.receipt.cacheInputBytes,
+          );
+          expect(coordinator.receipt.reservedDerivedBytes).toBe(
+            coordinator.receipt.cacheDerivedBytesReserved,
+          );
+          expect(coordinator.receipt.lastAdmissionFailure).toBeNull();
+          expect(coordinator.receipt.lastFittingFailure).toBeUndefined();
+          // LOD cancellation releases its transient payload, not still-valid
+          // retained terrain owners or the currently displayed mesh's lease.
+          expect(coordinator.receipt.cacheOwners).toBeGreaterThan(0);
+        }
+        // Duplicate-after-consumption is a separate stale-message guard: this
+        // ticket's placement result was already consumed to start grounding.
+        f.owner["settleWorkerResult"](queued.ticket, queued.output);
+        expect(f.owner["processSettledWorkerResults"]()).toBe(0);
+        expect(f.owner["advanceGroundingJob"]()).toBe(0);
+        expect(f.owner["workerInflight"].has(f.work.key)).toBe(false);
+        expect(f.owner["settledWorkerResults"]).toHaveLength(0);
+
+        // Also cancel a genuinely outstanding placement request before its
+        // actual worker reply can be delivered. No fabricated result or replay.
+        focus(scenario.away);
+        f.owner["pendingLodSwap"].set(f.work.key, {
+          node: f.node,
+          work: f.work,
+          desiredLod: scenario.to,
+        });
+        const placementInput = f.owner["createWorkerInput"](
+          f.work,
+          f.work.key,
+          scenario.to,
+        );
+        const placementTicket = f.owner["createWorkerTicket"](
+          f.work,
+          f.work.key,
+          scenario.to,
+          true,
+        );
+        const outstandingPlacement = f.execute(placementInput);
+        let placementOutput: GrassWorkerOutput;
+        try {
+          focus(scenario.home);
+          f.owner["cancelObsoleteLodWork"]();
+        } finally {
+          // Always consume this real request, including a cancellation failure.
+          placementOutput = await outstandingPlacement;
+        }
+        expect(f.owner["workerInflight"].has(f.work.key)).toBe(false);
+        expect(f.owner["pendingLodSwap"].has(f.work.key)).toBe(false);
+        expect(placementOutput.count).toBeGreaterThan(0);
+        f.owner["settleWorkerResult"](placementTicket, placementOutput);
+        expect(f.owner["settledWorkerResults"]).toHaveLength(0);
+        expect(f.owner["processSettledWorkerResults"]()).toBe(0);
+        expect(f.owner["advanceGroundingJob"]()).toBe(0);
+        expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
+        expect(f.owner["chunks"].get(f.work.key)).toBe(current);
+        expect(f.owner["completedGrounding"].get(f.work.key)).toBe(
+          originalAdmission,
+        );
+        expect(originalAdmission.region.isCurrent()).toBe(true);
+        expect(originalAdmission.inputs.isCurrent()).toBe(true);
+        expect(grounding.sourceIndices).toEqual(initialSources);
+        for (const { name, attribute, values } of attributes) {
+          expect(original.geometry.getAttribute(name), name).toBe(attribute);
+          expect(attribute.array, name).toEqual(values);
+        }
+        expect(geometryDisposals).toBe(0);
+        expect(materialDisposals).toBe(0);
+        expect(f.owner.getProfileReceipt().grounding?.failedChunks).toBe(0);
+        f.owner.destroy();
+        expect(geometryDisposals).toBe(1);
+        expect(materialDisposals).toBe(1);
+        expect(f.owner["completedGrounding"].size).toBe(0);
+        expect(f.container.children).toHaveLength(0);
+        if (port) {
+          expect(port.terminateCalls).toBe(1);
+          expect(port.listenerCount).toBe(0);
+          expect(f.owner.getProfileReceipt().grounding?.worker).toMatchObject({
+            cacheOwners: 0,
+            reservedOwners: 0,
+            reservedInputBytes: 0,
+            reservedDerivedBytes: 0,
+          });
+        }
+      } finally {
+        try {
+          ownedFixture?.close();
+        } finally {
+          await port?.close();
+        }
+      }
+    },
+  );
 
   it("retires every child on parent replacement and ignores late old-parent teardown/results", async () => {
     const f = await fixture();

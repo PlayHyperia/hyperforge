@@ -22,6 +22,10 @@ import {
 import { createCompactPreparationDetailRegions } from "../CompactIslandDetail";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { ProceduralDocks } from "../ProceduralDocks";
+import {
+  COMPACT_SERVICE_COURT_SYSTEM,
+  CompactServiceCourtSystem,
+} from "../CompactServiceCourtSystem";
 import { TerrainVisualManager } from "../TerrainVisualManager";
 import {
   FINE_MEADOW_APPEARANCE,
@@ -331,7 +335,8 @@ const native144Cases = (
   lod: 0 as const,
   key: cell.key,
   bounds: cell.bounds,
-  native144: {
+  nativeSheath: {
+    id: "native144" as const,
     source: "native144/process.json",
     sourceSHA256:
       "26f5618a7b482f906cf045ba5e3025ed7e6de866e40216da93f1366d1629f37c",
@@ -352,6 +357,50 @@ const native144Cases = (
       "Native144 retained two failed geometric-work prefixes, not worker packets. Current-source reconstruction uses actual v10 composition, retained owners, focus and explicit sheath geometry. Native143 counts pin unchanged source placement only; current clearance, outputs and work are independently observed. No byte-exact historical replay, native startup, art or performance qualification.",
   },
 }));
+
+const native146Case = {
+  name: "native146 first-camera LOD0 sheath gcell_v1_15_17 work budget",
+  test: "reconstructs the native146 gcell_v1_15_17 first-camera geometric-budget failure with actual v10 owners and unchanged caps",
+  enabled: process.env.ASSETS_DIR?.endsWith(
+    "/inland-pond-integration01-UNQUALIFIED/assets-v10",
+  ),
+  label: "NATIVE146_LOD0_POND_BANK_ARRIVAL",
+  // This actual halo crosses x400. Both retained owners are selected by the
+  // existing v10 detail policy, not a synthetic terrain or resolution override.
+  nodes: [
+    [350, 450],
+    [450, 450],
+  ],
+  resolutions: [128, 128],
+  focus: [372, 448],
+  lod: 0,
+  key: "gcell_v1_15_17",
+  bounds: { minX: 375, maxX: 400, minZ: 425, maxZ: 450 },
+  nativeSheath: {
+    id: "native146",
+    source: "native146/process.json",
+    sourceSHA256:
+      "0a505d7e08dcb42f1ac00a8946d5c99d87f6c6e297d2e589bc139ed0c11fcaf3",
+    worldConfigSHA256:
+      "60f98f5e300db1eb58902723d4f9a5859db4b3a75fc78ec81e1b3673832ac254",
+    worldAreasSHA256:
+      "438cabb6f34e965b708f0276d050cb2cda222252bdc8412123ee0c7e50e210c3",
+    failedOperations: 204088,
+    failedActiveMs: 57.399999994784594,
+    lastPhase: "blade_swept_bounds",
+    failureReason: "grounding_work",
+    nodeId: 49,
+    isLodSwap: true,
+    cameraId: "pond-bank-arrival",
+    baselineSource: "native145/pond-bank-arrival.json",
+    baselineSourceSHA256:
+      "fc99d78e9019d32ad429b5112e931e41b10ae64a086db7f89de90b3142180c94",
+    baselineInputClumps: 1125,
+    baselineWorkUnits: 731800,
+    scope:
+      "Native146 completed startup but failed this first-camera LOD swap under the geometric-work cap; its worker packet was not retained. Current-source reconstruction uses actual v10 composition, both retained owners, camera focus, the real service-court footing-exclusion owner and explicit sheath geometry. Native145 matched-view counts pin unchanged source placement only, not candidate retention, masks or work. This is an isolated full-cell reconstruction, not byte-exact historical replay, LOD scheduling, native startup, art or performance qualification.",
+  },
+} as const;
 
 const historicalCases = [
   {
@@ -846,12 +895,15 @@ const historicalCases = [
 ] as const;
 
 type PondGroundingScenario =
-  (typeof native144Cases)[number] | (typeof historicalCases)[number];
+  | (typeof native144Cases)[number]
+  | typeof native146Case
+  | (typeof historicalCases)[number];
 
 // Keep the original tuple's exact union members: combining two variadic
 // spreads directly normalizes absent discriminators into optional fields.
 const cases: readonly PondGroundingScenario[] = [
   ...native144Cases,
+  native146Case,
   ...historicalCases,
 ];
 
@@ -966,7 +1018,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
     async () => {
       const lod = "lod" in scenario ? scenario.lod : 0;
       const usesNativeComposition =
-        "native144" in scenario ||
+        "nativeSheath" in scenario ||
         "native52" in scenario ||
         "native72" in scenario ||
         "native74" in scenario ||
@@ -978,7 +1030,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         "native121" in scenario ||
         "native95" in scenario;
       const usesNativeDetail =
-        "native144" in scenario ||
+        "nativeSheath" in scenario ||
         "native82" in scenario ||
         "native86" in scenario ||
         "native106" in scenario ||
@@ -987,8 +1039,8 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         "native121" in scenario ||
         "native95" in scenario;
       const reconstructionObservation =
-        "native144" in scenario
-          ? scenario.native144
+        "nativeSheath" in scenario
+          ? scenario.nativeSheath
           : "native121" in scenario
             ? scenario.native121
             : "native118" in scenario
@@ -1018,10 +1070,19 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
       const reconstructionSources = reconstructionObservation
         ? [
             ...new Set(
-              "native121" in scenario || "native144" in scenario
+              "native121" in scenario || "nativeSheath" in scenario
                 ? [
                     ...fittingReconstructionSourcePaths,
                     ...groundingWorkerSourcePins.map((pin) => pin.path),
+                    ...("nativeSheath" in scenario &&
+                    scenario.nativeSheath.id === "native146"
+                      ? [
+                          "../CompactServiceCourtSystem.ts",
+                          "../CompactServiceCourt.ts",
+                        ].map((path) =>
+                          fileURLToPath(new URL(path, import.meta.url)),
+                        )
+                      : []),
                   ]
                 : surfaceReconstructionSourcePaths,
             ),
@@ -1054,9 +1115,10 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           >
         | undefined;
       let docks: ProceduralDocks | undefined;
+      let serviceCourts: CompactServiceCourtSystem | undefined;
       const failures: unknown[] = [];
       reconstruction: try {
-        if ("native121" in scenario || "native144" in scenario) {
+        if ("native121" in scenario || "nativeSheath" in scenario) {
           evidence(
             `${scenario.label}_SOURCE_INPUT_PINS`,
             JSON.stringify({
@@ -1143,6 +1205,53 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             "pond-dock-haven-reed-jetty",
           ]);
         }
+        if (
+          "nativeSheath" in scenario &&
+          scenario.nativeSheath.id === "native146"
+        ) {
+          // Native145's saved outlyingBank authority includes these four live
+          // footing exclusions inside cell15_17. Terrain/roads/docks omit this
+          // deterministic owner; its missing placement exclusions are not RNG
+          // or a reason to replace the historical 1125 source-count assertion.
+          serviceCourts = world.register(
+            COMPACT_SERVICE_COURT_SYSTEM,
+            CompactServiceCourtSystem,
+          ) as CompactServiceCourtSystem;
+          await serviceCourts.init();
+          await serviceCourts.start();
+          const pondCourt = serviceCourts
+            .getAllDiagnostics()
+            .find((court) => court.layoutId === "haven-pond-bank-v1");
+          expect(pondCourt).toMatchObject({
+            position: { x: 384, z: 438 },
+            blockingTiles: [
+              { x: 380, z: 434 },
+              { x: 387, z: 434 },
+              { x: 380, z: 441 },
+              { x: 387, z: 441 },
+            ],
+          });
+          const footings = terrain[
+            "landscapeGrassSurface"
+          ].exclusionPolygons.filter((polygon) =>
+            polygon.id.startsWith("haven-pond-bank-v1-footing-"),
+          );
+          expect(footings.map((polygon) => polygon.id)).toEqual(
+            [0, 1, 2, 3].map((index) => `haven-pond-bank-v1-footing-${index}`),
+          );
+          evidence(
+            `${scenario.label}_SERVICE_COURT_OWNER`,
+            JSON.stringify({
+              historicalSource: "native145/process.json#outlyingBank.authority",
+              historicalSourceSHA256:
+                "f863378b5fba84c713d5295f9932de20bc7abe50036a52b1b18b069356a3ff7a",
+              actualOwner: pondCourt,
+              actualGrassExclusions: footings,
+              scope:
+                "Actual shared court owner and its four deterministic pond-bank grass polygons. CPU fixture includes native physics; historical art owner reported no physics actor. Grass XZ footprints, not physics presence or cached ground heights, are the placement inputs being reconstructed.",
+            }),
+          );
+        }
         const setup = {
           ...terrain["buildGrassWorkerSetup"](),
           compactGrassColorGrade:
@@ -1194,7 +1303,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         }
         if ("native86" in scenario)
           expect(nodes.map((node) => node.resolution)).toEqual([128]);
-        if ("native95" in scenario || "native144" in scenario)
+        if ("native95" in scenario || "nativeSheath" in scenario)
           expect(nodes.map((node) => node.resolution)).toEqual(
             scenario.resolutions,
           );
@@ -1252,7 +1361,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               "native108" in scenario ||
               "native118" in scenario ||
               "native121" in scenario ||
-              "native144" in scenario) &&
+              "nativeSheath" in scenario) &&
               step.value.isRegularGrid)
           ) {
             // Historical pond fixtures all build refined 128-grid owners.
@@ -1500,7 +1609,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           terrain["getCompactHabitatMaterial"]("haven-understory-v1"),
           usesNativeComposition ? "leaf-volume-v1" : undefined,
           undefined,
-          "native144" in scenario ? "sheath-close-v1" : undefined,
+          "nativeSheath" in scenario ? "sheath-close-v1" : undefined,
         );
         if (usesNativeComposition) {
           // Consume the focus through the real update boundary before queuing
@@ -1577,7 +1686,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             { centerX: 250, centerZ: 450, size: 100, resolution: 64 },
           ]);
         }
-        if ("native95" in scenario || "native144" in scenario) {
+        if ("native95" in scenario || "nativeSheath" in scenario) {
           expect(
             region.surfaces.map((surface) => [
               surface.centerX,
@@ -1625,14 +1734,14 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           },
         };
         expect(request.geometryLayout).toBe(
-          "native144" in scenario
+          "nativeSheath" in scenario
             ? "fine-folded-sheath-near5-v1"
             : usesNativeComposition
               ? "fine-folded-lancet-v1"
               : "fine-linear-sweep-3seg-v1",
         );
         const actualLayout = getGrassBladeLayout(lod, request.geometryLayout);
-        if ("native144" in scenario) {
+        if ("nativeSheath" in scenario) {
           expect(actualLayout).toMatchObject({
             bladesPerClump: 24,
             bladeSegments: 5,
@@ -1644,7 +1753,9 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           expect(manager.getProfileReceipt().placement?.detailLodDistance).toBe(
             12,
           );
-          expect(projected.count).toBe(scenario.native144.baselineInputClumps);
+          expect(projected.count).toBe(
+            scenario.nativeSheath.baselineInputClumps,
+          );
           expect(request.workBudget).toBeUndefined();
         }
         expect(request.geometry.getAttribute("position").count).toBe(
@@ -1786,7 +1897,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             }),
           );
         }
-        if ("native144" in scenario) {
+        if ("nativeSheath" in scenario) {
           expect(pondServiceGround).toBeDefined();
           expect(pondServiceGround).toEqual(setup.pondServiceGround);
           const packet = createGrassGroundingWorkerRequest(request);
@@ -1796,7 +1907,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               key,
               lod,
               focus: scenario.focus,
-              historicalObservation: scenario.native144,
+              historicalObservation: scenario.nativeSheath,
               terrainSeed: setup.seed,
               terrainProfileIdentity:
                 setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
@@ -1825,7 +1936,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 positions: bufferReceipt(snapshot.positions),
                 indices: bufferReceipt(snapshot.indices),
               })),
-              scope: scenario.native144.scope,
+              scope: scenario.nativeSheath.scope,
             }),
           );
         }
@@ -1862,8 +1973,11 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             ...("native121" in scenario
               ? { native121HistoricalObservation: scenario.native121 }
               : {}),
-            ...("native144" in scenario
-              ? { native144HistoricalObservation: scenario.native144 }
+            ...("nativeSheath" in scenario
+              ? {
+                  [`${scenario.nativeSheath.id}HistoricalObservation`]:
+                    scenario.nativeSheath,
+                }
               : {}),
             ...("native95" in scenario
               ? { native95HistoricalObservation: scenario.native95 }
@@ -2215,7 +2329,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           throw new Error(
             `Actual cached pond worker ${cachedResult.state.status}`,
           );
-        if ("native144" in scenario) {
+        if ("nativeSheath" in scenario) {
           expect(cachedResult.work.operations).toBeLessThan(1_000_000);
           expect(cachedResult.work.activeMs).toBeLessThan(250);
         }
@@ -2878,7 +2992,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         expect(pipeline.state.status).toBe("ready");
         if (pipeline.state.status !== "ready")
           throw new Error(pipeline.state.status);
-        if ("native144" in scenario) {
+        if ("nativeSheath" in scenario) {
           expect(pipeline.operations).toBeLessThan(1_000_000);
           expect(pipeline.activeMs).toBeLessThan(250);
           expect(pipeline.state.result.receipt.processedClumps).toBe(
@@ -2994,7 +3108,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           expect(mesh.material.colorNode).toBe(base.colorNode);
           expect(mesh.material.aoNode).toBe(base.aoNode);
           expect(mesh.material.userData.grassBladeLayout).toEqual(actualLayout);
-          if ("native144" in scenario) {
+          if ("nativeSheath" in scenario) {
             expect(mesh.material.userData.fineGrassCanopyLighting).toBe(
               selected.userData.fineGrassCanopyLighting,
             );
@@ -3069,9 +3183,10 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         release(() => visual?.dispose());
         release(() => material.dispose());
         // Release native dock actors/exclusions before terrain or physics dies.
+        release(() => serviceCourts?.destroy());
         release(() => docks?.destroy());
         release(() => world.destroy());
-        if ("native121" in scenario || "native144" in scenario)
+        if ("native121" in scenario || "nativeSheath" in scenario)
           release(() => {
             const pinsBefore = [
               ...reconstructionSources,
