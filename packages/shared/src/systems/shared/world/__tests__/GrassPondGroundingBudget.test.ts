@@ -402,6 +402,22 @@ const native146Case = {
   },
 } as const;
 
+// Same real source populations and retained owners, newly composed templates.
+// Historical receipts pin the scenario only, never the new geometry or masks.
+const rootedFanCases = [...native144Cases, native146Case].map((source) => ({
+  ...source,
+  name: `rooted fan LOD0 ${source.key} actual v10 work budget`,
+  test: `fits rooted fan ${source.key} using actual v10 owners and unchanged caps`,
+  label: `ROOTED_FAN_${source.key.toUpperCase()}`,
+  geometryCandidate: "rooted-fan-v1" as const,
+  nativeSheath: {
+    ...source.nativeSheath,
+    scope:
+      "New rooted-fan geometry evaluated on the historical source-placement scenario. This is not historical geometry replay; retention, masks and cost are newly measured. " +
+      source.nativeSheath.scope,
+  },
+}));
+
 const historicalCases = [
   {
     name: "native121 startup LOD0 western pond work budget",
@@ -897,6 +913,7 @@ const historicalCases = [
 type PondGroundingScenario =
   | (typeof native144Cases)[number]
   | typeof native146Case
+  | (typeof rootedFanCases)[number]
   | (typeof historicalCases)[number];
 
 // Keep the original tuple's exact union members: combining two variadic
@@ -904,6 +921,7 @@ type PondGroundingScenario =
 const cases: readonly PondGroundingScenario[] = [
   ...native144Cases,
   native146Case,
+  ...rootedFanCases,
   ...historicalCases,
 ];
 
@@ -1609,7 +1627,11 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           terrain["getCompactHabitatMaterial"]("haven-understory-v1"),
           usesNativeComposition ? "leaf-volume-v1" : undefined,
           undefined,
-          "nativeSheath" in scenario ? "sheath-close-v1" : undefined,
+          "geometryCandidate" in scenario
+            ? scenario.geometryCandidate
+            : "nativeSheath" in scenario
+              ? "sheath-close-v1"
+              : undefined,
         );
         if (usesNativeComposition) {
           // Consume the focus through the real update boundary before queuing
@@ -1908,6 +1930,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               lod,
               focus: scenario.focus,
               historicalObservation: scenario.nativeSheath,
+              geometryCandidate: manager.getProfileReceipt().geometryCandidate,
               terrainSeed: setup.seed,
               terrainProfileIdentity:
                 setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,

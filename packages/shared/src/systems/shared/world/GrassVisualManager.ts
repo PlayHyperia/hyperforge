@@ -305,6 +305,23 @@ export const FINE_GRASS_CLOSE_DETAIL = Object.freeze({
   spacingMultiplier: 1,
 } as const);
 
+/** Explicit composition-only trial using the same blades and buffer layouts.
+ * Fixed progressive fan centers keep every shorter LOD prefix in place; the
+ * historical tuft recipe instead depends on the requested blade count. */
+export const FINE_GRASS_ROOTED_FAN_COMPOSITION = Object.freeze({
+  id: "rooted-fan-v1",
+  bladesPerFan: 4,
+  centerRadius: 0.52,
+  rootRadius: 0.025,
+  facingJitter: 0.16,
+  curveJitter: 0.12,
+} as const);
+
+export const FINE_GRASS_ROOTED_FAN_SHAPE = Object.freeze({
+  ...FINE_GRASS_FOLDED_BLADE_SHAPE,
+  ROOT_COMPOSITION: "progressive-fan-v1",
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -402,6 +419,7 @@ type GrassBladeShape = Pick<
   /** Additional upper-leaf width; zero at the root, full gain at half height. */
   BLADE_UPPER_WIDTH_GAIN?: number;
   PROGRESSIVE_ROOTS?: boolean;
+  ROOT_COMPOSITION?: "progressive-fan-v1";
   BLADE_CONTROL_HEIGHT?: number;
   /** Quadratic control-point XZ offset as a fraction of the unchanged tip arc. */
   BLADE_CONTROL_ARC_RATIO?: number;
@@ -474,6 +492,18 @@ export function createClumpGeometry(
   shape: GrassBladeShape = GRASS_CONFIG,
   crossSection?: "folded-lancet-v1" | "folded-sheath-v1",
 ): THREE.BufferGeometry {
+  const rootedFan = shape.ROOT_COMPOSITION === "progressive-fan-v1";
+  if (
+    shape.ROOT_COMPOSITION !== undefined &&
+    (!rootedFan ||
+      !shape.PROGRESSIVE_ROOTS ||
+      shape.TUFT_BLADES !== undefined ||
+      shape.TUFT_CENTER_RADIUS !== undefined ||
+      shape.TUFT_ROOT_RADIUS !== undefined ||
+      shape.TUFT_HEIGHT_FACTORS !== undefined ||
+      shape.TUFT_ARC_FACTORS !== undefined)
+  )
+    throw new Error("Rooted grass fans require the unmixed progressive shape");
   const sheath = crossSection === "folded-sheath-v1";
   const folded = crossSection === "folded-lancet-v1" || sheath;
   if (
@@ -543,7 +573,20 @@ export function createClumpGeometry(
     const tuftAngle = (tuft ?? 0) * GOLDEN_ANGLE;
     const fanAngle =
       tuftAngle + (fanIndex / (shape.TUFT_BLADES ?? 1)) * Math.PI * 2;
-    const angle = tuft === null ? b * GOLDEN_ANGLE : fanAngle;
+    const rootedFanIndex = Math.floor(
+      b / FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan,
+    );
+    const rootedFanAngle =
+      rootedFanIndex * GOLDEN_ANGLE +
+      ((b % FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan) /
+        FINE_GRASS_ROOTED_FAN_COMPOSITION.bladesPerFan) *
+        Math.PI *
+        2;
+    const angle = rootedFan
+      ? rootedFanAngle
+      : tuft === null
+        ? b * GOLDEN_ANGLE
+        : fanAngle;
     const rNorm = CLUMP_INNER_RATIO + (1 - CLUMP_INNER_RATIO) * Math.sqrt(t01);
     const r = rNorm * CLUMP_RADIUS;
     const jitter = (rng() - 0.5) * 0.15 * CLUMP_RADIUS;
@@ -552,16 +595,42 @@ export function createClumpGeometry(
       Math.sqrt(((tuft ?? 0) + 0.5) / Math.ceil(N / (shape.TUFT_BLADES ?? 1)));
     const rootRadius =
       (shape.TUFT_ROOT_RADIUS ?? 0) * (0.8 + (0.2 * fanIndex) / 3);
-    const ox =
-      tuft === null
+    // This center sequence depends only on fan index, never N or LOD. Keep the
+    // original per-blade random draw above even though its positional jitter
+    // is not used here: dimensions and all later samples remain unchanged.
+    let fanRadiusFraction = 0;
+    if (rootedFan) {
+      let value = rootedFanIndex + 1;
+      let place = 0.5;
+      while (value > 0) {
+        fanRadiusFraction += (value % 2) * place;
+        value = Math.floor(value / 2);
+        place *= 0.5;
+      }
+    }
+    const fanCenterRadius =
+      FINE_GRASS_ROOTED_FAN_COMPOSITION.centerRadius *
+      Math.sqrt(fanRadiusFraction);
+    const ox = rootedFan
+      ? Math.cos(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
+        Math.cos(angle) * FINE_GRASS_ROOTED_FAN_COMPOSITION.rootRadius
+      : tuft === null
         ? Math.cos(angle) * r + Math.cos(angle + 1.3) * jitter
         : Math.cos(tuftAngle) * tuftRadius + Math.cos(fanAngle) * rootRadius;
-    const oz =
-      tuft === null
+    const oz = rootedFan
+      ? Math.sin(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
+        Math.sin(angle) * FINE_GRASS_ROOTED_FAN_COMPOSITION.rootRadius
+      : tuft === null
         ? Math.sin(angle) * r + Math.sin(angle + 1.3) * jitter
         : Math.sin(tuftAngle) * tuftRadius + Math.sin(fanAngle) * rootRadius;
 
-    const facingAngle = angle + Math.PI * 0.5 + (rng() - 0.5) * Math.PI;
+    const facingAngle =
+      angle +
+      Math.PI * 0.5 +
+      (rng() - 0.5) *
+        (rootedFan
+          ? 2 * FINE_GRASS_ROOTED_FAN_COMPOSITION.facingJitter
+          : Math.PI);
     const cr = Math.cos(facingAngle);
     const sr = Math.sin(facingAngle);
 
@@ -587,7 +656,10 @@ export function createClumpGeometry(
       (shape.TUFT_HEIGHT_FACTORS?.[fanIndex] ?? 1);
     const w = h * BLADE_WIDTH_RATIO;
 
-    const curveAngle = angle + (rng() - 0.5) * Math.PI * 0.6;
+    const curveSample = rng() - 0.5;
+    const curveAngle = rootedFan
+      ? angle + curveSample * 2 * FINE_GRASS_ROOTED_FAN_COMPOSITION.curveJitter
+      : angle + curveSample * Math.PI * 0.6;
     const arcDist =
       h *
       BLADE_ARC_RATIO *
@@ -789,6 +861,13 @@ export function createClumpGeometry(
   geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
+  if (rootedFan)
+    Object.defineProperty(geo.userData, "grassRootComposition", {
+      value: FINE_GRASS_ROOTED_FAN_COMPOSITION,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   return geo;
 }
 
@@ -1117,7 +1196,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly habitatComposition?: CompactHabitatField | null,
     private readonly lightingCandidate?: GrassLightingCandidate,
     groundingWorkerSetup?: GrassGroundingWorkerSetup,
-    geometryCandidate?: GrassGeometryCandidate,
+    private readonly geometryCandidate?: GrassGeometryCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1192,7 +1271,8 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     if (
       geometryCandidate !== undefined &&
-      (geometryCandidate !== FINE_GRASS_CLOSE_DETAIL.id ||
+      ((geometryCandidate !== FINE_GRASS_CLOSE_DETAIL.id &&
+        geometryCandidate !== FINE_GRASS_ROOTED_FAN_COMPOSITION.id) ||
         lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
     )
       throw new Error(
@@ -1358,7 +1438,8 @@ export class GrassVisualManager implements QuadTreeListener {
     );
 
     this.geometryLayout = this.fineMeadow
-      ? geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id
+      ? geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id ||
+        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
         ? FINE_GRASS_CLOSE_DETAIL.geometryLayout
         : this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
           ? FINE_GRASS_FOLDED_BLADE_SHAPE.GEOMETRY_LAYOUT
@@ -1370,9 +1451,11 @@ export class GrassVisualManager implements QuadTreeListener {
       return createClumpGeometry(
         layout.bladesPerClump,
         layout.bladeSegments,
-        folded
-          ? FINE_GRASS_FOLDED_BLADE_SHAPE
-          : (this.meadowAppearance ?? GRASS_CONFIG),
+        geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id
+          ? FINE_GRASS_ROOTED_FAN_SHAPE
+          : folded
+            ? FINE_GRASS_FOLDED_BLADE_SHAPE
+            : (this.meadowAppearance ?? GRASS_CONFIG),
         folded
           ? layout.bladeSegments === 5
             ? "folded-sheath-v1"
@@ -1513,6 +1596,9 @@ export class GrassVisualManager implements QuadTreeListener {
       ...(this.geometryLayout === undefined
         ? {}
         : { geometryLayout: this.geometryLayout }),
+      ...(this.geometryCandidate === undefined
+        ? {}
+        : { geometryCandidate: this.geometryCandidate }),
       eligibility: this.grassEligibility,
       terrainProfileIdentity: this.terrainProfileIdentity,
       minimumLodLevel: this.minimumLodLevel,

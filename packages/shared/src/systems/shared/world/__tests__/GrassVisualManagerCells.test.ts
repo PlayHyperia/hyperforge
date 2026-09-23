@@ -37,6 +37,9 @@ import {
   TERRAIN_SHADER_CONSTANTS,
 } from "../TerrainShader";
 import {
+  createClumpGeometry,
+  FINE_GRASS_ROOTED_FAN_COMPOSITION,
+  FINE_GRASS_ROOTED_FAN_SHAPE,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
@@ -44,6 +47,7 @@ import {
   GrassVisualManager,
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
+import type { GrassGeometryCandidate } from "../../../../runtime/clientViewportMode";
 import type { GrassPlacementCoverageTrial } from "../../../../utils/workers/GrassPlacementCell";
 import type { GrassGroundingWorkerPort } from "../../../../utils/workers/GrassGroundingWorkerClient";
 import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
@@ -57,7 +61,7 @@ async function fixture(
   resolution = 16,
   groundingPort?: GrassGroundingWorkerPort,
   lightingCandidate?: "leaf-volume-v1",
-  geometryCandidate?: "sheath-close-v1",
+  geometryCandidate?: GrassGeometryCandidate,
   roadClearance?: "per-blade-v1",
 ) {
   const worker = new Worker(
@@ -289,6 +293,201 @@ async function fixture(
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("publishes the explicit rooted fan at all three tiers with unchanged sheath placement inputs", async () => {
+    const baseline = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "sheath-close-v1",
+      "per-blade-v1",
+    );
+    let candidate: Awaited<ReturnType<typeof fixture>> | undefined;
+    try {
+      candidate = await fixture(
+        undefined,
+        undefined,
+        16,
+        undefined,
+        "leaf-volume-v1",
+        "rooted-fan-v1",
+        "per-blade-v1",
+      );
+      const owner = candidate.owner;
+      expect(owner.getProfileReceipt()).toMatchObject({
+        geometryCandidate: "rooted-fan-v1",
+        geometryLayout: "fine-folded-sheath-near5-v1",
+        clumpSpacing: 0.7,
+        clumpSpacingMultiplier: 1,
+        maxRenderDistance: 140,
+        placement: { cellSize: 25, nearLodDistance: 40, detailLodDistance: 12 },
+      });
+      expect(baseline.owner.getProfileReceipt().geometryCandidate).toBe(
+        "sheath-close-v1",
+      );
+      const baselineInput = baseline.owner["createWorkerInput"](
+        baseline.work,
+        baseline.work.key,
+        0,
+      );
+      const baselineOutput = await baseline.execute(baselineInput);
+      expect(baselineOutput.count).toBeGreaterThan(0);
+      for (const lod of [0, 1, 2] as const) {
+        const descriptor = getGrassBladeLayout(
+          lod,
+          "fine-folded-sheath-near5-v1",
+        );
+        const expected = createClumpGeometry(
+          descriptor.bladesPerClump,
+          descriptor.bladeSegments,
+          FINE_GRASS_ROOTED_FAN_SHAPE,
+          lod === 0
+            ? "folded-sheath-v1"
+            : lod === 1
+              ? "folded-lancet-v1"
+              : undefined,
+        );
+        try {
+          const source = owner["lodGeometries"][lod];
+          const previous = baseline.owner["lodGeometries"][lod];
+          expect(source.userData.grassRootComposition).toBe(
+            FINE_GRASS_ROOTED_FAN_COMPOSITION,
+          );
+          expect(
+            Object.getOwnPropertyDescriptor(
+              source.userData,
+              "grassRootComposition",
+            ),
+          ).toEqual({
+            value: FINE_GRASS_ROOTED_FAN_COMPOSITION,
+            enumerable: true,
+            configurable: false,
+            writable: false,
+          });
+          expect(Object.isFrozen(source.userData.grassRootComposition)).toBe(
+            true,
+          );
+          expect(previous.userData).not.toHaveProperty("grassRootComposition");
+          for (const name of ["position", "normal", "uv"])
+            expect(
+              source.getAttribute(name).array,
+              `LOD${lod} ${name}`,
+            ).toEqual(expected.getAttribute(name).array);
+          if (!source.index || !previous.index || !expected.index)
+            throw new Error("Actual indexed fan/sheath templates required");
+          expect(source.index.array).toEqual(expected.index.array);
+          expect(source.index.array).toEqual(previous.index.array);
+          expect(source.getAttribute("uv").array).toEqual(
+            previous.getAttribute("uv").array,
+          );
+          expect(source.getAttribute("position").array).not.toEqual(
+            previous.getAttribute("position").array,
+          );
+          expect(source.getAttribute("position").count).toBe(
+            descriptor.verticesPerClump,
+          );
+          expect(source.index.count / 3).toBe(descriptor.trianglesPerClump);
+          const input = owner["createWorkerInput"](
+            candidate.work,
+            candidate.work.key,
+            lod,
+          );
+          expect(input).toEqual(baselineInput);
+          expect(input).not.toHaveProperty("geometryCandidate");
+          expect(input).not.toHaveProperty("grassRootComposition");
+          owner["lodFocusX"] = candidate.work.bounds.maxX + [0, 20, 60][lod];
+          owner["lodFocusZ"] =
+            (candidate.work.bounds.minZ + candidate.work.bounds.maxZ) / 2;
+          if (lod)
+            owner["pendingLodSwap"].set(candidate.work.key, {
+              node: candidate.node,
+              work: candidate.work,
+              desiredLod: lod,
+            });
+          const queued = await candidate.queue(lod, lod !== 0);
+          expect(queued.input).toEqual(baselineInput);
+          expect(queued.output).toEqual(baselineOutput);
+          owner["processSettledWorkerResults"]();
+          expect(candidate.finish()).toBe(1);
+          const chunk = owner["chunks"].get(candidate.work.key);
+          if (!chunk)
+            throw new Error("Grounded rooted-fan publication required");
+          expect(chunk.lodLevel).toBe(lod);
+          expect(chunk.mesh.count).toBeGreaterThan(0);
+          for (const name of ["position", "normal", "uv"])
+            expect(chunk.mesh.geometry.getAttribute(name).array).toEqual(
+              expected.getAttribute(name).array,
+            );
+          expect(chunk.mesh.geometry.index?.array).toEqual(
+            expected.index.array,
+          );
+          expect(chunk.mesh.geometry.userData.grassRootComposition).toEqual(
+            FINE_GRASS_ROOTED_FAN_COMPOSITION,
+          );
+          const roots = chunk.mesh.geometry.getAttribute("grassRootDeltas");
+          expect(roots.itemSize).toBe(2);
+          expect(roots.count).toBe(
+            chunk.mesh.count * descriptor.bladesPerClump,
+          );
+          expect(Array.from(roots.array).every(Number.isFinite)).toBe(true);
+          const masks = chunk.mesh.geometry.getAttribute(
+            "grassBladeVisibility",
+          );
+          expect(masks.count).toBe(chunk.mesh.count);
+          if (!(masks.array instanceof Uint32Array))
+            throw new Error(
+              "Actual rooted-fan Uint32 visibility masks required",
+            );
+          let visibleBlades = 0;
+          for (const mask of masks.array) {
+            expect(mask).toBeGreaterThan(0);
+            expect(mask).toBeLessThan(2 ** descriptor.bladesPerClump);
+            for (let bits = mask; bits; bits &= bits - 1) visibleBlades++;
+          }
+          const admission = chunk.mesh.userData.grassBladeGrounding;
+          expect(admission.geometryLayout).toBe("fine-folded-sheath-near5-v1");
+          expect(admission.roadClearance.retainedBlades).toBe(visibleBlades);
+          const sourceIndices = admission.sourceIndices;
+          if (!(sourceIndices instanceof Uint32Array))
+            throw new Error(
+              "Actual rooted-fan accepted source indices required",
+            );
+          expect(sourceIndices.length).toBe(chunk.mesh.count);
+          expect(
+            sourceIndices.every((index) => index < queued.output.count),
+          ).toBe(true);
+          const material = chunk.mesh.material;
+          if (Array.isArray(material))
+            throw new Error(
+              "Single actual grounded rooted-fan material required",
+            );
+          expect(material.userData.grassBladeLayout).toBe(descriptor);
+          expect(material.userData.fineGrassCanopyLighting.normalSource).toBe(
+            lod < 2 ? "geometry-fold" : undefined,
+          );
+          const retained = owner["completedGrounding"].get(candidate.work.key);
+          if (!retained)
+            throw new Error("Current rooted-fan grounding lease required");
+          expect(retained.region.isCurrent()).toBe(true);
+          expect(retained.inputs.isCurrent()).toBe(true);
+          expect(owner.getProfileReceipt()).toMatchObject({
+            geometryCandidate: "rooted-fan-v1",
+            geometryLayout: "fine-folded-sheath-near5-v1",
+            grounding: { failedChunks: 0 },
+          });
+          // Root composition changes blade envelopes. Do not demand identical
+          // final acceptance or masks merely because the placement inputs match.
+        } finally {
+          expected.dispose();
+        }
+      }
+    } finally {
+      candidate?.close();
+      baseline.close();
+    }
+  });
+
   it("preserves full placement and old distant templates while publishing all three close-detail tiers", async () => {
     const baseline = await fixture(
       undefined,

@@ -715,163 +715,195 @@ describe("explicit fine leaf-volume lighting selection", () => {
   });
 });
 
-describe("explicit close sheath geometry selection", () => {
-  const fine =
-    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
-  const lighting = "grassLighting=leaf-volume-v1";
-  const geometry: GrassGeometryCandidate = "sheath-close-v1";
-  const selected = `grassGeometry=${geometry}`;
+describe.each(["sheath-close-v1", "rooted-fan-v1"] as const)(
+  "explicit %s geometry selection",
+  (geometry: GrassGeometryCandidate) => {
+    const fine =
+      "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
+    const lighting = "grassLighting=leaf-volume-v1";
+    const selected = `grassGeometry=${geometry}`;
+    const otherGeometry: GrassGeometryCandidate =
+      geometry === "sheath-close-v1" ? "rooted-fan-v1" : "sheath-close-v1";
 
-  it("never infers geometry from omission, appearance, lighting or profile", () => {
-    expect(resolveGrassGeometryCandidate()).toBeUndefined();
-    for (const path of ["/play", "/stream.html", "/"])
+    it("never infers geometry from omission, appearance, lighting or profile", () => {
+      expect(resolveGrassGeometryCandidate()).toBeUndefined();
+      for (const path of ["/play", "/stream.html", "/"])
+        for (const query of [
+          "",
+          fine,
+          `${fine}&${lighting}`,
+          "grassLighting=invalid",
+        ])
+          expect(
+            resolveGrassGeometryCandidate(makeWindow(path, `?${query}`)),
+          ).toBeUndefined();
+    });
+
+    it("admits the exact fine/leaf-volume pair without changing renderer or population selectors", () => {
+      for (const [path, prefix] of [
+        ["/stream.html", ""],
+        ["/", "page=stream&"],
+        ["/stream.html", "embedded=false&streamFps=60&"],
+      ]) {
+        const baseline = makeWindow(path, `?${prefix}${fine}&${lighting}`);
+        const candidate = makeWindow(
+          path,
+          `${baseline.location.search}&${selected}`,
+        );
+        expect(resolveGrassGeometryCandidate(candidate)).toBe(geometry);
+        expect(resolveGrassGeometryCandidate(baseline)).toBeUndefined();
+        expect(resolveGrassLightingCandidate(candidate)).toBe("leaf-volume-v1");
+        expect(resolveGrassAppearanceCandidate(candidate)).toBe(
+          "fine-meadow-v1",
+        );
+        expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+          resolveExplicitStreamingRenderProfile(baseline),
+        );
+        expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+          resolveClientViewportRuntimeProfile(baseline),
+        );
+        expect(resolveGrassCoverageTrial(candidate)).toEqual(
+          resolveGrassCoverageTrial(baseline),
+        );
+        expect(resolveGrassGroundingExecution(candidate)).toEqual(
+          resolveGrassGroundingExecution(baseline),
+        );
+        expect(resolveGrassRoadClearance(candidate)).toEqual(
+          resolveGrassRoadClearance(baseline),
+        );
+        expect(
+          resolveStreamingRenderPreferences(
+            1280,
+            720,
+            resolveExplicitStreamingRenderProfile(candidate),
+          ),
+        ).toEqual(
+          resolveStreamingRenderPreferences(
+            1280,
+            720,
+            resolveExplicitStreamingRenderProfile(baseline),
+          ),
+        );
+      }
+    });
+
+    it.each([
+      "",
+      geometry.toUpperCase(),
+      ` ${geometry}`,
+      `${geometry} `,
+      `${geometry}\n`,
+      geometry.replace("-v1", "-v2"),
+      "folded-sheath-v1",
+      `${geometry},other`,
+      `${geometry},${otherGeometry}`,
+    ])("fails closed on noncanonical geometry %j", (value) => {
+      expect(() =>
+        resolveGrassGeometryCandidate(
+          makeWindow(
+            "/stream.html",
+            `?${fine}&${lighting}&grassGeometry=${encodeURIComponent(value)}`,
+          ),
+        ),
+      ).toThrow("grass geometry");
+    });
+
+    it("rejects duplicates and incompatible lighting, profiles and viewport owners", () => {
       for (const query of [
         "",
         fine,
-        `${fine}&${lighting}`,
-        "grassLighting=invalid",
+        lighting,
+        `grassAppearance=fine-meadow-v1&${lighting}`,
+        `streamRenderProfile=island-fine-meadow-720p60-v1&${lighting}`,
+        `${fine}&grassLighting=canopy-normal-v1`,
+        `${fine}&${lighting}&${lighting}`,
+        `${fine}&${lighting}&${selected}`,
+        `${fine}&${lighting}&grassGeometry=${otherGeometry}`,
+        `${fine}&${lighting}&grassGeometry=`,
+        `${fine}&${lighting}&grassAppearance=fine-meadow-v1`,
+        `${fine}&${lighting}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+        `${fine}&${lighting}&embedded=true`,
+        `${fine}&${lighting}&embedded=false&embedded=false`,
+        `${fine}&${lighting}&streamFps=30`,
+        "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1&grassLighting=leaf-volume-v1",
       ])
-        expect(
-          resolveGrassGeometryCandidate(makeWindow(path, `?${query}`)),
-        ).toBeUndefined();
-  });
-
-  it("admits the exact fine/leaf-volume pair without changing renderer or population selectors", () => {
-    for (const [path, prefix] of [
-      ["/stream.html", ""],
-      ["/", "page=stream&"],
-      ["/stream.html", "embedded=false&streamFps=60&"],
-    ]) {
-      const baseline = makeWindow(path, `?${prefix}${fine}&${lighting}`);
-      const candidate = makeWindow(
-        path,
-        `${baseline.location.search}&${selected}`,
-      );
-      expect(resolveGrassGeometryCandidate(candidate)).toBe(geometry);
-      expect(resolveGrassGeometryCandidate(baseline)).toBeUndefined();
-      expect(resolveGrassLightingCandidate(candidate)).toBe("leaf-volume-v1");
-      expect(resolveGrassAppearanceCandidate(candidate)).toBe("fine-meadow-v1");
-      expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
-        resolveExplicitStreamingRenderProfile(baseline),
-      );
-      expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
-        resolveClientViewportRuntimeProfile(baseline),
-      );
-      expect(resolveGrassCoverageTrial(candidate)).toEqual(
-        resolveGrassCoverageTrial(baseline),
-      );
-      expect(resolveGrassGroundingExecution(candidate)).toEqual(
-        resolveGrassGroundingExecution(baseline),
-      );
-      expect(resolveGrassRoadClearance(candidate)).toEqual(
-        resolveGrassRoadClearance(baseline),
-      );
-      expect(
-        resolveStreamingRenderPreferences(
-          1280,
-          720,
-          resolveExplicitStreamingRenderProfile(candidate),
-        ),
-      ).toEqual(
-        resolveStreamingRenderPreferences(
-          1280,
-          720,
-          resolveExplicitStreamingRenderProfile(baseline),
-        ),
-      );
-    }
-  });
-
-  it.each([
-    "",
-    "SHEATH-CLOSE-V1",
-    " sheath-close-v1",
-    "sheath-close-v1 ",
-    "sheath-close-v1\n",
-    "sheath-close-v2",
-    "folded-sheath-v1",
-    "sheath-close-v1,other",
-  ])("fails closed on noncanonical geometry %j", (value) => {
-    expect(() =>
-      resolveGrassGeometryCandidate(
-        makeWindow(
-          "/stream.html",
-          `?${fine}&${lighting}&grassGeometry=${encodeURIComponent(value)}`,
-        ),
-      ),
-    ).toThrow("grass geometry");
-  });
-
-  it("rejects duplicates and incompatible lighting, profiles and viewport owners", () => {
-    for (const query of [
-      "",
-      fine,
-      lighting,
-      `grassAppearance=fine-meadow-v1&${lighting}`,
-      `streamRenderProfile=island-fine-meadow-720p60-v1&${lighting}`,
-      `${fine}&grassLighting=canopy-normal-v1`,
-      `${fine}&${lighting}&${lighting}`,
-      `${fine}&${lighting}&${selected}`,
-      `${fine}&${lighting}&grassGeometry=`,
-      `${fine}&${lighting}&grassAppearance=fine-meadow-v1`,
-      `${fine}&${lighting}&streamRenderProfile=island-fine-meadow-720p60-v1`,
-      `${fine}&${lighting}&embedded=true`,
-      `${fine}&${lighting}&embedded=false&embedded=false`,
-      `${fine}&${lighting}&streamFps=30`,
-      "streamRenderProfile=island-meadow-720p60-v1&grassAppearance=natural-tuft-v1&grassLighting=leaf-volume-v1",
-    ])
+        expect(() =>
+          resolveGrassGeometryCandidate(
+            makeWindow("/stream.html", `?${query}&${selected}`),
+          ),
+        ).toThrow();
       expect(() =>
         resolveGrassGeometryCandidate(
-          makeWindow("/stream.html", `?${query}&${selected}`),
+          makeWindow("/play", `?${fine}&${lighting}&${selected}`),
         ),
       ).toThrow();
-    expect(() =>
-      resolveGrassGeometryCandidate(
-        makeWindow("/play", `?${fine}&${lighting}&${selected}`),
-      ),
-    ).toThrow();
-    const embedded = makeWindow(
-      "/stream.html",
-      `?${fine}&${lighting}&${selected}`,
-    );
-    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
-    expect(() => resolveGrassGeometryCandidate(embedded)).toThrow();
-  });
-
-  it.each([false, true])(
-    "captures geometry selection once on the real terrain owner, selected=%s",
-    (enabled) => {
-      const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
-      const world = new World();
-      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-      const input = makeWindow(
+      const embedded = makeWindow(
         "/stream.html",
-        `?${fine}&${lighting}${enabled ? `&${selected}` : ""}`,
+        `?${fine}&${lighting}&${selected}`,
       );
-      Object.defineProperty(globalThis, "window", {
-        configurable: true,
-        value: input,
-      });
-      try {
-        terrain["getCompactGrassColorGrade"]();
-        const captured = terrain["grassVisualSelection"]!;
-        expect(Object.isFrozen(captured)).toBe(true);
-        expect(captured.geometry).toBe(enabled ? geometry : undefined);
-        expect(Object.prototype.hasOwnProperty.call(captured, "geometry")).toBe(
-          enabled,
+      Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+      expect(() => resolveGrassGeometryCandidate(embedded)).toThrow();
+    });
+
+    it("rejects either ordering of different valid geometry selectors", () => {
+      for (const values of [
+        [geometry, otherGeometry],
+        [otherGeometry, geometry],
+      ])
+        expect(() =>
+          resolveGrassGeometryCandidate(
+            makeWindow(
+              "/stream.html",
+              `?${fine}&${lighting}&${values
+                .map((value) => `grassGeometry=${value}`)
+                .join("&")}`,
+            ),
+          ),
+        ).toThrow("Unknown or duplicate grass geometry candidate");
+    });
+
+    it.each([false, true])(
+      "captures geometry selection once on the real terrain owner, selected=%s",
+      (enabled) => {
+        const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+        const world = new World();
+        const terrain = world.register(
+          "terrain",
+          TerrainSystem,
+        ) as TerrainSystem;
+        const input = makeWindow(
+          "/stream.html",
+          `?${fine}&${lighting}${enabled ? `&${selected}` : ""}`,
         );
-        input.location.search = `?${fine}&${lighting}${enabled ? "" : `&${selected}`}`;
-        terrain["getCompactGrassColorGrade"]();
-        expect(terrain["grassVisualSelection"]).toBe(captured);
-        expect(captured.geometry).toBe(enabled ? geometry : undefined);
-      } finally {
-        if (previous) Object.defineProperty(globalThis, "window", previous);
-        else Reflect.deleteProperty(globalThis, "window");
-        world.destroy();
-      }
-    },
-  );
-});
+        Object.defineProperty(globalThis, "window", {
+          configurable: true,
+          value: input,
+        });
+        try {
+          terrain["getCompactGrassColorGrade"]();
+          const captured = terrain["grassVisualSelection"]!;
+          expect(Object.isFrozen(captured)).toBe(true);
+          expect(captured.geometry).toBe(enabled ? geometry : undefined);
+          expect(
+            Object.prototype.hasOwnProperty.call(captured, "geometry"),
+          ).toBe(enabled);
+          input.location.search = `?${fine}&${lighting}${enabled ? "" : `&${selected}`}`;
+          terrain["getCompactGrassColorGrade"]();
+          expect(terrain["grassVisualSelection"]).toBe(captured);
+          expect(captured.geometry).toBe(enabled ? geometry : undefined);
+          input.location.search = `?${fine}&${lighting}&grassGeometry=${otherGeometry}`;
+          terrain["getCompactGrassColorGrade"]();
+          expect(terrain["grassVisualSelection"]).toBe(captured);
+          expect(captured.geometry).toBe(enabled ? geometry : undefined);
+        } finally {
+          if (previous) Object.defineProperty(globalThis, "window", previous);
+          else Reflect.deleteProperty(globalThis, "window");
+          world.destroy();
+        }
+      },
+    );
+  },
+);
 
 describe("client resource-pool startup ordering", () => {
   it("binds the registered scene before asynchronous resource registration", () => {
@@ -3150,6 +3182,79 @@ describe("opt-in shadows render contract (CPU validation, not GPU execution)", (
     expect(
       evaluateStreamingRenderProfileApplication(fine, requested, state).ready,
     ).toBe(true);
+    const closeGrass: StreamingGrassProfileReceipt = {
+      ...grass,
+      geometryLayout: "fine-folded-sheath-near5-v1",
+      placement: { ...grass.placement!, detailLodDistance: 12 },
+    };
+    // Existing saved close-layout receipts predate candidate identity.
+    expect(closeGrass).not.toHaveProperty("geometryCandidate");
+    expect(
+      evaluateStreamingRenderProfileApplication(fine, requested, {
+        ...state,
+        grass: closeGrass,
+      }).ready,
+    ).toBe(true);
+    for (const geometryCandidate of [
+      "sheath-close-v1",
+      "rooted-fan-v1",
+    ] as const) {
+      const selectedGrass = { ...closeGrass, geometryCandidate };
+      expect(
+        evaluateStreamingRenderProfileApplication(fine, requested, {
+          ...state,
+          grass: selectedGrass,
+        }).ready,
+      ).toBe(true);
+      for (const geometryLayout of [
+        undefined,
+        "fine-folded-lancet-v1",
+        "fine-linear-sweep-3seg-v1",
+      ] as const)
+        expect(
+          evaluateStreamingRenderProfileApplication(fine, requested, {
+            ...state,
+            grass: { ...selectedGrass, geometryLayout },
+          }).mismatchReason,
+        ).toBe("grass_profile");
+      expect(
+        evaluateStreamingRenderProfileApplication(
+          STREAMING_RENDER_PROFILES["island-meadow-720p60-v1"],
+          requested,
+          {
+            ...state,
+            grass: {
+              ...selectedGrass,
+              profileId: "compact-meadow-v2",
+              minimumLodLevel: 1,
+              clumpSpacingMultiplier: 2.5,
+              clumpSpacing: 1.75,
+              placement: undefined,
+            },
+          },
+        ).mismatchReason,
+      ).toBe("grass_profile");
+    }
+    for (const geometryCandidate of [
+      "",
+      "ROOTED-FAN-V1",
+      "rooted-fan-v1 ",
+      "rooted-fan-v2",
+      "sheath-close-v2",
+      null,
+      1,
+      {},
+    ]) {
+      const invalidGrass = { ...closeGrass };
+      // Exercise malformed observed data without broad casts or mocked owners.
+      Reflect.set(invalidGrass, "geometryCandidate", geometryCandidate);
+      expect(
+        evaluateStreamingRenderProfileApplication(fine, requested, {
+          ...state,
+          grass: invalidGrass,
+        }).mismatchReason,
+      ).toBe("grass_profile");
+    }
     // This validates observed configuration, not population completion or cost.
     for (const change of [
       { profileId: "compact-meadow-v2" as const },

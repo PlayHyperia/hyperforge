@@ -133,7 +133,7 @@ export type StreamingRenderProfileId = keyof typeof STREAMING_RENDER_PROFILES;
 export type SkyAtmosphereMode = "gradient-v1" | "scattering-v1";
 export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
-export type GrassGeometryCandidate = "sheath-close-v1";
+export type GrassGeometryCandidate = "sheath-close-v1" | "rooted-fan-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -212,7 +212,7 @@ export function resolveGrassLightingCandidate(
   return values[0];
 }
 
-/** Add close detail without changing the existing meadow population or range.
+/** Explicit close detail/root composition without changing population or range.
  * Omission retains the historical geometry; capture once with the terrain owner. */
 export function resolveGrassGeometryCandidate(
   win?: Window,
@@ -222,13 +222,16 @@ export function resolveGrassGeometryCandidate(
   const params = getSearchParams(windowRef);
   const values = params?.getAll("grassGeometry") ?? [];
   if (!values.length) return undefined;
-  if (values.length !== 1 || values[0] !== "sheath-close-v1")
+  if (
+    values.length !== 1 ||
+    (values[0] !== "sheath-close-v1" && values[0] !== "rooted-fan-v1")
+  )
     throw new Error("Unknown or duplicate grass geometry candidate");
   if (resolveGrassLightingCandidate(windowRef) !== "leaf-volume-v1")
     throw new Error(
       "Grass geometry requires the explicit leaf-volume fine meadow",
     );
-  return "sheath-close-v1";
+  return values[0];
 }
 
 /** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
@@ -596,6 +599,8 @@ export type StreamingGrassProfileReceipt = {
   schemaVersion: 1;
   /** Explicit fine geometry/addressing revision; absent for ordinary owners. */
   geometryLayout?: import("../systems/shared/world/GrassBladeLayout").FineGrassGeometryLayout;
+  /** Opt-in authored composition; historical receipts omit this identity. */
+  geometryCandidate?: GrassGeometryCandidate;
   profileId:
     | "ordinary-v1"
     | "fixed-arena-v1"
@@ -769,7 +774,12 @@ export function evaluateStreamingRenderProfileApplication(
       grass.maxRenderDistance !== 140 ||
       grass.maxChunksPerFrame !== 1 ||
       grass.castShadow !== false ||
-      grass.destroyed !== false
+      grass.destroyed !== false ||
+      (grass.geometryCandidate !== undefined &&
+        (!fineMeadow ||
+          grass.geometryLayout !== "fine-folded-sheath-near5-v1" ||
+          (grass.geometryCandidate !== "sheath-close-v1" &&
+            grass.geometryCandidate !== "rooted-fan-v1")))
     )
       return finish("grass_profile");
     if (fineMeadow) {
