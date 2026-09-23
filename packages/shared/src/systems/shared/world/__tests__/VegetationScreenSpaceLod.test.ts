@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import THREE, { float, vec3 } from "../../../../extras/three/three";
+import { UniformDirectionalShadowNode } from "../../../../extras/three/UniformDirectionalShadow";
 import { World } from "../../../../core/World";
 import { ClientLoader } from "../../../client/ClientLoader";
 import { modelCache } from "../../../../utils/rendering/ModelCache";
@@ -404,6 +405,49 @@ describe("isolated static vegetation LOD selector actual CPU ownership", () => {
     expect(f.select(100)).toBe(0);
     expect(f.state.errorPixels).toBeLessThan(0.25);
     expect(f.state.shadowErrorPixels).toBeGreaterThan(0.5);
+  });
+
+  it("retains the same main/shadow LOD for the exact owned uniform-frustum node", () => {
+    const f = fixture();
+    expect(f.select(100)).toBe(1);
+    const errors = [
+      f.state.errorPixels,
+      f.state.extentPixels,
+      f.state.shadowErrorPixels,
+    ];
+    const node = new UniformDirectionalShadowNode(f.sun);
+    f.sun.shadow.shadowNode = node;
+    try {
+      expect(f.select(100)).toBe(1);
+      expect([
+        f.state.errorPixels,
+        f.state.extentPixels,
+        f.state.shadowErrorPixels,
+      ]).toEqual(errors);
+      // Recognition does not bypass any existing map/update safety gate.
+      f.sun.shadow.autoUpdate = false;
+      expect(f.select(100)).toBe(0);
+    } finally {
+      f.sun.shadow.autoUpdate = true;
+      delete f.sun.shadow.shadowNode;
+      node.dispose();
+    }
+  });
+
+  it("returns hero for a uniform-frustum node belonging to a different light", () => {
+    const f = fixture();
+    expect(f.select(100)).toBe(1);
+    const other = new THREE.DirectionalLight();
+    const node = new UniformDirectionalShadowNode(other);
+    f.sun.shadow.shadowNode = node;
+    try {
+      expect(f.select(100)).toBe(0);
+      expect(f.sun.shadow.shadowNode).toBe(node);
+    } finally {
+      delete f.sun.shadow.shadowNode;
+      node.dispose();
+      other.dispose();
+    }
   });
 
   it.each(["allocated", "requested"])(

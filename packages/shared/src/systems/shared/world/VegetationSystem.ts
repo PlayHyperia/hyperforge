@@ -27,6 +27,7 @@
  */
 
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
+import { isOwnedUniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
 import { System } from "../infrastructure/System";
 import type { World, WorldOptions } from "../../../types";
 import type {
@@ -2361,7 +2362,8 @@ export class VegetationSystem extends System {
     let shadowCamera: THREE.OrthographicCamera | null = null;
     if (knownViews && sun?.castShadow) {
       if (
-        sun.shadow.shadowNode !== undefined ||
+        (sun.shadow.shadowNode !== undefined &&
+          !isOwnedUniformDirectionalShadowNode(sun.shadow.shadowNode, sun)) ||
         !sun.shadow.autoUpdate ||
         !(sun.shadow.camera instanceof THREE.OrthographicCamera) ||
         !sun.shadow.map

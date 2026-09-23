@@ -1271,20 +1271,32 @@ export function applyCompactPondBankMaterials(
     field,
     compactCoastDistributionMath,
   );
-  // Normalizing only the changed contribution keeps the original normal exact
-  // outside the field, including source normals with finite rounding error.
+  // Bank masks vary per fragment. Evaluate both normal inputs before selecting
+  // the result so their cotangent derivatives remain in uniform control flow.
+  // Fence that context at the inputs: their own sampling/LOD branches retain
+  // ownership, particularly the deferred exact-zero rock appearance branch.
+  const soilSourceNormal = soil.worldNormal
+    .context({ uniformFlow: false })
+    .toVar("compactPondBankSoilSourceNormal");
+  const rockSourceNormal = rock.worldNormal
+    .context({ uniformFlow: false })
+    .toVar("compactPondBankRockSourceNormal");
+  // Native selection returns the original normal exactly outside the field,
+  // including source normals with finite rounding error (no extra normalize).
   const mineralNormal = mineral
     .greaterThan(0)
     .select(
-      normalize(mix(soil.worldNormal, rock.worldNormal, mineral)),
-      soil.worldNormal,
-    );
+      normalize(mix(soilSourceNormal, rockSourceNormal, mineral)),
+      soilSourceNormal,
+    )
+    .uniformFlow();
   const soilNormal = silt
     .greaterThan(0)
     .select(
-      normalize(mix(mineralNormal, soil.worldNormal, silt)),
+      normalize(mix(mineralNormal, soilSourceNormal, silt)),
       mineralNormal,
-    );
+    )
+    .uniformFlow();
   return {
     soil: {
       ...soil,
@@ -1305,9 +1317,10 @@ export function applyCompactPondBankMaterials(
       worldNormal: silt
         .greaterThan(0)
         .select(
-          normalize(mix(rock.worldNormal, soil.worldNormal, silt)),
-          rock.worldNormal,
-        ),
+          normalize(mix(rockSourceNormal, soilSourceNormal, silt)),
+          rockSourceNormal,
+        )
+        .uniformFlow(),
     },
   };
 }

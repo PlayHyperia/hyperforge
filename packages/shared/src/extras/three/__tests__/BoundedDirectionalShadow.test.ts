@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import THREE, { uniform } from "../three";
 import { fitBoundedDirectionalShadow } from "../BoundedDirectionalShadow";
+import { UniformDirectionalShadowNode } from "../UniformDirectionalShadow";
 
 function lightAt(direction = new THREE.Vector3(0.4, 0.8, 0.3)) {
   const scene = new THREE.Scene();
@@ -54,8 +55,8 @@ function snapshot(light: THREE.DirectionalLight) {
       ...camera.matrixWorld.elements,
       ...light.shadow.matrix.elements,
     ],
-    map: light.shadow.map?.uuid,
-    mapPass: light.shadow.mapPass?.uuid,
+    map: light.shadow.map?.texture.uuid,
+    mapPass: light.shadow.mapPass?.texture.uuid,
     mapSize: light.shadow.mapSize.toArray(),
     needsUpdate: light.shadow.needsUpdate,
     color: light.color.toArray(),
@@ -223,7 +224,7 @@ describe("opt-in bounded directional shadows with real Three objects", () => {
     );
     expect(snapshot(light)).toBe(before);
     expect(shadow.shadowNode).toBe(node);
-    shadow.shadowNode = null;
+    Reflect.set(shadow, "shadowNode", null);
     expect(() => fitBoundedDirectionalShadow(light, box())).not.toThrow();
   });
 
@@ -246,5 +247,35 @@ describe("opt-in bounded directional shadows with real Three objects", () => {
     expect(disposed).toBe(1);
     compatible.dispose();
     light.shadow.map = null;
+  });
+
+  it("fits only the exact uniform-flow single-map owner, preserving the default fit", () => {
+    const baseline = lightAt().light;
+    const candidate = lightAt().light;
+    const node = new UniformDirectionalShadowNode(candidate);
+    candidate.shadow.shadowNode = node;
+    const beforeColor = candidate.color.clone();
+    const beforeIntensity = candidate.intensity;
+    expect(fitBoundedDirectionalShadow(candidate, box())).toEqual(
+      fitBoundedDirectionalShadow(baseline, box()),
+    );
+    expect(snapshot(candidate)).toBe(snapshot(baseline));
+    expect(candidate.color.equals(beforeColor)).toBe(true);
+    expect(candidate.intensity).toBe(beforeIntensity);
+    expect(candidate.shadow.shadowNode).toBe(node);
+    node.dispose();
+  });
+
+  it("rejects another light's uniform-flow node without mutating the fit", () => {
+    const light = lightAt().light;
+    const other = lightAt().light;
+    const node = new UniformDirectionalShadowNode(other);
+    light.shadow.shadowNode = node;
+    const before = snapshot(light);
+    expect(() => fitBoundedDirectionalShadow(light, box())).toThrow(
+      /single-map path/,
+    );
+    expect(snapshot(light)).toBe(before);
+    node.dispose();
   });
 });

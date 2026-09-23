@@ -750,6 +750,20 @@ function vectorValue(
       return values;
     }
     if (node.type === "VarNode") return child("node");
+    if (node.type === "ContextNode") {
+      // Arithmetic is unchanged by this narrowly scoped codegen setting. The
+      // native gate below, not this evaluator, verifies its control flow.
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Reflect.ownKeys(value).length !== 1 ||
+        Reflect.ownKeys(value)[0] !== "uniformFlow" ||
+        typeof Object.getOwnPropertyDescriptor(value, "uniformFlow")?.value !==
+          "boolean"
+      )
+        throw new Error("Unsupported numeric TSL context");
+      return child("node");
+    }
     if (node.type === "ConditionalNode") {
       const condition = child("condNode");
       if (condition.length !== 1 || ![0, 1].includes(condition[0]))
@@ -3175,6 +3189,34 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
 });
 
 describe("exact-zero rock appearance (CPU arithmetic plus explicit native WGSL gate)", () => {
+  it("evaluates only the explicit uniform-flow context arithmetic identity", () => {
+    for (const uniformFlow of [true, false])
+      expect(vectorValue(vec3(0.2, 0.8, 0.1).context({ uniformFlow }))).toEqual(
+        [0.2, 0.8, 0.1],
+      );
+    let getterReads = 0;
+    const inherited = Object.assign(Object.create({ uniformFlow: true }), {
+      unrelated: true,
+    });
+    const accessor = Object.defineProperty({}, "uniformFlow", {
+      get: () => {
+        getterReads++;
+        return true;
+      },
+    });
+    for (const context of [
+      {},
+      { uniformFlow: 1 },
+      { uniformFlow: true, other: false },
+      { uniformFlow: true, [Symbol("other")]: false },
+      inherited,
+      accessor,
+    ])
+      expect(() => vectorValue(vec3(1).context(context))).toThrow(
+        "Unsupported numeric TSL context",
+      );
+    expect(getterReads).toBe(0);
+  });
   it("skips only exact zero rock and absent dry-soil mineral contribution", () => {
     const values = [-1, -1e-30, -0, 0, 1e-30, 0.25, 1];
     for (const rock of values)
@@ -3400,18 +3442,34 @@ globalThis.terrainWgslProbe = async () => {
       const factory = gated ? createCompactTerrainLayerFactory(owner,sharedDistance,sharedPattern) : null;
       const placeholder = {albedo:vec3(0),roughness:float(1),ao:float(1),worldNormal:normalWorldGeometry};
       const layers = factory ? {...factory.createGround(),rock:placeholder} : createCompactTerrainLayers(owner,sharedDistance,sharedPattern);
-      const mineral = uniform(.2);
+      const mineral = positionWorld.x.sin().mul(.5).add(.5).toVar("testedPondMineral");
+      const silt = positionWorld.z.cos().mul(.5).add(.5).toVar("testedPondSilt");
+      const appearance = original => {
+        const bank = applyCompactPondBankMaterials(original.dirt,original.rock,
+          {mineralAppearance:mineral,siltAppearance:silt});
+        return {...original,dirt:bank.soil,rock:bank.rock};
+      };
       const surface = blendCompactTerrainLayers(layers,uniform(.31),uniform(.23),uniform(.17),
         undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,
-        gated ? (weights,original) => {
+        (weights,original) => {
+          if (!gated) return appearance(original);
           const rock = factory.createRock(createCompactRockAppearanceRequired(weights,mineral).toVar("testedRockAppearanceRequired"));
           const shared = Object.values(rock).map(root => [...graph(root)].filter(node => node.name === "compactRockAppearanceResult"));
           if(shared.length!==5 || shared.some(rows => rows.length!==1 || rows[0]!==shared[0][0]))
             throw new Error("Rock appearance is not one shared actual packed node");
           sharedPackedChannels=shared.length;
-          return {...original,rock};
-        } : undefined);
-      return vec4(surface.albedo.add(surface.normal),surface.roughness.add(surface.ao));
+          return appearance({...original,rock});
+        });
+      // Exercise staged channel evaluation so the shared texture owners are
+      // established before normals. This focused graph does not reproduce the
+      // complete terrain material's lighting or exact emitted channel order.
+      return Fn(() => {
+        const albedo = surface.albedo.toVar("testedSurfaceAlbedo");
+        const roughness = surface.roughness.toVar("testedSurfaceRoughness");
+        const ao = surface.ao.toVar("testedSurfaceAo");
+        const normal = surface.normal.toVar("testedSurfaceNormal");
+        return vec4(albedo.add(normal),roughness.add(ao));
+      })();
     };
     const generate = output => {
       const builder = new WGSLNodeBuilder(mesh,renderer);
@@ -3451,9 +3509,9 @@ globalThis.terrainWgslProbe = async () => {
     try {
       const entry = await build({
         stdin: {
-          contents: `import THREE,{float,vec3,vec4,uniform,normalWorldGeometry} from ${JSON.stringify(threePath)};
+          contents: `import THREE,{float,vec3,vec4,uniform,normalWorldGeometry,positionWorld,Fn} from ${JSON.stringify(threePath)};
 import {WGSLNodeBuilder} from "three/webgpu";
-import {CompactTerrainTextureSet,createCompactTerrainLayers,createCompactTerrainLayerFactory,createCompactRockAppearanceRequired,blendCompactTerrainLayers} from ${JSON.stringify(modulePath)};
+import {CompactTerrainTextureSet,createCompactTerrainLayers,createCompactTerrainLayerFactory,createCompactRockAppearanceRequired,blendCompactTerrainLayers,applyCompactPondBankMaterials} from ${JSON.stringify(modulePath)};
 ${nativeProbe}`,
           resolveDir: fileURLToPath(new URL(".", import.meta.url)),
           loader: "js",
@@ -3697,6 +3755,38 @@ ${nativeProbe}`,
           ),
         ).toBe(false);
       for (const flow of [baseline, candidate]) {
+        const regions = branches(flow.code);
+        const source = flow.code + flow.result;
+        // Both mineral and silt really vary by fragment. Derivative legality
+        // must cover their downstream normals, not just the rock initializer.
+        expect(source).toContain("testedPondMineral");
+        expect(source).toContain("testedPondSilt");
+        expect(source).toMatch(/\bselect\s*\(/);
+        for (const name of [
+          "compactPondBankSoilSourceNormal",
+          "compactPondBankRockSourceNormal",
+        ]) {
+          const assignments = [
+            ...flow.code.matchAll(new RegExp(`\\b${name}\\s*=`, "g")),
+          ];
+          expect(assignments).toHaveLength(1);
+          expect(
+            regions.some(
+              (region) =>
+                assignments[0].index > region.start &&
+                assignments[0].index < region.end,
+            ),
+          ).toBe(false);
+        }
+        for (const derivative of flow.code.matchAll(/\bdpd[xy]\s*\(/g))
+          expect(
+            regions.some(
+              (region) =>
+                derivative.index > region.start &&
+                derivative.index < region.end,
+            ),
+            "Material derivatives must precede every nonuniform bank/rock branch",
+          ).toBe(false);
         expect(flow.code).not.toMatch(/\btextureSample(?:Bias|Level)?\s*\(/);
         expect(flow.code + flow.result).not.toMatch(/undefined|NaN|Infinity/);
       }

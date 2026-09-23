@@ -1,4 +1,5 @@
 import THREE from "./three";
+import { isOwnedUniformDirectionalShadowNode } from "./UniformDirectionalShadow";
 
 type Options = { mapSize?: 1024 | 2048; paddingWorld?: number };
 
@@ -39,9 +40,12 @@ export function fitBoundedDirectionalShadow(
   )
     throw new Error("Bounded shadow requires position-driven light and target");
   const shadow = light.shadow;
+  const shadowNode = (
+    shadow as THREE.DirectionalLightShadow & { shadowNode?: unknown }
+  ).shadowNode;
   if (
-    (shadow as THREE.DirectionalLightShadow & { shadowNode?: unknown })
-      .shadowNode != null
+    shadowNode != null &&
+    !isOwnedUniformDirectionalShadowNode(shadowNode, light)
   )
     throw new Error(
       "Bounded shadow requires the single-map path, not CSM or a custom shadow node",
