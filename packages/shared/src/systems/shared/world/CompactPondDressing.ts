@@ -390,6 +390,7 @@ function createInlandPondDressing(
       !Number.isFinite(group.bearing) ||
       group.bearing < 0 ||
       group.bearing >= 360 ||
+      group.placements.length === 0 ||
       group.placements.length > 12
     )
       throw new Error("Invalid inland habitat group");
@@ -486,8 +487,11 @@ function createInlandPondDressing(
       );
     }
   }
+  // Three nonempty groups, each capped at twelve, leave room for the 24
+  // service-court instances within the owner's unchanged 64-instance cap.
   if (
-    result.length !== 28 ||
+    result.length === 0 ||
+    result.length > 36 ||
     new Set(result.map((row) => row.id)).size !== result.length
   )
     throw new Error("Inland habitat exceeds its explicit instance budget");

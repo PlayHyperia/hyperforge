@@ -122,6 +122,22 @@ const waterwardRoots = [
 
 // Historical fixtures remain the original five assets. The additive selected
 // habitat is exercised separately; it must not broaden default load ownership.
+// Exercise alternate authored recipes through the real factory, restoring the
+// imported data even when a historical/negative assertion fails.
+function withInlandRecipe<T>(recipe: typeof inlandHabitat, run: () => T): T {
+  const saved = structuredClone(inlandHabitat.groups);
+  inlandHabitat.groups.splice(
+    0,
+    inlandHabitat.groups.length,
+    ...structuredClone(recipe.groups),
+  );
+  try {
+    return run();
+  } finally {
+    inlandHabitat.groups.splice(0, inlandHabitat.groups.length, ...saved);
+  }
+}
+
 const models: CompactPondModel[] = ["boulder", "stone", "fern", "bush", "reed"];
 function canonicalGeometry(model: CompactPondModel) {
   const bytes = readFileSync(
@@ -335,267 +351,413 @@ describe("bounded pond dressing", () => {
         "dimensions",
       );
       const rows = createCompactPondDressing(profile, areas, height, docks);
-      expect(rows).toHaveLength(28);
+      expect(rows).toHaveLength(34);
       expect(rows.every(Object.isFrozen)).toBe(true);
       expect(Object.isFrozen(rows)).toBe(true);
       expect(rows).toEqual(
         createCompactPondDressing(profile, areas, height, docks),
       );
       const currentRecipe = structuredClone(inlandHabitat);
-      for (const pocket of pocketCrowns) {
-        const group = inlandHabitat.groups.find(
-          (entry) => entry.id === pocket.group,
-        )!;
-        expect(group.placements.slice(2).map((row) => row[3])).toEqual(
-          pocket.scales.map(([, after]) => after),
-        );
-      }
-      const northernPocket = inlandHabitat.groups.find(
-        (group) => group.id === "northern-quiet-pocket",
-      )!;
-      for (const shift of waterwardRoots)
-        expect(northernPocket.placements[shift.index][2]).toBe(shift.after);
-      let previousCrownRows: readonly CompactPondPlacement[];
-      try {
-        for (const pocket of pocketCrowns) {
-          const group = inlandHabitat.groups.find(
-            (entry) => entry.id === pocket.group,
-          )!;
-          pocket.scales.forEach(([before], index) => {
-            group.placements[index + 2][3] = before;
-          });
-        }
-        for (const shift of waterwardRoots)
-          northernPocket.placements[shift.index][2] = shift.before;
-        previousCrownRows = createCompactPondDressing(
-          profile,
-          areas,
-          height,
-          docks,
-        );
-      } finally {
-        inlandHabitat.groups.forEach((group, index) =>
-          group.placements.forEach((row, placementIndex) => {
-            row.splice(
-              0,
-              row.length,
-              ...currentRecipe.groups[index].placements[placementIndex],
-            );
-          }),
-        );
+      expect(
+        currentRecipe.groups.map(({ id, placements }) => [
+          id,
+          placements.length,
+        ]),
+      ).toEqual([
+        ["northwest-cutbank", 10],
+        ["northern-quiet-pocket", 12],
+        ["southeast-sedge-pocket", 12],
+      ]);
+      const northern = currentRecipe.groups[1],
+        southeast = currentRecipe.groups[2];
+      expect([northern.placements[4][0], southeast.placements[4][0]]).toEqual([
+        "fern",
+        "fern",
+      ]);
+      expect(northern.placements.slice(8)).toEqual([
+        ["sorrel", -0.95, 0.25, 0.7, 16],
+        ["sorrel", 0, 0.3, 0.8, 142],
+        ["sorrel", 0.65, 0.42, 0.65, 252],
+        ["fern", -0.65, 0.55, 0.65, 341],
+      ]);
+      expect(southeast.placements.slice(10)).toEqual([
+        ["sorrel", -1.35, 0.6, 0.7, 317],
+        ["sorrel", 0.65, 0.78, 0.6, 54],
+      ]);
+      // Explicit native182-era28 fixture. Historical crown/massing proofs
+      // remain about that recipe; all current owner/access checks below use34.
+      const historicalRecipe = structuredClone(currentRecipe);
+      historicalRecipe.groups[1].placements.splice(8);
+      historicalRecipe.groups[2].placements.splice(10);
+      historicalRecipe.groups[1].placements[4][0] = "bush";
+      historicalRecipe.groups[2].placements[4][0] = "bush";
+      const historicalRows = withInlandRecipe(historicalRecipe, () =>
+        createCompactPondDressing(profile, areas, height, docks),
+      );
+      expect(historicalRows).toHaveLength(28);
+      for (const kind of [
+        "empty-group",
+        "thirteenth-placement",
+        "duplicate-group",
+      ] as const) {
+        const invalid = structuredClone(currentRecipe);
+        if (kind === "empty-group") invalid.groups[1].placements.length = 0;
+        else if (kind === "thirteenth-placement")
+          invalid.groups[1].placements.push([
+            ...invalid.groups[1].placements[11],
+          ]);
+        else invalid.groups[2].id = invalid.groups[1].id;
+        expect(
+          () =>
+            withInlandRecipe(invalid, () =>
+              createCompactPondDressing(profile, areas, height, docks),
+            ),
+          kind,
+        ).toThrow();
       }
       expect(inlandHabitat).toEqual(currentRecipe);
-      let changedScales = 0;
-      let waterwardMoves = 0;
-      rows.forEach((row, index) => {
-        const before = previousCrownRows[index];
-        const { x, z, scale, ...metadata } = row;
-        const { x: oldX, z: oldZ, scale: oldScale, ...oldMetadata } = before;
-        expect(metadata).toEqual(oldMetadata);
-        if (scale !== oldScale) changedScales++;
-        const moved = waterwardRoots.some(
-          (shift) =>
-            row.id === `inland_pond_northern-quiet-pocket_${shift.index}`,
-        );
-        if (moved) {
-          waterwardMoves++;
-          expect(Math.hypot(x - oldX, z - oldZ)).toBeCloseTo(0.3, 12);
-          expect(x).toBeLessThan(oldX);
-          expect(z).toBeGreaterThan(oldZ);
-          expect(Math.hypot(x - 410, z - 415)).toBeCloseTo(
-            Math.hypot(oldX - 410, oldZ - 415) - 0.3,
-            12,
+      const { previousCrownRows, changedScales, waterwardMoves, movedPlants } =
+        withInlandRecipe(historicalRecipe, () => {
+          for (const pocket of pocketCrowns) {
+            const group = inlandHabitat.groups.find(
+              (entry) => entry.id === pocket.group,
+            )!;
+            expect(group.placements.slice(2).map((row) => row[3])).toEqual(
+              pocket.scales.map(([, after]) => after),
+            );
+          }
+          const northernPocket = inlandHabitat.groups.find(
+            (group) => group.id === "northern-quiet-pocket",
+          )!;
+          for (const shift of waterwardRoots)
+            expect(northernPocket.placements[shift.index][2]).toBe(shift.after);
+          let previousCrownRows: readonly CompactPondPlacement[];
+          try {
+            for (const pocket of pocketCrowns) {
+              const group = inlandHabitat.groups.find(
+                (entry) => entry.id === pocket.group,
+              )!;
+              pocket.scales.forEach(([before], index) => {
+                group.placements[index + 2][3] = before;
+              });
+            }
+            for (const shift of waterwardRoots)
+              northernPocket.placements[shift.index][2] = shift.before;
+            previousCrownRows = createCompactPondDressing(
+              profile,
+              areas,
+              height,
+              docks,
+            );
+          } finally {
+            inlandHabitat.groups.forEach((group, index) =>
+              group.placements.forEach((row, placementIndex) => {
+                row.splice(
+                  0,
+                  row.length,
+                  ...historicalRecipe.groups[index].placements[placementIndex],
+                );
+              }),
+            );
+          }
+          expect(inlandHabitat).toEqual(historicalRecipe);
+          let changedScales = 0;
+          let waterwardMoves = 0;
+          historicalRows.forEach((row, index) => {
+            const before = previousCrownRows[index];
+            const { x, z, scale, ...metadata } = row;
+            const {
+              x: oldX,
+              z: oldZ,
+              scale: oldScale,
+              ...oldMetadata
+            } = before;
+            expect(metadata).toEqual(oldMetadata);
+            if (scale !== oldScale) changedScales++;
+            const moved = waterwardRoots.some(
+              (shift) =>
+                row.id === `inland_pond_northern-quiet-pocket_${shift.index}`,
+            );
+            if (moved) {
+              waterwardMoves++;
+              expect(Math.hypot(x - oldX, z - oldZ)).toBeCloseTo(0.3, 12);
+              expect(x).toBeLessThan(oldX);
+              expect(z).toBeGreaterThan(oldZ);
+              expect(Math.hypot(x - 410, z - 415)).toBeCloseTo(
+                Math.hypot(oldX - 410, oldZ - 415) - 0.3,
+                12,
+              );
+            } else expect([x, z]).toEqual([oldX, oldZ]);
+            if (
+              row.model === "boulder" ||
+              row.model === "stone" ||
+              row.id.startsWith("inland_pond_northwest-cutbank_")
+            )
+              expect(row).toEqual(before);
+          });
+          expect(changedScales).toBe(14);
+          expect(waterwardMoves).toBe(2);
+          // Reconstruct only the fourteen previous pocket offsets before checking
+          // the original recipe pin, separately reversing the new crown scales.
+          // No model/yaw/order/rock change is hidden by the historical reconstruction.
+          const fixedRecipe = inlandHabitat.groups.map((group) => ({
+            id: group.id,
+            bearing: group.bearing,
+            placements: group.placements.map((row, index) => {
+              const beforeScale = pocketCrowns.find(
+                (pocket) => pocket.group === group.id,
+              )?.scales[index - 2]?.[0];
+              const historicalRow = [...row];
+              if (beforeScale !== undefined) historicalRow[3] = beforeScale;
+              if (group.id === "northwest-cutbank" && index >= 3)
+                return [
+                  historicalRow[0],
+                  null,
+                  null,
+                  ...historicalRow.slice(3),
+                ];
+              const offset = pocketMassing.find(
+                (pocket) => pocket.group === group.id,
+              )?.offsets[index - 2];
+              return offset
+                ? [
+                    historicalRow[0],
+                    offset[0],
+                    offset[1],
+                    ...historicalRow.slice(3),
+                  ]
+                : historicalRow;
+            }),
+          }));
+          expect(
+            createHash("sha256")
+              .update(JSON.stringify(fixedRecipe))
+              .digest("hex"),
+          ).toBe(
+            "1ae7f001918b560a0751905b4ab49d338c1e27d1a7b9f58044cc59ee935cc68d",
           );
-        } else expect([x, z]).toEqual([oldX, oldZ]);
-        if (
-          row.model === "boulder" ||
-          row.model === "stone" ||
-          row.id.startsWith("inland_pond_northwest-cutbank_")
-        )
-          expect(row).toEqual(before);
-      });
-      expect(changedScales).toBe(14);
-      expect(waterwardMoves).toBe(2);
-      // Reconstruct only the fourteen previous pocket offsets before checking
-      // the original recipe pin, separately reversing the new crown scales.
-      // No model/yaw/order/rock change is hidden by the historical reconstruction.
-      const fixedRecipe = inlandHabitat.groups.map((group) => ({
-        id: group.id,
-        bearing: group.bearing,
-        placements: group.placements.map((row, index) => {
-          const beforeScale = pocketCrowns.find(
-            (pocket) => pocket.group === group.id,
-          )?.scales[index - 2]?.[0];
-          const historicalRow = [...row];
-          if (beforeScale !== undefined) historicalRow[3] = beforeScale;
-          if (group.id === "northwest-cutbank" && index >= 3)
-            return [historicalRow[0], null, null, ...historicalRow.slice(3)];
-          const offset = pocketMassing.find(
-            (pocket) => pocket.group === group.id,
-          )?.offsets[index - 2];
-          return offset
-            ? [
-                historicalRow[0],
-                offset[0],
-                offset[1],
-                ...historicalRow.slice(3),
-              ]
-            : historicalRow;
-        }),
-      }));
-      expect(
-        createHash("sha256").update(JSON.stringify(fixedRecipe)).digest("hex"),
-      ).toBe(
-        "1ae7f001918b560a0751905b4ab49d338c1e27d1a7b9f58044cc59ee935cc68d",
-      );
-      const northwest = inlandHabitat.groups[0];
-      expect(northwest.id).toBe("northwest-cutbank");
-      expect(
-        northwest.placements.slice(3).map((row) => row.slice(1, 3)),
-      ).toEqual([
-        [-2.55, 0.65],
-        [-0.9, 0.9],
-        [1.8, 0.65],
-        [0.35, 1.15],
-        [-3.4, 0.2],
-        [2.6, 0.2],
-        [3.2, 0.85],
+          const northwest = inlandHabitat.groups[0];
+          expect(northwest.id).toBe("northwest-cutbank");
+          expect(
+            northwest.placements.slice(3).map((row) => row.slice(1, 3)),
+          ).toEqual([
+            [-2.55, 0.65],
+            [-0.9, 0.9],
+            [1.8, 0.65],
+            [0.35, 1.15],
+            [-3.4, 0.2],
+            [2.6, 0.2],
+            [3.2, 0.85],
+          ]);
+          expect(
+            historicalRows.filter(
+              (row) => row.model === "boulder" || row.model === "stone",
+            ),
+          ).toHaveLength(7);
+          expect(new Set(historicalRows.map((row) => row.model)).size).toBe(6);
+          for (const pocket of pocketMassing) {
+            const group = inlandHabitat.groups.find(
+              (entry) => entry.id === pocket.group,
+            )!;
+            expect(
+              group.placements.slice(2).map((row) => row.slice(1, 3)),
+            ).toEqual(
+              pocket.offsets.map((offset, index) => [
+                offset[2],
+                pocket.group === "northern-quiet-pocket"
+                  ? (waterwardRoots.find((shift) => shift.index === index + 2)
+                      ?.after ?? offset[3])
+                  : offset[3],
+              ]),
+            );
+          }
+          let previousPocketRows: readonly CompactPondPlacement[];
+          try {
+            for (const pocket of pocketMassing) {
+              const group = inlandHabitat.groups.find(
+                (entry) => entry.id === pocket.group,
+              )!;
+              pocket.offsets.forEach(([tangent, bankOffset], index) => {
+                group.placements[index + 2][1] = tangent;
+                group.placements[index + 2][2] = bankOffset;
+              });
+            }
+            previousPocketRows = createCompactPondDressing(
+              profile,
+              areas,
+              height,
+              docks,
+            );
+          } finally {
+            for (const pocket of pocketMassing) {
+              const group = inlandHabitat.groups.find(
+                (entry) => entry.id === pocket.group,
+              )!;
+              const current = historicalRecipe.groups.find(
+                (entry) => entry.id === pocket.group,
+              )!;
+              pocket.offsets.forEach((_, index) => {
+                group.placements[index + 2][1] =
+                  current.placements[index + 2][1];
+                group.placements[index + 2][2] =
+                  current.placements[index + 2][2];
+              });
+            }
+          }
+          let movedPlants = 0;
+          historicalRows.forEach((row, index) => {
+            const before = previousPocketRows[index];
+            const moved = pocketMassing.some((pocket) =>
+              pocket.offsets.some(
+                (_, index) =>
+                  row.id === `inland_pond_${pocket.group}_${index + 2}`,
+              ),
+            );
+            if (!moved) expect(row).toEqual(before);
+            else {
+              movedPlants++;
+              const { x, z, ...metadata } = row;
+              const { x: oldX, z: oldZ, ...oldMetadata } = before;
+              expect(metadata).toEqual(oldMetadata);
+              expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.05);
+            }
+          });
+          expect(movedPlants).toBe(14);
+          const previousOffsets = [
+            [-1.7, 0.75],
+            [-0.55, 1.4],
+            [0.8, 0.95],
+            [0.1, 2.2],
+            [-0.9, 0.18],
+            [0.65, 0.24],
+            [-1, 2.3],
+          ];
+          const currentOffsets = northwest.placements
+            .slice(3)
+            .map((row) => [row[1], row[2]]);
+          let previousRows: readonly CompactPondPlacement[];
+          // Exercise both inputs through the real owner recipe. Restore the actual
+          // imported authoring data even on failure; this does not mock grounding.
+          try {
+            previousOffsets.forEach(([tangent, bankOffset], index) => {
+              northwest.placements[index + 3][1] = tangent;
+              northwest.placements[index + 3][2] = bankOffset;
+            });
+            previousRows = createCompactPondDressing(
+              profile,
+              areas,
+              height,
+              docks,
+            );
+          } finally {
+            currentOffsets.forEach(([tangent, bankOffset], index) => {
+              northwest.placements[index + 3][1] = tangent;
+              northwest.placements[index + 3][2] = bankOffset;
+            });
+          }
+          historicalRows.forEach((row, index) => {
+            const previous = previousRows[index];
+            if (index < 3 || index >= 10) expect(row).toEqual(previous);
+            else {
+              const { x, z, ...metadata } = row;
+              const { x: oldX, z: oldZ, ...oldMetadata } = previous;
+              expect(metadata).toEqual(oldMetadata);
+              expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.1);
+            }
+          });
+          const driftSpan = Math.hypot(
+            historicalRows[7].x - historicalRows[9].x,
+            historicalRows[7].z - historicalRows[9].z,
+          );
+          expect(driftSpan).toBeGreaterThan(6);
+          expect(driftSpan).toBeLessThan(8);
+          // Wider tangents are not admitted for rocks or unrelated bank pockets.
+          for (const row of [
+            northwest.placements[0],
+            inlandHabitat.groups[1].placements[2],
+          ]) {
+            const original = row[1];
+            try {
+              row[1] = -3;
+              expect(() =>
+                createCompactPondDressing(profile, areas, height, docks),
+              ).toThrow("placement");
+            } finally {
+              row[1] = original;
+            }
+          }
+          const drift = northwest.plantDrift!;
+          const originalSpan = drift.tangentMax;
+          try {
+            drift.tangentMax = originalSpan + 0.01;
+            expect(() =>
+              createCompactPondDressing(profile, areas, height, docks),
+            ).toThrow("plant drift");
+          } finally {
+            drift.tangentMax = originalSpan;
+          }
+          return {
+            previousCrownRows,
+            changedScales,
+            waterwardMoves,
+            movedPlants,
+          };
+        });
+      expect(inlandHabitat).toEqual(currentRecipe);
+      const previousById = new Map(historicalRows.map((row) => [row.id, row]));
+      const replacements = new Set([
+        "inland_pond_northern-quiet-pocket_4",
+        "inland_pond_southeast-sedge-pocket_4",
       ]);
+      const additions = rows.filter((row) => !previousById.has(row.id));
+      expect(additions).toHaveLength(6);
+      const containedCrowns: { id: string; minimumInset: number }[] = [];
+      for (const row of rows) {
+        const previous = previousById.get(row.id);
+        if (previous) {
+          if (replacements.has(row.id)) {
+            expect(previous.model).toBe("bush");
+            expect(row.model).toBe("fern");
+            expect({ ...row, model: previous.model }).toEqual(previous);
+          } else expect(row).toEqual(previous);
+        }
+        if (!previous || replacements.has(row.id)) {
+          const radius = COMPACT_POND_MODELS[row.model].radius * row.scale;
+          const minimumInset = Math.max(
+            ...historicalRows
+              .filter(
+                (before) =>
+                  before.model !== "boulder" && before.model !== "stone",
+              )
+              .map(
+                (before) =>
+                  COMPACT_POND_MODELS[before.model].radius * before.scale -
+                  Math.hypot(row.x - before.x, row.z - before.z) -
+                  radius,
+              ),
+          );
+          // A complete new canopy circle inside one previous canopy is a
+          // conservative sufficient proof; no sampled union approximation.
+          expect(
+            minimumInset,
+            row.id + " previous28 canopy containment",
+          ).toBeGreaterThanOrEqual(-1e-12);
+          containedCrowns.push({ id: row.id, minimumInset });
+        }
+      }
+      expect(containedCrowns).toHaveLength(8);
       expect(
         rows.filter((row) => row.model === "boulder" || row.model === "stone"),
-      ).toHaveLength(7);
-      expect(new Set(rows.map((row) => row.model)).size).toBe(6);
-      for (const pocket of pocketMassing) {
-        const group = inlandHabitat.groups.find(
-          (entry) => entry.id === pocket.group,
-        )!;
-        expect(group.placements.slice(2).map((row) => row.slice(1, 3))).toEqual(
-          pocket.offsets.map((offset, index) => [
-            offset[2],
-            pocket.group === "northern-quiet-pocket"
-              ? (waterwardRoots.find((shift) => shift.index === index + 2)
-                  ?.after ?? offset[3])
-              : offset[3],
-          ]),
-        );
-      }
-      let previousPocketRows: readonly CompactPondPlacement[];
-      try {
-        for (const pocket of pocketMassing) {
-          const group = inlandHabitat.groups.find(
-            (entry) => entry.id === pocket.group,
-          )!;
-          pocket.offsets.forEach(([tangent, bankOffset], index) => {
-            group.placements[index + 2][1] = tangent;
-            group.placements[index + 2][2] = bankOffset;
-          });
-        }
-        previousPocketRows = createCompactPondDressing(
-          profile,
-          areas,
-          height,
-          docks,
-        );
-      } finally {
-        for (const pocket of pocketMassing) {
-          const group = inlandHabitat.groups.find(
-            (entry) => entry.id === pocket.group,
-          )!;
-          const current = currentRecipe.groups.find(
-            (entry) => entry.id === pocket.group,
-          )!;
-          pocket.offsets.forEach((_, index) => {
-            group.placements[index + 2][1] = current.placements[index + 2][1];
-            group.placements[index + 2][2] = current.placements[index + 2][2];
-          });
-        }
-      }
-      let movedPlants = 0;
-      rows.forEach((row, index) => {
-        const before = previousPocketRows[index];
-        const moved = pocketMassing.some((pocket) =>
-          pocket.offsets.some(
-            (_, index) => row.id === `inland_pond_${pocket.group}_${index + 2}`,
-          ),
-        );
-        if (!moved) expect(row).toEqual(before);
-        else {
-          movedPlants++;
-          const { x, z, ...metadata } = row;
-          const { x: oldX, z: oldZ, ...oldMetadata } = before;
-          expect(metadata).toEqual(oldMetadata);
-          expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.05);
-        }
-      });
-      expect(movedPlants).toBe(14);
-      const previousOffsets = [
-        [-1.7, 0.75],
-        [-0.55, 1.4],
-        [0.8, 0.95],
-        [0.1, 2.2],
-        [-0.9, 0.18],
-        [0.65, 0.24],
-        [-1, 2.3],
-      ];
-      const currentOffsets = northwest.placements
-        .slice(3)
-        .map((row) => [row[1], row[2]]);
-      let previousRows: readonly CompactPondPlacement[];
-      // Exercise both inputs through the real owner recipe. Restore the actual
-      // imported authoring data even on failure; this does not mock grounding.
-      try {
-        previousOffsets.forEach(([tangent, bankOffset], index) => {
-          northwest.placements[index + 3][1] = tangent;
-          northwest.placements[index + 3][2] = bankOffset;
-        });
-        previousRows = createCompactPondDressing(profile, areas, height, docks);
-      } finally {
-        currentOffsets.forEach(([tangent, bankOffset], index) => {
-          northwest.placements[index + 3][1] = tangent;
-          northwest.placements[index + 3][2] = bankOffset;
-        });
-      }
-      rows.forEach((row, index) => {
-        const previous = previousRows[index];
-        if (index < 3 || index >= 10) expect(row).toEqual(previous);
-        else {
-          const { x, z, ...metadata } = row;
-          const { x: oldX, z: oldZ, ...oldMetadata } = previous;
-          expect(metadata).toEqual(oldMetadata);
-          expect(Math.hypot(x - oldX, z - oldZ)).toBeGreaterThan(0.1);
-        }
-      });
-      const driftSpan = Math.hypot(
-        rows[7].x - rows[9].x,
-        rows[7].z - rows[9].z,
+      ).toEqual(
+        historicalRows.filter(
+          (row) => row.model === "boulder" || row.model === "stone",
+        ),
       );
-      expect(driftSpan).toBeGreaterThan(6);
-      expect(driftSpan).toBeLessThan(8);
-      // Wider tangents are not admitted for rocks or unrelated bank pockets.
-      for (const row of [
-        northwest.placements[0],
-        inlandHabitat.groups[1].placements[2],
-      ]) {
-        const original = row[1];
-        try {
-          row[1] = -3;
-          expect(() =>
-            createCompactPondDressing(profile, areas, height, docks),
-          ).toThrow("placement");
-        } finally {
-          row[1] = original;
-        }
-      }
-      const drift = northwest.plantDrift!;
-      const originalSpan = drift.tangentMax;
-      try {
-        drift.tangentMax = originalSpan + 0.01;
-        expect(() =>
-          createCompactPondDressing(profile, areas, height, docks),
-        ).toThrow("plant drift");
-      } finally {
-        drift.tangentMax = originalSpan;
-      }
+      expect(
+        rows.filter((row) =>
+          row.id.startsWith("inland_pond_northwest-cutbank_"),
+        ),
+      ).toEqual(historicalRows.slice(0, 10));
       const bounds = docks.docks.map(getCompactPondDockSupportBounds);
       const occupiedDegrees = new Set<number>();
       for (const row of rows) {
@@ -641,7 +803,7 @@ describe("bounded pond dressing", () => {
         DataManager.getWorldConfig()!.compactServicePlanting,
       );
       expect(servicePlanting).toHaveLength(24);
-      expect(rows.length + servicePlanting.length).toBe(52);
+      expect(rows.length + servicePlanting.length).toBe(58);
       owner = new CompactPondDressingVisuals(new THREE.Group(), rows);
       for (const model of Object.keys(
         COMPACT_POND_MODELS,
@@ -664,8 +826,8 @@ describe("bounded pond dressing", () => {
       owner.update(0.25, () => surface);
       expect(owner.getReceipt()).toMatchObject({
         ready: true,
-        visible: 28,
-        instances: 28,
+        visible: 34,
+        instances: 34,
       });
       const assetReceipt = owner.getReceipt().assets;
       expect(assetReceipt).toHaveLength(6);
@@ -909,7 +1071,7 @@ describe("bounded pond dressing", () => {
         const placementHash = (value: unknown) =>
           createHash("sha256").update(JSON.stringify(value)).digest("hex");
         expect(placementHash(previousCrownRows)).toBe(crownGolden.before);
-        expect(placementHash(rows)).toBe(crownGolden.after);
+        expect(placementHash(historicalRows)).toBe(crownGolden.after);
         const approaches = (
           point: { x: number; z: number },
           planting: readonly CompactPondPlacement[],
@@ -964,15 +1126,18 @@ describe("bounded pond dressing", () => {
         };
         const allApproaches = pool.map((point) => {
           const before = approaches(point, previousCrownRows);
+          const historical = approaches(point, historicalRows);
+          expect(historical.dryTiles).toEqual(before.dryTiles);
+          expect(historical.clearTiles).toEqual(before.clearTiles);
           const after = approaches(point, rows);
-          expect(after.dryTiles).toEqual(before.dryTiles);
+          expect(after.dryTiles).toEqual(historical.dryTiles);
           expect(
             after.clearTiles,
-            `${point.x},${point.z} complete pool`,
-          ).toEqual(before.clearTiles);
+            `${point.x},${point.z} complete current34 pool`,
+          ).toEqual(historical.clearTiles);
           expect(after.clearTiles.length).toBeGreaterThan(0);
           expect(after.minimumClearMargin).toBeGreaterThan(0);
-          return { point, before, after };
+          return { point, before, historical, after };
         });
         expect(allApproaches).toHaveLength(admittedPool.length);
         expect(
@@ -983,7 +1148,9 @@ describe("bounded pond dressing", () => {
         ).toBe(crownGolden.clearApproaches);
         expect(
           Math.min(
-            ...allApproaches.map((entry) => entry.after.minimumClearMargin),
+            ...allApproaches.map(
+              (entry) => entry.historical.minimumClearMargin,
+            ),
           ),
         ).toBeCloseTo(0.04318228473613872, 12);
         // Both previously rejected candidates still have the same large crowns.
@@ -1000,22 +1167,16 @@ describe("bounded pond dressing", () => {
             ],
           },
         ]) {
-          let rejectedRows: readonly CompactPondPlacement[];
-          try {
+          const rejectedRows = withInlandRecipe(historicalRecipe, () => {
+            const northernPocket = inlandHabitat.groups.find(
+              (group) => group.id === "northern-quiet-pocket",
+            )!;
             waterwardRoots.forEach((shift, index) => {
               northernPocket.placements[shift.index][2] =
                 rejected.offsets[index];
             });
-            rejectedRows = createCompactPondDressing(
-              profile,
-              areas,
-              height,
-              docks,
-            );
-          } finally {
-            for (const shift of waterwardRoots)
-              northernPocket.placements[shift.index][2] = shift.after;
-          }
+            return createCompactPondDressing(profile, areas, height, docks);
+          });
           const point = pool.find(
             (entry) => entry.x === 416.5 && entry.z === 399.5,
           )!;
@@ -1152,9 +1313,10 @@ describe("bounded pond dressing", () => {
         console.info(
           "inland-plant-massing-clearances",
           JSON.stringify({
-            movedPlants,
-            changedScales,
-            waterwardMoves,
+            historical28Massing: { movedPlants, changedScales, waterwardMoves },
+            current34CanopyContainment: containedCrowns,
+            historical28PlacementSHA256: placementHash(historicalRows),
+            current34PlacementSHA256: placementHash(rows),
             selectedAreasSHA256,
             selectedConfigSHA256,
             allocationPool: allApproaches.map(({ point, before, after }) => ({
