@@ -117,7 +117,7 @@ function rows(result: RootedFlowerPlacementResult) {
 }
 
 // Frozen original hash arithmetic, independent of the production helper.
-// Population changes must not reshuffle position/acceptance/yaw/scale keys.
+// Distribution changes retain acceptance/yaw/scale keys, not historical roots.
 function originalFlowerHash(seed: number, x: number, z: number, lane: number) {
   let value =
     (seed ^
@@ -128,6 +128,23 @@ function originalFlowerHash(seed: number, x: number, z: number, lane: number) {
   value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
   value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
   return ((value ^ (value >>> 16)) >>> 0) / 0x100000000;
+}
+
+// Design oracle: one point in each [1,3]/[5,7] quadrant interval. Do not use
+// the production position helper to construct expected placement matrices.
+function meadowPosition(seed: number, cx: number, cz: number, ordinal: number) {
+  return {
+    x: Math.fround(
+      cx * 8 +
+        [1, 5, 1, 5][ordinal] +
+        2 * originalFlowerHash(seed, cx, cz, ordinal * 8),
+    ),
+    z: Math.fround(
+      cz * 8 +
+        [1, 1, 5, 5][ordinal] +
+        2 * originalFlowerHash(seed, cx, cz, ordinal * 8 + 1),
+    ),
+  };
 }
 
 function addTree(world: World, x: number, z: number) {
@@ -245,7 +262,7 @@ describe("bounded rooted flower placement", () => {
     }
   });
 
-  it("keeps compact candidates separated for supported factory geometry even at extreme Float32 cells", () => {
+  it("distributes four roots across each cell with separated factory wind envelopes, including extreme Float32 cells", () => {
     let maximumFactoryReach = 0;
     for (const requestedHeight of [0.12, 0.38, 0.5, 0.75, 0.8]) {
       const geometry = createRootedFlowerGeometry({ height: requestedHeight });
@@ -270,14 +287,9 @@ describe("bounded rooted flower placement", () => {
     // All factory positions scale linearly with requested height. Below 0.8m,
     // the uncapped wind envelope is monotone, so 0.8m bounds intermediate sizes.
     // Generic admitted geometry can be wider: this is not a new placement gate.
-    const nominalMinimum = 2 * 0.65 * Math.sin((Math.PI / 2 - 0.24) / 2);
-    expect(nominalMinimum).toBeGreaterThan(0.8);
-    const pairRoundingAllowance = Math.SQRT2 / 8;
-    expect(nominalMinimum - pairRoundingAllowance).toBeGreaterThan(
-      2 * maximumFactoryReach,
-    );
-    // Distinct cells retain >=0.75m inset on both sides of their shared edge.
-    expect(1.5).toBeGreaterThan(2 * maximumFactoryReach);
+    // All interval endpoints are exactly representable integers, and Float32
+    // rounding is monotone. Thus rounding cannot reduce the 2m separation.
+    expect(2).toBeGreaterThan(2 * maximumFactoryReach);
     const cells = [
       [0, 0],
       [-1, -1],
@@ -294,55 +306,70 @@ describe("bounded rooted flower placement", () => {
           getRootedFlowerCandidatePosition(seed, cx, cz, ordinal),
         );
         for (const [ordinal, candidate] of candidates.entries()) {
-          const angle =
-            originalFlowerHash(seed, cx, cz, 1002) * Math.PI * 2 +
-            ordinal * (Math.PI / 2) +
-            (originalFlowerHash(seed, cx, cz, ordinal * 8) - 0.5) * 0.24;
-          const radius =
-            0.65 + originalFlowerHash(seed, cx, cz, ordinal * 8 + 1) * 0.3;
-          expect(candidate).toEqual({
-            x: Math.fround(
-              cx * 8 +
-                1.75 +
-                originalFlowerHash(seed, cx, cz, 1000) * 4.5 +
-                Math.cos(angle) * radius,
-            ),
-            z: Math.fround(
-              cz * 8 +
-                1.75 +
-                originalFlowerHash(seed, cx, cz, 1001) * 4.5 +
-                Math.sin(angle) * radius,
-            ),
-          });
-          expect(candidate.x).toBeGreaterThanOrEqual(cx * 8 + 0.75);
-          expect(candidate.x).toBeLessThanOrEqual(cx * 8 + 7.25);
-          expect(candidate.z).toBeGreaterThanOrEqual(cz * 8 + 0.75);
-          expect(candidate.z).toBeLessThanOrEqual(cz * 8 + 7.25);
+          expect(candidate).toEqual(meadowPosition(seed, cx, cz, ordinal));
+          const minX = cx * 8 + [1, 5, 1, 5][ordinal];
+          const minZ = cz * 8 + [1, 1, 5, 5][ordinal];
+          expect(candidate.x).toBeGreaterThanOrEqual(minX);
+          expect(candidate.x).toBeLessThanOrEqual(minX + 2);
+          expect(candidate.z).toBeGreaterThanOrEqual(minZ);
+          expect(candidate.z).toBeLessThanOrEqual(minZ + 2);
           for (const other of candidates.slice(ordinal + 1)) {
             const distance = Math.hypot(
               candidate.x - other.x,
               candidate.z - other.z,
             );
-            expect(distance).toBeGreaterThanOrEqual(
-              nominalMinimum - pairRoundingAllowance - 1e-12,
-            );
-            expect(distance).toBeLessThanOrEqual(
-              1.9 + pairRoundingAllowance + 1e-12,
-            );
+            expect(distance).toBeGreaterThanOrEqual(2);
+            expect(distance).toBeLessThanOrEqual(6 * Math.SQRT2);
             expect(distance).toBeGreaterThan(2 * maximumFactoryReach);
+          }
+          for (const [dx, dz] of [
+            [1, 0],
+            [0, 1],
+            [1, 1],
+            [-1, 0],
+            [0, -1],
+            [-1, -1],
+            [-1, 1],
+            [1, -1],
+          ]) {
+            if (
+              cx + dx < -(2 ** 17) - 5 ||
+              cx + dx > 2 ** 17 + 4 ||
+              cz + dz < -(2 ** 17) - 5 ||
+              cz + dz > 2 ** 17 + 4
+            )
+              continue;
+            for (let neighbor = 0; neighbor < 4; neighbor++) {
+              const other = getRootedFlowerCandidatePosition(
+                seed,
+                cx + dx,
+                cz + dz,
+                neighbor,
+              );
+              const separation = Math.hypot(
+                candidate.x - other.x,
+                candidate.z - other.z,
+              );
+              expect(separation).toBeGreaterThanOrEqual(
+                dx && dz ? 2 * Math.SQRT2 : 2,
+              );
+              expect(separation).toBeGreaterThan(2 * maximumFactoryReach);
+            }
           }
         }
       }
   });
 
-  it.each([1, 0.63])(
-    "fills sparse patches while preserving original accepted matrices with habitat %s",
+  it.each([0, 0.63, 1])(
+    "matches independent meadow placement, hash lanes and rejection accounting with habitat %s",
     (habitat) => {
       const f = fixture(() => 10);
       const seed = 1728;
       const actual = drain(f.request({ seed, grassPlacement: () => habitat }));
       const expected: number[] = [];
-      const previous: number[][] = [];
+      let previousAdmissionCount = 0;
+      let horizonRejected = 0;
+      let habitatRejected = 0;
       let groupedCells = 0;
       let newlyPopulatedGroups = 0;
       for (let cx = -5; cx <= 5; cx++)
@@ -355,26 +382,30 @@ describe("bounded rooted flower placement", () => {
           );
           let acceptedInCell = 0;
           for (let ordinal = 0; ordinal < 4; ordinal++) {
-            const { x, z } = getRootedFlowerCandidatePosition(
-              seed,
-              cx,
-              cz,
-              ordinal,
-            );
-            if (Math.hypot(x - 4, z - 4) > 40) continue;
+            const { x, z } = meadowPosition(seed, cx, cz, ordinal);
+            if (Math.hypot(x - 4, z - 4) > 40) {
+              horizonRejected++;
+              continue;
+            }
             const acceptance = originalFlowerHash(
               seed,
               cx,
               cz,
               ordinal * 8 + 2,
             );
-            const formerlyAccepted =
-              patch <= 0.42 &&
-              acceptance < habitat * (0.25 + 0.5 * (1 - patch / 0.42));
-            const accepted = acceptance < habitat * (0.6 + 0.35 * (1 - patch));
-            // Raising population must retain every existing transform.
-            if (formerlyAccepted) expect(accepted).toBe(true);
-            if (!accepted) continue;
+            const previousAdmission =
+              acceptance < habitat * (0.6 + 0.35 * (1 - patch));
+            const accepted = acceptance < habitat * (0.9 + 0.1 * (1 - patch));
+            // This isolates admission at the CURRENT candidate roots. Relocated
+            // roots encounter different exclusions; historical matrices differ.
+            if (previousAdmission) {
+              previousAdmissionCount++;
+              expect(accepted).toBe(true);
+            }
+            if (!accepted) {
+              habitatRejected++;
+              continue;
+            }
             const yaw =
               originalFlowerHash(seed, cx, cz, ordinal * 8 + 3) * Math.PI * 2;
             const scale =
@@ -388,23 +419,21 @@ describe("bounded rooted flower placement", () => {
               new THREE.Vector3(scale, scale, scale),
             ).elements;
             expected.push(...transform);
-            if (formerlyAccepted)
-              previous.push(Array.from(new Float32Array(transform)));
             acceptedInCell++;
           }
           if (acceptedInCell >= 2) groupedCells++;
           if (patch > 0.42 && acceptedInCell >= 2) newlyPopulatedGroups++;
         }
-      expect(groupedCells).toBeGreaterThan(20);
-      expect(newlyPopulatedGroups).toBeGreaterThan(10);
+      if (habitat > 0) {
+        expect(groupedCells).toBeGreaterThan(20);
+        expect(newlyPopulatedGroups).toBeGreaterThan(10);
+        expect(previousAdmissionCount).toBeGreaterThan(0);
+        expect(actual.result.count).toBeGreaterThan(previousAdmissionCount);
+      } else expect(actual.result.count).toBe(0);
       expect(actual.result.matrices).toEqual(new Float32Array(expected));
-      expect(previous.length).toBeGreaterThan(0);
-      expect(actual.result.count).toBeGreaterThan(previous.length * 2);
-      const actualByRoot = new Map(
-        rows(actual.result).map((row) => [`${row[12]},${row[14]}`, row]),
-      );
-      for (const row of previous)
-        expect(actualByRoot.get(`${row[12]},${row[14]}`)).toEqual(row);
+      expect(actual.result.diagnostics.rejected.horizon).toBe(horizonRejected);
+      expect(actual.result.diagnostics.rejected.habitat).toBe(habitatRejected);
+      expect(actual.result.count + horizonRejected + habitatRejected).toBe(484);
       expect(actual.result.diagnostics.candidates).toBe(484);
       expect(
         actual.phases.filter((phase) => phase === "flower_candidate"),
@@ -446,24 +475,31 @@ describe("bounded rooted flower placement", () => {
     );
   });
 
-  it("keeps all matrices in retained world cells identical when the horizon moves", () => {
-    const f = fixture();
-    const a = drain(f.request()).result;
-    const b = drain(f.request({ origin: { x: 12, z: 4 } })).result;
-    const byPoint = new Map(
-      rows(b).map((row) => [`${row[12]},${row[14]}`, row]),
-    );
-    let retained = 0;
-    for (const row of rows(a)) {
-      if (Math.hypot(row[12] - 12, row[14] - 4) > 40) continue;
-      expect(byPoint.get(`${row[12]},${row[14]}`)).toEqual(row);
-      retained++;
-    }
-    expect(retained).toBeGreaterThan(0);
-    expect(drain(f.request({ seed: 1729 })).result.matrices).not.toEqual(
-      a.matrices,
-    );
-  });
+  it.each([
+    [12, 4],
+    [4, 12],
+    [-4, -4],
+  ])(
+    "keeps retained world-cell matrices identical when the horizon moves to %s/%s",
+    (x, z) => {
+      const f = fixture();
+      const a = drain(f.request()).result;
+      const b = drain(f.request({ origin: { x, z } })).result;
+      const byPoint = new Map(
+        rows(b).map((row) => [`${row[12]},${row[14]}`, row]),
+      );
+      let retained = 0;
+      for (const row of rows(a)) {
+        if (Math.hypot(row[12] - x, row[14] - z) > 40) continue;
+        expect(byPoint.get(`${row[12]},${row[14]}`)).toEqual(row);
+        retained++;
+      }
+      expect(retained).toBeGreaterThan(0);
+      expect(drain(f.request({ seed: 1729 })).result.matrices).not.toEqual(
+        a.matrices,
+      );
+    },
+  );
 
   it("samples the actual retained face at Float32 XZ and reports only root-center rounding", () => {
     const f = fixture((x, z) => 10.123456 + x * 0.0321 + z * 0.0143);

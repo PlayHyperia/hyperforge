@@ -89,11 +89,12 @@ function hash(seed: number, x: number, z: number, ordinal: number): number {
   return ((value ^ (value >>> 16)) >>> 0) / 0x100000000;
 }
 
-/** Four compact candidates in an admitted world cell, independent of focus.
- * Only XZ changes: the continuation retains its original patch, acceptance,
- * yaw and scale lanes. Before Float32 rounding, diameter is <=1.9m and pair
- * separation >0.8m. Extreme admitted coordinates require rounding allowance;
- * factory-envelope separation is tested, not promised for arbitrary geometry.
+/** One jittered candidate per 4m quadrant, independent of the current focus.
+ * Spread the existing four roots through suitable meadow instead of placing
+ * every sprig in one tiny cluster. Patch, acceptance, yaw and scale hash lanes
+ * stay independent. Roots retain a 1m cell inset and >=2m pair separation,
+ * including adjacent cells and Float32 rounding in the admitted domain.
+ * These root distances do not replace the full geometry/wind clearance checks.
  */
 export function getRootedFlowerCandidatePosition(
   seed: number,
@@ -116,16 +117,13 @@ export function getRootedFlowerCandidatePosition(
     ordinal >= 4
   )
     throw new Error("Invalid bounded rooted flower candidate");
-  const anchorX = cellX * 8 + 1.75 + hash(seed, cellX, cellZ, 1000) * 4.5;
-  const anchorZ = cellZ * 8 + 1.75 + hash(seed, cellX, cellZ, 1001) * 4.5;
-  const angle =
-    hash(seed, cellX, cellZ, 1002) * Math.PI * 2 +
-    ordinal * (Math.PI / 2) +
-    (hash(seed, cellX, cellZ, ordinal * 8) - 0.5) * 0.24;
-  const radius = 0.65 + hash(seed, cellX, cellZ, ordinal * 8 + 1) * 0.3;
+  const centerX = cellX * 8 + 2 + (ordinal % 2) * 4;
+  const centerZ = cellZ * 8 + 2 + Math.floor(ordinal / 2) * 4;
   return {
-    x: Math.fround(anchorX + Math.cos(angle) * radius),
-    z: Math.fround(anchorZ + Math.sin(angle) * radius),
+    x: Math.fround(centerX + (hash(seed, cellX, cellZ, ordinal * 8) - 0.5) * 2),
+    z: Math.fround(
+      centerZ + (hash(seed, cellX, cellZ, ordinal * 8 + 1) - 0.5) * 2,
+    ),
   };
 }
 
@@ -594,9 +592,9 @@ export function* createRootedFlowerPlacementSteps(
     centerZ = (origin.z - 4) / 8;
   for (let cx = centerX - 5; cx <= centerX + 5; cx++)
     for (let cz = centerZ - 5; cz <= centerZ + 5; cz++) {
-      // Keep a background population throughout suitable grass, with richer
-      // meadow patches. A hard patch cutoff left most broad cells flowerless.
-      // Candidate positions and acceptance/yaw/scale lanes remain stable.
+      // Broad meadow coverage with subtle regional thinning. Habitat and full
+      // swept clearances still reject roads, water, resources and poor ground;
+      // no extra candidate, pool capacity or scheduling allowance is added.
       const patch = hash(seed, Math.floor(cx / 3), Math.floor(cz / 3), 100);
       for (let ordinal = 0; ordinal < 4; ordinal++) {
         yield "flower_candidate";
@@ -617,7 +615,7 @@ export function* createRootedFlowerPlacementSteps(
           throw new Error("Invalid rooted flower habitat eligibility");
         if (
           hash(seed, cx, cz, ordinal * 8 + 2) >=
-          habitat * (0.6 + 0.35 * (1 - patch))
+          habitat * (0.9 + 0.1 * (1 - patch))
         ) {
           diagnostics.rejected.habitat++;
           continue;
