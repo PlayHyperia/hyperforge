@@ -1,5 +1,19 @@
 # Compact island environment art: next delivery slice
 
+## 2026-09-22 — Grass silhouette study: five segments favored; not enabled in-world
+
+- [x] Added an explicit generator-only five/six-segment basal-sheath study: quarter-width roots, unchanged blade population/RNG/tips, derivative-consistent normals. Historical geometry hashes remain unchanged. No world profile, manager, worker or playable build selects the study.
+- [x] **152 focused tests pass** (17 geometry, 135 existing grounding/wind/appearance); scoped lint/style and full shared **760-root / 2,466-source no-emit** check pass. The initial historical-index test mismatch is retained: source indices are Uint16, native142 captured Uint32; the corrected test checks both representations explicitly. Final source changes after lint/types were comment-only.
+- [x] **grass-blade-shape-native03**: nine matched 1280×720 native Chrome/Metal montages, three variants, calm and fixed ±X wind. Real source geometry and submitted position/normal/index buffers verified; complete blade framing checked. Native01 clipped some tips, native02 failed the unchanged framing margin; native03 adjusts cameras only. All attempts retained. Owned browser/server cleaned up; protected bundles/ports unchanged.
+- [x] Root and independent review favor **five segments as the next candidate**, not production acceptance: narrower bases remove the chopped-ribbon look and bends are less abrupt. Six adds little visible benefit in the small patch. Sampling and base width changed together, so the gain is not attributed to sampling alone.
+- [x] Per 24-blade clump: current **216 vertices / 216 triangles / 8,208 bytes**; five **360 / 408 / 13,968**; six **432 / 504 / 16,848**. These are template/source-buffer costs, not frame timings. A blanket near-range replacement would be expensive; no density, resolution or quality setting was reduced.
+- [ ] Next: qualify a bounded close-range five-segment integration, explicit layout/stride and worker admission, fresh terrain/root fitting, actual GPU wind and normals, road/bank clearance, smooth LOD transitions, then matched gameplay views and GPU/frame-time measurements. Retain existing distant geometry; do not assume a narrower root footprint preserves prior clearance.
+- [ ] Needle-like lower tips, substrate contact, full meadow coverage, production lighting/SSS and continuous motion remain unaccepted. This renderer-only study uses neutral lighting and CPU-posed fixed wind; it is not an in-game, animation or performance test.
+
+References: [Grassworks](https://grassworks.techredux.co/demo) visually inspected for silhouette/root integration; no source or assets copied. [GPUOpen procedural grass](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) informs curve/normal reasoning, not a claim of mesh-shader support in this renderer.
+
+Evidence: `grass-blade-shape-native03/report.json` (SHA256 `b9b29b61a4af5ba351538a7b4b3d97c44d93450095cebf52b4bf8e926d51979a`), `grass-sheath-shape-review01.json`; service-layout logs `grass-sheath-geometry02`, `grass-sheath-existing01`, `grass-sheath-types01`, `grass-sheath-lint01`, `grass-sheath-style01`, `grass-sheath-native-study03`.
+
 ## 2026-09-22 — Height-consistent grass wind verified; silhouette still unfinished
 
 - [x] Explicit folded-layout wind now scales with authored blade height and instance scale, with a coupled normal derivative. Historical unselected layouts keep their original response. Both whole-clump terrain bounds and per-blade road sweeps use the same response; intermediate rows can extend farther than the old curve even when the tip does not.

@@ -282,6 +282,16 @@ export const FINE_GRASS_FOLDED_BLADE_SHAPE = Object.freeze({
   BLADE_RIDGE_TANGENT: 0.36,
 } as const);
 
+/** Isolated generator study, not a world-profile selection. A narrow basal
+ * sheath avoids a full-width cut-off edge. Geometry cost and fresh grounding
+ * must be qualified before the five/six-segment study enters a game manager. */
+export const FINE_GRASS_BASAL_SHEATH_SHAPE = Object.freeze({
+  id: "basal-sheath-v1",
+  rootWidthFactor: 0.25,
+  // Authored curve parameter t, not a fraction of physical blade height.
+  fullWidthHeight: 0.2,
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -441,16 +451,20 @@ export function createClumpGeometry(
   bladesPerClump = GRASS_CONFIG.BLADES_PER_CLUMP,
   bladeSegments = GRASS_CONFIG.BLADE_SEGMENTS,
   shape: GrassBladeShape = GRASS_CONFIG,
-  crossSection?: "folded-lancet-v1",
+  crossSection?: "folded-lancet-v1" | "folded-sheath-v1",
 ): THREE.BufferGeometry {
-  const folded = crossSection === "folded-lancet-v1";
+  const sheath = crossSection === "folded-sheath-v1";
+  const folded = crossSection === "folded-lancet-v1" || sheath;
   if (
     (crossSection !== undefined && !folded) ||
     (folded &&
-      (bladeSegments !== 3 || shape.BLADE_CONTROL_HEIGHT === undefined))
+      ((sheath
+        ? bladeSegments !== 5 && bladeSegments !== 6
+        : bladeSegments !== 3) ||
+        shape.BLADE_CONTROL_HEIGHT === undefined))
   )
     throw new Error(
-      "Folded grass requires the explicit three-segment curved layout",
+      "Folded grass requires its explicit curved layout: three segments, or five/six for the sheath study",
     );
   const N = bladesPerClump;
   const segs = bladeSegments;
@@ -470,8 +484,8 @@ export function createClumpGeometry(
   const controlArcRatio = shape.BLADE_CONTROL_ARC_RATIO ?? 0;
   const tipHeight = shape.BLADE_TIP_HEIGHT ?? 1;
 
-  const vertsPerBlade = folded ? 9 : segs * 2 + 1;
-  const trisPerBlade = folded ? 9 : (segs - 1) * 2 + 1;
+  const vertsPerBlade = folded ? 3 * segs : segs * 2 + 1;
+  const trisPerBlade = folded ? 4 * segs - 3 : (segs - 1) * 2 + 1;
   const totalVerts = vertsPerBlade * N;
   const totalIdx = trisPerBlade * 3 * N;
 
@@ -580,14 +594,33 @@ export function createClumpGeometry(
 
     const foldedWidth = (t: number) => {
       const [a, b, c, d] = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_WIDTH_POLYNOMIAL;
-      return w * 0.5 * (a + b * t + c * t * t + d * t * t * t);
+      const hw = w * 0.5 * (a + b * t + c * t * t + d * t * t * t);
+      if (!sheath) return hw;
+      const { rootWidthFactor, fullWidthHeight } =
+        FINE_GRASS_BASAL_SHEATH_SHAPE;
+      const u = THREE.MathUtils.clamp(t / fullWidthHeight, 0, 1);
+      return (
+        hw * (rootWidthFactor + (1 - rootWidthFactor) * u * u * (3 - 2 * u))
+      );
     };
     const foldedNormal = (t: number, s: number) => {
       // P=C+s*hw*S+f*(1-s²)*H, H=(-sr,0,cr). Derive both tangents
       // from that same surface; the old ribbon normal is not valid at edges.
       const [, b, c, d] = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_WIDTH_POLYNOMIAL;
       const hw = foldedWidth(t);
-      const dhw = w * 0.5 * (b + 2 * c * t + 3 * d * t * t);
+      let dhw = w * 0.5 * (b + 2 * c * t + 3 * d * t * t);
+      if (sheath) {
+        const { rootWidthFactor, fullWidthHeight } =
+          FINE_GRASS_BASAL_SHEATH_SHAPE;
+        const u = THREE.MathUtils.clamp(t / fullWidthHeight, 0, 1);
+        const factor =
+          rootWidthFactor + (1 - rootWidthFactor) * u * u * (3 - 2 * u);
+        const derivative =
+          ((1 - rootWidthFactor) * 6 * u * (1 - u)) / fullWidthHeight;
+        const [a] = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_WIDTH_POLYNOMIAL;
+        const originalWidth = w * 0.5 * (a + b * t + c * t * t + d * t * t * t);
+        dhw = dhw * factor + originalWidth * derivative;
+      }
       const g = 16 * t * t * (1 - t) * (1 - t);
       const dg = 32 * t * (1 - t) * (1 - 2 * t);
       const ridge = FINE_GRASS_FOLDED_BLADE_SHAPE.BLADE_RIDGE_TANGENT;
@@ -627,7 +660,7 @@ export function createClumpGeometry(
         hw = w * 0.5 * Math.pow(1.0 - taperedHeight * taper, widthFalloffPower);
       if (upperWidthGain !== 0)
         hw *= 1 + upperWidthGain * THREE.MathUtils.smoothstep(t, 0, 0.5);
-      if (folded && i !== 0) hw = foldedWidth(t);
+      if (folded && (i !== 0 || sheath)) hw = foldedWidth(t);
       // Keep the historical arithmetic exact when no leaning control is
       // selected. The fine candidate changes only the middle control point;
       // root and tip remain byte-identical, with no extra random draws.
@@ -666,7 +699,8 @@ export function createClumpGeometry(
     vi++;
 
     if (folded) {
-      for (const t of [1 / 3, 2 / 3]) {
+      for (let row = 1; row < segs; row++) {
+        const t = row / segs;
         const arc = 2 * (1 - t) * t * controlArcRatio + t * t;
         const ridge =
           foldedWidth(t) *
@@ -684,8 +718,32 @@ export function createClumpGeometry(
         uvs.set([0.5, t], vi * 2);
         vi++;
       }
-      for (const index of FINE_GRASS_FOLDED_BLADE_INDICES)
-        indices[ii++] = baseVert + index;
+      if (!sheath) {
+        for (const index of FINE_GRASS_FOLDED_BLADE_INDICES)
+          indices[ii++] = baseVert + index;
+      } else {
+        // Same two-root indexing convention, but a narrower footprint; adds
+        // longitudinal stations and their physical ridge vertices, not blades.
+        const tip = segs * 2;
+        const triangle = (a: number, b: number, c: number) => {
+          indices[ii++] = baseVert + a;
+          indices[ii++] = baseVert + b;
+          indices[ii++] = baseVert + c;
+        };
+        triangle(0, 1, tip + 1);
+        triangle(0, tip + 1, 2);
+        triangle(1, 3, tip + 1);
+        for (let row = 1; row < segs - 1; row++) {
+          const left = 2 * row,
+            center = tip + row;
+          triangle(left, center, left + 2);
+          triangle(center, center + 1, left + 2);
+          triangle(center, left + 1, center + 1);
+          triangle(left + 1, left + 3, center + 1);
+        }
+        triangle(tip - 2, 2 * segs + segs - 1, tip);
+        triangle(2 * segs + segs - 1, tip - 1, tip);
+      }
       continue;
     }
 
