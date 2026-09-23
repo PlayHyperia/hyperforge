@@ -1,5 +1,14 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-23 — Uniform shadow trial integrated; full-island capture pending
+
+- [x] Integrated the explicit `shadowFlow=uniform-v1` island trial. Selection is captured once; malformed, duplicate and embedded routes are rejected. Omission leaves current defaults unchanged.
+- [x] The real Environment owner installs the helper only for admitted compact, single-map WebGPU shadows. No-shadows quality still disables maps while retaining direct light. CSM, non-WebGPU and non-sculpt rejection preserve an existing light, its node, scene membership and construction provenance.
+- [x] Quality changes and destruction release the owned target and detach only the matching map/node aliases. Real Three-object lifecycle tests cover target disposal; a rendered node can receive another idempotent dispose call from Three's own light listener, so node-event counts are not claimed as a GPU lifecycle guarantee.
+- [x] **850 tests / 12 files**, including both actual headful Chrome/Metal shader gates, pass. The no-emit shared/source check has **767 roots, 2,571 source files and zero diagnostics**; scoped lint passes. Receipts: `uniform-shadow-integration-regression02`, `uniform-shadow-integration-types02`, and `uniform-shadow-integration-lint01` under service-layout evidence.
+- [ ] Build79/runtime121 and fresh native163/164 will validate the complete island. Both comparison runs retain exact-zero rock sampling; only164 selects the new shadow flow. Exact source additions, unchanged geometry/population/grass config, texture owners/filtering, actual shadow-node ownership, full retained shader diagnostics and ordinary-frame timing must be checked before any promotion.
+- [ ] Full-world visual, motion, traversal and sustained performance acceptance remain open. This source checkpoint does not establish a finished visual improvement or alter the saved localhost game. Next art work remains flower readability, grass form/normal quality and cohesive island finish.
+
 ## 2026-09-23 — Shoreline normal correction and native-qualified shadow candidate
 
 - [x] Corrected pond mineral/silt normal selection to keep cotangent derivatives in uniform control flow. Original fallback normals, material values, textures and resolution remain unchanged; raw normals are shared once and sampling subgraphs retain their own branch context.

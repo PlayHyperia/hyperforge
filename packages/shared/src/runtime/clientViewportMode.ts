@@ -137,6 +137,33 @@ export type GrassGeometryCandidate = "sheath-close-v1" | "rooted-fan-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
+/** Explicit native shadow correctness trial; omission keeps current defaults.
+ * The Environment owner separately admits WebGPU, compact terrain and one map. */
+export function resolveSingleMapShadowFlow(
+  win?: Window,
+): "uniform-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("shadowFlow") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "uniform-v1")
+    throw new Error("Unknown or duplicate single-map shadow flow candidate");
+  if (
+    (params?.getAll("page").length ?? 0) > 1 ||
+    (params?.getAll("embedded").length ?? 0) > 1 ||
+    ![
+      "island-720p60-v1",
+      "island-meadow-720p60-v1",
+      "island-fine-meadow-720p60-v1",
+    ].includes(resolveExplicitStreamingRenderProfile(windowRef)?.id ?? "")
+  )
+    throw new Error(
+      "Single-map shadow flow requires the explicit non-embedded island profile",
+    );
+  return "uniform-v1";
+}
+
 /** Explicit rooted-flower population; omission never enables this owner. */
 export function resolveRootedFlowerCandidate(
   win?: Window,

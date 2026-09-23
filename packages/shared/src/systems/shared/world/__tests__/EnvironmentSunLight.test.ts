@@ -4,8 +4,13 @@ import { spawnSync } from "node:child_process";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import THREE from "../../../../extras/three/three";
+import {
+  UniformDirectionalShadowNode,
+  isOwnedUniformDirectionalShadowNode,
+} from "../../../../extras/three/UniformDirectionalShadow";
 import type { WorldConfigManifest } from "../../../../types/world/world-types";
 import { ClientInterface } from "../../../client/ClientInterface";
+import { ClientGraphics } from "../../../client/ClientGraphics";
 import { csmLevels, Environment } from "../Environment";
 import { worldTerrainProfileIdentity } from "../WorldTerrainProfile";
 
@@ -47,6 +52,151 @@ describe("directional illumination independent of shadow quality", () => {
     expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
     return { world, prefs, environment, scene: world.stage.scene };
   }
+
+  function selectUniformCandidate(): void {
+    vi.stubGlobal("window", {
+      location: {
+        pathname: "/stream.html",
+        search: "?streamRenderProfile=island-720p60-v1&shadowFlow=uniform-v1",
+      },
+    });
+  }
+
+  it.each(["low", "med", "high"])(
+    "attaches the explicit uniform %s owner without changing sun or projection settings",
+    async (level) => {
+      const control = await create(level);
+      control.environment.buildSunLight();
+      const original = control.environment.sunLight!;
+      selectUniformCandidate();
+      const { environment } = await create(level);
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      expect(
+        isOwnedUniformDirectionalShadowNode(light.shadow.shadowNode, light),
+      ).toBe(true);
+      expect(original.shadow.shadowNode).toBeUndefined();
+      expect(light.color.toArray()).toEqual(original.color.toArray());
+      expect(light.intensity).toBe(original.intensity);
+      expect(light.position.toArray()).toEqual(original.position.toArray());
+      expect(light.target.position.toArray()).toEqual(
+        original.target.position.toArray(),
+      );
+      expect(light.shadow.mapSize.toArray()).toEqual(
+        original.shadow.mapSize.toArray(),
+      );
+      expect(light.shadow.bias).toBe(original.shadow.bias);
+      expect(light.shadow.normalBias).toBe(original.shadow.normalBias);
+      expect(light.shadow.camera.projectionMatrix.elements).toEqual(
+        original.shadow.camera.projectionMatrix.elements,
+      );
+      expect(light.shadow.map).toBeNull();
+    },
+  );
+
+  it("captures selection once, honors no-shadows and emits disposal for each replaced CPU-only owner", async () => {
+    selectUniformCandidate();
+    const { environment, prefs, scene } = await create("med");
+    const nodes: UniformDirectionalShadowNode[] = [];
+    const disposed: UniformDirectionalShadowNode[] = [];
+    for (const level of ["med", "none", "high", "low"]) {
+      prefs.shadows = level;
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      const node = light.shadow.shadowNode;
+      if (level === "none") {
+        expect(node).toBeUndefined();
+        expect(light.castShadow).toBe(false);
+      } else {
+        expect(node).toBeInstanceOf(UniformDirectionalShadowNode);
+        const owned = node as UniformDirectionalShadowNode;
+        owned.addEventListener("dispose", () => disposed.push(owned));
+        nodes.push(owned);
+      }
+      expect(scene.children).toEqual([light, light.target]);
+      expect(disposed).toEqual(level === "none" ? nodes : nodes.slice(0, -1));
+      // A changing URL cannot silently change an already admitted owner.
+      vi.stubGlobal("window", {});
+    }
+    environment.destroy();
+    expect(disposed).toEqual(nodes);
+    expect(scene.children).toEqual([]);
+    environment.destroy();
+    expect(disposed).toEqual(nodes);
+  });
+
+  it("rejects incompatible CSM selection before replacing the existing light", async () => {
+    selectUniformCandidate();
+    const { environment, scene } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode;
+    const identity = environment.getSunLightTerrainProfileIdentity();
+    vi.stubEnv("ENABLE_CSM", "true");
+    expect(() => environment.buildSunLight()).toThrow(
+      "compact single-map shadows",
+    );
+    expect(environment.sunLight).toBe(light);
+    expect(light.shadow.shadowNode).toBe(node);
+    expect(scene.children).toEqual([light, light.target]);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+  });
+
+  it("rejects an explicitly non-WebGPU graphics owner without mutating or disposing the existing sun", async () => {
+    selectUniformCandidate();
+    const { environment, world, scene } = await create("med");
+    // Actual graphics owner, deliberately never initialized/rendered. This tests
+    // the negative capability gate, not a supplied GPU/renderer substitute.
+    const graphics = new ClientGraphics(world);
+    world.addSystem("graphics", graphics);
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode as UniformDirectionalShadowNode;
+    const identity = environment.getSunLightTerrainProfileIdentity();
+    const before = light.toJSON();
+    let lightDisposals = 0;
+    let nodeDisposals = 0;
+    light.addEventListener("dispose", () => lightDisposals++);
+    node.addEventListener("dispose", () => nodeDisposals++);
+    try {
+      graphics.isWebGPU = false;
+      expect(() => environment.buildSunLight()).toThrow(
+        "compact single-map shadows",
+      );
+      expect(environment.sunLight).toBe(light);
+      expect(light.shadow.shadowNode).toBe(node);
+      expect(light.toJSON()).toEqual(before);
+      expect(scene.children).toEqual([light, light.target]);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+      expect(isOwnedUniformDirectionalShadowNode(node, light)).toBe(true);
+      expect([lightDisposals, nodeDisposals]).toEqual([0, 0]);
+    } finally {
+      graphics.isWebGPU = true;
+      graphics.destroy();
+    }
+  });
+
+  it("disposes the actual owned Three target once when replacing its light", async () => {
+    selectUniformCandidate();
+    const { environment } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode as UniformDirectionalShadowNode;
+    // Real Three resources with the same aliasing as ShadowNode.setupShadow.
+    // This verifies teardown ownership, not GPU allocation or rendering.
+    const target = new THREE.RenderTarget(64, 64);
+    Reflect.set(node, "shadowMap", target);
+    light.shadow.map = target;
+    let disposals = 0;
+    target.addEventListener("dispose", () => disposals++);
+    environment.buildSunLight();
+    expect(disposals).toBe(1);
+    expect(node.shadowMap).toBeNull();
+    expect(light.shadow.map).toBeNull();
+    expect(light.shadow.shadowNode).toBeUndefined();
+    expect(light.parent).toBeNull();
+    expect(environment.sunLight).not.toBe(light);
+  });
 
   it("none retains a direct sun and target without a shadow map or scene changes", async () => {
     const { environment, scene } = await create();
@@ -228,7 +378,7 @@ describe("directional illumination independent of shadow quality", () => {
     expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
   });
 
-  it("retains legacy bias without compact admission and caches exact admitted construction provenance", () => {
+  it("retains legacy bias/provenance and rejects a selected uniform shadow under non-sculpt terrain without replacing its owner", () => {
     // Vitest's real manifest setup already identifies its world. A fresh actual
     // source process tests pre-admission behavior without resetting that owner.
     const source = (path: string) =>
@@ -244,6 +394,7 @@ describe("directional illumination independent of shadow quality", () => {
       import {DataManager} from ${source("../../../../data/DataManager.ts")};
       import {Environment} from ${source("../Environment.ts")};
       import {ClientInterface} from ${source("../../../client/ClientInterface.ts")};
+      import {isOwnedUniformDirectionalShadowNode} from ${source("../../../../extras/three/UniformDirectionalShadow.ts")};
       import {
         COMPACT_WORLD_TERRAIN_PROFILE,
         SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -307,6 +458,35 @@ describe("directional illumination independent of shadow quality", () => {
         environment.buildSunLight();
         assert.equal(environment.sunLight.shadow.bias, .0002);
         assert.equal(environment.getSunLightTerrainProfileIdentity(), null);
+
+        // Keep manifest/global identity changes inside this fresh source process.
+        // The historical large-world fixture cannot be runtime-admitted, so use
+        // the actual supported non-sculpt compact profile to hit this rejection.
+        admit(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
+        globalThis.window = {location:{pathname:"/stream.html",
+          search:"?streamRenderProfile=island-720p60-v1&shadowFlow=uniform-v1"}};
+        const selected = new Environment(world);
+        try {
+          await selected.init({});
+          selected.buildSunLight();
+          const light = selected.sunLight, node = light.shadow.shadowNode;
+          const identity = selected.getSunLightTerrainProfileIdentity();
+          const children = [...world.stage.scene.children], before = light.toJSON();
+          let lightDisposals = 0, nodeDisposals = 0;
+          light.addEventListener("dispose", () => lightDisposals++);
+          node.addEventListener("dispose", () => nodeDisposals++);
+          assert.ok(isOwnedUniformDirectionalShadowNode(node,light));
+          admit(COMPACT_WORLD_TERRAIN_PROFILE);
+          assert.throws(() => selected.buildSunLight(), /compact single-map shadows/);
+          assert.equal(selected.sunLight,light);
+          assert.equal(light.shadow.shadowNode,node);
+          assert.deepEqual(light.toJSON(),before);
+          assert.deepEqual(world.stage.scene.children,children);
+          assert.equal(selected.getSunLightTerrainProfileIdentity(),identity);
+          assert.ok(isOwnedUniformDirectionalShadowNode(node,light));
+          assert.deepEqual([lightDisposals,nodeDisposals],[0,0]);
+          console.log("UNIFORM_SHADOW_NONSCULPT_REJECTION_OK");
+        } finally {selected.destroy();}
         console.log("SUN_ADMISSION_AND_PROVENANCE_OK");
       } finally { environment.destroy(); world.destroy(); }
     `,
@@ -321,6 +501,7 @@ describe("directional illumination independent of shadow quality", () => {
     expect(child.error).toBeUndefined();
     expect(child.status, child.stderr).toBe(0);
     expect(child.stdout).toContain("SUN_ADMISSION_AND_PROVENANCE_OK");
+    expect(child.stdout).toContain("UNIFORM_SHADOW_NONSCULPT_REJECTION_OK");
   });
 
   it("keeps compact shadow matrices fixed across camera cuts without changing the existing light ray or budget", async () => {

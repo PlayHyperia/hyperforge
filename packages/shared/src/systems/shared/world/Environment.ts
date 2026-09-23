@@ -1,5 +1,7 @@
 import THREE, { CSMShadowNode } from "../../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
+import { UniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
+import { resolveSingleMapShadowFlow } from "../../../runtime/clientViewportMode";
 
 import { Node as NodeClass } from "../../../nodes/Node";
 import { System } from "../infrastructure/System";
@@ -212,6 +214,8 @@ export class Environment extends System {
 
   // CSMShadowNode for WebGPU cascaded shadows
   private csmShadowNode: InstanceType<typeof CSMShadowNode> | null = null;
+  private readonly singleMapShadowFlow = resolveSingleMapShadowFlow();
+  private singleMapShadowNode: UniformDirectionalShadowNode | null = null;
 
   // CSM frustum update optimization - only recalculate when needed
   // Set to true on: viewport resize, camera near/far change, CSM config change
@@ -533,6 +537,7 @@ export class Environment extends System {
     }
 
     // Dispose sun light and CSM
+    this.disposeSingleMapShadowNode();
     if (this.csmShadowNode) {
       this.csmShadowNode.dispose();
       this.csmShadowNode = null;
@@ -1010,9 +1015,6 @@ export class Environment extends System {
    * When ENABLE_CSM=false: one map, fixed to admitted compact terrain when present.
    */
   buildSunLight(): void {
-    this.sunLightTerrainProfileOwner = null;
-    this.sunLightTerrainProfileIdentity = null;
-    this.useCompactLightAnchor = false;
     if (!this.isClientWithGraphics) return;
 
     const useWebGPU = this.world.graphics?.isWebGPU !== false;
@@ -1030,23 +1032,43 @@ export class Environment extends System {
 
     const scene = this.world.stage.scene;
 
+    const terrainProfile =
+      !useCSM && csmConfig.enabled && DataManager.getWorldConfig()
+        ? DataManager.getWorldTerrainProfile()
+        : null;
+    const compactProfile =
+      terrainProfile && isCompactSculptProfile(terrainProfile)
+        ? terrainProfile
+        : null;
+    // Fail before replacing any working light. Selecting no shadows is still a
+    // valid quality change and never enables a map just to satisfy this trial.
+    if (
+      this.singleMapShadowFlow &&
+      csmConfig.enabled &&
+      (!useWebGPU || useCSM || !compactProfile)
+    )
+      throw new Error(
+        "Uniform shadow flow requires WebGPU and compact single-map shadows",
+      );
+    this.sunLightTerrainProfileOwner = null;
+    this.sunLightTerrainProfileIdentity = null;
+    this.useCompactLightAnchor = false;
+
     // Startup/quality-change only: no per-frame terrain sampling, scene traversal
     // or allocation. DataManager already admitted and froze this world profile.
     let terrainProfileIdentity: string | null = null;
-    if (!useCSM && csmConfig.enabled && DataManager.getWorldConfig()) {
-      const profile = DataManager.getWorldTerrainProfile();
-      if (isCompactSculptProfile(profile)) {
-        this.compactLightAnchor.set(
-          profile.island.centerX,
-          profile.height.baseOffset,
-          profile.island.centerZ,
-        );
-        this.useCompactLightAnchor = true;
-        terrainProfileIdentity = worldTerrainProfileIdentity(profile);
-      }
+    if (compactProfile) {
+      this.compactLightAnchor.set(
+        compactProfile.island.centerX,
+        compactProfile.height.baseOffset,
+        compactProfile.island.centerZ,
+      );
+      this.useCompactLightAnchor = true;
+      terrainProfileIdentity = worldTerrainProfileIdentity(compactProfile);
     }
 
     // Dispose existing light and CSM
+    this.disposeSingleMapShadowNode();
     if (this.csmShadowNode) {
       this.csmShadowNode.dispose();
       this.csmShadowNode = null;
@@ -1148,6 +1170,12 @@ export class Environment extends System {
       this.sunLight.position.set(100, 200, 100);
       this.sunLight.target.position.set(0, 0, 0);
       this.csmShadowNode = null;
+      if (this.singleMapShadowFlow === "uniform-v1") {
+        this.singleMapShadowNode = new UniformDirectionalShadowNode(
+          this.sunLight,
+        );
+        this.sunLight.shadow.shadowNode = this.singleMapShadowNode;
+      }
 
       console.log(
         `[Environment] Single shadow map (${SINGLE_SHADOW_MAP_SIZE}px, ${SINGLE_SHADOW_FRUSTUM}m frustum)`,
@@ -1161,6 +1189,19 @@ export class Environment extends System {
       this.sunLightTerrainProfileIdentity = terrainProfileIdentity;
       this.sunLightTerrainProfileOwner = this.sunLight;
     }
+  }
+
+  private disposeSingleMapShadowNode(): void {
+    const node = this.singleMapShadowNode;
+    if (!node) return;
+    this.singleMapShadowNode = null;
+    const allocatedMap = node.shadowMap;
+    node.dispose();
+    // ShadowNode owns the allocated target. Detach only that same target so
+    // retiring the light cannot dispose it a second time; foreign maps survive.
+    if (allocatedMap && node.shadow.map === allocatedMap)
+      node.shadow.map = null;
+    if (node.shadow.shadowNode === node) delete node.shadow.shadowNode;
   }
 
   /**

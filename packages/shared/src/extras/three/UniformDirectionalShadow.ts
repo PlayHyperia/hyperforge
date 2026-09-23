@@ -5,6 +5,7 @@ import {
   type DirectionalLightShadow,
   type Node,
   type NodeBuilder,
+  type RenderTarget,
 } from "three/webgpu";
 
 type FilterInputs = {
@@ -40,6 +41,8 @@ const owners = new WeakMap<
  */
 export class UniformDirectionalShadowNode extends ShadowNode {
   declare readonly shadow: DirectionalLightShadow;
+  // Same r186 declaration gap; expose the actual allocated owner for teardown.
+  declare readonly shadowMap: RenderTarget | null;
 
   constructor(light: DirectionalLight) {
     super(light, light.shadow);

@@ -35,6 +35,7 @@ import {
   resolveGrassGroundingExecution,
   resolveHabitatCompositionCandidate,
   resolveSkyAtmosphereMode,
+  resolveSingleMapShadowFlow,
   resolveStreamingRenderFrameRate,
   shouldAdmitNetworkEntityInViewport,
   shouldStreamVegetationBackgroundLods,
@@ -51,6 +52,83 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit uniform single-map shadow flow", () => {
+  it("keeps every existing profile unchanged without selection", () => {
+    expect(resolveSingleMapShadowFlow()).toBeUndefined();
+    for (const profile of Object.keys(STREAMING_RENDER_PROFILES))
+      expect(
+        resolveSingleMapShadowFlow(
+          makeWindow("/stream.html", `?streamRenderProfile=${profile}`),
+        ),
+      ).toBeUndefined();
+  });
+
+  it.each([
+    "island-720p60-v1",
+    "island-meadow-720p60-v1",
+    "island-fine-meadow-720p60-v1",
+  ])("admits %s without changing any render preferences", (profile) => {
+    for (const [path, route] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+    ]) {
+      const before = makeWindow(
+        path,
+        `?${route}streamRenderProfile=${profile}`,
+      );
+      const after = makeWindow(
+        path,
+        before.location.search + "&shadowFlow=uniform-v1",
+      );
+      expect(resolveSingleMapShadowFlow(after)).toBe("uniform-v1");
+      expect(resolveExplicitStreamingRenderProfile(after)).toBe(
+        resolveExplicitStreamingRenderProfile(before),
+      );
+    }
+  });
+
+  it("rejects malformed selectors and ambiguous or unsupported routes", () => {
+    const profile = "streamRenderProfile=island-720p60-v1";
+    for (const value of [
+      "",
+      "uniform-v2",
+      "UNIFORM-V1",
+      "%20uniform-v1",
+      "uniform-v1%20",
+      "uniform-v1&shadowFlow=uniform-v1",
+    ])
+      expect(() =>
+        resolveSingleMapShadowFlow(
+          makeWindow("/stream.html", `?${profile}&shadowFlow=${value}`),
+        ),
+      ).toThrow("shadow flow candidate");
+    for (const [path, search] of [
+      ["/play", `?${profile}`],
+      ["/stream.html", ""],
+      ["/stream.html", "?streamRenderProfile=canonical-720p60-v1"],
+      ["/stream.html", "?streamRenderProfile=shadows-720p60-v1"],
+      ["/stream.html", `?${profile}&${profile}`],
+      ["/stream.html", `?${profile}&embedded=true`],
+      ["/stream.html", `?${profile}&embedded=false&embedded=false`],
+      ["/", `?${profile}&page=stream&page=stream`],
+    ])
+      expect(() =>
+        resolveSingleMapShadowFlow(
+          makeWindow(
+            path,
+            `${search}${search ? "&" : "?"}shadowFlow=uniform-v1`,
+          ),
+        ),
+      ).toThrow();
+    const embedded = makeWindow(
+      "/stream.html",
+      `?${profile}&shadowFlow=uniform-v1`,
+    );
+    Reflect.set(embedded, "__HYPERIA_EMBEDDED__", true);
+    expect(() => resolveSingleMapShadowFlow(embedded)).toThrow();
+  });
+});
 
 describe("explicit rooted flower selection", () => {
   const fine =
