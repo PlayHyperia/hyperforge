@@ -26,6 +26,7 @@ import { findFishingSpotTiles } from "../../../../utils/ShoreUtils";
 import { snapToTileCenter } from "../../movement/TileSystem";
 import {
   getDuelArenaConfig,
+  getDuelArenaProtectionBounds,
   isPositionInsideDuelArenaZone,
 } from "../../../../data/duel-manifest";
 import {
@@ -345,14 +346,40 @@ async function actualFixture({
   manager = true,
   bodyCenter,
   selected,
+  arenaProtection,
 }: {
   water?: boolean;
   bake?: boolean;
   manager?: boolean;
   bodyCenter?: { x: number; z: number };
   selected?: SelectedFishingPond;
+  arenaProtection?: "legacy-envelope";
 } = {}) {
   await DataManager.getInstance().initialize();
+  if (arenaProtection === "legacy-envelope") {
+    // Exercise the supported legacy policy explicitly, not whichever protection
+    // mode ASSETS_DIR loaded. Current-world and floor-rejection cases opt out.
+    expect(selected).toBeUndefined();
+    const original = ALL_WORLD_AREAS.duel_arena;
+    const originalConfig = getDuelArenaConfig();
+    const originalFloors = createDuelArenaFloorZones(
+      originalConfig,
+      getDuelArenaGradeHeight(),
+    );
+    originals.set("duel_arena", original);
+    const legacy = structuredClone(original);
+    delete legacy.duelProtection;
+    ALL_WORLD_AREAS.duel_arena = legacy;
+    expect(legacy).not.toBe(original);
+    expect(getDuelArenaConfig()).toEqual(originalConfig);
+    expect(
+      createDuelArenaFloorZones(
+        getDuelArenaConfig(),
+        getDuelArenaGradeHeight(),
+      ),
+    ).toEqual(originalFloors);
+    expect(getDuelArenaProtectionBounds()).toEqual([legacy.bounds]);
+  }
   const pair = Object.entries(ALL_WORLD_AREAS).find(([, area]) =>
     area.flatZones?.some((zone) => zone.id === "haven_pond_floor"),
   )!;
@@ -626,12 +653,20 @@ describe("body-bound fishing coverage with actual terrain and resource ownership
     },
   );
 
-  it("admits all seven families/twelve fish exactly twice, reserving pending registration and preserving repeated calls", async () => {
-    const f = await actualFixture();
+  it("admits all seven families/twelve fish exactly twice under explicit legacy-envelope protection, reserving pending registration and preserving repeated calls", async () => {
+    const f = await actualFixture({ arenaProtection: "legacy-envelope" });
     const protectedCampus = { x: 397.5, y: basin.waterBody.surfaceY, z: 409.5 };
     expect(
       isPositionInsideDuelArenaZone(protectedCampus.x, protectedCampus.z),
     ).toBe(true);
+    for (const floor of createDuelArenaFloorZones(
+      getDuelArenaConfig(),
+      getDuelArenaGradeHeight(),
+    ))
+      expect(
+        Math.abs(protectedCampus.x - floor.centerX) > floor.width / 2 + 1 ||
+          Math.abs(protectedCampus.z - floor.centerZ) > floor.depth / 2 + 1,
+      ).toBe(true);
     expect(
       f.system["createResourceFromSpawnPoint"](
         { type: "tree", subType: "oak", position: protectedCampus },
