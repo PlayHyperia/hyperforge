@@ -1,5 +1,15 @@
 # World graphics development checkpoint — 2026-09-20
 
+## 2026-09-23 — Restart-safe handoff; spread trial remains test-only
+
+- [x] Completed source and native-comparison evidence are pushed through **b88dcd5b988972dbd3c6474c85595c5aa8daf6a6** on `codex/sol-duel-stream-launch`; the remote branch was checked directly. No new production rendering change is included in this handoff.
+- [x] The stale 40-day-uptime restart prompt no longer describes the host: fresh uptime at 07:19 UTC is **10h18m**. Another restart is not required by that old observation. No owned capture or test is currently active.
+- [x] Preserve the one unfinished grass test change in `GrassRootedFanAppearance.test.ts` (SHA-256 `d998fa97b8ae00b0be5e498397c7f79b088a64d6964f81295089f8258ae99151`). Its expected RED run, `grass-rooted-spread-red01`, ended with **7 failed / 14 passed**: tests request radius 0.7 while production remains 0.52. These failures are not a completed fix; do not commit the draft as passing code.
+- [x] A separate exact Git patch is saved at `asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/rooted-spread-red-restart01.patch` (SHA-256 `71edff4836d348b23409c3b361d16b6c282f79696c2084cab3a8ffe8ac89ce55`); reverse-apply check confirms it matches the existing local edit. It is already applied: do not apply it again to the current worktree.
+- [x] The playable server/client and saved database remain untouched. The database uses named volume `hyperia-playable-local-postgres-data`, with restart policy `no`. A normal machine restart interrupts localhost:3333 and may require restarting Docker, this same container, and the existing guarded playable launcher; verify identities first, never replace or initialize the saved database.
+- [ ] Resume by testing **only fan center spread 0.52 → 0.7**, retaining all blade/density/material/lighting/resolution/work limits. Run focused geometry, integration and actual-v10 grounding tests before a new isolated build. Then review fresh native coverage, central gaps, terrain/road clearance and LOD transitions. Source-root metrics alone cannot qualify visual coverage.
+- [ ] Prepare the bounded held-camera GPU visibility diagnostic separately, restoring all scene state afterward; grass-hidden measurements are diagnostic only and never shipping performance. Coverage, smooth 60fps and full-world acceptance remain open. Use the recovery guard for every Node/Bun/Blender run; do not install dependencies, materialize missing files, overwrite canonical bundles or sweep unrelated local changes into commits.
+
 ## 2026-09-23 — Rooted-fan game comparison complete; coverage regression blocks promotion
 
 - [x] **Build75/runtime116, native149 sheath / native150 rooted-fan** complete actual Chrome/Metal WebGPU startup and all four camera gates. Both select the same close-detail layout at 1280×720/DPR1, daylight 0.56, full configured grass/flowers and 35 terrain texture reads. All 1,096 build inputs stayed pinned; only the two admitted production sources differ from build74. Source checkpoint **a250c554e** is pushed under the approved account.
