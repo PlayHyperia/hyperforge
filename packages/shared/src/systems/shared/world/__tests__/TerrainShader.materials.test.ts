@@ -10,11 +10,59 @@ import {
 } from "../TerrainShader";
 
 describe("TerrainShader material graph", () => {
+  it("rejects unsupported deferred rock sampling before constructing textures", () => {
+    type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
+    const dependencies: Options = {
+      compactPbr: true,
+      compactDirtProjection: "stochastic-v1",
+      compactRockProjection: "stochastic-v1",
+      compactSurfaceBlend: "height-v1",
+      compactPondBlend: "composition-v1",
+      compactRockSampling: "exact-zero-v1",
+    };
+    const invalid: Options = { ...dependencies };
+    Reflect.set(invalid, "compactRockSampling", "epsilon-v1");
+    expect(() => createTerrainMaterial(undefined, invalid)).toThrow(
+      "Invalid compact rock sampling",
+    );
+    for (const dependency of [
+      "compactDirtProjection",
+      "compactRockProjection",
+      "compactSurfaceBlend",
+      "compactPondBlend",
+    ] as const) {
+      const missing = { ...dependencies };
+      delete missing[dependency];
+      expect(() => createTerrainMaterial(undefined, missing)).toThrow(
+        /Exact-zero rock sampling requires/,
+      );
+    }
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        compactRockSampling: "exact-zero-v1",
+      }),
+    ).toThrow(/Exact-zero rock sampling requires/);
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        ...dependencies,
+        compactCoastBlend: "cavity-v1",
+      }),
+    ).toThrow(/Exact-zero rock sampling requires/);
+    // A valid sampling selector does not waive the existing pond admission.
+    expect(() => createTerrainMaterial(undefined, dependencies)).toThrow(
+      "Pond blending requires an admitted compact pond",
+    );
+  });
+
   it("preserves the original palette and shares only an explicitly supplied owner", () => {
     const first = createTerrainMaterial();
     const second = createTerrainMaterial();
     const explicit = new TerrainShadeUniforms();
     const shared = createTerrainMaterial(explicit);
+    for (const material of [first, second, shared])
+      expect(
+        Object.prototype.hasOwnProperty.call(material, "compactRockSampling"),
+      ).toBe(false);
     expect(first.terrainUniforms.shade.tint.value.toArray()).toEqual([
       ...TERRAIN_SHADE.TINT_COLOR,
     ]);

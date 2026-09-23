@@ -55,8 +55,11 @@ import { SUN_LIGHT, SUN_SHADE } from "./LightingConfig";
 import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
+  createCompactTerrainLayerFactory,
+  createCompactRockAppearanceRequired,
   type CompactDirtProjection,
   type CompactRockProjection,
+  type CompactRockSampling,
   type CompactSurfaceBlend,
   type CompactPondBlend,
   type CompactCoastBlend,
@@ -1187,6 +1190,7 @@ export function createTerrainMaterial(
     compactGrassColorGrade?: CompactGrassColorGrade;
     compactDirtProjection?: CompactDirtProjection;
     compactRockProjection?: CompactRockProjection;
+    compactRockSampling?: CompactRockSampling;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
@@ -1200,6 +1204,7 @@ export function createTerrainMaterial(
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactRockSampling?: CompactRockSampling;
   compactPondBlend?: CompactPondBlend;
   compactCoastBlend?: CompactCoastBlend;
   compactPondBankField?: CompactPondBankField;
@@ -1227,6 +1232,21 @@ export function createTerrainMaterial(
     throw new Error("Rock projection requires the compact PBR material");
   if (options.compactSurfaceBlend !== undefined && !options.compactPbr)
     throw new Error("Surface blending requires the compact PBR material");
+  if (options.compactRockSampling !== undefined) {
+    if (options.compactRockSampling !== "exact-zero-v1")
+      throw new Error("Invalid compact rock sampling");
+    if (
+      !options.compactPbr ||
+      options.compactDirtProjection !== "stochastic-v1" ||
+      options.compactRockProjection !== "stochastic-v1" ||
+      options.compactSurfaceBlend !== "height-v1" ||
+      options.compactPondBlend !== "composition-v1" ||
+      options.compactCoastBlend === "cavity-v1"
+    )
+      throw new Error(
+        "Exact-zero rock sampling requires stochastic ground/rock, height pond composition and no coast cavity",
+      );
+  }
   if (options.compactPondBlend !== undefined) {
     if (
       options.compactPondBlend !== "relief-v1" &&
@@ -1376,9 +1396,27 @@ export function createTerrainMaterial(
     noiseValue,
     macroField,
   );
-  const compactLayers = compactTextures
-    ? createCompactTerrainLayers(compactTextures, distSq, noiseValue)
-    : null;
+  const compactLayerFactory =
+    compactTextures && options.compactRockSampling
+      ? createCompactTerrainLayerFactory(compactTextures, distSq, noiseValue)
+      : null;
+  const compactLayers: ReturnType<typeof createCompactTerrainLayers> | null =
+    compactTextures
+      ? compactLayerFactory
+        ? {
+            ...compactLayerFactory.createGround(),
+            // No rock samples before final coverage is known. The resolver
+            // below replaces this finite construction-only value; raw rock AO
+            // stays absent so it cannot accidentally enter coverage weights.
+            rock: {
+              albedo: vec3(0),
+              roughness: float(1),
+              ao: float(1),
+              worldNormal: normalWorldGeometry,
+            },
+          }
+        : createCompactTerrainLayers(compactTextures, distSq, noiseValue)
+      : null;
   const bankVergeLocality = macroField?.bankVerge
     ? createCompactBankVergeLocality(worldPos, macroField)
     : undefined;
@@ -1860,7 +1898,7 @@ export function createTerrainMaterial(
           ),
         }
       : undefined;
-  if (compactLayers && pondBankComposition) {
+  if (compactLayers && pondBankComposition && !compactLayerFactory) {
     const bankMaterials = applyCompactPondBankMaterials(
       compactLayers.dirt,
       compactLayers.rock,
@@ -1869,13 +1907,46 @@ export function createTerrainMaterial(
     compactLayers.dirt = bankMaterials.soil;
     compactLayers.rock = bankMaterials.rock;
   }
-  if (compactLayers && coastRockSurface) {
+  if (compactLayers && coastRockSurface && !compactLayerFactory) {
     compactLayers.rock = applyCompactCoastRock(
       compactLayers.rock,
       compactLayers.dirt,
       coastRockSurface,
     );
   }
+  const resolveCompactAppearance = compactLayerFactory
+    ? (
+        weights: Node<"vec4">,
+        layers: ReturnType<typeof createCompactTerrainLayers>,
+      ): ReturnType<typeof createCompactTerrainLayers> => {
+        const required = createCompactRockAppearanceRequired(
+          weights,
+          pondBankComposition?.mineralAppearance ?? float(0),
+        );
+        const resolved = {
+          ...layers,
+          rock: compactLayerFactory.createRock(required),
+        };
+        // Coastal ground above intentionally retains the unmodified soil.
+        // Resolve raw rock first, then preserve the existing bank/coast order.
+        if (pondBankComposition) {
+          const bankMaterials = applyCompactPondBankMaterials(
+            resolved.dirt,
+            resolved.rock,
+            pondBankComposition,
+          );
+          resolved.dirt = bankMaterials.soil;
+          resolved.rock = bankMaterials.rock;
+        }
+        if (coastRockSurface)
+          resolved.rock = applyCompactCoastRock(
+            resolved.rock,
+            resolved.dirt,
+            coastRockSurface,
+          );
+        return resolved;
+      }
+    : undefined;
   const compactWeights = compactLayers
     ? createCompactTerrainLayerWeights(
         noiseValue,
@@ -2002,6 +2073,7 @@ export function createTerrainMaterial(
               }
             : undefined,
           pondBankComposition,
+          resolveCompactAppearance,
         )
       : null;
   const compactSurface = compactBaseSurface
@@ -2200,6 +2272,7 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactRockSampling?: CompactRockSampling;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
     compactPondBankField?: CompactPondBankField;
@@ -2214,6 +2287,13 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (options.compactRockSampling !== undefined)
+    Object.defineProperty(result, "compactRockSampling", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactRockSampling,
+    });
   if (macroField?.pondBankField)
     Object.defineProperty(result, "compactPondBankField", {
       enumerable: true,

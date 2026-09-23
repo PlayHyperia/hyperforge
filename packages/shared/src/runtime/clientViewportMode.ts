@@ -272,6 +272,36 @@ export function resolveCompactRockProjectionCandidate(
   return "stochastic-v1";
 }
 
+/** Opt-in exact-zero rock sampling; omission preserves the existing shader. */
+export function resolveCompactRockSampling(
+  win?: Window,
+): "exact-zero-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("rockSampling") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "exact-zero-v1")
+    throw new Error("Unknown or duplicate rock sampling candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    params?.get("streamRenderProfile") !== "island-fine-meadow-720p60-v1"
+  )
+    throw new Error("Rock sampling requires the explicit fine meadow pair");
+  if (
+    resolveCompactRockProjectionCandidate(windowRef) !== "stochastic-v1" ||
+    resolveCompactDirtProjectionCandidate(windowRef) !== "stochastic-v1" ||
+    resolveCompactSurfaceBlendCandidate(windowRef) !== "height-v1" ||
+    resolveCompactPondBlendCandidate(windowRef) !== "composition-v1"
+  )
+    throw new Error(
+      "Rock sampling requires stochastic rock/dirt, height-v1 and composition-v1",
+    );
+  if (resolveCompactCoastBlend(windowRef) === "cavity-v1")
+    throw new Error("Rock sampling does not support cavity-v1 coast blending");
+  return "exact-zero-v1";
+}
+
 /** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
 export function resolveCompactSurfaceBlendCandidate(
   win?: Window,

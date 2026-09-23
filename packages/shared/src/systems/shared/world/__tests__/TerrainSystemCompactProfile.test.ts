@@ -42,107 +42,299 @@ function createTerrain(seed?: number) {
 }
 
 describe("real manifest to compact TerrainSystem integration", () => {
-  it("binds composition before material creation and publishes identical registered owners to grass", async () => {
-    await DataManager.getInstance().initialize();
-    const area = ALL_WORLD_AREAS.haven_pond;
-    const originalZones = area.flatZones;
-    const original = originalZones?.find(
-      (zone) => zone.id === "haven_pond_floor",
+  const rockSamplingDependencies =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&rockProjection=stochastic-v1&dirtProjection=stochastic-v1&terrainBlend=height-v1&pondBlend=composition-v1";
+
+  it.each([false, true])(
+    "captures exact-zero sampling and absence until a fresh terrain owner (selected=%s)",
+    async (selected) => {
+      await DataManager.getInstance().initialize();
+      const location = new URL(
+        `https://localhost/stream.html?${rockSamplingDependencies}${selected ? "&rockSampling=exact-zero-v1" : ""}`,
+      );
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location },
+      });
+      const world = new World(),
+        terrain = new TerrainSystem(world);
+      const nextWorld = new World(),
+        next = new TerrainSystem(nextWorld);
+      const identity = DataManager.getWorldContentIdentity();
+      try {
+        terrain["initializeTerrainGenerator"]();
+        const profile = terrain.getWorldTerrainProfile();
+        const height = terrain.getHeightAt(350, 320);
+        expect(terrain["getCompactRockSampling"]()).toBe(
+          selected ? "exact-zero-v1" : undefined,
+        );
+        expect(terrain["compactRockSampling"]).toBe(
+          selected ? "exact-zero-v1" : null,
+        );
+        location.search = `?${rockSamplingDependencies}${selected ? "" : "&rockSampling=exact-zero-v1"}`;
+        expect(terrain["getCompactRockSampling"]()).toBe(
+          selected ? "exact-zero-v1" : undefined,
+        );
+        expect(next["getCompactRockSampling"]()).toBe(
+          selected ? undefined : "exact-zero-v1",
+        );
+        location.search += "&rockSampling=invalid";
+        expect(terrain["getCompactRockSampling"]()).toBe(
+          selected ? "exact-zero-v1" : undefined,
+        );
+        expect(next["getCompactRockSampling"]()).toBe(
+          selected ? undefined : "exact-zero-v1",
+        );
+        expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+        expect(terrain.getWorldTerrainProfile()).toBe(profile);
+        expect(terrain.getHeightAt(350, 320)).toBe(height);
+        expect(DataManager.getWorldContentIdentity()).toBe(identity);
+      } finally {
+        next.destroy();
+        nextWorld.destroy();
+        terrain.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it.each([
+    ["compactDirtProjection", "getCompactDirtProjection", "dirtProjection"],
+    ["compactRockProjection", "getCompactRockProjection", "rockProjection"],
+    ["compactSurfaceBlend", "getCompactSurfaceBlend", "terrainBlend"],
+    ["compactPondBlend", "getCompactPondBlend", "pondBlend"],
+  ] as const)(
+    "refuses a newly selected sampler when %s was already captured absent",
+    async (_field, getter, parameter) => {
+      await DataManager.getInstance().initialize();
+      const location = new URL(
+        `https://localhost/stream.html?${rockSamplingDependencies}`,
+      );
+      location.searchParams.delete(parameter);
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location },
+      });
+      const world = new World(),
+        terrain = new TerrainSystem(world);
+      try {
+        expect(terrain[getter]()).toBeUndefined();
+        location.search = `?${rockSamplingDependencies}&rockSampling=exact-zero-v1`;
+        expect(() => terrain["getCompactRockSampling"]()).toThrow(
+          "compatible captured material selections",
+        );
+        expect(terrain["compactRockSampling"]).toBeUndefined();
+        expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      } finally {
+        terrain.destroy();
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects invalid sampling before material, water or grass publication", async () => {
+    const location = new URL(
+      `https://localhost/stream.html?${rockSamplingDependencies}&rockSampling=invalid`,
     );
-    if (!original?.radialPond) throw new Error("Actual Haven profile required");
-    const selected = {
-      ...original,
-      radialPond: {
-        ...original.radialPond,
-        bankSectors: [
-          {
-            bearing: -1.5,
-            halfWidth: 0.7,
-            innerRadius: 6.8,
-            innerHeight: 28.08,
-            outerRadius: 8.7,
-            outerHeight: 28.24,
-          },
-        ],
-        bankComposition: {
-          schemaVersion: 1 as const,
-          sectors: [{ sectorIndex: 0, surface: "sedge-shelf" as const }],
-        },
-      },
-    };
-    area.flatZones = originalZones!.map((zone) =>
-      zone === original ? selected : zone,
-    );
-    const world = new World();
-    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-    terrain["activeTerrainProfile"] = resolveWorldTerrainProfile({
-      ...DataManager.getWorldTerrainProfile(),
-      southernMeadow: {
-        schemaVersion: 1,
-        minX: 304,
-        maxX: 500,
-        minZ: 345,
-        maxZ: 535,
-        featherX: 24,
-        featherZ: 24,
-        northHeight: 26.8,
-        southHeight: 25.3,
-        crossFall: 1,
-        rollAmplitude: 0.65,
-        rollWavelength: 100,
-      },
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location },
     });
-    terrain["compactPondBlend"] = "composition-v1";
-    terrain["compactSurfaceBlend"] = "height-v1";
-    terrain["compactDirtProjection"] = "stochastic-v1";
-    terrain["compactRockProjection"] = "stochastic-v1";
+    const world = new World(),
+      terrain = new TerrainSystem(world);
     try {
-      await terrain.init();
-      expect(terrain["compositionManifestLoaded"]).toBe(true);
-      const field = terrain["compactPondBankField"]!;
-      expect(field).toMatchObject({
-        id: "composition-v1",
-        zoneId: original.id,
-      });
-      const height = terrain.getHeightAt(343, 295);
-      const ground = terrain.captureCanonicalGroundLease();
-      terrain["initTerrainMaterial"]();
-      const material = terrain.getTerrainMaterialWithUniforms()!;
-      expect(material.compactPondBlend).toBe("composition-v1");
-      expect(material.compactPondBankField).toEqual(field);
-      expect(Object.isFrozen(material.compactPondBankField)).toBe(true);
-      expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
-        surfaceSampleCount: 33,
-        status: "idle",
-      });
-      expect(material.compactGrassColorGrade).toBeUndefined();
-      expect(
-        Object.prototype.hasOwnProperty.call(
-          material.compactTerrainSurface!.getReceipt(),
-          "grassSubstrate",
-        ),
-      ).toBe(false);
-      expect(
-        material.compactTerrainSurface!.getReceipt().textures,
-      ).toHaveLength(7);
-      expect(material.getCompactTerrainDiagnosticOutputs()).not.toBeNull();
-      const setup = terrain["buildGrassWorkerSetup"]();
-      expect(setup.compactPondBlend).toBe("composition-v1");
-      expect(setup.compactPondBankField).toEqual(field);
-      const remote = setup.getTerrainSurfaceForRegion(490, 490, 495, 495);
-      expect(
-        remote.zones.find((zone) => zone.id === original.id)?.radialPond,
-      ).toEqual(selected.radialPond);
-      expect(
-        remote.waterBodies.find((pond) => pond.id === field.pond.id),
-      ).toMatchObject(field.pond);
-      expect(ground.isCurrent()).toBe(true);
-      expect(terrain.getHeightAt(343, 295)).toBe(height);
+      await expect(terrain.init()).rejects.toThrow("rock sampling candidate");
+      expect(terrain["compactRockSampling"]).toBeUndefined();
+      expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
+      expect(terrain["waterSystem"]).toBeUndefined();
+      expect(terrain["grassVisualManager"]).toBeNull();
+      expect(terrain["canonicalGroundInitialized"]).toBe(false);
     } finally {
-      area.flatZones = originalZones;
+      terrain.destroy();
       world.destroy();
     }
   });
+
+  it("rejects sampling on legacy terrain and leaves server omission unselected", async () => {
+    await DataManager.getInstance().initialize();
+    Reflect.deleteProperty(globalThis, "window");
+    const world = new World(),
+      terrain = new TerrainSystem(world);
+    try {
+      expect(terrain["getCompactRockSampling"]()).toBeUndefined();
+      expect(terrain["compactRockSampling"]).toBeNull();
+    } finally {
+      terrain.destroy();
+      world.destroy();
+    }
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: new URL(
+          `https://localhost/stream.html?${rockSamplingDependencies}&rockSampling=exact-zero-v1`,
+        ),
+      },
+    });
+    const legacyWorld = new World(),
+      legacy = new TerrainSystem(legacyWorld);
+    try {
+      legacy["activeTerrainProfile"] = resolveWorldTerrainProfile(
+        COMPACT_WORLD_TERRAIN_PROFILE,
+      );
+      expect(() => legacy["getCompactRockSampling"]()).toThrow(
+        "compact sculpt terrain",
+      );
+      expect(legacy["compactRockSampling"]).toBeUndefined();
+      expect(legacy.getTerrainMaterialWithUniforms()).toBeNull();
+    } finally {
+      legacy.destroy();
+      legacyWorld.destroy();
+    }
+  });
+
+  it.each([false, true])(
+    "binds composition before material creation and publishes identical registered owners to grass (exact-zero sampling=%s)",
+    async (rockSampling) => {
+      await DataManager.getInstance().initialize();
+      if (rockSampling)
+        Object.defineProperty(globalThis, "window", {
+          configurable: true,
+          value: {
+            location: new URL(
+              `https://localhost/stream.html?${rockSamplingDependencies}&rockSampling=exact-zero-v1`,
+            ),
+          },
+        });
+      const area = ALL_WORLD_AREAS.haven_pond;
+      const originalZones = area.flatZones;
+      const original = originalZones?.find(
+        (zone) => zone.id === "haven_pond_floor",
+      );
+      if (!original?.radialPond)
+        throw new Error("Actual Haven profile required");
+      const selected = {
+        ...original,
+        radialPond: {
+          ...original.radialPond,
+          bankSectors: [
+            {
+              bearing: -1.5,
+              halfWidth: 0.7,
+              innerRadius: 6.8,
+              innerHeight: 28.08,
+              outerRadius: 8.7,
+              outerHeight: 28.24,
+            },
+          ],
+          bankComposition: {
+            schemaVersion: 1 as const,
+            sectors: [{ sectorIndex: 0, surface: "sedge-shelf" as const }],
+          },
+        },
+      };
+      area.flatZones = originalZones!.map((zone) =>
+        zone === original ? selected : zone,
+      );
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = resolveWorldTerrainProfile({
+        ...DataManager.getWorldTerrainProfile(),
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      terrain["compactPondBlend"] = "composition-v1";
+      terrain["compactSurfaceBlend"] = "height-v1";
+      terrain["compactDirtProjection"] = "stochastic-v1";
+      terrain["compactRockProjection"] = "stochastic-v1";
+      try {
+        if (rockSampling) {
+          expect(terrain["getCompactRockSampling"]()).toBe("exact-zero-v1");
+          // Capture the real URL choice, then retain this fixture's server init.
+          // Material construction below intentionally leaves the seven actual
+          // asset owners idle; browser texture admission is a separate check.
+          Reflect.deleteProperty(globalThis, "window");
+        }
+        await terrain.init();
+        expect(terrain["runtimeIsServer"]).toBe(true);
+        expect(terrain["compositionManifestLoaded"]).toBe(true);
+        const field = terrain["compactPondBankField"]!;
+        expect(field).toMatchObject({
+          id: "composition-v1",
+          zoneId: original.id,
+        });
+        const height = terrain.getHeightAt(343, 295);
+        const ground = terrain.captureCanonicalGroundLease();
+        terrain["initTerrainMaterial"]();
+        const material = terrain.getTerrainMaterialWithUniforms()!;
+        expect(material.compactRockSampling).toBe(
+          rockSampling ? "exact-zero-v1" : undefined,
+        );
+        expect(
+          Object.prototype.hasOwnProperty.call(material, "compactRockSampling"),
+        ).toBe(rockSampling);
+        expect(
+          Object.getOwnPropertyDescriptor(material, "compactRockSampling"),
+        ).toEqual(
+          rockSampling
+            ? {
+                value: "exact-zero-v1",
+                enumerable: true,
+                writable: false,
+                configurable: false,
+              }
+            : undefined,
+        );
+        expect(material.compactPondBlend).toBe("composition-v1");
+        expect(material.compactPondBankField).toEqual(field);
+        expect(Object.isFrozen(material.compactPondBankField)).toBe(true);
+        expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
+          surfaceSampleCount: rockSampling ? 35 : 33,
+          status: "idle",
+        });
+        expect(material.compactGrassColorGrade?.id).toBe(
+          rockSampling ? "fine-meadow-green-v1" : undefined,
+        );
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            material.compactTerrainSurface!.getReceipt(),
+            "grassSubstrate",
+          ),
+        ).toBe(rockSampling);
+        expect(
+          material.compactTerrainSurface!.getReceipt().textures,
+        ).toHaveLength(7);
+        expect(material.getCompactTerrainDiagnosticOutputs()).not.toBeNull();
+        const setup = terrain["buildGrassWorkerSetup"]();
+        expect(setup).not.toHaveProperty("compactRockSampling");
+        expect(setup.compactPondBlend).toBe("composition-v1");
+        expect(setup.compactPondBankField).toEqual(field);
+        const remote = setup.getTerrainSurfaceForRegion(490, 490, 495, 495);
+        expect(
+          remote.zones.find((zone) => zone.id === original.id)?.radialPond,
+        ).toEqual(selected.radialPond);
+        expect(
+          remote.waterBodies.find((pond) => pond.id === field.pond.id),
+        ).toMatchObject(field.pond);
+        expect(ground.isCurrent()).toBe(true);
+        expect(terrain.getHeightAt(343, 295)).toBe(height);
+      } finally {
+        area.flatZones = originalZones;
+        world.destroy();
+      }
+    },
+  );
 
   it("fails closed before water or material publication when composition metadata is missing", async () => {
     const world = new World();

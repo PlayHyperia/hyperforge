@@ -20,6 +20,7 @@ import {
   resolveExplicitStreamingWorldProfile,
   resolveCompactDirtProjectionCandidate,
   resolveCompactRockProjectionCandidate,
+  resolveCompactRockSampling,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -2231,6 +2232,176 @@ describe("explicit stochastic rock preview URL policy", () => {
     const captureIndex = initialize.indexOf("this.getCompactRockProjection();");
     expect(captureIndex).toBeGreaterThan(0);
     expect(captureIndex).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+  });
+});
+
+describe("explicit exact-zero rock sampling URL policy", () => {
+  const dependencies =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&rockProjection=stochastic-v1&dirtProjection=stochastic-v1&terrainBlend=height-v1&pondBlend=composition-v1";
+  const selected = "rockSampling=exact-zero-v1";
+
+  it("keeps server, default and every existing profile unchanged without selection", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "window");
+    try {
+      expect(resolveCompactRockSampling()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+    }
+    for (const path of ["/play", "/stream.html", "/"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactRockSampling(
+            makeWindow(path, `?streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    expect(
+      resolveCompactRockSampling(
+        makeWindow("/stream.html", `?${dependencies}`),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("admits only the explicit dependency set without changing other selections", () => {
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/stream.html", "embedded=false&streamFps=60&"],
+    ])
+      for (const coast of [
+        "",
+        "&coastBlend=detail-v1",
+        "&coastBlend=distribution-v1",
+      ]) {
+        const baseline = makeWindow(path, `?${prefix}${dependencies}${coast}`);
+        const candidate = makeWindow(
+          path,
+          `${baseline.location.search}&${selected}`,
+        );
+        expect(resolveCompactRockSampling(candidate)).toBe("exact-zero-v1");
+        for (const resolve of [
+          resolveCompactRockProjectionCandidate,
+          resolveCompactDirtProjectionCandidate,
+          resolveCompactSurfaceBlendCandidate,
+          resolveCompactPondBlendCandidate,
+          resolveCompactCoastBlend,
+          resolveGrassAppearanceCandidate,
+          resolveGrassGeometryCandidate,
+          resolveGrassLightingCandidate,
+        ])
+          expect(resolve(candidate)).toBe(resolve(baseline));
+        expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+          resolveExplicitStreamingRenderProfile(baseline),
+        );
+        expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+          resolveClientViewportRuntimeProfile(baseline),
+        );
+      }
+  });
+
+  it("rejects empty, nonexact and duplicate sampling selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "EXACT-ZERO-V1",
+      "%20exact-zero-v1",
+      "exact-zero-v1%20",
+      "exact-zero-v1%0A",
+      "exact-zero-v1&rockSampling=exact-zero-v1",
+      "exact-zero-v1&rockSampling=",
+    ])
+      expect(() =>
+        resolveCompactRockSampling(
+          makeWindow("/stream.html", `?${dependencies}&rockSampling=${value}`),
+        ),
+      ).toThrow("rock sampling candidate");
+  });
+
+  it("rejects missing, malformed or duplicate dependencies and unsupported coastal blending", () => {
+    for (const key of [
+      "streamRenderProfile",
+      "grassAppearance",
+      "rockProjection",
+      "dirtProjection",
+      "terrainBlend",
+      "pondBlend",
+    ])
+      for (const mutation of ["missing", "empty", "unknown", "duplicate"]) {
+        const params = new URLSearchParams(`${dependencies}&${selected}`);
+        const initial = params.get(key)!;
+        if (mutation === "missing") params.delete(key);
+        else if (mutation === "duplicate") params.append(key, initial);
+        else params.set(key, mutation === "empty" ? "" : "unknown");
+        expect(() =>
+          resolveCompactRockSampling(makeWindow("/stream.html", `?${params}`)),
+        ).toThrow();
+      }
+    for (const suffix of [
+      "&pondBlend=relief-v1",
+      "&coastBlend=cavity-v1",
+      "&coastBlend=",
+      "&coastBlend=unknown",
+      "&coastBlend=detail-v1&coastBlend=detail-v1",
+      "&embedded=true",
+      "&embedded=false&embedded=false",
+      "&streamFps=30",
+      "&streamFps=60&streamFps=60",
+    ])
+      expect(() =>
+        resolveCompactRockSampling(
+          makeWindow("/stream.html", `?${dependencies}&${selected}${suffix}`),
+        ),
+      ).toThrow();
+    for (const mode of ["relief-v1", "relief-contact-v1", "shore-contact-v1"]) {
+      const params = new URLSearchParams(`${dependencies}&${selected}`);
+      params.set("pondBlend", mode);
+      expect(() =>
+        resolveCompactRockSampling(makeWindow("/stream.html", `?${params}`)),
+      ).toThrow("Rock sampling requires");
+    }
+    expect(() =>
+      resolveCompactRockSampling(
+        makeWindow("/play", `?${dependencies}&${selected}`),
+      ),
+    ).toThrow();
+    expect(() =>
+      resolveCompactRockSampling(
+        makeWindow("/", `?page=stream&page=stream&${dependencies}&${selected}`),
+      ),
+    ).toThrow();
+    const embedded = makeWindow("/stream.html", `?${dependencies}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveCompactRockSampling(embedded)).toThrow("non-embedded");
+  });
+
+  it("captures once before publication and forwards only to the material owner", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/resolveCompactRockSampling\(\)/gu)).toHaveLength(1);
+    const capture = source.slice(
+      source.indexOf("  private getCompactRockSampling()"),
+      source.indexOf("  private getCompactSurfaceBlend()"),
+    );
+    expect(capture).toContain("this.compactRockSampling = selection ?? null;");
+    expect(capture).toContain("return this.compactRockSampling ?? undefined;");
+    expect(capture).toContain(
+      "isCompactSculptProfile(this.getWorldTerrainProfile())",
+    );
+    expect(source).toContain(
+      "compactRockSampling: this.getCompactRockSampling(),",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    expect(
+      initialize.indexOf("this.getCompactRockSampling();"),
+    ).toBeGreaterThan(initialize.indexOf("this.getCompactCoastBlend();"));
+    expect(initialize.indexOf("this.getCompactRockSampling();")).toBeLessThan(
       initialize.indexOf("this.initTerrainMaterial();"),
     );
   });

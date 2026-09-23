@@ -8,6 +8,9 @@ import THREE, {
   vec2,
   vec3,
   vec4,
+  mat3,
+  Fn,
+  If,
   mix,
   min,
   max,
@@ -135,6 +138,7 @@ type Channel = (typeof CHANNELS)[number];
 type Key = `${Layer}-${Channel}` | "ground-height";
 export type CompactDirtProjection = "stochastic-v1";
 export type CompactRockProjection = "stochastic-v1";
+export type CompactRockSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
 /**
  * Candidate material microrelief, not world-space displacement. Means are from
@@ -1802,6 +1806,46 @@ export function createCompactTerrainLayers(
   distanceSquared: Node<"float">,
   patternNoise: Node<"float"> = float(0.5),
 ): Record<Layer, CompactTerrainLayer> {
+  const factory = createCompactTerrainLayerFactory(
+    textures,
+    distanceSquared,
+    patternNoise,
+  );
+  // Preserve the original unconditional graph-construction order.
+  const rock = factory.createRock();
+  const ground = factory.createGround();
+  return {
+    ...ground,
+    rock: {
+      ...rock,
+      rawRockAo: rock.rawRockAo!.toVar("compactRawRockAo"),
+    },
+  };
+}
+
+/** Raw rock also supplies mineral-graded soil. Only exact zero is inactive. */
+export function createCompactRockAppearanceRequired(
+  finalWeights: Node<"vec4">,
+  mineral: Node<"float">,
+): Node<"bool"> {
+  return finalWeights.z
+    .notEqual(0)
+    .or(finalWeights.y.notEqual(0).and(mineral.clamp(0, 1).notEqual(0)));
+}
+
+/**
+ * Ground heights remain available before final material weights are resolved.
+ * Rock graph creation is deferred so its sampling and temporary assignments
+ * can be constructed inside the actual shader branch, not wrapped afterward.
+ */
+export function createCompactTerrainLayerFactory(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float"> = float(0.5),
+): {
+  createGround(): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
+  createRock(required?: Node<"bool">): CompactTerrainLayer;
+} {
   const controls = COMPACT_TERRAIN_MATERIAL;
   const nearDetail = float(1).sub(
     smoothstep(
@@ -1810,25 +1854,17 @@ export function createCompactTerrainLayers(
       distanceSquared,
     ),
   );
-  // Only identical geometric inputs are shared by the explicit rock candidate.
-  // Rotated projections retain their own tangent lengths, scale and normal:
-  // a common scan scale does not make oblique cotangent frames interchangeable.
-  const sharedRockNormal = textures.rockProjection
-    ? {
-        inputs: createCompactCotangentInputs(
-          normalWorldGeometry,
-          positionWorld.dFdx(),
-          positionWorld.dFdy(),
-        ),
-        strength: nearDetail.mul(controls.rockNormalStrength),
-      }
-    : null;
   const project = (
     layer: Layer,
     uv: Node<"vec2">,
     normalStrength: number,
     gradients?: { dx: Node<"vec2">; dy: Node<"vec2">; scale?: Node<"float"> },
     projection: "A" | "B" = "A",
+    sharedRockNormal?: {
+      inputs: ReturnType<typeof createCompactCotangentInputs>;
+      strength: Node<"float">;
+    } | null,
+    worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
   ): CompactTerrainLayer => {
     const sample = (channel: Channel) => {
       const base = textures.getNode(layer, channel);
@@ -1893,8 +1929,8 @@ export function createCompactTerrainLayers(
           : createCompactCotangentNormal(
               na.rgb,
               normalWorldGeometry,
-              positionWorld.dFdx(),
-              positionWorld.dFdy(),
+              worldDerivatives?.dx ?? positionWorld.dFdx(),
+              worldDerivatives?.dy ?? positionWorld.dFdy(),
               gradients?.dx ?? uv.dFdx(),
               gradients?.dy ?? uv.dFdy(),
               nearDetail.mul(normalStrength),
@@ -1961,110 +1997,154 @@ export function createCompactTerrainLayers(
       ),
     };
   };
-  const weights = normalWorldGeometry.abs().pow(vec3(4));
-  const normalizedWeights = weights.div(
-    weights.x.add(weights.y).add(weights.z).max(1e-12),
-  );
-  const rock = (worldPlane: Node<"vec2">, axis: "X" | "Y" | "Z") => {
-    if (textures.rockProjection) {
-      const p = createCompactStochasticProjections(
-        worldPlane,
-        controls.repeatsPerMeter,
-        controls.rockPatchEdgeMeters,
-        worldPlane.dFdx(),
-        worldPlane.dFdy(),
-        { X: 0x173ab129, Y: 0x375cd103, Z: 0x529a4d27 }[axis],
-      );
-      const a = project("rock", p.a.uv, controls.rockNormalStrength, p.a);
-      const b = project("rock", p.b.uv, controls.rockNormalStrength, p.b);
-      const c = project("rock", p.c.uv, controls.rockNormalStrength, p.c);
-      return {
-        rawRockAo: a
-          .rawRockAo!.mul(p.weights.x)
-          .add(b.rawRockAo!.mul(p.weights.y))
-          .add(c.rawRockAo!.mul(p.weights.z)),
-        albedo: blendCompactStochasticAlbedo(
-          a.albedo,
-          b.albedo,
-          c.albedo,
-          p.weights,
-          createCompactTerrainColorOperations().getPalette().rock,
-        ).toVar(`compactStochasticRockAlbedo${axis}`),
-        roughness: a.roughness
-          .mul(p.weights.x)
-          .add(b.roughness.mul(p.weights.y))
-          .add(c.roughness.mul(p.weights.z)),
-        ao: a.ao
-          .mul(p.weights.x)
-          .add(b.ao.mul(p.weights.y))
-          .add(c.ao.mul(p.weights.z)),
-        worldNormal: normalize(
-          a.worldNormal
-            .mul(p.weights.x)
-            .add(b.worldNormal.mul(p.weights.y))
-            .add(c.worldNormal.mul(p.weights.z)),
-        ),
-      };
-    }
-    // Reuse the exact ground transition: outgoing B == incoming A at every
-    // band boundary. Derive screen gradients BEFORE discrete phase selection;
-    // both packed maps and the cotangent frame use the same rotated gradients.
-    // World anchoring and geometric weights also preserve negative-facing axes.
-    const p = createCompactGroundProjections(
-      worldPlane,
-      patternNoise,
-      controls.repeatsPerMeter,
+  const buildRock = (worldDerivatives?: {
+    dx: Node<"vec3">;
+    dy: Node<"vec3">;
+  }): CompactTerrainLayer => {
+    // Only identical geometric inputs are shared. Every rotated projection
+    // retains its own tangent lengths and explicit texture-coordinate gradients.
+    const sharedRockNormal = textures.rockProjection
+      ? {
+          inputs: createCompactCotangentInputs(
+            normalWorldGeometry,
+            worldDerivatives?.dx ?? positionWorld.dFdx(),
+            worldDerivatives?.dy ?? positionWorld.dFdy(),
+          ),
+          strength: nearDetail.mul(controls.rockNormalStrength),
+        }
+      : null;
+    const weights = normalWorldGeometry.abs().pow(vec3(4));
+    const normalizedWeights = weights.div(
+      weights.x.add(weights.y).add(weights.z).max(1e-12),
     );
-    const a = project("rock", p.a.uv, controls.rockNormalStrength, p.a);
-    const b = project("rock", p.b.uv, controls.rockNormalStrength, p.b);
-    return {
-      rawRockAo: mix(a.rawRockAo!, b.rawRockAo!, p.weight),
-      albedo: blendCompactRockAlbedo(a.albedo, b.albedo, p.weight).toVar(
-        `compactRockAlbedo${axis}`,
-      ),
-      roughness: mix(a.roughness, b.roughness, p.weight),
-      ao: mix(a.ao, b.ao, p.weight),
-      worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
-    };
-  };
-  const sides = [
-    rock(vec2(positionWorld.z, positionWorld.y), "X"),
-    rock(vec2(positionWorld.x, positionWorld.z), "Y"),
-    rock(vec2(positionWorld.x, positionWorld.y), "Z"),
-  ];
-  const blendVector = (
-    a: Node<"vec3">,
-    b: Node<"vec3">,
-    c: Node<"vec3">,
-  ): Node<"vec3"> =>
-    a
-      .mul(normalizedWeights.x)
-      .add(b.mul(normalizedWeights.y))
-      .add(c.mul(normalizedWeights.z));
-  const blendScalar = (
-    a: Node<"float">,
-    b: Node<"float">,
-    c: Node<"float">,
-  ): Node<"float"> =>
-    a
-      .mul(normalizedWeights.x)
-      .add(b.mul(normalizedWeights.y))
-      .add(c.mul(normalizedWeights.z));
-  return {
-    grass: ground("grass", controls.grassRepeatsPerMeter, 1),
-    dirt: textures.dirtProjection
-      ? stochasticDirt()
-      : ground(
-          "dirt",
-          controls.dirtRepeatsPerMeter,
-          controls.dirtNormalStrength,
+    const projectRock = (projection: {
+      uv: Node<"vec2">;
+      dx: Node<"vec2">;
+      dy: Node<"vec2">;
+      scale?: Node<"float">;
+    }) =>
+      project(
+        "rock",
+        projection.uv,
+        controls.rockNormalStrength,
+        projection,
+        "A",
+        sharedRockNormal,
+        worldDerivatives,
+      );
+    const rock = (
+      worldPlane: Node<"vec2">,
+      axis: "X" | "Y" | "Z",
+      worldDx?: Node<"vec2">,
+      worldDy?: Node<"vec2">,
+    ) => {
+      if (textures.rockProjection) {
+        const p = createCompactStochasticProjections(
+          worldPlane,
+          controls.repeatsPerMeter,
+          controls.rockPatchEdgeMeters,
+          worldDx ?? worldPlane.dFdx(),
+          worldDy ?? worldPlane.dFdy(),
+          { X: 0x173ab129, Y: 0x375cd103, Z: 0x529a4d27 }[axis],
+        );
+        const a = projectRock(p.a);
+        const b = projectRock(p.b);
+        const c = projectRock(p.c);
+        return {
+          rawRockAo: a
+            .rawRockAo!.mul(p.weights.x)
+            .add(b.rawRockAo!.mul(p.weights.y))
+            .add(c.rawRockAo!.mul(p.weights.z)),
+          albedo: blendCompactStochasticAlbedo(
+            a.albedo,
+            b.albedo,
+            c.albedo,
+            p.weights,
+            createCompactTerrainColorOperations().getPalette().rock,
+          ).toVar(`compactStochasticRockAlbedo${axis}`),
+          roughness: a.roughness
+            .mul(p.weights.x)
+            .add(b.roughness.mul(p.weights.y))
+            .add(c.roughness.mul(p.weights.z)),
+          ao: a.ao
+            .mul(p.weights.x)
+            .add(b.ao.mul(p.weights.y))
+            .add(c.ao.mul(p.weights.z)),
+          worldNormal: normalize(
+            a.worldNormal
+              .mul(p.weights.x)
+              .add(b.worldNormal.mul(p.weights.y))
+              .add(c.worldNormal.mul(p.weights.z)),
+          ),
+        };
+      }
+      // Reuse the exact ground transition: outgoing B == incoming A at every
+      // band boundary. Derive screen gradients BEFORE discrete phase selection;
+      // both packed maps and the cotangent frame use the same rotated gradients.
+      // World anchoring and geometric weights also preserve negative-facing axes.
+      const p = createCompactGroundProjections(
+        worldPlane,
+        patternNoise,
+        controls.repeatsPerMeter,
+        worldDx,
+        worldDy,
+      );
+      const a = projectRock(p.a);
+      const b = projectRock(p.b);
+      return {
+        rawRockAo: mix(a.rawRockAo!, b.rawRockAo!, p.weight),
+        albedo: blendCompactRockAlbedo(a.albedo, b.albedo, p.weight).toVar(
+          `compactRockAlbedo${axis}`,
         ),
-    rock: {
+        roughness: mix(a.roughness, b.roughness, p.weight),
+        ao: mix(a.ao, b.ao, p.weight),
+        worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
+      };
+    };
+    const sides = [
+      rock(
+        vec2(positionWorld.z, positionWorld.y),
+        "X",
+        worldDerivatives?.dx.zy,
+        worldDerivatives?.dy.zy,
+      ),
+      rock(
+        vec2(positionWorld.x, positionWorld.z),
+        "Y",
+        worldDerivatives?.dx.xz,
+        worldDerivatives?.dy.xz,
+      ),
+      rock(
+        vec2(positionWorld.x, positionWorld.y),
+        "Z",
+        worldDerivatives?.dx.xy,
+        worldDerivatives?.dy.xy,
+      ),
+    ];
+    const blendVector = (
+      a: Node<"vec3">,
+      b: Node<"vec3">,
+      c: Node<"vec3">,
+    ): Node<"vec3"> =>
+      a
+        .mul(normalizedWeights.x)
+        .add(b.mul(normalizedWeights.y))
+        .add(c.mul(normalizedWeights.z));
+    const blendScalar = (
+      a: Node<"float">,
+      b: Node<"float">,
+      c: Node<"float">,
+    ): Node<"float"> =>
+      a
+        .mul(normalizedWeights.x)
+        .add(b.mul(normalizedWeights.y))
+        .add(c.mul(normalizedWeights.z));
+    return {
       rawRockAo: blendScalar(
         sides[0].rawRockAo,
         sides[1].rawRockAo,
         sides[2].rawRockAo,
-      ).toVar("compactRawRockAo"),
+      ),
       albedo: blendVector(sides[0].albedo, sides[1].albedo, sides[2].albedo),
       roughness: blendScalar(
         sides[0].roughness,
@@ -2079,6 +2159,57 @@ export function createCompactTerrainLayers(
           sides[2].worldNormal,
         ),
       ),
+    };
+  };
+  return {
+    createGround: () => ({
+      grass: ground("grass", controls.grassRepeatsPerMeter, 1),
+      dirt: textures.dirtProjection
+        ? stochasticDirt()
+        : ground(
+            "dirt",
+            controls.dirtRepeatsPerMeter,
+            controls.dirtNormalStrength,
+          ),
+    }),
+    createRock: (required) => {
+      if (required === undefined) return buildRock();
+      const packed = Fn(() => {
+        // These variables enter the enclosing stack before the nonuniform If.
+        // No implicit derivative may be constructed inside buildRock below.
+        const dx = positionWorld.dFdx().toVar("compactRockWorldDx");
+        const dy = positionWorld.dFdy().toVar("compactRockWorldDy");
+        const result = mat3(vec3(0), normalWorldGeometry, vec3(1)).toVar(
+          "compactRockAppearance",
+        );
+        If(required, () => {
+          // Construct all rock samples and their .toVar() assignments here:
+          // wrapping a previously materialized rock graph would not defer it.
+          const rock = buildRock({ dx, dy });
+          const rawRockAo = rock.rawRockAo!.toVar("compactRawRockAo");
+          result.assign(
+            mat3(
+              rock.albedo,
+              rock.worldNormal,
+              vec3(rock.roughness, rock.ao, rawRockAo),
+            ),
+          );
+        });
+        return result;
+      })().toVar("compactRockAppearanceResult") as unknown as Node<"mat3"> & {
+        // r186 indexes matrices through ArrayElementNode, but the installed
+        // declarations expose .element only for array nodes. A mat3 column is
+        // exactly vec3; keep this missing declaration local to the packed value.
+        element(index: 0 | 1 | 2): Node<"vec3">;
+      };
+      const channels = packed.element(2);
+      return {
+        albedo: packed.element(0),
+        worldNormal: packed.element(1),
+        roughness: channels.x,
+        ao: channels.y,
+        rawRockAo: channels.z,
+      };
     },
   };
 }
@@ -2536,6 +2667,10 @@ export function blendCompactTerrainLayers(
   coastDistribution?: CompactCoastDistribution<Node<"float">>,
   coastCavity?: { coverage: Node<"float">; pondClearance: Node<"float"> },
   pondBankComposition?: CompactPondBankComposition<Node<"float">>,
+  resolveAppearance?: (
+    weights: Node<"vec4">,
+    layers: Record<Layer, CompactTerrainLayer>,
+  ) => Record<Layer, CompactTerrainLayer>,
 ): {
   albedo: Node<"vec3">;
   roughness: Node<"float">;
@@ -2543,6 +2678,12 @@ export function blendCompactTerrainLayers(
   normal: Node<"vec3">;
   weights?: Node<"vec4">;
 } {
+  if (resolveAppearance && coastCavity)
+    throw new Error(
+      "Deferred rock appearance cannot supply coast cavity weights",
+    );
+  if (resolveAppearance && (!layers.grass.height || !layers.dirt.height))
+    throw new Error("Deferred appearance requires admitted height layers");
   if (pondBankComposition && (!layers.grass.height || !layers.dirt.height))
     throw new Error("Pond bank composition requires admitted height layers");
   if (layers.grass.height && layers.dirt.height) {
@@ -2612,6 +2753,8 @@ export function blendCompactTerrainLayers(
         weights,
         pondBankComposition,
       );
+    // Appearance resolution cannot feed back into the completed weight graph.
+    const appearance = resolveAppearance?.(weights, layers) ?? layers;
     const blendVector = (
       grass: Node<"vec3">,
       soil: Node<"vec3">,
@@ -2637,28 +2780,28 @@ export function blendCompactTerrainLayers(
     return {
       weights,
       albedo: blendVector(
-        layers.grass.albedo,
-        layers.dirt.albedo,
-        layers.rock.albedo,
+        appearance.grass.albedo,
+        appearance.dirt.albedo,
+        appearance.rock.albedo,
         coastalGround?.layer.albedo,
       ),
       roughness: blendScalar(
-        layers.grass.roughness,
-        layers.dirt.roughness,
-        layers.rock.roughness,
+        appearance.grass.roughness,
+        appearance.dirt.roughness,
+        appearance.rock.roughness,
         coastalGround?.layer.roughness,
       ),
       ao: blendScalar(
-        layers.grass.ao,
-        layers.dirt.ao,
-        layers.rock.ao,
+        appearance.grass.ao,
+        appearance.dirt.ao,
+        appearance.rock.ao,
         coastalGround?.layer.ao,
       ),
       normal: compactTerrainNormalToView(
         blendVector(
-          layers.grass.worldNormal,
-          layers.dirt.worldNormal,
-          layers.rock.worldNormal,
+          appearance.grass.worldNormal,
+          appearance.dirt.worldNormal,
+          appearance.rock.worldNormal,
           coastalGround?.layer.worldNormal,
         ),
       ),

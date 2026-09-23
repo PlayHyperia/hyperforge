@@ -1,9 +1,12 @@
 import { readFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
+import type { Browser } from "playwright";
 import THREE, {
   float,
   mat4,
@@ -33,6 +36,7 @@ import {
   COMPACT_TERRAIN_COAST_CAVITY,
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
+  createCompactRockAppearanceRequired,
   createCompactDryGrassRoughness,
   createCompactCotangentNormal,
   createCompactTerrainLayerWeights,
@@ -731,6 +735,7 @@ function vectorValue(
     };
     const value = read("value");
     if (typeof value === "number") return [value];
+    if (typeof value === "boolean") return [value ? 1 : 0];
     if (
       value instanceof THREE.Vector2 ||
       value instanceof THREE.Vector3 ||
@@ -796,6 +801,12 @@ function vectorValue(
     };
     const uintArithmetic = isUint(node);
     switch (read("op")) {
+      case "!=":
+        return pair((a, b) => (a !== b ? 1 : 0));
+      case "&&":
+        return pair((a, b) => (a !== 0 && b !== 0 ? 1 : 0));
+      case "||":
+        return pair((a, b) => (a !== 0 || b !== 0 ? 1 : 0));
       case ">":
         return pair((a, b) => (a > b ? 1 : 0));
       case "/":
@@ -3161,6 +3172,576 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
         }
       }
   });
+});
+
+describe("exact-zero rock appearance (CPU arithmetic plus explicit native WGSL gate)", () => {
+  it("skips only exact zero rock and absent dry-soil mineral contribution", () => {
+    const values = [-1, -1e-30, -0, 0, 1e-30, 0.25, 1];
+    for (const rock of values)
+      for (const soil of values)
+        for (const mineral of [-2, -1e-30, -0, 0, 1e-30, 0.5, 1, 2]) {
+          const gate = createCompactRockAppearanceRequired(
+            vec4(0.3, soil, rock, 0.7),
+            float(mineral),
+          );
+          const expected =
+            rock !== 0 ||
+            (soil !== 0 && Math.max(0, Math.min(1, mineral)) !== 0);
+          expect(vectorValue(gate)).toEqual([expected ? 1 : 0]);
+          // This graph has no sampler, derivative or appearance dependency.
+          expect(
+            [...graph(gate)].some(
+              (node) =>
+                Reflect.get(node, "isTextureNode") === true ||
+                ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+            ),
+          ).toBe(false);
+        }
+    // Neither wet-soil nor grass weight can require mineral appearance alone.
+    for (const unrelated of [-10, 0, 10])
+      expect(
+        vectorValue(
+          createCompactRockAppearanceRequired(
+            vec4(unrelated, 0, 0, unrelated),
+            float(1),
+          ),
+        ),
+      ).toEqual([0]);
+  });
+
+  it("resolves appearance once after final bank weights without feeding appearance back into weights", () => {
+    const layers = {
+      grass: {
+        albedo: vec3(0.1, 0.2, 0.3),
+        roughness: float(0.92),
+        ao: float(0.7),
+        worldNormal: vec3(0, 1, 0),
+        height: float(0.2),
+      },
+      dirt: {
+        albedo: vec3(0.4, 0.3, 0.2),
+        roughness: float(0.86),
+        ao: float(0.6),
+        worldNormal: vec3(0.2, 0.9, 0.1),
+        height: float(0.8),
+      },
+      rock: {
+        albedo: vec3(0.6, 0.7, 0.8),
+        roughness: float(0.9),
+        ao: float(0.8),
+        worldNormal: vec3(0.1, 0.9, 0.2),
+        rawRockAo: float(0.3),
+      },
+    };
+    const parameters: Parameters<typeof blendCompactTerrainLayers> = [
+      layers,
+      float(0.24),
+      float(0.13),
+      float(0.19),
+      { talus: float(0.2), wear: float(0.1) },
+      float(0.17),
+      undefined,
+      float(0.12),
+      float(0.21),
+      float(0.11),
+      float(0.08),
+      { coverage: float(0.2), pondRegion: float(0.4) },
+      undefined,
+      undefined,
+      {
+        soilToGrass: float(0.1),
+        soilToRock: float(0.2),
+        grassToSoil: float(0.13),
+        grassToRock: float(0.12),
+        grassShade: float(0.8),
+        groundCoverWeight: float(0.09),
+        groundCoverGrassShare: float(0.7),
+      },
+    ];
+    const baseline = blendCompactTerrainLayers(...parameters);
+    const observed: Node[] = [];
+    parameters[15] = (weights, original) => {
+      observed.push(weights);
+      expect(original).toBe(layers);
+      return original;
+    };
+    const resolved = blendCompactTerrainLayers(...parameters);
+    expect(observed).toEqual([resolved.weights]);
+    const frame = new Map<Node, readonly number[]>([
+      [cameraViewMatrix, new THREE.Matrix4().toArray()],
+    ]);
+    for (const key of [
+      "albedo",
+      "roughness",
+      "ao",
+      "normal",
+      "weights",
+    ] as const)
+      expect(vectorValue(resolved[key]!, frame)).toEqual(
+        vectorValue(baseline[key]!, frame),
+      );
+    const replacement = vec3(0.9, 0.1, 0.7);
+    parameters[15] = (_weights, original) => ({
+      ...original,
+      grass: { ...original.grass, height: float(999), albedo: replacement },
+    });
+    const replaced = blendCompactTerrainLayers(...parameters);
+    expect(vectorValue(replaced.weights!)).toEqual(
+      vectorValue(baseline.weights!),
+    );
+    expect(graph(replaced.weights!).has(replacement)).toBe(false);
+    const grassWeight = vectorValue(baseline.weights!)[0];
+    const oldColor = vectorValue(baseline.albedo);
+    const delta = vectorValue(replacement).map(
+      (value, i) => value - vectorValue(layers.grass.albedo)[i],
+    );
+    vectorValue(replaced.albedo).forEach((value, i) =>
+      expect(value).toBeCloseTo(oldColor[i] + grassWeight * delta[i], 13),
+    );
+    parameters[13] = { coverage: float(0.4), pondClearance: float(1) };
+    expect(() => blendCompactTerrainLayers(...parameters)).toThrow(
+      /coast cavity/i,
+    );
+    parameters[13] = undefined;
+    parameters[0] = {
+      ...layers,
+      grass: { ...layers.grass, height: undefined },
+    };
+    expect(() => blendCompactTerrainLayers(...parameters)).toThrow(
+      /height layers/i,
+    );
+  });
+
+  type Flow = {
+    code: string;
+    result: string;
+    textureNames: Map<string, string>;
+  };
+  type NativeFlowReceipt = {
+    baseline: Omit<Flow, "textureNames"> & { textureNames: [string, string][] };
+    candidate: Omit<Flow, "textureNames"> & {
+      textureNames: [string, string][];
+    };
+    before: {
+      uuid: string;
+      sourceUuid: string;
+      version: number;
+      sourceVersion: number;
+      colorSpace: string;
+      anisotropy: number;
+      wrapS: number;
+      wrapT: number;
+      minFilter: number;
+      magFilter: number;
+      generateMipmaps: boolean;
+      flipY: boolean;
+      premultiplyAlpha: boolean;
+    }[];
+    after: NativeFlowReceipt["before"];
+    sharedPackedChannels: number;
+    adapter: {
+      vendor: string;
+      architecture: string;
+      description: string;
+      fallback: boolean;
+    };
+    features: string[];
+    errors: string[];
+    nativeBackend: boolean;
+  };
+
+  // This entry imports only real production code and installed Three. Unlike
+  // storage-only codegen, r186 texture codegen queries actual device features.
+  // No supplied capability table, fake GPU object or feature override is valid.
+  const nativeProbe = String.raw`
+globalThis.terrainWgslProbe = async () => {
+  if (!navigator.gpu || !isSecureContext) throw new Error("Native WebGPU is required");
+  const adapter = await navigator.gpu.requestAdapter({powerPreference:"high-performance"});
+  if (!adapter || adapter.isFallbackAdapter || adapter.info.isFallbackAdapter || /swiftshader|llvmpipe|software/i.test(
+    [adapter.info.vendor,adapter.info.architecture,adapter.info.description].join(" ")))
+    throw new Error("A hardware WebGPU adapter is required");
+  const device = await adapter.requestDevice({requiredFeatures:[...adapter.features]});
+  let active = true, renderer, owner, geometry, material;
+  const errors = [];
+  const onError = event => errors.push(String(event.error.message));
+  device.addEventListener("uncapturederror", onError);
+  device.lost.then(info => { if(active) errors.push("Device lost: " + info.message); });
+  try {
+    const canvas = document.querySelector("canvas");
+    if (!canvas) throw new Error("Missing real browser canvas");
+    renderer = new THREE.WebGPURenderer({canvas,device});
+    await renderer.init();
+    if (renderer.backend.isWebGPUBackend !== true || renderer.backend.device !== device)
+      throw new Error("Renderer did not retain the actual WebGPU device");
+    owner = new CompactTerrainTextureSet("/assets","stochastic-v1","height-v1","stochastic-v1","frequency-v1");
+    const textures = [
+      ...["grass","dirt","rock"].flatMap(layer =>
+        ["albedo-roughness","normal-ao"].map(channel => owner.getNode(layer,channel).value)),
+      owner.getHeightNode().value,
+    ];
+    const snapshot = () => textures.map(t => ({
+      uuid:t.uuid,sourceUuid:t.source.uuid,version:t.version,sourceVersion:t.source.version,
+      colorSpace:t.colorSpace,anisotropy:t.anisotropy,wrapS:t.wrapS,wrapT:t.wrapT,
+      minFilter:t.minFilter,magFilter:t.magFilter,generateMipmaps:t.generateMipmaps,
+      flipY:t.flipY,premultiplyAlpha:t.premultiplyAlpha,
+    }));
+    const before = snapshot();
+    geometry = new THREE.PlaneGeometry(2,2);
+    material = new THREE.MeshStandardNodeMaterial();
+    const mesh = new THREE.Mesh(geometry,material);
+    let sharedPackedChannels = 0;
+    const graph = root => {
+      const nodes = new Set();
+      const visit = node => {if(nodes.has(node))return;nodes.add(node);for(const child of node.getChildren())visit(child);};
+      visit(root);return nodes;
+    };
+    const sharedDistance = uniform(16), sharedPattern = uniform(.43);
+    const makeOutput = gated => {
+      const factory = gated ? createCompactTerrainLayerFactory(owner,sharedDistance,sharedPattern) : null;
+      const placeholder = {albedo:vec3(0),roughness:float(1),ao:float(1),worldNormal:normalWorldGeometry};
+      const layers = factory ? {...factory.createGround(),rock:placeholder} : createCompactTerrainLayers(owner,sharedDistance,sharedPattern);
+      const mineral = uniform(.2);
+      const surface = blendCompactTerrainLayers(layers,uniform(.31),uniform(.23),uniform(.17),
+        undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,
+        gated ? (weights,original) => {
+          const rock = factory.createRock(createCompactRockAppearanceRequired(weights,mineral).toVar("testedRockAppearanceRequired"));
+          const shared = Object.values(rock).map(root => [...graph(root)].filter(node => node.name === "compactRockAppearanceResult"));
+          if(shared.length!==5 || shared.some(rows => rows.length!==1 || rows[0]!==shared[0][0]))
+            throw new Error("Rock appearance is not one shared actual packed node");
+          sharedPackedChannels=shared.length;
+          return {...original,rock};
+        } : undefined);
+      return vec4(surface.albedo.add(surface.normal),surface.roughness.add(surface.ao));
+    };
+    const generate = output => {
+      const builder = new WGSLNodeBuilder(mesh,renderer);
+      builder.camera = new THREE.PerspectiveCamera(58,1,.2,1000);
+      builder.shaderStage = "fragment";
+      const flow = builder.flowStagesNode(output,"vec4");
+      if(typeof flow.code!=="string" || typeof flow.result!=="string")throw new Error("Missing native generated flow");
+      const byUuid = new Map(owner.getReceipt().textures.map(row => [row.textureUuid,row.key]));
+      const textureNames = builder.uniforms.fragment.filter(row => row.value instanceof THREE.Texture && byUuid.has(row.value.uuid))
+        .map(row => [row.name,byUuid.get(row.value.uuid)]);
+      if(textureNames.length!==7)throw new Error("Incomplete actual texture bindings");
+      return {code:flow.code,result:flow.result,textureNames};
+    };
+    const baseline = generate(makeOutput(false)), candidate = generate(makeOutput(true));
+    if(errors.length)throw new Error(errors.join("; "));
+    return {baseline,candidate,before,after:snapshot(),sharedPackedChannels,
+      adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,description:adapter.info.description,
+        fallback:adapter.isFallbackAdapter===true || adapter.info.isFallbackAdapter===true},
+      features:[...device.features].sort(),errors,nativeBackend:renderer.backend.isWebGPUBackend};
+  } finally {
+    active=false;device.removeEventListener("uncapturederror",onError);
+    try { owner?.dispose();geometry?.dispose();material?.dispose();renderer?.dispose(); }
+    finally { device.destroy(); }
+  }
+};`;
+
+  async function generateNative(): Promise<NativeFlowReceipt> {
+    let browser: Browser | undefined;
+    let server: Server | undefined;
+    const errors: string[] = [];
+    const modulePath = fileURLToPath(
+      new URL("../CompactTerrainMaterial.ts", import.meta.url),
+    );
+    const threePath = fileURLToPath(
+      new URL("../../../../extras/three/three.ts", import.meta.url),
+    );
+    try {
+      const entry = await build({
+        stdin: {
+          contents: `import THREE,{float,vec3,vec4,uniform,normalWorldGeometry} from ${JSON.stringify(threePath)};
+import {WGSLNodeBuilder} from "three/webgpu";
+import {CompactTerrainTextureSet,createCompactTerrainLayers,createCompactTerrainLayerFactory,createCompactRockAppearanceRequired,blendCompactTerrainLayers} from ${JSON.stringify(modulePath)};
+${nativeProbe}`,
+          resolveDir: fileURLToPath(new URL(".", import.meta.url)),
+          loader: "js",
+        },
+        bundle: true,
+        write: false,
+        metafile: true,
+        platform: "browser",
+        format: "esm",
+        target: "es2022",
+        minify: false,
+        keepNames: true,
+      });
+      expect(entry.outputFiles).toHaveLength(1);
+      expect(
+        Object.keys(entry.metafile.inputs).some((path) =>
+          path.endsWith("CompactTerrainMaterial.ts"),
+        ),
+      ).toBe(true);
+      expect(
+        Object.keys(entry.metafile.inputs).filter((path) =>
+          /__tests__|vitest|playwright|node:/.test(path),
+        ),
+      ).toEqual([]);
+      server = createServer((request, response) => {
+        response.setHeader("Cache-Control", "no-store");
+        if (request.url === "/") {
+          response.setHeader("Content-Type", "text/html; charset=utf-8");
+          response.end(
+            '<!doctype html><title>Hyperia native terrain WGSL qualification</title><canvas></canvas><script type="module" src="/entry.js"></script>',
+          );
+        } else if (request.url === "/entry.js") {
+          response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+          response.end(entry.outputFiles[0].contents);
+        } else if (request.url === "/favicon.ico") {
+          response.writeHead(204).end();
+        } else {
+          errors.push(`Unexpected request ${request.url}`);
+          response.writeHead(404).end();
+        }
+      });
+      await new Promise<void>((resolve, reject) => {
+        server!.once("error", reject);
+        server!.listen(0, "127.0.0.1", () => {
+          server!.removeListener("error", reject);
+          resolve();
+        });
+      });
+      const address = server.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing private loopback port");
+      const { chromium } = await import("playwright");
+      browser = await chromium.launch({
+        channel: "chrome",
+        headless: false,
+        timeout: 20_000,
+        args: ["--use-angle=metal", "--enable-features=WebGPU,UnsafeWebGPU"],
+      });
+      const page = await browser.newPage();
+      page.setDefaultTimeout(20_000);
+      page.on("pageerror", (error) => errors.push(error.message));
+      const origin = `http://127.0.0.1:${address.port}`;
+      await page.route("**/*", (route) => {
+        if (new URL(route.request().url()).origin === origin)
+          return route.continue();
+        errors.push("Unexpected nonlocal request");
+        return route.abort();
+      });
+      await page.goto(origin, { waitUntil: "load" });
+      await page.waitForFunction(
+        () => typeof Reflect.get(globalThis, "terrainWgslProbe") === "function",
+      );
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const receipt = await Promise.race([
+        page.evaluate(async () => {
+          const actual = window as unknown as Window & {
+            terrainWgslProbe(): Promise<NativeFlowReceipt>;
+          };
+          return actual.terrainWgslProbe();
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "Native terrain WGSL qualification exceeded 45 seconds",
+                ),
+              ),
+            45_000,
+          );
+        }),
+      ]).finally(() => clearTimeout(timeout));
+      expect(errors).toEqual([]);
+      expect(receipt.errors).toEqual([]);
+      expect(receipt.nativeBackend).toBe(true);
+      expect(receipt.adapter.fallback).toBe(false);
+      expect(receipt.sharedPackedChannels).toBe(5);
+      process.stdout.write(
+        `Native terrain WGSL adapter (not rendering/performance proof): ${JSON.stringify({ adapter: receipt.adapter, features: receipt.features })}\n`,
+      );
+      return receipt;
+    } finally {
+      try {
+        await browser?.close();
+      } finally {
+        if (server?.listening)
+          await new Promise<void>((resolve, reject) => {
+            server!.close((error) => (error ? reject(error) : resolve()));
+            server!.closeAllConnections();
+          });
+      }
+    }
+  }
+
+  // Balance generated braces rather than treating indentation or temporary IDs
+  // as a shader contract. No normalization or rewriting of generated WGSL.
+  const matchingEnd = (
+    source: string,
+    start: number,
+    open: string,
+    close: string,
+  ) => {
+    let depth = 0;
+    for (let i = start; i < source.length; i++) {
+      if (source[i] === open) depth++;
+      if (source[i] === close && --depth === 0) return i;
+    }
+    throw new Error("Unbalanced actual WGSL control flow");
+  };
+  const branches = (source: string) =>
+    [...source.matchAll(/\bif\s*\(/g)].map((match) => {
+      const start = match.index + match[0].lastIndexOf("(");
+      const conditionEnd = matchingEnd(source, start, "(", ")");
+      const bodyStart = source.indexOf("{", conditionEnd + 1);
+      if (bodyStart < 0 || source.slice(conditionEnd + 1, bodyStart).trim())
+        throw new Error("Missing actual conditional body");
+      return {
+        condition: source.slice(start + 1, conditionEnd),
+        start: bodyStart,
+        end: matchingEnd(source, bodyStart, "{", "}"),
+      };
+    });
+
+  // Mandatory native qualification is separate from ordinary unit runs. A
+  // skipped test is explicitly NOT generated-shader proof or promotion approval.
+  it.skipIf(process.env.HYPERIA_NATIVE_TERRAIN_WGSL !== "1")(
+    "native WebGPU generates one shared deferred rock branch with 18 reads, hoisted derivatives and unchanged 5 height reads",
+    async () => {
+      const receipt = await generateNative();
+      const baseline: Flow = {
+        ...receipt.baseline,
+        textureNames: new Map(receipt.baseline.textureNames),
+      };
+      const candidate: Flow = {
+        ...receipt.candidate,
+        textureNames: new Map(receipt.candidate.textureNames),
+      };
+      const calls = (flow: Flow) =>
+        [...flow.code.matchAll(/\btextureSampleGrad\s*\(\s*(\w+)/g)].map(
+          (match) => {
+            const key = flow.textureNames.get(match[1]);
+            if (!key) throw new Error(`Unowned generated texture ${match[1]}`);
+            return { key, offset: match.index };
+          },
+        );
+      const oldCalls = calls(baseline),
+        newCalls = calls(candidate);
+      expect(oldCalls).toHaveLength(35);
+      expect(newCalls).toHaveLength(35);
+      const counts = (rows: ReturnType<typeof calls>) =>
+        Object.fromEntries(
+          [...new Set(rows.map((row) => row.key))]
+            .sort()
+            .map((key) => [key, rows.filter((row) => row.key === key).length]),
+        );
+      expect(counts(newCalls)).toEqual(counts(oldCalls));
+      expect(counts(newCalls)).toEqual({
+        "grass-albedo-roughness": 4,
+        "grass-normal-ao": 2,
+        "dirt-albedo-roughness": 3,
+        "dirt-normal-ao": 3,
+        "rock-albedo-roughness": 9,
+        "rock-normal-ao": 9,
+        "ground-height": 5,
+      });
+      const conditional = branches(candidate.code).filter((branch) =>
+        branch.condition.includes("testedRockAppearanceRequired"),
+      );
+      expect(conditional).toHaveLength(1);
+      const branch = conditional[0];
+      const inside = (offset: number) =>
+        offset > branch.start && offset < branch.end;
+      expect(newCalls.filter((row) => inside(row.offset))).toHaveLength(18);
+      for (const call of newCalls)
+        expect(inside(call.offset)).toBe(call.key.startsWith("rock-"));
+      const derivatives = [...candidate.code.matchAll(/\bdpd[xy]\s*\(/g)];
+      expect(derivatives.length).toBeGreaterThan(0);
+      for (const derivative of derivatives)
+        expect(inside(derivative.index)).toBe(false);
+      const worldDerivativeOperands: string[] = [];
+      // r186 WGSLNodeBuilder maps dFdy to '- dpdy' for WebGPU coordinates.
+      // Both hoisted derivatives must use the same actual world-position
+      // varying, with no X negation or additional expression accepted.
+      for (const [name, operation] of [
+        ["compactRockWorldDx", "dpdx"],
+        ["compactRockWorldDy", "-\\s*dpdy"],
+      ]) {
+        const assignments = [
+          ...candidate.code.matchAll(
+            new RegExp(
+              `\\b${name}\\s*=\\s*${operation}\\s*\\(\\s*(\\w+)\\s*\\)\\s*;`,
+              "g",
+            ),
+          ),
+        ];
+        const excerpt = candidate.code
+          .split("\n")
+          .filter((line) => /compactRockWorldD[xy]|\bdpd[xy]\s*\(/.test(line))
+          .slice(0, 24)
+          .map((line) => line.slice(0, 1200))
+          .join("\n");
+        expect(
+          assignments,
+          `Actual derivative assignments (bounded excerpt):\n${excerpt}`,
+        ).toHaveLength(1);
+        expect(assignments[0].index).toBeLessThan(branch.start);
+        worldDerivativeOperands.push(assignments[0][1]);
+      }
+      expect(worldDerivativeOperands).toEqual([
+        "v_positionWorld",
+        "v_positionWorld",
+      ]);
+      expect([
+        ...candidate.code.matchAll(/\bcompactRockAppearanceResult\s*=/g),
+      ]).toHaveLength(1);
+      const oldBranches = branches(baseline.code);
+      for (const call of oldCalls.filter((row) => row.key.startsWith("rock-")))
+        expect(
+          oldBranches.some(
+            (region) => call.offset > region.start && call.offset < region.end,
+          ),
+        ).toBe(false);
+      for (const flow of [baseline, candidate]) {
+        expect(flow.code).not.toMatch(/\btextureSample(?:Bias|Level)?\s*\(/);
+        expect(flow.code + flow.result).not.toMatch(/undefined|NaN|Infinity/);
+      }
+      expect(receipt.after).toEqual(receipt.before);
+      expect(receipt.after).toHaveLength(7);
+      for (const texture of receipt.after) {
+        expect(texture.anisotropy).toBe(16);
+        expect(texture.wrapS).toBe(THREE.RepeatWrapping);
+        expect(texture.wrapT).toBe(THREE.RepeatWrapping);
+        expect(texture.minFilter).toBe(THREE.LinearMipmapLinearFilter);
+        expect(texture.magFilter).toBe(THREE.LinearFilter);
+        expect(texture.generateMipmaps).toBe(true);
+        expect(texture.flipY).toBe(false);
+        expect(texture.premultiplyAlpha).toBe(false);
+      }
+      const fingerprint = (flow: Flow) => ({
+        codeSha256: createHash("sha256").update(flow.code).digest("hex"),
+        resultSha256: createHash("sha256").update(flow.result).digest("hex"),
+        codeLength: flow.code.length,
+        resultLength: flow.result.length,
+      });
+      process.stdout.write(
+        `Native terrain WGSL qualification: ${JSON.stringify({
+          scope:
+            "Actual initialized r186 generated fragment flow; not shader-module compilation, draw or performance proof",
+          adapter: receipt.adapter,
+          baseline: fingerprint(baseline),
+          candidate: fingerprint(candidate),
+          ownedSampleCounts: counts(newCalls),
+          totalSamples: newCalls.length,
+          rockSamplesInsideSingleBranch: newCalls.filter((row) =>
+            inside(row.offset),
+          ).length,
+          heightSamplesOutsideBranch: newCalls.filter(
+            (row) => row.key === "ground-height" && !inside(row.offset),
+          ).length,
+          derivativeOperatorsOutsideBranch: derivatives.length,
+          worldDerivativeOperands,
+          sharedPackedChannels: receipt.sharedPackedChannels,
+          samplerStateUnchanged: true,
+        })}\n`,
+      );
+    },
+    90_000,
+  );
 });
 
 describe("compact terrain actual texture ownership and CPU material graph", () => {

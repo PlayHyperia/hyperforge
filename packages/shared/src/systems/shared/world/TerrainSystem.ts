@@ -200,6 +200,7 @@ import {
   resolveExplicitStreamingRenderProfile,
   resolveCompactDirtProjectionCandidate,
   resolveCompactRockProjectionCandidate,
+  resolveCompactRockSampling,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -446,6 +447,9 @@ export class TerrainSystem extends System {
   private compactRockProjection: ReturnType<
     typeof resolveCompactRockProjectionCandidate
   > | null;
+  private compactRockSampling: ReturnType<
+    typeof resolveCompactRockSampling
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -640,6 +644,7 @@ export class TerrainSystem extends System {
       compactPbr: isCompactSculptProfile(profile),
       compactDirtProjection: this.getCompactDirtProjection(),
       compactRockProjection: this.getCompactRockProjection(),
+      compactRockSampling: this.getCompactRockSampling(),
       compactSurfaceBlend: this.getCompactSurfaceBlend(),
       compactPondBlend: this.getCompactPondBlend(),
       compactCoastBlend: this.getCompactCoastBlend(),
@@ -808,6 +813,32 @@ export class TerrainSystem extends System {
       this.compactRockProjection = selection ?? null;
     }
     return this.compactRockProjection ?? undefined;
+  }
+
+  /** Shader-only sampling choice, pinned to this owner's captured dependencies. */
+  private getCompactRockSampling(): ReturnType<
+    typeof resolveCompactRockSampling
+  > {
+    if (this.compactRockSampling === undefined) {
+      const selection = resolveCompactRockSampling();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Rock sampling requires compact sculpt terrain");
+        if (
+          !this.getCompactGrassColorGrade() ||
+          this.getCompactRockProjection() !== "stochastic-v1" ||
+          this.getCompactDirtProjection() !== "stochastic-v1" ||
+          this.getCompactSurfaceBlend() !== "height-v1" ||
+          this.getCompactPondBlend() !== "composition-v1" ||
+          this.getCompactCoastBlend() === "cavity-v1"
+        )
+          throw new Error(
+            "Rock sampling requires compatible captured material selections",
+          );
+      }
+      this.compactRockSampling = selection ?? null;
+    }
+    return this.compactRockSampling ?? undefined;
   }
 
   /** Capture both absence and selection once, independently of dirt projection. */
@@ -2206,6 +2237,7 @@ export class TerrainSystem extends System {
     this.getCompactPondBlend();
     this.getCompactCoastBlend();
     this.getCompactGrassColorGrade();
+    this.getCompactRockSampling();
 
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();
