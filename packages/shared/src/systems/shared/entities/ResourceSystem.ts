@@ -1413,37 +1413,7 @@ export class ResourceSystem extends SystemBase {
         );
       return running.completion;
     }
-    const occupied = this.getOccupiedFishingTiles();
-    for (const entry of Object.values(ALL_WORLD_AREAS))
-      for (const resource of entry.resources) {
-        if (getExternalResource(resource.resourceId)?.type !== "fishing_spot")
-          continue;
-        const tile = worldToTile(resource.position.x, resource.position.z);
-        occupied.add(`${tile.x},${tile.z}`);
-      }
-    const unique = new Set<string>();
-    const points = findFishingSpotTiles(
-      this.world.collision,
-      area.bounds,
-      terrain.getResourceGroundHeight.bind(terrain),
-      terrain
-        .getWaterBodyRegistry()
-        .getWaterSurfaceAt.bind(terrain.getWaterBodyRegistry()),
-      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
-    )
-      .map((point) => snapToTileCenter(point))
-      .filter((point) => {
-        const tile = worldToTile(point.x, point.z),
-          key = `${tile.x},${tile.z}`;
-        if (
-          occupied.has(key) ||
-          unique.has(key) ||
-          !this.isBoundFishingPoint(point, binding)
-        )
-          return false;
-        unique.add(key);
-        return true;
-      });
+    const points = this.getBoundFishingSpawnCandidates(area, binding, terrain);
     if (points.length < fishing.spotCount) {
       this.pendingFishingAreas.set(areaId, area);
       return Promise.resolve();
@@ -1479,6 +1449,45 @@ export class ResourceSystem extends SystemBase {
     });
     this.boundFishingSpawns.set(areaId, { signature, completion });
     return completion;
+  }
+
+  /** Query current support and reservations without reserving or shuffling spots. */
+  private getBoundFishingSpawnCandidates(
+    area: WorldArea,
+    binding: BoundFishingArea,
+    terrain: TerrainSystem,
+  ): ReturnType<typeof snapToTileCenter>[] {
+    const occupied = this.getOccupiedFishingTiles();
+    for (const entry of Object.values(ALL_WORLD_AREAS))
+      for (const resource of entry.resources) {
+        if (getExternalResource(resource.resourceId)?.type !== "fishing_spot")
+          continue;
+        const tile = worldToTile(resource.position.x, resource.position.z);
+        occupied.add(`${tile.x},${tile.z}`);
+      }
+    const unique = new Set<string>();
+    return findFishingSpotTiles(
+      this.world.collision,
+      area.bounds,
+      terrain.getResourceGroundHeight.bind(terrain),
+      terrain
+        .getWaterBodyRegistry()
+        .getWaterSurfaceAt.bind(terrain.getWaterBodyRegistry()),
+      GATHERING_CONSTANTS.FISHING_SPOT_MOVE.shoreMinSpacing,
+    )
+      .map((point) => snapToTileCenter(point))
+      .filter((point) => {
+        const tile = worldToTile(point.x, point.z),
+          key = `${tile.x},${tile.z}`;
+        if (
+          occupied.has(key) ||
+          unique.has(key) ||
+          !this.isBoundFishingPoint(point, binding)
+        )
+          return false;
+        unique.add(key);
+        return true;
+      });
   }
 
   private getOccupiedFishingTiles(except?: ResourceID): Set<string> {
