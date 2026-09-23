@@ -389,6 +389,16 @@ export const FINE_GRASS_THIN_LEAF_LIGHTING = Object.freeze({
   rootEnd: 0.65,
 } as const);
 
+/** Field-only thin-leaf fill. Three multiplies this by the actual shadowed
+ * direct light, leaf tint and existing root gate; it is not emissive or an
+ * environmental-light boost. The added term is at most 0.1 times that light
+ * per color channel. This artistic approximation adds no pass or texture. */
+export const FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING = Object.freeze({
+  ...FINE_GRASS_THIN_LEAF_LIGHTING,
+  id: "meadow-field-thin-leaf-v1",
+  ambient: 0.5,
+} as const);
+
 /** Explicit normals-only art trial; the historical fine recipe stays unchanged. */
 export const FINE_GRASS_CANOPY_NORMAL_LIGHTING = Object.freeze({
   id: "canopy-normal-v1",
@@ -463,12 +473,21 @@ function publishFineGrassCanopyLighting(
   });
 }
 
-function publishFineGrassLighting(material: MeshSSSNodeMaterial): void {
+function fineGrassThinLeafLighting(geometryLayout?: FineGrassGeometryLayout) {
+  return geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+    ? FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING
+    : FINE_GRASS_THIN_LEAF_LIGHTING;
+}
+
+function publishFineGrassLighting(
+  material: MeshSSSNodeMaterial,
+  geometryLayout?: FineGrassGeometryLayout,
+): void {
   Object.defineProperty(material.userData, "fineGrassLighting", {
     enumerable: true,
     configurable: false,
     writable: false,
-    value: FINE_GRASS_THIN_LEAF_LIGHTING,
+    value: fineGrassThinLeafLighting(geometryLayout),
   });
 }
 
@@ -1591,7 +1610,7 @@ export class GrassVisualManager implements QuadTreeListener {
         this.foldedMaterial = this.material.clone();
         this.foldedMaterial.normalNode = this.foldedBladeNormalNode;
         if (this.foldedMaterial instanceof MeshSSSNodeMaterial)
-          publishFineGrassLighting(this.foldedMaterial);
+          publishFineGrassLighting(this.foldedMaterial, this.geometryLayout);
         if (this.habitatComposition)
           Object.defineProperty(
             this.foldedMaterial.userData,
@@ -1896,7 +1915,7 @@ export class GrassVisualManager implements QuadTreeListener {
     // NodeMaterial clones userData through JSON; restore the immutable receipt
     // on the actual representative owner without changing any shader nodes.
     if (material instanceof MeshSSSNodeMaterial)
-      publishFineGrassLighting(material);
+      publishFineGrassLighting(material, this.geometryLayout);
     if (this.lightingCandidate)
       publishFineGrassCanopyLighting(
         material,
@@ -2879,7 +2898,7 @@ export class GrassVisualManager implements QuadTreeListener {
           blades.bladeVisibility,
         );
       if (material instanceof MeshSSSNodeMaterial)
-        publishFineGrassLighting(material);
+        publishFineGrassLighting(material, this.geometryLayout);
       if (this.lightingCandidate)
         publishFineGrassCanopyLighting(
           material,
@@ -3597,8 +3616,10 @@ export class GrassVisualManager implements QuadTreeListener {
       mat.thicknessDistortionNode = float(
         FINE_GRASS_THIN_LEAF_LIGHTING.distortion,
       );
-      mat.thicknessAmbientNode = float(FINE_GRASS_THIN_LEAF_LIGHTING.ambient);
-      publishFineGrassLighting(mat);
+      mat.thicknessAmbientNode = float(
+        fineGrassThinLeafLighting(this.geometryLayout).ambient,
+      );
+      publishFineGrassLighting(mat, this.geometryLayout);
     }
 
     if (appearance?.id === FINE_MEADOW_APPEARANCE.id) {

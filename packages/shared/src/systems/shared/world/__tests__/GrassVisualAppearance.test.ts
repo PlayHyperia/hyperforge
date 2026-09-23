@@ -11,8 +11,19 @@ import THREE, {
 import {
   MeshSSSNodeMaterial,
   MeshStandardNodeMaterial,
+  NodeBuilder,
   type Node,
 } from "three/webgpu";
+import {
+  attribute,
+  float,
+  getCurrentStack,
+  normalView,
+  positionViewDirection,
+  setCurrentStack,
+  stack,
+  vec3,
+} from "three/tsl";
 import habitatData from "../../../../data/compact-haven-habitat-v1.json";
 import { validateCompactHabitatComposition } from "../CompactHabitatComposition";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -24,6 +35,7 @@ import {
   NATURAL_TUFT_APPEARANCE,
   FINE_MEADOW_APPEARANCE,
   FINE_GRASS_THIN_LEAF_LIGHTING,
+  FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
   FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_FOLDED_BLADE_LIGHTING,
@@ -194,6 +206,8 @@ function computeColorValue(
   if (node === modelWorldMatrix) return attributes._modelWorldMatrix;
   if (node === output) return attributes._output;
   if (node === time && attributes._time) return attributes._time;
+  if (node === normalView) return attributes._lightingNormalView;
+  if (node === positionViewDirection) return attributes._lightingViewDirection;
   if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
     const value = attributes[String(read("_attributeName"))];
@@ -285,6 +299,75 @@ function geometryBytes(geometry: THREE.BufferGeometry) {
       0,
     ) + geometry.index!.array.byteLength
   );
+}
+
+/** Invoke installed Three's direct-light implementation and retain its actual
+ * SSS contribution graph. This is construction/evaluation of that term only:
+ * no renderer, GPU, full BRDF, shadow map or tone mapping is simulated. */
+function installedSssContribution(
+  material: MeshSSSNodeMaterial,
+  geometry: THREE.BufferGeometry,
+): Node {
+  // NodeBuilder's runtime constructor accepts a null renderer/parser for pure
+  // graph construction. Reflect.construct avoids pretending its incomplete
+  // abstract declaration is a concrete renderer-backed subclass.
+  const builder: unknown = Reflect.construct(NodeBuilder, [
+    new THREE.Mesh(geometry, material),
+    null,
+    null,
+  ]);
+  if (!(builder instanceof NodeBuilder))
+    throw new Error("Expected actual Three NodeBuilder");
+  expect(builder.material).toBe(material);
+  expect(builder.renderer).toBeNull();
+  const previous = getCurrentStack();
+  const scope = stack();
+  setCurrentStack(scope);
+  try {
+    const reflectedLight = {
+      directDiffuse: vec3(0).toVar("testedDirectDiffuse"),
+      directSpecular: vec3(0).toVar("testedDirectSpecular"),
+      indirectDiffuse: vec3(0).toVar("testedIndirectDiffuse"),
+      indirectSpecular: vec3(0).toVar("testedIndirectSpecular"),
+    };
+    material.setupLightingModel().direct(
+      {
+        lightNode: vec3(0),
+        lightDirection: attribute("testedLightDirection", "vec3"),
+        lightColor: attribute("testedShadowedLightColor", "vec3"),
+        reflectedLight,
+      },
+      builder,
+    );
+    const assignments = scope.nodes.filter(
+      (node) =>
+        node.type === "AssignNode" &&
+        Reflect.get(node, "targetNode") === reflectedLight.directDiffuse,
+    );
+    // Installed SSS precedes the ordinary physical diffuse contribution.
+    // Fail closed if Three changes that structure, rather than testing a
+    // handwritten replacement or silently selecting a different expression.
+    expect(assignments).toHaveLength(2);
+    const addition = expand(Reflect.get(assignments[0], "sourceNode"));
+    expect(Reflect.get(addition, "op")).toBe("+");
+    expect(Reflect.get(addition, "aNode")).toBe(reflectedLight.directDiffuse);
+    const contribution = requireNode(Reflect.get(addition, "bNode"));
+    const nodes = graph(contribution);
+    for (const input of [
+      material.thicknessColorNode,
+      material.thicknessAmbientNode,
+      material.thicknessAttenuationNode,
+      material.thicknessScaleNode,
+      material.thicknessPowerNode,
+      material.thicknessDistortionNode,
+      normalView,
+      positionViewDirection,
+    ])
+      expect(nodes.has(requireNode(input))).toBe(true);
+    return contribution;
+  } finally {
+    setCurrentStack(previous);
+  }
 }
 
 describe("opt-in fine canopy normals (actual graph and geometry, CPU only)", () => {
@@ -677,6 +760,247 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     _frontFacing: [1],
     _cameraViewMatrix: new THREE.Matrix4().makeRotationY(0.4).toArray(),
     _modelWorldMatrix: new THREE.Matrix4().toArray(),
+  });
+
+  it("bounds meadow-field fill using the installed Three SSS direct graph, not native rendering", () => {
+    const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
+    try {
+      for (let lod = 0; lod < 3; lod++) {
+        const geometry = owner["lodGeometries"][lod];
+        const material = owner["materialForLod"](lod);
+        if (!(material instanceof MeshSSSNodeMaterial))
+          throw new Error("Expected actual meadow-field SSS owner");
+        // Isolate exactly one coefficient on a real Three clone. This is a
+        // diagnostic zero-floor control, not a historical geometry/material.
+        const noFloor = material.clone();
+        noFloor.thicknessAmbientNode = float(0);
+        try {
+          const actual = installedSssContribution(material, geometry);
+          const control = installedSssContribution(noFloor, geometry);
+          for (const key of [
+            "colorNode",
+            "normalNode",
+            "aoNode",
+            "thicknessColorNode",
+            "thicknessAttenuationNode",
+            "thicknessScaleNode",
+            "thicknessPowerNode",
+            "thicknessDistortionNode",
+          ] as const)
+            expect(noFloor[key]).toBe(material[key]);
+          let positiveFloorSamples = 0;
+          for (const front of [false, true])
+            for (const height of [0, 0.05, 0.2, 0.65, 1]) {
+              const input = inputsAt(geometry, 2);
+              input._frontFacing = [front ? 1 : 0];
+              input.uv = [front ? 0.2 : 0.8, height];
+              input._lightingNormalView = colorValue(
+                material.normalNode,
+                input,
+              );
+              const albedo = colorValue(material.colorNode, input);
+              const thickness = colorValue(material.thicknessColorNode, input);
+              const heightGate = smooth(0.05, 0.65, height);
+              thickness.forEach((value, channel) =>
+                expect(value).toBeCloseTo(albedo[channel] * heightGate, 14),
+              );
+              for (const view of [
+                [0, 1, 0],
+                [0, 0.15, -1],
+                [0.7, 0.2, 0.4],
+              ])
+                for (const light of [
+                  [0, 1, 0],
+                  [0.8, 0.3, -0.4],
+                ])
+                  for (const [label, lightRgb] of [
+                    ["unlit", [0, 0, 0]],
+                    ["fully-shadowed", [0, 0, 0]],
+                    ["partly-shadowed", [0.11, 0.05, 0.2]],
+                    ["lit", [1.8, 1.7, 1.6]],
+                  ] as const) {
+                    // Light color is the already-shadowed direct input that
+                    // Three supplies; this does not simulate a shadow map.
+                    input._lightingViewDirection = vector(view)
+                      .normalize()
+                      .toArray();
+                    input.testedLightDirection = vector(light)
+                      .normalize()
+                      .toArray();
+                    input.testedShadowedLightColor = [...lightRgb];
+                    const observed = colorValue(actual, input);
+                    const baseline = colorValue(control, input);
+                    for (let channel = 0; channel < 3; channel++) {
+                      expect(Number.isFinite(observed[channel])).toBe(true);
+                      const delta = observed[channel] - baseline[channel];
+                      const bound =
+                        0.1 * lightRgb[channel] * albedo[channel] * heightGate;
+                      // The floor is independent of view/normal/face, not the
+                      // entire SSS lobe. Its per-light bound is not an energy-
+                      // conservation assertion or a bound on many lights.
+                      expect(delta).toBeCloseTo(bound, 13);
+                      expect(delta).toBeGreaterThanOrEqual(-1e-14);
+                      expect(delta).toBeLessThanOrEqual(bound + 1e-13);
+                      if (label === "unlit" || label === "fully-shadowed")
+                        expect(observed[channel]).toBe(0);
+                      if (height <= 0.05) expect(observed[channel]).toBe(0);
+                      if (bound > 0) positiveFloorSamples++;
+                    }
+                  }
+            }
+          expect(positiveFloorSamples).toBe(216);
+        } finally {
+          noFloor.dispose();
+        }
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("selects immutable meadow-field fill only for field owners and retains it through LOD and representative publication", async () => {
+    const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
+    const legacyOwners = [
+      fine(),
+      fine("leaf-volume-v1"),
+      ...(
+        ["sheath-close-v1", "rooted-fan-v1", "meadow-canopy-v1"] as const
+      ).map((geometry) => fine("leaf-volume-v1", undefined, geometry)),
+    ];
+    let representativeDisposals = 0;
+    const expectRecipe = (material: MeshStandardNodeMaterial) => {
+      if (!(material instanceof MeshSSSNodeMaterial))
+        throw new Error("Expected actual meadow-field SSS material");
+      expect(
+        Object.getOwnPropertyDescriptor(material.userData, "fineGrassLighting"),
+      ).toEqual({
+        value: FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+      expect(material.userData.fineGrassLighting).toBe(
+        FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
+      );
+      for (const [key, value] of [
+        ["thicknessAttenuationNode", 0.2],
+        ["thicknessScaleNode", 1],
+        ["thicknessPowerNode", 2],
+        ["thicknessDistortionNode", 0.1],
+        ["thicknessAmbientNode", 0.5],
+      ] as const)
+        expect(colorValue(material[key], {})).toEqual([value]);
+      expect(material.transmission).toBe(0);
+      expect(material.transmissionNode).toBeNull();
+      expect(material.emissive.toArray()).toEqual([0, 0, 0]);
+      expect(material.emissiveNode).toBeNull();
+      expect(material.transparent).toBe(false);
+      expect(material.depthWrite).toBe(true);
+      expect(material.side).toBe(THREE.DoubleSide);
+      for (const key of [
+        "clearcoat",
+        "sheen",
+        "iridescence",
+        "anisotropy",
+        "transmission",
+        "dispersion",
+        "retroreflection",
+      ] as const)
+        expect(material.setupLightingModel()[key]).toBe(false);
+    };
+    try {
+      expect(FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING).toEqual({
+        ...FINE_GRASS_THIN_LEAF_LIGHTING,
+        id: "meadow-field-thin-leaf-v1",
+        ambient: 0.5,
+      });
+      expect(Object.isFrozen(FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING)).toBe(
+        true,
+      );
+      expect(FINE_GRASS_THIN_LEAF_LIGHTING.ambient).toBe(0);
+      expectRecipe(owner["material"]);
+      for (let lod = 0; lod < 3; lod++) {
+        const selected = owner["materialForLod"](lod);
+        expectRecipe(selected);
+        const geometry = owner["lodGeometries"][lod].clone();
+        const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+        const clone = createGroundedGrassMaterial(
+          selected,
+          geometry,
+          new Float32Array(layout.bladesPerClump * layout.rootComponents),
+          1,
+          lod,
+          "fine-meadow-ribbon-v1",
+        );
+        try {
+          if (!(clone instanceof MeshSSSNodeMaterial))
+            throw new Error("Grounded field clone lost SSS material");
+          // Generic Three clones JSON-copy userData; only manager publication
+          // rebinds the recipe's identity and immutable descriptor.
+          expect(clone.userData.fineGrassLighting).toEqual(
+            FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
+          );
+          for (const key of [
+            "thicknessColorNode",
+            "thicknessAttenuationNode",
+            "thicknessScaleNode",
+            "thicknessPowerNode",
+            "thicknessDistortionNode",
+            "thicknessAmbientNode",
+            "colorNode",
+            "normalNode",
+            "aoNode",
+          ] as const) {
+            if (!(selected instanceof MeshSSSNodeMaterial))
+              throw new Error("Expected selected SSS material");
+            expect(clone[key]).toBe(selected[key]);
+          }
+        } finally {
+          clone.dispose();
+          geometry.dispose();
+        }
+        for (const legacy of legacyOwners) {
+          const material = legacy["materialForLod"](lod);
+          if (!(material instanceof MeshSSSNodeMaterial))
+            throw new Error("Expected legacy fine SSS material");
+          expect(material.userData.fineGrassLighting).toBe(
+            FINE_GRASS_THIN_LEAF_LIGHTING,
+          );
+          expect(colorValue(material.thicknessAmbientNode, {})).toEqual([0]);
+        }
+      }
+      let observed = 0;
+      await owner.precompileRepresentativeChunk(async (object) => {
+        if (
+          !(object instanceof THREE.InstancedMesh) ||
+          !(object.material instanceof MeshSSSNodeMaterial)
+        )
+          throw new Error("Expected actual field representative mesh");
+        expectRecipe(object.material);
+        const selected = owner["materialForLod"](observed);
+        if (!(selected instanceof MeshSSSNodeMaterial))
+          throw new Error("Expected selected SSS material");
+        expect(object.material.thicknessAmbientNode).toBe(
+          selected.thicknessAmbientNode,
+        );
+        expect(object.geometry.getAttribute("position").count).toBe(
+          getGrassBladeLayout(observed, "fine-meadow-ribbon-v1")
+            .verticesPerClump,
+        );
+        expect(object.receiveShadow).toBe(true);
+        expect(object.castShadow).toBe(false);
+        object.material.addEventListener(
+          "dispose",
+          () => representativeDisposals++,
+        );
+        observed++;
+      });
+      expect(observed).toBe(3);
+      expect(representativeDisposals).toBe(3);
+    } finally {
+      owner.destroy();
+      legacyOwners.forEach((legacy) => legacy.destroy());
+    }
   });
 
   it("admits a distinct immutable recipe only for the fine sculpt owner", () => {

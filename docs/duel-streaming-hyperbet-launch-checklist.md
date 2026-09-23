@@ -1,5 +1,21 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-23 — Shadow-aware meadow leaf illumination
+
+Current status: **implemented and source-tested; native pixels, visual gain and performance are not yet qualified.** The completed native176 capture remains the baseline.
+
+- [x] Restrict an orientation-independent leaf-scattering floor to the explicit meadow-field candidate: ambient `0→0.5`, with attenuation `0.2` and the existing leaf tint/root-height gate unchanged. This adds at most `0.1 × shadowed direct-light RGB × tint × height gate` per analytic light. It is an additive artistic approximation, not energy-conserving transmission, indirect ambient or emissive light.
+- [x] Select the same immutable recipe in the actual ambient node and base, cloned, representative and installed-chunk material metadata. Legacy fine, folded, sheath, rooted-fan and canopy paths retain ambient zero. No new pass, texture or shader input; geometry, density, placement, wind, normals, albedo, AO and work/time limits are unchanged. Exact inverse editing reproduces the prior source.
+- [x] Pass **244 unique tests across six files**: 169 shape/wind/cell cases, 64 appearance cases and eleven full-field grounding cases; 29 other pond scenarios were not selected. The new tests construct and evaluate installed Three's actual SSS contribution graph, checking both faces, light/view variation, root gating, zero already-shadowed light and the per-light bound. They also cover all three LOD/precompile owners and cloned-node identity; they do not simulate a renderer or shadow map.
+- [x] Pass no-emit typechecking (**768 roots / 2,572 files / zero diagnostics / 82 stable pins**), scoped lint and formatting. Retain the initial focused-test assumption failures (a wrapped graph node and three—not one—representative LODs); corrected focused tests and the complete appearance suite pass. Independent source review found no unintended default, geometry or clone change.
+- [x] Reverify **145 protected artifacts and 13 unrelated files**. Saved localhost3333/database remain intact; the prior private runtime/browser are stopped. No unqualified candidate promotion.
+- [ ] Build89/runtime131/native177: compare all four noon views against complete native176, verify actual live chunk node values and emitted grass shader changes, and preserve exact geometry/root/mask/population, flowers, terrain, wind, quality and budget guards. Retain ordinary full-scene timing, restored far-grass diagnostics and strict terrain compilation.
+- [ ] Require paired lower-sun review before accepting the lighting: clearer green leaf faces without glowing shadow regions, flattened contrast or washed-out tips. This cannot fill genuine ground gaps. Keep wider grass composition, natural shores, tactile pavilion/dock materials, island dressing and sustained 2× performance open.
+
+Reference checked against the installed Three 0.186.0 source: [Three.js SSS material](https://threejs.org/docs/pages/MeshSSSNodeMaterial.html). Its experimental scattering support is a mechanism to evaluate, not evidence that this coefficient is visually correct.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/meadow-leaf-fill-source-review01.json` (SHA256 `1fd187ace04c67126dc77208508fe56f23a69d8e3718a88abdd458b4e770d010`), service-layout `meadow-leaf-fill-{shape01,grounding01,appearance01,types01,lint01,format01}`; focused `tests01` failure and `tests02/03` passes remain retained.
+
 ## 2026-09-23 — Swept-geometry kernel checkpoint
 
 Current status: **source verified; native176 completed the full route and strict shader checks once at unchanged quality and limits. Art and sustained-performance acceptance remain open.** Native175's failure below is retained, not reclassified.
