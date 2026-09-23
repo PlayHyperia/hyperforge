@@ -293,11 +293,13 @@ export const FINE_GRASS_CANOPY_NORMAL_LIGHTING = Object.freeze({
   upperStart: 0.65,
 } as const);
 
-/** Shading-only leaf volume; no folded geometry or physical self-shadow claim. */
+/** Shading-only leaf volume; upper leaves follow the deformed, folded blade
+ * normal instead of forcing both faces toward terrain-up. Root blending remains
+ * local to the lower leaf; no folded geometry or physical self-shadow claim. */
 export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
   id: "leaf-volume-v1",
   rootWeight: 0.2,
-  upperWeight: 0.45,
+  upperWeight: 1,
   rootEnd: 0.1,
   upperStart: 0.65,
   foldTangent: Math.tan((24 * Math.PI) / 180),

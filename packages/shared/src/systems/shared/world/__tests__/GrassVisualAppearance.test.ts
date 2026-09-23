@@ -142,6 +142,7 @@ function graph(root: unknown): Set<Node> {
 function colorValue(
   input: unknown,
   attributes: Record<string, number[]>,
+  interpolants?: ReadonlyMap<Node, number[]>,
 ): number[] {
   // TSL is a DAG. Evaluate a shared node once per immutable input sample;
   // recursively expanding it as a tree makes folded-normal tests exponential.
@@ -149,6 +150,15 @@ function colorValue(
   const values = new Map<Node, number[]>();
   const evaluate = (value: unknown): number[] => {
     const node = requireNode(value);
+    // Explicit fragment inputs can exercise cancellation of real varyings.
+    // No graph node is replaced: these are bounded CPU samples, not a GPU or
+    // rasterizer simulation. All remaining operations use the actual graph.
+    const interpolated = interpolants?.get(node);
+    if (interpolated) {
+      if (node.type !== "VaryingNode")
+        throw new Error("Only actual varying inputs may be sampled");
+      return interpolated;
+    }
     const cached = values.get(node);
     if (cached) return cached;
     const result = computeColorValue(node, attributes, evaluate);
@@ -177,6 +187,7 @@ function computeColorValue(
   if (node === cameraPosition) return attributes._cameraPosition;
   if (node === positionWorld) return attributes._positionWorld;
   if (node === modelWorldMatrix) return attributes._modelWorldMatrix;
+  if (node === output) return attributes._output;
   if (node === time && attributes._time) return attributes._time;
   if (node.type === "FrontFacingNode") return attributes._frontFacing;
   if (node.type === "AttributeNode") {
@@ -667,7 +678,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       expect(FINE_GRASS_LEAF_VOLUME_LIGHTING).toEqual({
         id: "leaf-volume-v1",
         rootWeight: 0.2,
-        upperWeight: 0.45,
+        upperWeight: 1,
         rootEnd: 0.1,
         upperStart: 0.65,
         foldTangent: Math.tan((24 * Math.PI) / 180),
@@ -869,8 +880,8 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           lod,
           FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
         ).verticesPerBlade;
-        for (const index of [0, 2, stride - 1])
-          for (const distance of [0, 125, 140])
+        for (const index of new Set([0, 2, stride - 3, stride - 1]))
+          for (const distance of [0, 125, 139.999, 140])
             for (const windTime of [0, 2.3])
               for (const ground of [
                 new THREE.Vector3(0, 1, 0),
@@ -907,7 +918,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                   Math.sqrt(Math.max(tangent.lengthSq(), 1e-12)),
                 );
                 const t = inputs.uv[1],
-                  weight = 0.2 + 0.25 * smooth(0.1, 0.65, t);
+                  weight = 0.2 + 0.8 * smooth(0.1, 0.65, t);
                 expect(colorValue(weightNode, inputs)[0]).toBeCloseTo(
                   weight,
                   14,
@@ -931,7 +942,10 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                       .normalize();
                     const mixed = ground
                       .clone()
-                      .lerp(folded.multiplyScalar(front ? 1 : -1), weight);
+                      .lerp(
+                        folded.clone().multiplyScalar(front ? 1 : -1),
+                        weight,
+                      );
                     const expected = (
                       mixed.lengthSq() > 1e-12
                         ? mixed.normalize()
@@ -943,16 +957,29 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                     expect(actual.toArray().every(Number.isFinite)).toBe(true);
                     expect(actual.length()).toBeCloseTo(1, 12);
                     expect(actual.distanceTo(expected)).toBeLessThan(1e-11);
-                    expect(
-                      actual
+                    if (t <= 0.1)
+                      expect(
+                        actual
+                          .clone()
+                          .transformDirection(
+                            new THREE.Matrix4()
+                              .fromArray(inputs._cameraViewMatrix)
+                              .invert(),
+                          )
+                          .dot(ground),
+                      ).toBeGreaterThan(0);
+                    if (t >= 0.65) {
+                      expect(colorValue(weightNode, inputs)[0]).toBe(1);
+                      const physical = folded
                         .clone()
+                        .multiplyScalar(front ? 1 : -1)
                         .transformDirection(
-                          new THREE.Matrix4()
-                            .fromArray(inputs._cameraViewMatrix)
-                            .invert(),
-                        )
-                        .dot(ground),
-                    ).toBeGreaterThan(0);
+                          new THREE.Matrix4().fromArray(
+                            inputs._cameraViewMatrix,
+                          ),
+                        );
+                      expect(actual.distanceTo(physical)).toBeLessThan(1e-11);
+                    }
                     if (front && u !== 0.5) sideNormals.push(actual);
                   }
                 if (t === 1)
@@ -1167,39 +1194,57 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
-  it("keeps zero-width and collapsed-normal results finite and the authored weight below hemisphere reversal", () => {
+  it("keeps antiparallel crossing, zero-width and collapsed source normals finite on both faces", () => {
     const owner = fine("leaf-volume-v1");
     try {
       const material = owner["material"],
         inputs = inputsAt(owner["lodGeometries"][0], 2);
-      inputs.normal = [0, 1, 0]; // Valid unit input parallel to terrain: zero width frame.
-      inputs.instanceOffset = [140, 28, 0];
-      inputs._frontFacing = [0];
-      inputs.uv[0] = 0.5;
       const weightNode = named(
         material.normalNode,
         "fineGrassCanopyNormalWeight",
       );
-      for (const t of [0, 0.1, 0.375, 0.65 - 1e-5, 0.65, 0.65 + 1e-5, 1]) {
-        inputs.uv[1] = t;
-        for (const u of [0, 0.5, 1]) {
-          inputs.uv[0] = u;
-          const result = vector(colorValue(material.normalNode, inputs));
-          expect(result.toArray().every(Number.isFinite)).toBe(true);
-          expect(result.length()).toBeCloseTo(1, 12);
-          expect(colorValue(weightNode, inputs)[0]).toBeGreaterThanOrEqual(0.2);
-          expect(colorValue(weightNode, inputs)[0]).toBeLessThanOrEqual(0.45);
-          expect(result.distanceTo(new THREE.Vector3(0, 1, 0))).toBeLessThan(
-            1e-12,
-          );
-        }
-      }
-      // Exercise the earlier zero-normal fallback independently of valid source geometry.
-      inputs.normal = [0, 0, 0];
-      inputs.uv = [0.5, 0.65];
-      expect(vector(colorValue(material.normalNode, inputs)).toArray()).toEqual(
+      // Invert smoothstep at (.5-.2)/.8=.375 independently. At this height,
+      // a back-facing +terrain blade cancels the terrain term exactly.
+      const crossing = 0.1 + 0.55 * (0.5 - Math.sin(Math.asin(0.25) / 3));
+      for (const source of [
         [0, 1, 0],
-      );
+        [0, 0, 0],
+      ])
+        for (const distance of [0, 140])
+          for (const front of [false, true])
+            for (const t of [
+              0,
+              0.1,
+              crossing - 1e-4,
+              crossing,
+              crossing + 1e-4,
+              0.65,
+              1,
+            ])
+              for (const u of [0, 0.5, 1]) {
+                // Parallel source normal has zero width; zero source normal
+                // additionally exercises the vertex fallback. Full fade is
+                // sampled separately, not asserted visually continuous.
+                inputs.normal = source;
+                inputs.instanceOffset = [distance, 28, 0];
+                inputs._frontFacing = [front ? 1 : 0];
+                inputs.uv = [u, t];
+                const result = vector(colorValue(material.normalNode, inputs));
+                const weight = colorValue(weightNode, inputs)[0];
+                expect(weight).toBeGreaterThanOrEqual(0.2);
+                expect(weight).toBeLessThanOrEqual(1);
+                if (t <= 0.1) expect(weight).toBe(0.2);
+                if (t >= 0.65) expect(weight).toBe(1);
+                if (t === crossing) expect(weight).toBeCloseTo(0.5, 14);
+                const mixedY = front ? 1 : 1 - 2 * weight;
+                const expectedY =
+                  mixedY * mixedY > 1e-12 ? Math.sign(mixedY) : 1;
+                expect(result.toArray().every(Number.isFinite)).toBe(true);
+                expect(result.length()).toBeCloseTo(1, 12);
+                expect(
+                  result.distanceTo(new THREE.Vector3(0, expectedY, 0)),
+                ).toBeLessThan(1e-12);
+              }
       // The upper-tip mask is the real graph, not a replaced shading function.
       inputs.normal = [1, 0, 0];
       inputs.uv[0] = 1;
@@ -1213,6 +1258,152 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       }
     } finally {
       owner.destroy();
+    }
+  });
+
+  it("guards cancelled fragment varyings and degenerate transverse width without forcing physical faces upward", () => {
+    const owner = fine("leaf-volume-v1");
+    try {
+      const material = owner["material"];
+      const inputs = inputsAt(owner["lodGeometries"][0], 2);
+      const blade = named(material.normalNode, "v_curvedGrassNormal");
+      const width = named(material.normalNode, "v_fineGrassWidthAxis");
+      // The exact midpoint of opposite unit vertex outputs is a valid zero
+      // fragment input. Feed only real varying identities; no shader or
+      // vertex graph is replaced, and no raster visibility is inferred.
+      const cancelled = new THREE.Vector3(1, 0, 0)
+        .lerp(new THREE.Vector3(-1, 0, 0), 0.5)
+        .toArray();
+      const crossing = 0.1 + 0.55 * (0.5 - Math.sin(Math.asin(0.25) / 3));
+      for (const sampledWidth of [cancelled, [0, 1, 0], [1, 0, 0]]) {
+        const interpolants = new Map<Node, number[]>([
+          [blade, cancelled],
+          [width, sampledWidth],
+        ]);
+        for (const t of [crossing, 0.65, 1])
+          for (const u of [0, 0.5, 1]) {
+            const faces: THREE.Vector3[] = [];
+            for (const front of [false, true]) {
+              inputs._frontFacing = [front ? 1 : 0];
+              inputs.uv = [u, t];
+              const result = vector(
+                colorValue(material.normalNode, inputs, interpolants),
+              );
+              expect(result.toArray().every(Number.isFinite)).toBe(true);
+              expect(result.length()).toBeCloseTo(1, 12);
+              faces.push(result);
+              if (
+                t === crossing &&
+                !front &&
+                (sampledWidth[0] === 0 || u === 0.5)
+              )
+                expect(result.toArray()).toEqual([0, 1, 0]);
+            }
+            if (t >= 0.65)
+              expect(faces[0].clone().add(faces[1]).length()).toBeLessThan(
+                1e-12,
+              );
+          }
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it("uses physical upper-leaf normals in the actual material and preserves lit output passthrough", () => {
+    const owner = fine("leaf-volume-v1"),
+      canopy = fine("canopy-normal-v1");
+    try {
+      const material = owner["material"];
+      const bladeNode = named(material.normalNode, "v_curvedGrassNormal");
+      const geometry = owner["lodGeometries"][0];
+      const layout = getGrassBladeLayout(
+        0,
+        FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT,
+      );
+      const sun = new THREE.Vector3();
+      // Same phase as the retained capture, but hypothetical settled light:
+      // production sun sampling + Environment's400m distance/100m Y offset.
+      // The capture did not retain actual interpolated grass-light transforms.
+      sampleSkyCycle(0.56, sun);
+      const light = sun
+        .multiplyScalar(400)
+        .add(new THREE.Vector3(0, 100, 0))
+        .normalize();
+      const incidences: Array<{ physical: number; canopy: number }> = [];
+      for (let blade = 0; blade < layout.bladesPerClump; blade++)
+        for (const row of [layout.bladeSegments - 1, layout.bladeSegments]) {
+          const vertex =
+            blade * layout.verticesPerBlade +
+            Math.min(row * 2, layout.verticesPerBlade - 1);
+          const inputs = inputsAt(geometry, vertex);
+          expect(inputs.uv[1]).toBeGreaterThanOrEqual(0.65);
+          inputs.uv[0] = 0.5; // No artistic transverse fold at the blade center.
+          const viewMatrix = new THREE.Matrix4().fromArray(
+            inputs._cameraViewMatrix,
+          );
+          const inverseView = viewMatrix.clone().invert();
+          const physical = vector(colorValue(bladeNode, inputs)).normalize();
+          const faces: THREE.Vector3[] = [];
+          for (const front of [false, true]) {
+            inputs._frontFacing = [front ? 1 : 0];
+            const actual = vector(colorValue(material.normalNode, inputs));
+            const expected = physical
+              .clone()
+              .multiplyScalar(front ? 1 : -1)
+              .transformDirection(viewMatrix);
+            expect(actual.distanceTo(expected)).toBeLessThan(1e-12);
+            faces.push(actual);
+            const previous = vector(
+              colorValue(canopy["material"].normalNode, inputs),
+            );
+            incidences.push({
+              physical: Math.max(
+                0,
+                actual.clone().transformDirection(inverseView).dot(light),
+              ),
+              canopy: Math.max(
+                0,
+                previous.transformDirection(inverseView).dot(light),
+              ),
+            });
+          }
+          expect(faces[0].clone().add(faces[1]).length()).toBeLessThan(1e-12);
+        }
+      // Detect that the changed recipe reaches actual shading arithmetic, not
+      // prescribe a bright/dark or contrast target for future artistic work.
+      expect(
+        incidences.some(
+          (sample) => Math.abs(sample.physical - sample.canopy) > 1e-6,
+        ),
+      ).toBe(true);
+      console.info(
+        "physicalUpperLeafIncidence",
+        JSON.stringify({
+          scope:
+            "actual CPU material normal graph; settled phase.56; no native light/pixel claim",
+          samples: incidences.length,
+          physicalRange: [
+            Math.min(...incidences.map((v) => v.physical)),
+            Math.max(...incidences.map((v) => v.physical)),
+          ],
+          canopyRange: [
+            Math.min(...incidences.map((v) => v.canopy)),
+            Math.max(...incidences.map((v) => v.canopy)),
+          ],
+        }),
+      );
+      expect(graph(material.outputNode).has(output)).toBe(true);
+      for (const rgba of [
+        [0, 0, 0, 1],
+        [0.13, 0.5, 1.8, 0.7],
+      ])
+        expect(
+          colorValue(expand(material.outputNode), { _output: rgba }),
+        ).toEqual(rgba);
+    } finally {
+      owner.destroy();
+      canopy.destroy();
     }
   });
 

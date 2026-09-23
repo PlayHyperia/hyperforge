@@ -1,5 +1,74 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — Physical upper-leaf lighting retained as an incremental candidate
+
+- [x] Tested a material-only change in `leaf-volume-v1`: upper normal weight
+  `0.45 → 1`, retaining the existing `0.2` root blend and height transition.
+  Upper leaves now use their deformed, folded normal instead of forcing both
+  faces toward terrain-up. The default and `canopy-normal-v1` remain unchanged.
+  No geometry, density, albedo, AO, scattering, shadow, texture, or resolution change.
+- [x] Actual graph tests cover upper endpoints, both faces, slope, wind,
+  near/full fade, antiparallel cancellation, cancelled fragment varyings and
+  output passthrough. **55/55 passed**; full shared/retained-world type check:
+  **751 roots, 2,457 sources, zero diagnostics**; two-file lint passed.
+  These establish arithmetic and isolation, not visual continuity.
+- [x] Isolated `build68`: nine bundles, 1,096 stable source inputs; only
+  `GrassVisualManager.ts` differs from retained `build66`. Reversing the exact
+  coefficient/comment reconstructs the previous source hash. Protected compiled
+  outputs and dependency lock were not overwritten.
+- [x] Real Chrome/Metal WebGPU `native134`: three matched 1280×720 views,
+  original startup gate passed in **29.962 s**, ten nominal host samples,
+  no capture errors/device loss. Compared with immutable `native132`,
+  actual grass counts are identical per chunk: **75,947 / 59,416 / 57,061**;
+  full flower populations, matrices and clearances match. Submitted WGSL
+  changes only the named normal-weight coefficient, apart from strictly
+  verified generated storage-identifier renaming.
+- [x] Root and independent reviewer inspected all six before/after images.
+  **Retain as an opt-in incremental improvement:** directional light/dark
+  separation gives the meadow more depth. Close blades still look like broad
+  angular ribbons, and stronger dark faces can emphasize that geometry.
+  The exposed granular ground remains unresolved. This is not AAA acceptance.
+- [x] Added read-only actual-light evidence: sun RGB × intensity is
+  `[1.7676, 1.732248, 1.626192]`, matching the submitted uniform's Float32
+  upload cache; hemisphere/ambient fill is zero with the outdoor environment
+  active. World/target matrices, exposure and environment intensity are retained.
+  Directional-position uniform ownership remains unclassified. The close
+  receipt can lag the renderer by one completed submission; this is not an
+  exact screenshot-frame light readback or retrospective lighting equality
+  with `native132`.
+- [x] Ordinary held wind: **6.0075 s**, 60 observations, 179 decoded VP8 frames,
+  1280×720. Three extracted frames inspected. Source video timestamps are
+  strictly increasing (18–49 ms intervals); the default null-output decode
+  emitted timestamp-rounding warnings, retained in its log. No full playback,
+  camera traversal, smoothness, fade, performance or streaming approval.
+- [x] Isolated `runtime105` and its temporary database stopped/removed;
+  capture browser closed. The normal playable localhost:3333 and its persistent
+  database remain protected. Fresh uptime confirms the Mac already restarted;
+  do not request another restart from the stale 40-day-uptime report.
+- [ ] Next: coordinated grass/ground integration. The current `height-v1`
+  branch uses **0.7** grass-albedo contrast, not the earlier reviewed 0.35.
+  That coupling is not required by height blending. Source Grass004 contains
+  dense bright fragments; correctly loaded 1024² maps, 11 mips and anisotropy16
+  rule out a missing-resolution diagnosis. Evaluate frequency-aware substrate
+  treatment on both covered and bare turf; do not repeat the rejected normal
+  strength reduction or merely flatten all variation around one global mean.
+- [ ] Still required: softer convincing close blade form, canopy-ground contact,
+  ordinary camera/LOD/fade and grazing-angle review, target-hardware performance,
+  gameplay and stream qualification. Do not promote this trial to defaults.
+
+Evidence: `asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native134/`
+(`process.json`, three PNG/JSON pairs, `visual-review.json`,
+`flower-wind-held.webm`); serialized source/type/lint/video logs under
+`service-layout-network01-UNQUALIFIED/grass-physical-upper-*`.
+Original `native132` baseline and rejected `native133` twist remain intact.
+
+Research boundary: [Three's SSS material documentation](https://threejs.org/docs/pages/MeshSSSNodeMaterial.html)
+describes an experimental scattering extension, not a general solution to flat
+leaf lighting. [NVIDIA's vegetation chapter](https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-1-toward-photorealism-virtual-botany)
+treats plant/ground lighting, variation and shadow cues together; its older
+billboard implementation and performance are not a drop-in WebGPU benchmark.
+No external code or assets were copied in this pass.
+
 ## 2026-09-22 — grass illumination measured; horizontal-twist trial rejected
 
 - [x] Add a diagnostic of the actual composed grass-normal graph and existing
