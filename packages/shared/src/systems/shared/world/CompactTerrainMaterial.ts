@@ -111,6 +111,15 @@ export const COMPACT_TERRAIN_BITMAP_OPTIONS = {
   colorSpaceConversion: "none",
 } as const;
 
+/** Authored substrate frequency balance, not a lower-resolution texture tier. */
+export const COMPACT_GRASS_SUBSTRATE = Object.freeze({
+  id: "frequency-v1",
+  footprintMeters: 0.07,
+  detailRetention: 0.35,
+  additionalSurfaceSampleCount: 2,
+} as const);
+export type CompactGrassSubstrate = typeof COMPACT_GRASS_SUBSTRATE.id;
+
 // Paired with the lossless packing manifest: stale CDN maps fail admission.
 export const COMPACT_TERRAIN_TEXTURE_SHA256 = Object.freeze({
   ...compactTerrainTextureDigests,
@@ -201,6 +210,7 @@ export class CompactTerrainTextureSet {
     readonly dirtProjection?: CompactDirtProjection,
     readonly surfaceBlend?: CompactSurfaceBlend,
     readonly rockProjection?: CompactRockProjection,
+    readonly grassSubstrate?: CompactGrassSubstrate,
   ) {
     if (dirtProjection !== undefined && dirtProjection !== "stochastic-v1")
       throw new Error("Unknown compact dirt projection");
@@ -208,6 +218,13 @@ export class CompactTerrainTextureSet {
       throw new Error("Unknown compact surface blend");
     if (rockProjection !== undefined && rockProjection !== "stochastic-v1")
       throw new Error("Unknown compact rock projection");
+    if (
+      grassSubstrate !== undefined &&
+      grassSubstrate !== COMPACT_GRASS_SUBSTRATE.id
+    )
+      throw new Error("Unknown compact grass substrate");
+    if (grassSubstrate && surfaceBlend !== "height-v1")
+      throw new Error("Grass substrate requires height-v1 surface blending");
     for (const layer of LAYERS) {
       for (const channel of CHANNELS) {
         const key: Key = `${layer}-${channel}`;
@@ -287,6 +304,9 @@ export class CompactTerrainTextureSet {
       dirtProjection: this.dirtProjection ?? "dual-v1",
       rockProjection: this.rockProjection ?? "dual-v1",
       surfaceBlend: this.surfaceBlend ?? "linear-v1",
+      ...(this.grassSubstrate
+        ? { grassSubstrate: COMPACT_GRASS_SUBSTRATE }
+        : {}),
       surfaceSampleCount:
         (this.surfaceBlend
           ? this.dirtProjection
@@ -297,6 +317,9 @@ export class CompactTerrainTextureSet {
             : COMPACT_TERRAIN_MATERIAL.surfaceSampleCount) +
         (this.rockProjection
           ? COMPACT_TERRAIN_MATERIAL.stochasticRockAdditionalSampleCount
+          : 0) +
+        (this.grassSubstrate
+          ? COMPACT_GRASS_SUBSTRATE.additionalSurfaceSampleCount
           : 0),
       bitmapOptions: { ...COMPACT_TERRAIN_BITMAP_OPTIONS },
     };
@@ -1472,6 +1495,7 @@ export function createCompactGroundProjections(
       uv: rotate(worldXZ).add(offset),
       dx: rotate(worldDx),
       dy: rotate(worldDy),
+      scale,
     };
   };
   return {
@@ -1746,6 +1770,33 @@ export function createCompactDryGrassRoughness(
     .toVar(`compactDryGrassRoughness${projection}`);
 }
 
+/**
+ * Broaden the original projected footprint J by an isotropic world-scale term:
+ * C = J J^T + r² I. Cholesky columns provide valid explicit texture gradients,
+ * including at zero derivatives and grazing angles. Unlike multiplying both
+ * derivatives by one major-axis scale, this also broadens the narrow axis.
+ * Hardware mip/anisotropic filtering approximates this footprint; this is not
+ * an exact Gaussian blur or a promised cutoff frequency. The original sample
+ * and all non-albedo channels retain their original gradients.
+ */
+export function createCompactGrassSubstrateGradients(
+  dx: Node<"vec2">,
+  dy: Node<"vec2">,
+  scale: Node<"float">,
+  projection: "A" | "B" = "A",
+) {
+  const radius = scale.abs().mul(COMPACT_GRASS_SUBSTRATE.footprintMeters);
+  const radiusSquared = radius.mul(radius).max(1e-12);
+  const xx = dx.x.mul(dx.x).add(dy.x.mul(dy.x)).add(radiusSquared);
+  const xy = dx.x.mul(dx.y).add(dy.x.mul(dy.y));
+  const yy = dx.y.mul(dx.y).add(dy.y.mul(dy.y)).add(radiusSquared);
+  const a = xx.sqrt().toVar(`compactGrassSubstrateFootprintA${projection}`);
+  const b = xy.div(a).toVar(`compactGrassSubstrateFootprintB${projection}`);
+  // The exact Schur complement is >= r²; clamp roundoff conservatively.
+  const c = yy.sub(b.mul(b)).max(radiusSquared).sqrt();
+  return { dx: vec2(a, b), dy: vec2(0, c) };
+}
+
 export function createCompactTerrainLayers(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
@@ -1776,7 +1827,7 @@ export function createCompactTerrainLayers(
     layer: Layer,
     uv: Node<"vec2">,
     normalStrength: number,
-    gradients?: { dx: Node<"vec2">; dy: Node<"vec2"> },
+    gradients?: { dx: Node<"vec2">; dy: Node<"vec2">; scale?: Node<"float"> },
     projection: "A" | "B" = "A",
   ): CompactTerrainLayer => {
     const sample = (channel: Channel) => {
@@ -1787,6 +1838,29 @@ export function createCompactTerrainLayers(
     };
     const ar = sample("albedo-roughness");
     const na = sample("normal-ao");
+    let albedo: Node<"vec3"> = ar.rgb;
+    if (layer === "grass" && textures.grassSubstrate) {
+      if (!gradients?.scale)
+        throw new Error(
+          "Grass substrate requires its physical projection scale",
+        );
+      const broad = createCompactGrassSubstrateGradients(
+        gradients.dx,
+        gradients.dy,
+        gradients.scale,
+        projection,
+      );
+      // Reuse the same sRGB texture/UV owner: sampling decodes RGB to linear.
+      // Keep original packed alpha for roughness; low-frequency alpha is unused.
+      const low = textures
+        .getNode(layer, "albedo-roughness")
+        .grad(broad.dx, broad.dy)
+        .sample(uv)
+        .rgb.toVar(`compactGrassSubstrateLow${projection}`);
+      albedo = mix(low, ar.rgb, COMPACT_GRASS_SUBSTRATE.detailRetention).toVar(
+        `compactGrassSubstrateAlbedo${projection}`,
+      );
+    }
     const heightMap = textures.getHeightNode();
     // Each layer's height follows its own exact projection and gradients.
     // Sampling RGB once at a common UV would misalign the material relief.
@@ -1801,7 +1875,7 @@ export function createCompactTerrainLayers(
       ...(heightSample
         ? { height: layer === "grass" ? heightSample.r : heightSample.g }
         : {}),
-      albedo: ar.rgb,
+      albedo,
       roughness:
         layer === "grass"
           ? createCompactDryGrassRoughness(ar.a, projection)

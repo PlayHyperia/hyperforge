@@ -140,6 +140,8 @@ describe("opt-in terrain surface detail (real CPU graph scope)", () => {
     const first = createTerrainMaterial();
     const second = createTerrainMaterial();
     try {
+      if (!(first instanceof THREE.MeshStandardNodeMaterial))
+        throw new Error("Expected actual terrain MeshStandardNodeMaterial");
       expect(first.terrainUniforms.surfaceDetailStrength.value).toBe(0);
       expect(second.terrainUniforms.surfaceDetailStrength.value).toBe(0);
       expect(first.terrainUniforms.surfaceDetailStrength).not.toBe(
@@ -155,10 +157,15 @@ describe("opt-in terrain surface detail (real CPU graph scope)", () => {
       expect(first.version).toBe(version);
       expect(first.colorNode).toBe(albedo);
       expect(second.terrainUniforms.surfaceDetailStrength.value).toBe(0);
-      expect(nodes(first.roughnessNode!)).toContain(
+      if (
+        !(first.roughnessNode instanceof THREE.Node) ||
+        !(first.colorNode instanceof THREE.Node)
+      )
+        throw new Error("Expected actual terrain roughness and color nodes");
+      expect(nodes(first.roughnessNode)).toContain(
         first.terrainUniforms.surfaceDetailStrength,
       );
-      expect(nodes(first.colorNode!)).not.toContain(
+      expect(nodes(first.colorNode)).not.toContain(
         first.terrainUniforms.surfaceDetailStrength,
       );
     } finally {
@@ -170,8 +177,15 @@ describe("opt-in terrain surface detail (real CPU graph scope)", () => {
   it("reuses existing albedo texture objects without adding normal or displacement assets", () => {
     const material = createTerrainMaterial();
     try {
-      const existing = textures(material.colorNode!);
-      const detail = textures(material.roughnessNode!);
+      if (!(material instanceof THREE.MeshStandardNodeMaterial))
+        throw new Error("Expected actual terrain MeshStandardNodeMaterial");
+      if (
+        !(material.colorNode instanceof THREE.Node) ||
+        !(material.roughnessNode instanceof THREE.Node)
+      )
+        throw new Error("Expected actual terrain color and roughness nodes");
+      const existing = textures(material.colorNode);
+      const detail = textures(material.roughnessNode);
       expect(detail.size).toBe(4); // existing grass, dirt, cliff and shared noise
       for (const texture of detail) expect(existing).toContain(texture);
       expect(material.normalMap).toBeNull();

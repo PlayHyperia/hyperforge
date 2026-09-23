@@ -1,5 +1,64 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — Calmer grass substrate retained; contact and motion remain open
+
+- [x] Added a frequency-aware grass RGB treatment for the existing opt-in
+  fine-meadow grade plus height-blended material. A 7 cm horizontal-world
+  footprint preserves local color variation; 35% of the original fine detail
+  remains. Original roughness, normals, AO, height, soil and rock are unchanged.
+  Default/ungraded/non-height paths are unchanged.
+- [x] Reuses the same seven texture assets: no down-resolution, new maps,
+  density cuts, geometry changes or lighting changes. Cost is explicit:
+  **33 → 35 static terrain sample sites**, two extra grass-albedo reads.
+  Filtering and added arithmetic still require GPU-cost measurement.
+- [x] **257/257 tests passed** across seven terrain suites. Five new actual-TSL
+  tests cover footprint covariance, projection continuity, exact read counts,
+  channel isolation, linear RGB composition and admission. Expanded no-emit
+  check: **757 roots / 2,463 source files / zero diagnostics**; seven-file lint
+  passed. Updated only affected sample-budget assertions; replaced a stale
+  base-profile fixture with actual manifest identity/deep-snapshot checks.
+- [x] Isolated `build69`: nine bundles, 1,096 stable input hashes; exactly
+  the two terrain-material sources differ from `build68`. Chrome/Metal WebGPU
+  `native136` completed four 1280×720 views, original startup gate in **30.272 s**,
+  eleven nominal host samples, no capture errors. First three poses retain
+  exact per-chunk grass populations **75,947 / 59,416 / 57,061**, flower
+  placement/geometry and grass/flower shader behavior against `native134`
+  (only strictly checked generated storage-name differences allowed).
+  Actual native texture ownership confirms the added reads and unchanged
+  asset hashes, formats, mip counts and sampler settings.
+- [x] Root and independent visual reviews retain this as an **incremental
+  opt-in improvement**, not default or AAA acceptance. Close ground is less
+  yellow/green speckled while retaining fine mottling; wider views show no
+  obvious regression. The fourth dock-side view is supplemental, not matched
+  historical evidence; its bright, smooth shore fringe still needs art work.
+- [x] Held wind recorded **6.018 s**, 59 observations; VP8 decoded cleanly,
+  164 frames, three extracted frames inspected. Recorded timestamps increase
+  but intervals vary **15–84 ms**. This is not full playback, game-frame timing,
+  camera-motion, smoothness or performance approval.
+- [x] Earlier `native135` stopped before browser launch on a historical-report
+  comparison bug. Its evidence remains intact. The retry accounts only for
+  the known, explicitly validated post-still optical receipt; no readiness,
+  source, population, resolution or safety gate was relaxed.
+- [x] Capture browser closed; `runtime106` and its temporary database stopped
+  and removed. Normal localhost:3333, persistent player/database and protected
+  compiled outputs remain untouched.
+- [ ] Next: improve close blade shape and ground contact, and the overly bright
+  pond turf fringe; do not mistake smoother texture for convincing contact.
+- [ ] Before promotion: matched native GPU/frame-cost measurement of the added
+  reads, grazing-angle and ordinary traversal/LOD/fade review, broader island
+  art, gameplay and streaming qualification. No production-quality sign-off.
+
+Evidence: `asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native136/`
+(four PNG/JSON pairs, terrain binding receipts, shaders, wind video,
+`visual-review.json`); checks under
+`service-layout-network01-UNQUALIFIED/grass-substrate-frequency-*`.
+The immutable `native134` baseline and failed `native135` are preserved.
+
+Research: [Three.js explicit texture gradients](https://threejs.org/docs/pages/TextureNode.html)
+and [O3DE frequency separation](https://www.docs.o3de.org/docs/learning-guide/tutorials/environments/understanding-frequency-separation/).
+The shader uses existing mip/aniso filtering to approximate a broadened
+footprint, not an exact Gaussian kernel; no external code or assets copied.
+
 ## 2026-09-22 — Physical upper-leaf lighting retained as an incremental candidate
 
 - [x] Tested a material-only change in `leaf-volume-v1`: upper normal weight

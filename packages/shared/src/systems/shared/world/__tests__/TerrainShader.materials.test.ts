@@ -39,6 +39,8 @@ describe("TerrainShader material graph", () => {
   });
   it("constructs typed runtime uniforms and updates vertex lights", () => {
     const material = createTerrainMaterial();
+    if (!(material instanceof THREE.MeshStandardNodeMaterial))
+      throw new Error("Expected actual terrain MeshStandardNodeMaterial");
     const { terrainUniforms } = material;
     const light = {
       position: new THREE.Vector3(2, 3, 4),

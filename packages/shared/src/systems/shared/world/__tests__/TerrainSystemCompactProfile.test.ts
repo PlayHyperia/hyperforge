@@ -115,6 +115,13 @@ describe("real manifest to compact TerrainSystem integration", () => {
         surfaceSampleCount: 33,
         status: "idle",
       });
+      expect(material.compactGrassColorGrade).toBeUndefined();
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          material.compactTerrainSurface!.getReceipt(),
+          "grassSubstrate",
+        ),
+      ).toBe(false);
       expect(
         material.compactTerrainSurface!.getReceipt().textures,
       ).toHaveLength(7);
@@ -175,6 +182,7 @@ describe("real manifest to compact TerrainSystem integration", () => {
         const height = terrain.getHeightAt(350, 320);
         const profile = terrain.getWorldTerrainProfile();
         const workers = terrain["buildGrassWorkerSetup"]();
+        expect(workers.compactGrassColorGrade).toBe("fine-meadow-green-v1");
         expect(terrain["getCompactRockProjection"]()).toBe(
           selected ? "stochastic-v1" : undefined,
         );
@@ -184,7 +192,13 @@ describe("real manifest to compact TerrainSystem integration", () => {
         const material = terrain.getTerrainMaterialWithUniforms()!;
         expect(material.compactTerrainSurface!.getReceipt()).toMatchObject({
           rockProjection: selected ? "stochastic-v1" : "dual-v1",
-          surfaceSampleCount: selected ? 33 : 27,
+          surfaceSampleCount: selected ? 35 : 29,
+          grassSubstrate: {
+            id: "frequency-v1",
+            footprintMeters: 0.07,
+            detailRetention: 0.35,
+            additionalSurfaceSampleCount: 2,
+          },
           status: "idle",
         });
         expect(
@@ -218,7 +232,13 @@ describe("real manifest to compact TerrainSystem integration", () => {
             .compactTerrainSurface!.getReceipt(),
         ).toMatchObject({
           rockProjection: selected ? "dual-v1" : "stochastic-v1",
-          surfaceSampleCount: selected ? 27 : 33,
+          surfaceSampleCount: selected ? 29 : 35,
+          grassSubstrate: {
+            id: "frequency-v1",
+            footprintMeters: 0.07,
+            detailRetention: 0.35,
+            additionalSurfaceSampleCount: 2,
+          },
         });
         expect(restarted.getHeightAt(350, 320)).toBe(height);
         location.search = `?${fine}&rockProjection=invalid`;

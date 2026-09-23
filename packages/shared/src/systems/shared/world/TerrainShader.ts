@@ -1362,6 +1362,9 @@ export function createTerrainMaterial(
         options.compactDirtProjection,
         options.compactSurfaceBlend,
         options.compactRockProjection,
+        grassColorGrade && options.compactSurfaceBlend === "height-v1"
+          ? "frequency-v1"
+          : undefined,
       )
     : null;
 

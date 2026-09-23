@@ -5,7 +5,6 @@ import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { TerrainSystem } from "../TerrainSystem";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
-  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
   resolveWorldTerrainProfile,
   type WorldTerrainProfile,
 } from "../WorldTerrainProfile";
@@ -24,6 +23,10 @@ describe("actual TerrainSystem material initialization order", () => {
     async (_, profile, strength) => {
       const world = new World();
       const admittedIdentity = DataManager.getWorldContentIdentity();
+      const admittedProfile = DataManager.getWorldTerrainProfile();
+      // Preserve every real manifest field, including authored additions to
+      // the base sculpt recipe. The snapshot detects in-place mutation too.
+      const admittedSnapshot = structuredClone(admittedProfile);
       const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
       const lifecycle = terrain as unknown as MaterialLifecycle;
       if (profile) {
@@ -38,6 +41,9 @@ describe("actual TerrainSystem material initialization order", () => {
         // client-only material initialization used by init(), after its generator.
         // The actual browser branch remains covered by the live WebGPU probe.
         await terrain.init();
+        expect(terrain.getWorldTerrainProfile()).toEqual(
+          profile ? resolveWorldTerrainProfile(profile) : admittedSnapshot,
+        );
         expect(terrain.getTerrainMaterialWithUniforms()).toBeNull();
         expect(Number.isFinite(terrain.getHeightAt(350, 320))).toBe(true);
         expect(
@@ -58,9 +64,8 @@ describe("actual TerrainSystem material initialization order", () => {
             material!.compactPondMaterial!.parameters.value.toArray(),
           ).toEqual([pond.centerX, pond.centerZ, pond.radius, pond.surfaceY]);
         } else expect(material!.compactPondMaterial).toBeUndefined();
-        expect(DataManager.getWorldTerrainProfile()).toEqual(
-          SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
-        );
+        expect(DataManager.getWorldTerrainProfile()).toBe(admittedProfile);
+        expect(DataManager.getWorldTerrainProfile()).toEqual(admittedSnapshot);
         expect(DataManager.getWorldContentIdentity()).toBe(admittedIdentity);
       } finally {
         terrain.getTerrainMaterialWithUniforms()?.dispose();
@@ -71,11 +76,15 @@ describe("actual TerrainSystem material initialization order", () => {
 
   it("applies the admitted option even when material creation precedes the generator", () => {
     const world = new World();
+    const admittedIdentity = DataManager.getWorldContentIdentity();
+    const admittedProfile = DataManager.getWorldTerrainProfile();
+    const admittedSnapshot = structuredClone(admittedProfile);
     const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
     try {
       // Material ownership must not depend on the generator opportunistically
       // finding it. This also guards a future reordering of init().
       (terrain as unknown as MaterialLifecycle).initTerrainMaterial();
+      expect(terrain.getWorldTerrainProfile()).toBe(admittedProfile);
       expect(
         terrain.getTerrainMaterialWithUniforms()!.terrainUniforms
           .surfaceDetailStrength.value,
@@ -83,6 +92,9 @@ describe("actual TerrainSystem material initialization order", () => {
       expect(
         terrain.getTerrainMaterialWithUniforms()!.compactPondMaterial!.profile,
       ).toEqual(ALL_WORLD_AREAS.haven_pond.waterBodies![0]);
+      expect(DataManager.getWorldTerrainProfile()).toBe(admittedProfile);
+      expect(DataManager.getWorldTerrainProfile()).toEqual(admittedSnapshot);
+      expect(DataManager.getWorldContentIdentity()).toBe(admittedIdentity);
     } finally {
       terrain.getTerrainMaterialWithUniforms()?.dispose();
       world.destroy();

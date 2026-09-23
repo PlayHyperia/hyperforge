@@ -25,6 +25,7 @@ import {
 import {
   COMPACT_TERRAIN_BITMAP_OPTIONS,
   COMPACT_TERRAIN_MATERIAL,
+  COMPACT_GRASS_SUBSTRATE,
   COMPACT_TERRAIN_TEXTURE_SHA256,
   COMPACT_TERRAIN_HEIGHT_SHA256,
   COMPACT_TERRAIN_POND_RELIEF,
@@ -38,6 +39,7 @@ import {
   blendCompactTerrainLayers,
   compactTerrainNormalToView,
   createCompactGroundProjections,
+  createCompactGrassSubstrateGradients,
   createCompactDirtProjections,
   createCompactStochasticProjections,
   blendCompactStochasticAlbedo,
@@ -83,6 +85,7 @@ import {
   applyCompactCoastDistributionWeights,
   createCompactTerrainDiagnosticOutputs,
   type CompactTerrainLayer,
+  type CompactGrassSubstrate,
 } from "../CompactTerrainMaterial";
 import {
   createCompactTerrainColorOperations,
@@ -2667,6 +2670,496 @@ describe("authored Haven ground composition, independent of terrain and grass po
     } finally {
       await worker.terminate();
     }
+  });
+});
+
+describe("frequency-aware grass substrate (actual TSL, not hardware filtering or art approval)", () => {
+  const ownedSamples = (roots: Node[], owner: CompactTerrainTextureSet) => {
+    const owned = new Set(
+      owner.getReceipt().textures.map((row) => row.textureUuid),
+    );
+    return [...new Set(roots.flatMap((root) => [...graph(root)]))].filter(
+      (node) => {
+        const value: unknown = Reflect.get(node, "value");
+        return (
+          value instanceof THREE.Texture &&
+          owned.has(value.uuid) &&
+          Reflect.get(node, "uvNode")
+        );
+      },
+    );
+  };
+  const layerRoots = (layers: ReturnType<typeof createCompactTerrainLayers>) =>
+    Object.values(layers).flatMap((layer) => Object.values(layer));
+  const fingerprint = (root: Node, owner: CompactTerrainTextureSet): string => {
+    const keys = new Map(
+      owner.getReceipt().textures.map((row) => [row.textureUuid, row.key]),
+    );
+    const cache = new Map<Node, string>();
+    const visit = (node: Node): string => {
+      const cached = cache.get(node);
+      if (cached) return cached;
+      const value: unknown = Reflect.get(node, "value");
+      const result = createHash("sha256")
+        .update(
+          JSON.stringify({
+            type: node.type,
+            ...Object.fromEntries(
+              ["op", "method", "components", "scope", "nodeType", "name"].map(
+                (key) => [key, Reflect.get(node, key)],
+              ),
+            ),
+            value:
+              value instanceof THREE.Texture
+                ? {
+                    key: keys.get(value.uuid),
+                    colorSpace: value.colorSpace,
+                    anisotropy: value.anisotropy,
+                  }
+                : value instanceof THREE.Matrix4
+                  ? value.toArray()
+                  : value instanceof THREE.Vector2 ||
+                      value instanceof THREE.Vector3 ||
+                      value instanceof THREE.Vector4
+                    ? value.toArray()
+                    : typeof value === "number" ||
+                        typeof value === "boolean" ||
+                        typeof value === "string"
+                      ? value
+                      : undefined,
+            children: [...node.getChildren()].map(visit),
+          }),
+        )
+        .digest("hex");
+      cache.set(node, result);
+      return result;
+    };
+    return visit(root);
+  };
+
+  it("admits only the frozen height-material recipe and reports the exact added reads without allocating maps", () => {
+    expect(COMPACT_GRASS_SUBSTRATE).toEqual({
+      id: "frequency-v1",
+      footprintMeters: 0.07,
+      detailRetention: 0.35,
+      additionalSurfaceSampleCount: 2,
+    });
+    expect(Object.isFrozen(COMPACT_GRASS_SUBSTRATE)).toBe(true);
+    for (const invalid of [
+      null,
+      false,
+      {},
+      "",
+      "FREQUENCY-V1",
+      "frequency-v1 ",
+      "frequency-v2",
+    ])
+      expect(
+        () =>
+          new CompactTerrainTextureSet(
+            "/assets",
+            undefined,
+            "height-v1",
+            undefined,
+            invalid as CompactGrassSubstrate,
+          ),
+      ).toThrow();
+    expect(
+      () =>
+        new CompactTerrainTextureSet(
+          "/assets",
+          undefined,
+          undefined,
+          undefined,
+          "frequency-v1",
+        ),
+    ).toThrow();
+    for (const dirt of [undefined, "stochastic-v1"] as const)
+      for (const rock of [undefined, "stochastic-v1"] as const) {
+        const baseline = new CompactTerrainTextureSet(
+          "/assets",
+          dirt,
+          "height-v1",
+          rock,
+        );
+        const candidate = new CompactTerrainTextureSet(
+          "/assets",
+          dirt,
+          "height-v1",
+          rock,
+          "frequency-v1",
+        );
+        try {
+          const previous = baseline.getReceipt(),
+            current = candidate.getReceipt();
+          const expected = (dirt ? 27 : 24) + (rock ? 6 : 0);
+          expect(previous.surfaceSampleCount).toBe(expected);
+          expect(current.surfaceSampleCount).toBe(expected + 2);
+          expect(
+            Object.prototype.hasOwnProperty.call(previous, "grassSubstrate"),
+          ).toBe(false);
+          expect(current.grassSubstrate).toBe(COMPACT_GRASS_SUBSTRATE);
+          expect(current.textures).toHaveLength(7);
+          expect(
+            current.textures.map(({ textureUuid: _uuid, ...row }) => row),
+          ).toEqual(
+            previous.textures.map(({ textureUuid: _uuid, ...row }) => row),
+          );
+          const grass = candidate.getNode("grass", "albedo-roughness").value;
+          expect(grass.colorSpace).toBe(THREE.SRGBColorSpace);
+          expect(grass.minFilter).toBe(THREE.LinearMipmapLinearFilter);
+          expect(grass.anisotropy).toBe(16);
+          expect(grass.generateMipmaps).toBe(true);
+          expect(grass.premultiplyAlpha).toBe(false);
+          const a = createCompactTerrainLayers(
+            baseline,
+            float(64),
+            float(0.137),
+          );
+          const b = createCompactTerrainLayers(
+            candidate,
+            float(64),
+            float(0.137),
+          );
+          expect(ownedSamples(layerRoots(a), baseline)).toHaveLength(expected);
+          expect(ownedSamples(layerRoots(b), candidate)).toHaveLength(
+            expected + 2,
+          );
+          for (const layer of ["grass", "dirt", "rock"] as const)
+            for (const channel of [
+              "albedo",
+              "roughness",
+              "ao",
+              "worldNormal",
+              "height",
+              "rawRockAo",
+            ] as const) {
+              const before = a[layer][channel],
+                after = b[layer][channel];
+              if (!before || !after) {
+                expect(after).toBe(before);
+                continue;
+              }
+              // Only separately owned texture UUIDs are normalized to source
+              // keys; every arithmetic input, projection and channel remains.
+              expect(
+                fingerprint(after, candidate) === fingerprint(before, baseline),
+              ).toBe(!(layer === "grass" && channel === "albedo"));
+            }
+        } finally {
+          baseline.dispose();
+          candidate.dispose();
+        }
+      }
+  });
+
+  it("broadens the derivative covariance by an isotropic physical footprint for zero, grazing and rotated inputs", () => {
+    const cases: ReadonlyArray<
+      readonly [readonly [number, number], readonly [number, number]]
+    > = [
+      [
+        [0, 0],
+        [0, 0],
+      ],
+      [
+        [0.003, 0],
+        [0, 0.004],
+      ],
+      [
+        [0.3, 0],
+        [0, 0.000001],
+      ],
+      [
+        [0.2, 0.1],
+        [0.4, 0.2],
+      ],
+      [
+        [0.03, -0.01],
+        [-0.04, 0.002],
+      ],
+      [
+        [12, 3],
+        [-7, 15],
+      ],
+    ];
+    for (const [sourceX, sourceY] of cases)
+      for (const angle of [0, 0.71, Math.PI / 2, -1.7])
+        for (const scale of [0.82 / 1.4, 1.18 / 1.4, -1 / 1.4]) {
+          const rotate = (v: readonly [number, number]) =>
+            [
+              v[0] * Math.cos(angle) - v[1] * Math.sin(angle),
+              v[0] * Math.sin(angle) + v[1] * Math.cos(angle),
+            ] as const;
+          const dx = rotate(sourceX),
+            dy = rotate(sourceY);
+          const gradients = createCompactGrassSubstrateGradients(
+            vec2(...dx),
+            vec2(...dy),
+            float(scale),
+          );
+          const x = vectorValue(gradients.dx),
+            y = vectorValue(gradients.dy);
+          expect([...x, ...y].every(Number.isFinite)).toBe(true);
+          const r2 = (0.07 * Math.abs(scale)) ** 2;
+          const original = [
+            dx[0] ** 2 + dy[0] ** 2,
+            dx[0] * dx[1] + dy[0] * dy[1],
+            dx[1] ** 2 + dy[1] ** 2,
+          ];
+          const actual = [
+            x[0] ** 2 + y[0] ** 2,
+            x[0] * x[1] + y[0] * y[1],
+            x[1] ** 2 + y[1] ** 2,
+          ];
+          const expected = [original[0] + r2, original[1], original[2] + r2];
+          actual.forEach((value, i) =>
+            expect(Math.abs(value - expected[i])).toBeLessThan(
+              1e-12 * Math.max(1, Math.abs(expected[i])),
+            ),
+          );
+          // Test the PSD increment in independent directions, not only the
+          // diagonal. This catches broadening just the major derivative.
+          for (const direction of [0, 0.43, 1.27, 2.9]) {
+            const u = Math.cos(direction),
+              v = Math.sin(direction);
+            const added =
+              u * u * (actual[0] - original[0]) +
+              2 * u * v * (actual[1] - original[1]) +
+              v * v * (actual[2] - original[2]);
+            expect(Math.abs(added - r2)).toBeLessThan(1e-10);
+            expect(added).toBeGreaterThan(0);
+          }
+        }
+    // CPU arithmetic establishes the ellipse, not exact native anisotropic
+    // taps, mip choice, a Gaussian kernel or pixel/motion acceptance.
+    for (const scale of [0, 1e-12, -1e-12]) {
+      const gradients = createCompactGrassSubstrateGradients(
+        vec2(0),
+        vec2(0),
+        float(scale),
+      );
+      const x = vectorValue(gradients.dx),
+        y = vectorValue(gradients.dy);
+      expect([...x, ...y].every(Number.isFinite)).toBe(true);
+      expect(x).toEqual([1e-6, 0]);
+      expect(y).toEqual([0, 1e-6]);
+    }
+  });
+
+  it("shares actual projection scale and stays continuous across every sampled antirepeat band", () => {
+    const at = (noise: number) =>
+      createCompactGroundProjections(
+        vec2(350, 320),
+        float(noise),
+        1 / 1.4,
+        vec2(0.003, 0.001),
+        vec2(0.08, 0.006),
+      );
+    for (const id of [-3, 0, 1, 7, 13, 24, 32]) {
+      const left = at(id / 32 - 1e-8),
+        right = at(id / 32 + 1e-8);
+      expect(vectorValue(left.weight)).toEqual([1]);
+      expect(vectorValue(right.weight)).toEqual([0]);
+      for (const key of ["uv", "dx", "dy", "scale"] as const)
+        expect(vectorValue(left.b[key])).toEqual(vectorValue(right.a[key]));
+      const lowLeft = createCompactGrassSubstrateGradients(
+        left.b.dx,
+        left.b.dy,
+        left.b.scale,
+        "B",
+      );
+      const lowRight = createCompactGrassSubstrateGradients(
+        right.a.dx,
+        right.a.dy,
+        right.a.scale,
+        "A",
+      );
+      for (const key of ["dx", "dy"] as const)
+        expect(vectorValue(lowLeft[key])).toEqual(vectorValue(lowRight[key]));
+      for (const p of [left.a, left.b, right.a, right.b]) {
+        const scale = vectorValue(p.scale)[0];
+        expect(
+          Math.hypot(...vectorValue(p.dx)) / Math.hypot(0.003, 0.001),
+        ).toBeCloseTo(scale, 12);
+        expect(
+          Math.hypot(...vectorValue(p.dy)) / Math.hypot(0.08, 0.006),
+        ).toBeCloseTo(scale, 12);
+        expect(scale).toBeGreaterThanOrEqual(0.82 / 1.4);
+        expect(scale).toBeLessThanOrEqual(1.18 / 1.4);
+      }
+    }
+  });
+
+  it("retains original high-frequency reads for roughness and other channels while composing only linear RGB", () => {
+    const owner = new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      "height-v1",
+      "stochastic-v1",
+      "frequency-v1",
+    );
+    try {
+      const layers = createCompactTerrainLayers(owner, float(0), float(0.137));
+      const grass = layers.grass;
+      const source = owner.getNode("grass", "albedo-roughness").value;
+      const samples = ownedSamples([grass.albedo], owner).filter(
+        (node) => Reflect.get(node, "value") === source,
+      );
+      const original = ownedSamples([grass.roughness], owner).filter(
+        (node) => Reflect.get(node, "value") === source,
+      );
+      const low = samples.filter((node) => !original.includes(node));
+      expect(samples).toHaveLength(4);
+      expect(original).toHaveLength(2);
+      expect(low).toHaveLength(2);
+      for (const sample of low) {
+        const high = original.filter(
+          (node) =>
+            Reflect.get(node, "uvNode") === Reflect.get(sample, "uvNode"),
+        );
+        expect(high).toHaveLength(1);
+        expect(Reflect.get(sample, "gradNode")).toHaveLength(2);
+        expect(Reflect.get(sample, "gradNode")).not.toEqual(
+          Reflect.get(high[0], "gradNode"),
+        );
+        const broad = Reflect.get(sample, "gradNode") as Node[];
+        const detailed = Reflect.get(high[0], "gradNode") as Node[];
+        for (const component of broad)
+          for (const originalDerivative of detailed)
+            expect(graph(component).has(originalDerivative)).toBe(true);
+        expect(Reflect.get(sample, "levelNode")).toBeNull();
+        expect(Reflect.get(sample, "biasNode")).toBeNull();
+        for (const root of [
+          grass.roughness,
+          grass.ao,
+          grass.worldNormal,
+          grass.height!,
+        ])
+          expect(graph(root).has(sample)).toBe(false);
+      }
+      const contrasted = applyCompactFineGrassSubstrateContrast(
+        grass,
+        "fine-meadow-green-v1",
+        "height-v1",
+      );
+      const mean = createCompactTerrainColorOperations().getPalette().grass;
+      for (const [highRgb, lowRgb] of [
+        [mean, mean],
+        [
+          [0, 0, 0],
+          [0, 0, 0],
+        ],
+        [
+          [1, 1, 1],
+          [1, 1, 1],
+        ],
+        [
+          [0.03, 0.8, 0.12],
+          [0.18, 0.24, 0.09],
+        ],
+        [
+          [0.7, 0.13, 0.32],
+          [0.18, 0.24, 0.09],
+        ],
+      ])
+        for (const lowAlpha of [0, 0.23, 1]) {
+          // Actual sample-node inputs are already linear RGB. This checks
+          // real graph composition, never pretends to implement GPU filtering.
+          const inputs = new Map<Node, readonly number[]>();
+          original.forEach((node) => inputs.set(node, [...highRgb, 0.41]));
+          low.forEach((node) => inputs.set(node, [...lowRgb, lowAlpha]));
+          const expected = lowRgb.map(
+            (value, i) => value + 0.35 * (highRgb[i] - value),
+          );
+          vectorValue(grass.albedo, inputs).forEach((value, i) => {
+            expect(value).toBeCloseTo(expected[i], 14);
+            expect(value).toBeGreaterThanOrEqual(0);
+            expect(value).toBeLessThanOrEqual(1);
+          });
+          vectorValue(contrasted.albedo, inputs).forEach((value, i) =>
+            expect(value).toBeCloseTo(
+              mean[i] + 0.7 * (expected[i] - mean[i]),
+              14,
+            ),
+          );
+          expect(vectorValue(grass.roughness, inputs)[0]).toBeCloseTo(
+            0.85 + 0.13 * 0.41,
+            14,
+          );
+          for (const channel of [
+            "roughness",
+            "ao",
+            "worldNormal",
+            "height",
+          ] as const)
+            expect(contrasted[channel]).toBe(grass[channel]);
+        }
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("wires the extra reads only for admitted grade plus height and keeps the existing contrast order", () => {
+    for (const grade of [
+      undefined,
+      "fine-meadow-green-v1",
+      "fine-meadow-regional-v1",
+    ] as const)
+      for (const height of [undefined, "height-v1"] as const) {
+        const material = createTerrainMaterial(undefined, {
+          compactPbr: true,
+          compactDirtProjection: "stochastic-v1",
+          compactRockProjection: "stochastic-v1",
+          compactGrassColorGrade: grade,
+          compactSurfaceBlend: height,
+        });
+        try {
+          const owner = material.compactTerrainSurface!;
+          const active = grade !== undefined && height !== undefined;
+          const receipt = owner.getReceipt();
+          const expected = height ? (active ? 35 : 33) : 28;
+          expect(receipt.surfaceSampleCount).toBe(expected);
+          expect(
+            Object.prototype.hasOwnProperty.call(receipt, "grassSubstrate"),
+          ).toBe(active);
+          if (active)
+            expect(receipt.grassSubstrate).toBe(COMPACT_GRASS_SUBSTRATE);
+          const roots = [
+            material.colorNode!,
+            material.normalNode!,
+            material.roughnessNode!,
+            material.aoNode!,
+          ].map((root) => {
+            if (!(root instanceof THREE.Node))
+              throw new Error("Expected actual terrain material node");
+            return root;
+          });
+          expect(ownedSamples(roots, owner)).toHaveLength(expected);
+          if (grade) {
+            const named = (name: string) => {
+              const matches = [...graph(material.colorNode!)].filter(
+                (node) => Reflect.get(node, "name") === name,
+              );
+              expect(matches).toHaveLength(1);
+              return matches[0];
+            };
+            const contrast = named("fineGrassSubstrateContrast");
+            const substrate = named("fineGrassSubstrateAlbedo");
+            const graded = named("compactGrassGradedAlbedo");
+            expect(vectorValue(contrast)).toEqual([height ? 0.7 : 0.35]);
+            expect(graph(graded).has(substrate)).toBe(true);
+            expect(graph(substrate).has(graded)).toBe(false);
+            const source = owner.getNode("grass", "albedo-roughness").value;
+            expect(
+              ownedSamples([substrate], owner).filter(
+                (node) => Reflect.get(node, "value") === source,
+              ),
+            ).toHaveLength(active ? 4 : 2);
+          }
+        } finally {
+          material.dispose();
+        }
+      }
   });
 });
 
