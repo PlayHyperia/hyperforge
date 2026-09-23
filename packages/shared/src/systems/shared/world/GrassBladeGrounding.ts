@@ -1378,7 +1378,10 @@ export function* groundGrassBladeSteps(
       // Never borrow an earlier clump's cache. State 2 is accumulation in
       // progress; only a completely visited blade may become reusable (1).
       sweptBladeReusable?.fill(0);
-      for (let v = 0; v < position.count; v++) {
+      // Keep the numeric vertex kernel outside the resumable generator.
+      // The caller retains the exact blade yields; all borrowed reads and
+      // work charges below still happen after the same suspension point.
+      const accumulateSweptVertex = (v: number): void => {
         // One blade is a bounded batch: at most fifteen vertices / thirty
         // transforms at LOD0. Keep every suspension point and floating-point
         // expression. A zero-height vertex has identical fade endpoints, so
@@ -1386,7 +1389,6 @@ export function* groundGrassBladeSteps(
         // duplicate transforms and idempotent extrema. This does not omit any
         // actual swept vertex. Root transforms can also be reused below, but
         // only after checking their borrowed coordinates across suspension.
-        if (v % verticesPerBlade === 0) yield "blade_swept_bounds";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
         // Reread borrowed attributes and wind on resumption. Root correction
@@ -1478,6 +1480,10 @@ export function* groundGrassBladeSteps(
           sweptBladeReusable[blade] === 2
         )
           sweptBladeReusable[blade] = 1;
+      };
+      for (let v = 0; v < position.count; v++) {
+        if (v % verticesPerBlade === 0) yield "blade_swept_bounds";
+        accumulateSweptVertex(v);
       }
       if (
         ![box.minX, box.maxX, box.minZ, box.maxZ, minY, maxY].every(

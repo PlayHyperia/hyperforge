@@ -95,7 +95,7 @@ const evidence = (label: string, json: string) =>
   process.stdout.write(`${label} ${json}\n`);
 
 // One explicit diagnostic run, never enabled by ordinary regression commands.
-// Only the native95, native121 or native174 named reconstructed cached request
+// Only the native95, native121, native174 or native175 reconstructed cached request
 // is admitted; profiling never relaxes their production work/time limits.
 const cpuProfilePrefix = process.env.HYPERIA_GRASS_CACHED_PROFILE_PREFIX;
 const cachedBaselinePath = process.env.HYPERIA_GRASS_CACHED_BASELINE_BUNDLE;
@@ -514,6 +514,42 @@ const native174FieldCase = {
   },
 } as const;
 
+// Native175 exposed a different far-tier cell. The observed detail owners are
+// reconstructed from current source; its browser worker packet was not retained.
+const native175FieldCase = {
+  name: "native175 meadow field LOD2 northern landing gcell_v1_13_12 work budget",
+  test: "fits unsliced native175 northern landing field with actual v10 owners and unchanged caps",
+  enabled: native174FieldCase.enabled,
+  label: "NATIVE175_MEADOW_FIELD_LOD2_GCELL_V1_13_12",
+  nodes: [
+    [350, 350],
+    [350, 250],
+  ],
+  resolutions: [128, 16],
+  focus: [387, 426.5],
+  lod: 2,
+  key: "gcell_v1_13_12",
+  bounds: { minX: 325, maxX: 350, minZ: 300, maxZ: 325 },
+  geometryCandidate: "meadow-field-v1",
+  meadowField: {
+    worldConfigSHA256: native174FieldCase.meadowField.worldConfigSHA256,
+    worldAreasSHA256: native174FieldCase.meadowField.worldAreasSHA256,
+    serviceCourt: false,
+    scope:
+      "Fresh unsliced current-source v10 reconstruction of native175's failed northern landing cell, with observed own 128/north 16 detail and 0.5m field recipe. The browser worker packet was not retained: this is not exact replay, browser scheduling evidence or visual qualification. Original work/time caps remain unchanged.",
+  },
+  native175: {
+    source: "native175/process.json",
+    sourceSHA256:
+      "4a21d1429c4daaae992162c6103f68303f78c1837959c05f1f64a0024b9804ab",
+    phase: "grounding_operation",
+    failedOperations: 223364,
+    failedActiveMs: 251.50000004470348,
+    scope:
+      "Terminal cached-worker failure at the recorded landing focus. Observed owner resolutions come from retained completed frames; no failed worker packet or sampled profile was retained. Last phase is not exclusive cost attribution.",
+  },
+} as const;
+
 // Captured before the next optimization from the complete source-unchanged
 // meadow-field-west174-baseline01 run. These are numerical invariants, not
 // timing targets or hashes of the unavailable native174 worker packet.
@@ -561,6 +597,42 @@ const native174FieldNumericalBaseline = {
     maxZ: 425.923788628216,
     minY: 27.556405733119362,
     maxY: 32.52016878250645,
+  },
+} as const;
+
+// Source-unchanged meadow-field-north175-profile01, HEAD 82f5b9a5fcfe.
+// Attribute order is the shared `attributes` tuple; UUIDs and timing are not
+// golden data. The production browser input was not retained.
+const native175FieldNumericalBaseline = {
+  raw: [
+    "f12848f6d9e1dc2660de6e830e75330aaba445adf121c4d2186abfa414796928",
+    "4d9910dbd8e9a3844a433ece5dbd580bc6bd8027135e9cf4c9e2550baba2bf89",
+    "7855252d9b166927348d150793f9a0566d9128dccf1fb599d6a5ad3d79f7a25a",
+    "10b5643f0ad088db99f6384d5dd2a1b8560bad926893635c439ec6cd0f6bd359",
+    "56d0e31600e4aca519c1263d7cc3fa20aae64fb131e9463b32b7b9283dc4f7d6",
+  ],
+  projectedNormals:
+    "fbb664ae192af65bb2ec744ce666f853ad9a14a9b8c9b2be05873b207fe46963",
+  grounded: [
+    "a1643982fae81f683a46644509e0bea628d5169882ea203b835de15a7982a6e5",
+    "ffba8d7df4a2a8792bc3abc122f1a74fdbb929bd1916001061be52a19dcfe2a6",
+    "25ebc568422485d1b2f8189bb1bbba482d7971cd2b655028f6d877d220f72b36",
+    "2b37c9344908168eed65fbca2c7cf82da728f369bf153aea9bbd125d19a3dec7",
+    "7dd15f4efd70c8daf7f8a8175ae63e13a340b579a3c824821078ed76514423d1",
+  ],
+  sourceIndices:
+    "2f39a38a8b157fa288d7066e1b6d7bcdc3682e767028e0adf50b252c701cc211",
+  rootDeltas:
+    "cef386d8299189784391407d0697cadf0b5665c896b3a6dd7923c5cb75261e38",
+  bladeVisibility:
+    "028662b749ce43637507732dfe1a4f13d241a458b411e0396b53c75db16b7f61",
+  sweptBounds: {
+    minX: 324.0061257423898,
+    maxX: 351.07645746984946,
+    minZ: 298.97444791181135,
+    maxZ: 325.92419063290976,
+    minY: 28.41929198669433,
+    maxY: 29.327152632922814,
   },
 } as const;
 
@@ -1063,6 +1135,7 @@ type PondGroundingScenario =
   | (typeof meadowCanopyCases)[number]
   | (typeof meadowFieldCases)[number]
   | typeof native174FieldCase
+  | typeof native175FieldCase
   | (typeof historicalCases)[number];
 
 // Keep the original tuple's exact union members: combining two variadic
@@ -1074,6 +1147,7 @@ const cases: readonly PondGroundingScenario[] = [
   ...meadowCanopyCases,
   ...meadowFieldCases,
   native174FieldCase,
+  native175FieldCase,
   ...historicalCases,
 ];
 
@@ -1190,6 +1264,12 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
     async () => {
       const lod = "lod" in scenario ? scenario.lod : 0;
       const isMeadowField = "meadowField" in scenario;
+      const fieldFailure =
+        "native174" in scenario
+          ? scenario.native174
+          : "native175" in scenario
+            ? scenario.native175
+            : null;
       const usesNativeComposition =
         isMeadowField ||
         "nativeSheath" in scenario ||
@@ -2188,6 +2268,26 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 native174FieldNumericalBaseline.geometry[key],
               );
           }
+          if ("native175" in scenario) {
+            expect(output.count).toBe(2262);
+            expect(projected.count).toBe(2262);
+            expect(
+              attributes.map(([key]) => bufferReceipt(output[key]).sha256),
+            ).toEqual(native175FieldNumericalBaseline.raw);
+            expect(
+              attributes.map(([key]) => bufferReceipt(projected[key]).sha256),
+            ).toEqual(
+              native175FieldNumericalBaseline.raw.map((hash, index) =>
+                attributes[index][0] === "groundNormals"
+                  ? native175FieldNumericalBaseline.projectedNormals
+                  : hash,
+              ),
+            );
+            for (const key of ["position", "normal", "uv", "index"] as const)
+              expect(bufferReceipt(packet.geometry[key]).sha256).toBe(
+                native174FieldNumericalBaseline.geometry[key],
+              );
+          }
           evidence(
             `${scenario.label}_RECONSTRUCTED_INPUT`,
             JSON.stringify({
@@ -2205,7 +2305,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               rawWorker: attributeReceipts(output),
               projectedWorker: attributeReceipts(projected),
               packet: serializedInputReceipt(packet),
-              ...("native174" in scenario
+              ...(fieldFailure
                 ? {
                     sourcePins: fittingReconstructionSourcePaths.map((path) => {
                       const bytes = readFileSync(path);
@@ -2351,7 +2451,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             reason: result.status === "defer" ? result.reason : null,
             receipt: result.receipt,
             phaseAudit: audit,
-            ...("native174" in scenario && result.status === "ready"
+            ...(fieldFailure && result.status === "ready"
               ? { output: groundedBufferReceipts(result) }
               : {}),
           }),
@@ -2475,6 +2575,37 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           // Work counts/timings remain measured, not pinned: an exact-output
           // optimization may remove real work but must retain the original caps.
         }
+        if ("native175" in scenario) {
+          expect(result.data.count).toBe(2193);
+          expect(
+            attributes.map(([key]) => bufferReceipt(result.data[key]).sha256),
+          ).toEqual(native175FieldNumericalBaseline.grounded);
+          for (const key of [
+            "sourceIndices",
+            "rootDeltas",
+            "bladeVisibility",
+          ] as const)
+            expect(bufferReceipt(result[key]!).sha256).toBe(
+              native175FieldNumericalBaseline[key],
+            );
+          expect(result.sweptBounds).toEqual(
+            native175FieldNumericalBaseline.sweptBounds,
+          );
+          expect(result.receipt.endpointQueries).toBe(54288);
+          expect(result.receipt.rejected).toEqual({
+            terrain_edge: 0,
+            pad: 69,
+            road: 0,
+            water: 0,
+          });
+          expect(result.receipt.roadClearance).toEqual({
+            mode: "per-blade-v1",
+            retainedBlades: 26127,
+            partialClumps: 64,
+            maskedRetainedBlades: 189,
+            visibilityBytes: 8772,
+          });
+        }
         if ("native52" in scenario)
           expect(result.data.count).toBe(scenario.native52.retainedClumps);
 
@@ -2547,7 +2678,8 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           !!cpuProfilePrefix &&
           (("native95" in scenario && scenario.key === "gcell_v1_11_16") ||
             ("native121" in scenario && scenario.key === "gcell_v1_13_16") ||
-            ("native174" in scenario && scenario.key === "gcell_v1_11_16"));
+            ("native174" in scenario && scenario.key === "gcell_v1_11_16") ||
+            ("native175" in scenario && scenario.key === "gcell_v1_13_12"));
         groundingWorker = await createActualGroundingWorker(
           groundingWorkerSource,
           { profileCachedFit },
@@ -2556,13 +2688,13 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         const cachedPacket = createGrassGroundingWorkerRequest(request);
         const cachedCopyMs = performance.now() - cachedCopyStarted;
         const cachedInput =
-          "native121" in scenario || "native174" in scenario
+          "native121" in scenario || fieldFailure
             ? serializedInputReceipt(cachedPacket)
             : null;
         // Preserve this reconstruction before ownership transfer. V8 retains
         // typed-array bytes, Sets and Infinity; this is not a browser packet.
         const profiledPacket =
-          "native174" in scenario && profileCachedFit
+          fieldFailure && profileCachedFit
             ? writeProfileEvidence("-packet.v8", serialize(cachedPacket))
             : null;
         const prepared = await prepareCachedGrassGroundingWorkerRequest(
@@ -2589,15 +2721,15 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                         "Current-source reconstructed native121 cached fit with zero seed. Separately measured production handoff follows; not historical byte-exact replay.",
                     }
                   : {}),
-                ...("native174" in scenario
+                ...(fieldFailure
                   ? {
-                      historicalObservation: scenario.native174,
+                      historicalObservation: fieldFailure,
                       focus: scenario.focus,
                       workBounds: scenario.bounds,
                       reconstructedInput: cachedInput,
                       profiledPacket,
                       scope:
-                        "Current-source full v10 meadow-field western LOD2 reconstruction with zero cached-fit seed and unchanged caps. The separately pinned V8 packet was serialized before owner transfer in this Node version; it is not the unretained native174 browser packet. Subsequent handoff/coordinator measurements retain their own production preparation charges.",
+                        "Current-source full v10 meadow-field LOD2 reconstruction with zero cached-fit seed and unchanged caps. The separately pinned V8 packet was serialized before owner transfer in this Node version; it is not the unretained historical browser packet. Subsequent handoff/coordinator measurements retain their own production preparation charges.",
                     }
                   : {}),
                 projected: attributeReceipts(projected),
@@ -2631,7 +2763,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         ]);
         const profileFailures: unknown[] = [];
         if (
-          ("native121" in scenario || "native174" in scenario) &&
+          ("native121" in scenario || fieldFailure) &&
           fitOutcome.status === "fulfilled"
         ) {
           const raw = fitOutcome.value;
@@ -2662,14 +2794,12 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 ? scenario.native121
                 : "native95" in scenario
                   ? scenario.native95
-                  : "native174" in scenario
-                    ? scenario.native174
-                    : null;
+                  : fieldFailure;
             if (!historical)
               throw new Error("Unadmitted cached-fit profile scenario");
             saveCachedProfile(profileOutcome.value, {
               label:
-                "native121" in scenario || "native174" in scenario
+                "native121" in scenario || fieldFailure
                   ? scenario.label
                   : "NATIVE95",
               key,
@@ -2752,7 +2882,8 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
           cachedBaselineSource &&
           (("native95" in scenario && scenario.key === "gcell_v1_11_16") ||
             ("native121" in scenario && scenario.key === "gcell_v1_13_16") ||
-            ("native174" in scenario && scenario.key === "gcell_v1_11_16"))
+            ("native174" in scenario && scenario.key === "gcell_v1_11_16") ||
+            ("native175" in scenario && scenario.key === "gcell_v1_13_12"))
         ) {
           const expected = grassGroundingWorkerSemanticResult(result, request);
           const order = [
@@ -2774,7 +2905,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             groundingWorker = await createActualGroundingWorker(source);
             const comparisonPacket = createGrassGroundingWorkerRequest(request);
             const comparisonInput =
-              "native121" in scenario || "native174" in scenario
+              "native121" in scenario || fieldFailure
                 ? serializedInputReceipt(comparisonPacket)
                 : null;
             const comparisonPrepared =
@@ -2789,7 +2920,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             );
             const finished = performance.now();
             evidence(
-              "native121" in scenario || "native174" in scenario
+              "native121" in scenario || fieldFailure
                 ? `${scenario.label}_CACHED_AB`
                 : "NATIVE95_CACHED_AB",
               JSON.stringify({
@@ -2799,15 +2930,15 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
                 lod,
                 ...("native121" in scenario
                   ? { historicalObservation: scenario.native121 }
-                  : "native174" in scenario
-                    ? { historicalObservation: scenario.native174 }
+                  : fieldFailure
+                    ? { historicalObservation: fieldFailure }
                     : {}),
                 ...(comparisonInput
                   ? { reconstructedInput: comparisonInput }
                   : {}),
                 bundleSHA256: hashBytes(source),
                 status: comparison.state.status,
-                ...("native121" in scenario || "native174" in scenario
+                ...("native121" in scenario || fieldFailure
                   ? {
                       failure:
                         comparison.state.status === "ready"

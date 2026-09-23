@@ -1,5 +1,21 @@
 # World graphics development checkpoint — 2026-09-20
 
+## 2026-09-23 — Swept-geometry kernel checkpoint
+
+Current status: **source verified and meaningfully faster in the newly failing reconstruction; native loading acceptance remains pending.** Native175's failure below is not reclassified as a pass.
+
+- [x] Add the missing v10 field LOD2 `13_12` reconstruction with observed 128/16 terrain owners, exact input/output geometry and attribute hashes, swept bounds and masks: 2,262 input clumps → 2,193 retained, 69 pad rejections, 64 partial clumps and 189 masked blades. This is current-source evidence, not replay of an unretained browser packet.
+- [x] Reject and fully revert the direct-native-iterator-method experiment: paired medians changed only +0.25% / −0.18% across the two workloads. The sampled iterator attribution was not proof of wrapper overhead.
+- [x] Measure major fitting stages in a private, in-memory diagnostic with unchanged inputs, math, yields and caps. In the northern cell, swept geometry was the largest measured phase (~65 ms), followed by root fitting (~50 ms). These running-slice measurements include instrumentation and preemption, not exclusive CPU or native timing.
+- [x] Extract the unchanged swept-vertex math into a plain local function while retaining the exact generator loop, blade suspension boundaries, live borrowed reads, arithmetic, work charges and limits. The inverse edit restores the previous source byte-for-byte. No grass density, geometry, placement, wind, shader or default changes.
+- [x] Compare four baseline and four candidate fresh isolates per workload in ABBAABBA order. Northern-cell median **188.796 → 143.642 ms (23.92% lower)**; western-cell median **142.086 → 133.983 ms (5.70% lower)**. Serialized inputs, numerical outputs and operation counts match within each group. The western range includes a slower candidate sample; this is not a guarantee, FPS or browser qualification.
+- [x] Pass **642 unique tests across ten files**: 631 core/terrain/worker/client/coordinator cases and eleven full-field cases. The other 29 pond scenarios were not selected. Pass no-emit typechecking (768 roots / 2,572 files, zero diagnostics, 82 stable source pins), scoped ESLint and formatting.
+- [x] Restore the exact 607-byte ignored server-build manifest from independently hash-verified deterministic bytes. Preserve the original cloud placeholder as `.competitive-build.icloud-placeholder-20260923.json` beside it and retain a separate verified copy. No cloud download, build or service restart. All 145 protected artifacts and 13 unrelated files reverify; saved localhost3333/database remain unchanged. This does not resolve iCloud generally or complete workspace migration.
+- [ ] Build88 must contain only this compiled grounding-source delta against build87. Then complete native176/runtime130 startup, all four views, flower wind, landing, strict material/shader gates, far-grass measurement and ordinary held timing under unchanged caps and quality.
+- [ ] Resume visible grass/ground integration and wider island art after loading is reliable. AAA appearance, gameplay, stream and sustained-performance acceptance remain open.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/meadow-field-swept-kernel-source-review01.json` (SHA256 `d3ae8085ea265f40d52407257cb4d3612973306c4eea900e835f138fc79bf632`), service-layout `meadow-field-north175-{profile01,golden01}`, `meadow-field-stage-timing01`, rejected `meadow-field-native-delegate-abba01`, and `meadow-field-swept-kernel-{abba01,regression01,matrix01,types01,lint01,format01}`.
+
 ## 2026-09-23 — Native worker retest: loading remains open
 
 Current status: **build verified; native175 FAILED/partial; no candidate-default promotion.** The modest worker optimization below did not solve the native loading blocker.
