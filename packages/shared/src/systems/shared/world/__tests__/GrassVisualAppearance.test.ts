@@ -688,6 +688,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
         foldTipStart: 0.75,
         rootBrightness: 0.55,
         tipBrightness: 1.12,
+        colorTipStart: 0.75,
       });
       expect(Object.isFrozen(FINE_GRASS_LEAF_VOLUME_LIGHTING)).toBe(true);
       expect(
@@ -1504,7 +1505,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
-  it("darkens actual albedo roots, preserves relative bank tint and shares it with SSS without changing AO or scattering coefficients", () => {
+  it("retains root and tip endpoints while reaching tip albedo earlier, including shared SSS tint and unchanged AO/scattering coefficients", () => {
     for (const grade of [undefined, "fine-meadow-green-v1"] as const) {
       const baseline = fine(undefined, grade),
         candidate = fine("leaf-volume-v1", grade);
@@ -1527,7 +1528,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             (n) => Reflect.get(n, "name") === "v_naturalGrassBankLocality",
           );
           const locality = bankNode ? colorValue(bankNode, inputs)[0] : 0;
-          for (const t of [0, 0.2, 0.5, 1]) {
+          for (const t of [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1]) {
             inputs.uv[1] = t;
             const before = colorValue(a.colorNode, inputs),
               after = colorValue(b.colorNode, inputs);
@@ -1540,7 +1541,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             const expected = inputs.instanceGroundColor.map((c, i) =>
               Math.min(
                 1,
-                c * 0.55 + (tint[i] * tip - c * 0.55) * smooth(0, 1, t),
+                c * 0.55 + (tint[i] * tip - c * 0.55) * smooth(0, 0.75, t),
               ),
             );
             for (let i = 0; i < 3; i++)
@@ -1574,8 +1575,61 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     }
   });
 
+  it.each([undefined, "canopy-normal-v1", "leaf-volume-v1"] as const)(
+    "keeps valid saturated and dark-tip colors bounded with the selected ramp: %s",
+    (lighting) => {
+      const owner = fine(lighting);
+      try {
+        const material = owner["material"];
+        if (!(material instanceof MeshSSSNodeMaterial))
+          throw new Error("Expected actual fine SSS material");
+        const inputs = inputsAt(owner["lodGeometries"][0], 2);
+        const leafVolume = lighting === "leaf-volume-v1";
+        const rootGain = leafVolume ? 0.55 : 0.98;
+        const tipGain = leafVolume ? 1.12 : 1.2;
+        const end = leafVolume ? 0.75 : 1;
+        for (const [ground, tint] of [
+          [
+            [0.9, 0.95, 1],
+            [0.9, 0.95, 1],
+          ],
+          [
+            [0.8, 0.6, 0.4],
+            [0.05, 0.1, 0.05],
+          ],
+        ]) {
+          inputs.instanceGroundColor = ground;
+          inputs.instanceGrassTint = [...tint, 1];
+          for (const t of [0, 0.125, 0.5, 0.74, 0.75, 0.76, 1]) {
+            inputs.uv[1] = t;
+            const actual = colorValue(material.colorNode, inputs);
+            const expected = ground.map((root, channel) =>
+              Math.min(
+                1,
+                root * rootGain +
+                  (tint[channel] * tipGain - root * rootGain) *
+                    smooth(0, end, t),
+              ),
+            );
+            actual.forEach((value, channel) => {
+              expect(value).toBeGreaterThanOrEqual(0);
+              expect(value).toBeLessThanOrEqual(1);
+              expect(value).toBeCloseTo(expected[channel], 13);
+            });
+            expect(colorValue(material.thicknessColorNode, inputs)).toEqual(
+              actual.map((value) => value * smooth(0.05, 0.65, t)),
+            );
+          }
+        }
+        expect(material.emissive.getHex()).toBe(0);
+      } finally {
+        owner.destroy();
+      }
+    },
+  );
+
   it.each([0, 1, 2])(
-    "limits the historical .78 root change to its exact RGB contribution at LOD%i, including soil and bank tips",
+    "isolates the shorter albedo ramp from the prior full-length ramp at LOD%i, including soil and bank tips",
     (lod) => {
       // The historical default sculpt fixture has no coastal meadow. Admit
       // the current authored descriptor through the real terrain profile path;
@@ -1676,26 +1730,31 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                     inputs.instanceGrassTint[3],
               );
               const tip = 1.12 + (1.08 * (1.12 / 1.2) - 1.12) * locality;
-              for (const t of [0, 0.2, 0.5, 0.75, 1]) {
+              for (const t of [
+                0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1,
+              ]) {
                 inputs.uv[1] = t;
-                const blend = smooth(0, 1, t);
+                const oldBlend = smooth(0, 1, t);
+                const blend = smooth(0, 0.75, t);
                 const actual = colorValue(material.colorNode, inputs);
                 const historical = rootGround.map(
                   (root, i) =>
-                    root * 0.78 + (tinted[i] * tip - root * 0.78) * blend,
+                    root * 0.55 + (tinted[i] * tip - root * 0.55) * oldBlend,
                 );
                 for (let channel = 0; channel < 3; channel++) {
                   // These real-color samples stay below the albedo clamp;
-                  // the exact difference therefore isolates this one coefficient.
+                  // the exact difference therefore isolates the ramp timing,
+                  // not a different root/tip color, AO or scattering coefficient.
                   expect(historical[channel]).toBeGreaterThan(0);
                   expect(historical[channel]).toBeLessThan(1);
                   expect(actual[channel]).toBeGreaterThan(0);
                   expect(actual[channel]).toBeLessThan(1);
                   expect(actual[channel] - historical[channel]).toBeCloseTo(
-                    rootGround[channel] * (0.55 - 0.78) * (1 - blend),
+                    (tinted[channel] * tip - rootGround[channel] * 0.55) *
+                      (blend - oldBlend),
                     13,
                   );
-                  if (t === 1)
+                  if (t >= 0.75)
                     expect(actual[channel]).toBeCloseTo(
                       tinted[channel] * tip,
                       13,

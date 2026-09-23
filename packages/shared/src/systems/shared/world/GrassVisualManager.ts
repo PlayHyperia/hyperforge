@@ -357,9 +357,10 @@ export const FINE_GRASS_LEAF_VOLUME_LIGHTING = Object.freeze({
   foldTangent: Math.tan((24 * Math.PI) / 180),
   foldTipStart: 0.75,
   // Authored lower-leaf color contrast, not additional physical occlusion.
-  // Keep the tip endpoint and the existing AO/scattering response unchanged.
+  // Keep the tip endpoint and the existing AO/scattering coefficients unchanged.
   rootBrightness: 0.55,
   tipBrightness: 1.12,
+  colorTipStart: 0.75,
 } as const);
 
 /** The near mesh supplies its own transverse normals; never stack the
@@ -3980,7 +3981,13 @@ export class GrassVisualManager implements QuadTreeListener {
                 )
               : float(tipBrightness),
           ),
-          smoothstep(float(0.0), float(1.0), t),
+          smoothstep(
+            float(0.0),
+            float(
+              leafVolume ? FINE_GRASS_LEAF_VOLUME_LIGHTING.colorTipStart : 1,
+            ),
+            t,
+          ),
         );
         return compactPhysical
           ? bladeCol
