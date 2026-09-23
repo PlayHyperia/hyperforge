@@ -322,10 +322,11 @@ export const FINE_GRASS_ROOTED_FAN_SHAPE = Object.freeze({
   ROOT_COMPOSITION: "progressive-fan-v1",
 } as const);
 
-/** Mixed meadow stature, not a density or quality reduction. Eight three-leaf
- * fans spread the same 24 blades over more plants, each with two finer leaves
- * and a taller one. Rotate roles between fans so the tallest leaf does not
- * repeat one compass bearing.
+/** Mixed meadow stature. Eight three-leaf fans spread the same 24 blades over
+ * more plants: overlapping low/mid leaves and a finer tall silhouette. Width
+ * and reach use the shared plant height independently of each leaf's stature;
+ * shortening a leaf must not inadvertently shrink all three dimensions.
+ * Rotate roles between fans so the tallest leaf does not repeat one bearing.
  * The same deterministic prefix is used at every LOD and freshly ground-fit.
  * Wider root spacing separates the leaf silhouettes without adding vertices.
  */
@@ -334,9 +335,10 @@ export const FINE_GRASS_MEADOW_CANOPY_COMPOSITION = Object.freeze({
   id: "meadow-canopy-v1",
   bladesPerFan: 3,
   rootRadius: 0.065,
+  dimensionBasis: "shared-plant-height",
   heightFactors: Object.freeze([0.68, 0.84, 1] as const),
-  widthFactors: Object.freeze([0.62, 0.72, 0.86] as const),
-  arcFactors: Object.freeze([1.12, 1, 0.78] as const),
+  widthFactors: Object.freeze([1.1, 1.25, 0.86] as const),
+  arcFactors: Object.freeze([1.15, 1, 0.78] as const),
 } as const);
 
 export const FINE_GRASS_MEADOW_CANOPY_SHAPE = Object.freeze({
@@ -684,7 +686,7 @@ export function createClumpGeometry(
         FINE_GRASS_MEADOW_CANOPY_COMPOSITION.heightFactors[canopyRole]
       : variedBladeHeight;
     const w = meadowCanopy
-      ? h *
+      ? meadowCanopyHeight *
         BLADE_WIDTH_RATIO *
         FINE_GRASS_MEADOW_CANOPY_COMPOSITION.widthFactors[canopyRole]
       : h * BLADE_WIDTH_RATIO;
@@ -694,7 +696,7 @@ export function createClumpGeometry(
       ? angle + curveSample * 2 * fanComposition.curveJitter
       : angle + curveSample * Math.PI * 0.6;
     const variedArcDist =
-      h *
+      (meadowCanopy ? meadowCanopyHeight : h) *
       BLADE_ARC_RATIO *
       (0.8 + rng() * 0.4) *
       (shape.TUFT_ARC_FACTORS?.[fanIndex] ?? 1);

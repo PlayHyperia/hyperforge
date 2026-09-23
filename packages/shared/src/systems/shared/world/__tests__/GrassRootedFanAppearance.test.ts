@@ -564,8 +564,15 @@ describe("explicit progressive rooted-fan source geometry", () => {
 // These independent literals define the trial, rather than deriving its
 // expected dimensions from the candidate's own exported factors.
 const CANOPY_HEIGHT_FACTORS = [0.68, 0.84, 1] as const;
-const CANOPY_WIDTH_FACTORS = [0.62, 0.72, 0.86] as const;
-const CANOPY_ARC_FACTORS = [1.12, 1, 0.78] as const;
+const CANOPY_WIDTH_FACTORS = [1.1, 1.25, 0.86] as const;
+const CANOPY_ARC_FACTORS = [1.15, 1, 0.78] as const;
+// Captured native166 tall-role positions followed by normals, raw Float32,
+// ascending blade order. Only the lower and middle leaves should change.
+const CANOPY_TALL_NATIVE166_HASHES = {
+  sheath5: "764ef6bd595738d727ec73541f1545031d02c820565a2bd662841e9cb1a1dfd3",
+  folded3: "57e233eb4a6cc37d14a3081439208ffd90c3a2a316cf478e4552a31cf49d4c4e",
+  ribbon2: "9aa1d25dc2122d9777e09ddd4aeda7b8bfd5d1cf4e5eb1710ceec622c97b1119",
+} as const;
 const ROOTED_FAN_NATIVE164_HASHES = {
   sheath5: [
     "3a97ef4de90b18e755850a7671c357985376579197312f0d708c76790f1015ba",
@@ -605,6 +612,45 @@ function canopyWidthEnvelope(variant: Variant, t: number) {
   }
   const u = Math.max(0, Math.min(1, t / 0.5));
   return (1 - 0.85 * t * t) * (1 + 0.35 * u * u * (3 - 2 * u));
+}
+
+/** Summed, azimuth-averaged vertical projection of authored triangles within
+ * a height band. This is not silhouette union or screen coverage: overlapping
+ * leaves count repeatedly. It catches lost leaf area before world review. */
+function canopyBandArea(
+  g: THREE.BufferGeometry,
+  minimum: number,
+  maximum: number,
+) {
+  const clip = (polygon: THREE.Vector3[], height: number, above: boolean) => {
+    const result: THREE.Vector3[] = [];
+    for (let i = 0; i < polygon.length; i++) {
+      const a = polygon[i],
+        b = polygon[(i + 1) % polygon.length];
+      const insideA = above ? a.y >= height : a.y <= height;
+      const insideB = above ? b.y >= height : b.y <= height;
+      if (insideA) result.push(a);
+      if (insideA !== insideB)
+        result.push(a.clone().lerp(b, (height - a.y) / (b.y - a.y)));
+    }
+    return result;
+  };
+  let area = 0;
+  for (let i = 0; i < g.index!.count; i += 3) {
+    const triangle = [0, 1, 2].map((j) =>
+      vector(g, "position", g.index!.getX(i + j)),
+    );
+    const polygon = clip(clip(triangle, minimum, true), maximum, false);
+    for (let j = 1; j + 1 < polygon.length; j++) {
+      const cross = polygon[j]
+        .clone()
+        .sub(polygon[0])
+        .cross(polygon[j + 1].clone().sub(polygon[0]));
+      // Exact uniform-azimuth integral of |cross dot view| / 2.
+      area += Math.hypot(cross.x, cross.z) / Math.PI;
+    }
+  }
+  return area;
 }
 
 /** Measure width at the first non-root row, not the narrow sheath root.
@@ -659,6 +705,7 @@ describe("explicit meadow canopy source geometry", () => {
       id: "meadow-canopy-v1",
       bladesPerFan: 3,
       rootRadius: 0.065,
+      dimensionBasis: "shared-plant-height",
       heightFactors: CANOPY_HEIGHT_FACTORS,
       widthFactors: CANOPY_WIDTH_FACTORS,
       arcFactors: CANOPY_ARC_FACTORS,
@@ -744,25 +791,22 @@ describe("explicit meadow canopy source geometry", () => {
           const previous = new CanopySurface(baseline, variant, blade);
           const fanHeight = new CanopySurface(baseline, variant, fan * 3)
             .height;
-          const heightRatio =
-            (fanHeight / previous.height) * CANOPY_HEIGHT_FACTORS[role];
+          const plantRatio = fanHeight / previous.height;
+          const heightRatio = plantRatio * CANOPY_HEIGHT_FACTORS[role];
           expect(actual.height / fanHeight).toBeCloseTo(
             CANOPY_HEIGHT_FACTORS[role],
             6,
           );
           expect(actual.halfWidth / previous.halfWidth).toBeCloseTo(
-            heightRatio * CANOPY_WIDTH_FACTORS[role],
+            plantRatio * CANOPY_WIDTH_FACTORS[role],
             5,
           );
           expect(2 * actual.halfWidth).toBeCloseTo(
-            fanHeight *
-              CANOPY_HEIGHT_FACTORS[role] *
-              0.045 *
-              CANOPY_WIDTH_FACTORS[role],
+            fanHeight * 0.045 * CANOPY_WIDTH_FACTORS[role],
             7,
           );
           expect(actual.arc.length() / previous.arc.length()).toBeCloseTo(
-            heightRatio * CANOPY_ARC_FACTORS[role],
+            plantRatio * CANOPY_ARC_FACTORS[role],
             6,
           );
           // Fan cardinality changes the nominal direction, never the old
@@ -797,7 +841,7 @@ describe("explicit meadow canopy source geometry", () => {
               vector(baseline, "position", first + 1),
             );
             expect(width).toBeCloseTo(
-              oldWidth * heightRatio * CANOPY_WIDTH_FACTORS[role],
+              oldWidth * plantRatio * CANOPY_WIDTH_FACTORS[role],
               6,
             );
           }
@@ -1012,6 +1056,52 @@ describe("explicit meadow canopy source geometry", () => {
             }
           }
         }
+      } finally {
+        g.dispose();
+        baseline.dispose();
+      }
+    },
+  );
+
+  it.each(VARIANTS)(
+    "restores low/mid authored leaf area without broadening native166 tall leaves in $name",
+    (variant) => {
+      const blades = variant.name === "ribbon2" ? 12 : 24;
+      const g = makeCanopy(variant, blades),
+        baseline = make(variant, blades);
+      try {
+        // Recover coverage in the lower two strata, not the deliberately finer
+        // upper silhouette. World occlusion, retained masks, flower readability
+        // and native fragment cost still require an actual scene comparison.
+        for (const [minimum, maximum, floor] of [
+          [0, 0.2, 0.95],
+          [0.2, 0.4, 0.85],
+        ]) {
+          const ratio =
+            canopyBandArea(g, minimum, maximum) /
+            canopyBandArea(baseline, minimum, maximum);
+          expect(ratio).toBeGreaterThan(floor);
+          expect(ratio).toBeLessThan(1.3);
+        }
+        const hash = createHash("sha256");
+        for (const name of ["position", "normal"]) {
+          const values = g.getAttribute(name).array;
+          for (let blade = 0; blade < blades; blade++) {
+            if ((blade + Math.floor(blade / 3)) % 3 !== 2) continue;
+            const first = blade * variant.stride * 3;
+            const selected = values.slice(first, first + variant.stride * 3);
+            hash.update(
+              new Uint8Array(
+                selected.buffer,
+                selected.byteOffset,
+                selected.byteLength,
+              ),
+            );
+          }
+        }
+        expect(hash.digest("hex")).toBe(
+          CANOPY_TALL_NATIVE166_HASHES[variant.name],
+        );
       } finally {
         g.dispose();
         baseline.dispose();
