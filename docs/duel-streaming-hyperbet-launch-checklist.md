@@ -1,5 +1,34 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+## 2026-09-22 — Matched terrain GPU diagnostic complete; incremental cost inconclusive
+
+- [x] Four fresh A–B–B–A native WebGPU runs completed with 12 usable timestamp
+  samples each, identical four camera poses, complete grass/flower populations,
+  full density and 1280×720/DPR1. Two saved builds differ only in the exact two
+  terrain files; all 1,096 current inputs and 18 bundles verified before/after.
+- [x] Envelope run medians: 33.39 / 32.11 / 33.13 / 31.75 ms. Mean-of-run-medians
+  change **+0.05 ms**, smaller than repeated-run variation. Terrain-containing
+  mixed-pass change **+0.66 ms**, also below repeated-run variation, with
+  opposite-signed directional comparisons. **Cost is inconclusive, not free.**
+- [x] Raw overlapping timestamps, sample gaps, draw counts and host conditions
+  retained. B2 includes two extra draw calls / 32 triangles; no hidden correction.
+  No pass summation, exclusive terrain-cost, sustained FPS or significance claim.
+- [x] Fourteen instrumentation/preflight tests passed; independent capture and
+  analysis reviews completed. All owned browsers/runtime107–110/temp databases
+  cleaned up. Normal localhost:3333, persistent data and 145 protected outputs unchanged.
+- [x] Grassworks visual reference and AMD curve/normal concepts reviewed;
+  documented the broad late-taper blade silhouette and coordinated geometry,
+  normals and grounding constraints. No commercial code/assets imported.
+- [ ] Improve blade shape/surface detail/contact and pond-side turf transition.
+- [ ] Full traversal/LOD/wind, broader hardware and sustained gameplay/stream
+  qualification remain open. Existing candidate stays opt-in; no production
+  source, density, resolution or default change in this diagnostic checkpoint.
+
+Report: `docs/grass-substrate-performance-20260922.md`.
+Evidence: `inland-pond-integration01-UNQUALIFIED/native137–140/` and
+`substrate-timing-abba01.json`; preflight/analysis logs in the service-layout
+evidence directory. Mac already restarted; no further reboot is requested.
+
 ## 2026-09-22 — Calmer grass substrate retained; contact and motion remain open
 
 - [x] Added a frequency-aware grass RGB treatment for the existing opt-in
