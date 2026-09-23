@@ -1,5 +1,20 @@
 # Hyperia graphics reference library
 
+## 2026-09-23 — Native worker retest: loading remains open
+
+Current status: **build verified; native175 FAILED/partial; no candidate-default promotion.** The modest worker optimization below did not solve the native loading blocker.
+
+- [x] Build87 contains exactly one changed compiled source input versus build86 (the worker entry), with 1,096 others unchanged, six build configurations, nine bundle roles per build and identical compiled grass configuration. Source checkpoint `3f5cbd0571bad4caa8b85841314a1df857b022a0` is pushed.
+- [x] Run the isolated Metal WebGPU scene with unchanged quality, placement and limits. Startup and the first three grass transitions completed; their screenshots and the flower-wind check were retained. Matched native174/native175 images show no obvious geometry/population/material regression, but angular grass, dark edges, exposed bright ground and tiny distant flower marks remain.
+- [x] Retain the failed landing transition: `gcell_v1_13_12`, LOD2, 223,364 merged operations and 251.5 ms cumulative slice elapsed time against the unchanged 250 ms limit. This differs from native174's `11_16` cell. Recorded terrain descriptors show a 128/16-resolution northern seam; the exact failed worker packet was not retained.
+- [x] Keep timing interpretation honest: `active_cpu` includes preemption/GC and is not exclusive CPU measurement. A 28.9 ms peak clock interval and a `grounding_operation` label do not identify a unique hot path. Twelve host samples showed AC power and thermal state zero, not absence of CPU contention.
+- [x] Close the owned browser, restore camera/clock, stop runtime129 and remove its temporary database. Reverify all 145 protected artifacts and 13 unrelated files; the saved localhost3333 returns HTTP200 and its database/container/volume identity is unchanged. No additional Mac restart is required for this checkpoint.
+- [ ] Profile broader fitting costs and cover the newly exposed mixed-resolution field workload before another native trial. Existing same-cell generation tests use a different configuration/LOD0 and do not close this coverage gap. Do not repeatedly retry, raise limits or reduce grass quality to obtain a pass.
+- [ ] Complete landing, all four views, final strict shader/material checks, far-grass measurements and ordinary held timing. Native175 provides no completed landing hold, FPS/smoothness or performance acceptance.
+- [ ] Continue reference-led grass/ground integration and wider island art after loading is reliable. The prior 641 source tests remain valid historical evidence, not a claim that this failed native run passed.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/meadow-field-worker-forwarding-native-review01.json` (SHA256 `ebf4246ed4fa043ab46ffbd9ac75fedae95ff403387bf57450c7a8dcbeb12d91`), `isolated-build87-report.json` (`88b5457e0a5b2ff2762e752162c8894f1fb3f05c7380a063107fa99d2a945d12`), `native175/process.json` (`4a21d1429c4daaae992162c6103f68303f78c1837959c05f1f64a0024b9804ab`) and stopped `runtime129/process.json` (`8486dd034855fa6a358f4b8f27dfdf9fb9fd044814941bc122d6cd807223fb62`).
+
 ## 2026-09-23 — Profiled grass-worker forwarding checkpoint
 
 Current status: **source verified; a modest Node-worker improvement measured; native landing/loading and visual acceptance remain open.** This supersedes the missing-regression and unmeasured-hotspot items in the flower-distribution checkpoint below, not its failed native result.
