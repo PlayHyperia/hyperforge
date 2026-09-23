@@ -9,6 +9,7 @@ import {
 } from "../../../../utils/workers/GrassGroundingWorkerWire";
 import {
   groundGrassBlades,
+  groundGrassBladeSteps,
   GRASS_BLADE_GROUNDING_LIMITS,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
 } from "../GrassBladeGrounding";
@@ -163,6 +164,54 @@ function authoredGrid(resolution: number, indexed = false, refined = false) {
   return { surface, geometry, dispose: () => geometry.dispose() };
 }
 
+/** Trace the actual preparation and fitting cores, independently of the worker
+ * wrapper. Their terminal next calls share a worker resumption with the next
+ * stage; only the final fit completion adds a charged, non-yielding next. */
+function executionTrace(fixture: ReturnType<typeof createSameFaceCase>) {
+  const cold = workerRequest(fixture.request);
+  const preparation: string[] = [];
+  const collect = <T>(steps: Generator<string, T, void>, phases: string[]) => {
+    try {
+      for (let i = 0; i < 100_000; i++) {
+        const step = steps.next();
+        if (step.done) return step.value;
+        phases.push(step.value);
+      }
+      throw new Error("Worker phase trace exceeded fixture bound");
+    } finally {
+      steps.return(undefined as never);
+    }
+  };
+  for (const { snapshot } of cold.surfaces) {
+    preparation.push("worker_surface_rebuild");
+    for (
+      let i = 0;
+      i < (snapshot.topology?.cellIndexOffsets.length ?? 0);
+      i += 256
+    )
+      preparation.push("worker_topology_unpack");
+    const owner = fixture.owned.find(
+      ({ surface }) => surface.revision === snapshot.revision,
+    );
+    if (!owner) throw new Error("Missing actual fixture surface owner");
+    collect(
+      RetainedTerrainSurface.prepare(
+        snapshot.nodeId,
+        snapshot.terrainProfileIdentity,
+        snapshot.centerX,
+        snapshot.centerZ,
+        snapshot.size,
+        snapshot.resolution,
+        owner.geometry,
+      ),
+      preparation,
+    );
+  }
+  const fitting: string[] = [];
+  const result = collect(groundGrassBladeSteps(fixture.request), fitting);
+  return { preparation, fitting, result };
+}
+
 beforeAll(async () => {
   const bundled = await bundleGrassGroundingWorker();
   bundledSource = bundled.source;
@@ -174,6 +223,132 @@ afterEach(async () => {
 });
 
 describe("actual isolated grass grounding worker", () => {
+  it.each<SameFaceCase>([
+    "ordinary-lod2",
+    "refined-interiors",
+    "adjacent-owners",
+    "empty",
+  ])(
+    "forwards exact cold/cached core resumptions and rebuild boundary for %s",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const trace = executionTrace(fixture);
+        for (const cached of [false, true]) {
+          const worker = await actualWorker();
+          const cold = workerRequest(fixture.request);
+          cold.consumed = { operations: 37, activeMs: 1, maximumSliceMs: 0.5 };
+          const packet = cached
+            ? (await prepareCachedGrassGroundingWorkerRequest(worker, cold))
+                .request
+            : cold;
+          const prefix = cached
+            ? fixture.request.surfaces.map(() => "worker_cached_surface")
+            : trace.preparation;
+          const phases = [...prefix, "worker_blade_geometry", ...trace.fitting];
+          const response = await run(worker, packet);
+          expect(response.state.status).toBe(
+            trace.result.status === "ready" ? "ready" : "waiting_support",
+          );
+          if (
+            response.state.status !== "ready" &&
+            response.state.status !== "waiting_support"
+          )
+            throw new Error(
+              "Exact worker trace failed: " + JSON.stringify(response),
+            );
+          expect(
+            semanticResult(response.state.result, fixture.request),
+          ).toEqual(semanticResult(trace.result, fixture.request));
+          expect(response.work.operations).toBe(37 + phases.length + 1);
+          expect(response.lastPhase).toBe(phases.at(-1));
+          expect(response.work.activeMs).toBeGreaterThanOrEqual(1);
+          if (cached) expect(response.terrainRebuildWork).toBeNull();
+          else {
+            expect(response.terrainRebuildWork?.operations).toBe(
+              37 + trace.preparation.length,
+            );
+            expect(
+              response.terrainRebuildWork?.activeMs,
+            ).toBeGreaterThanOrEqual(1);
+          }
+        }
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "preserves seeded phase boundaries, terminal next and owner reuse with cached=%s",
+    async (cached) => {
+      const fixture = createSameFaceCase("empty");
+      try {
+        const trace = executionTrace(fixture);
+        const worker = await actualWorker();
+        const cold = workerRequest(fixture.request);
+        const packet = cached
+          ? (await prepareCachedGrassGroundingWorkerRequest(worker, cold))
+              .request
+          : cold;
+        const prefix = cached
+          ? fixture.request.surfaces.map(() => "worker_cached_surface")
+          : trace.preparation;
+        const phases = [...prefix, "worker_blade_geometry", ...trace.fitting];
+        let jobId = packet.jobId;
+        // Stop before setup starts, on either side of each stage boundary,
+        // and immediately before/after the terminal next. No fake clock or
+        // reduced production limit: consume the real cumulative budget seed.
+        for (const remaining of new Set([
+          0,
+          1,
+          prefix.length,
+          prefix.length + 1,
+          prefix.length + 2,
+          phases.length,
+          phases.length + 1,
+        ])) {
+          const input = structuredClone(packet);
+          input.jobId = jobId++;
+          input.consumed.operations =
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - remaining;
+          const response = await run(worker, input);
+          expect(response.work.operations).toBe(
+            GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+          );
+          expect(response.lastPhase).toBe(
+            phases[Math.min(remaining, phases.length) - 1] ?? null,
+          );
+          if (remaining === phases.length + 1) {
+            expect(response.state.status).toBe("ready");
+          } else {
+            expect(response.state).toEqual({
+              status: "failed_budget",
+              reason: "operations",
+            });
+            expect(response.resultBytes).toBe(0);
+          }
+          if (cached || remaining <= prefix.length)
+            expect(response.terrainRebuildWork).toBeNull();
+          else
+            expect(response.terrainRebuildWork?.operations).toBe(
+              input.consumed.operations + prefix.length,
+            );
+          expect(response.cache?.owners).toBe(
+            cached ? cold.surfaces.length : 0,
+          );
+        }
+        const recovered = structuredClone(packet);
+        recovered.jobId = jobId;
+        const response = await run(worker, recovered);
+        expect(response.state.status).toBe("ready");
+        expect(response.work.operations).toBe(phases.length + 1);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
   it.each([
     ["fine-lod0", false],
     ["fine-lod0", true],

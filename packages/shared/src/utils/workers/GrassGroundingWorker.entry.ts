@@ -5,6 +5,7 @@ import {
   GrassGroundingContinuation,
   groundGrassBladeSteps,
   validateGrassGroundingConsumedWork,
+  type GrassBladeGroundingRequest,
   type GrassBladeGroundingResult,
   type GrassGroundingConsumedWork,
   type GrassGroundingTiming,
@@ -621,12 +622,12 @@ function* rebuildSurface(
   );
 }
 
-function* execute(
+function* prepareExecution(
   request: GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest,
   owners: SurfaceOwners,
   geometries: BufferGeometry[],
   rebuilt: () => void,
-): Generator<string, GrassBladeGroundingResult, void> {
+): Generator<string, GrassBladeGroundingRequest, void> {
   const surfaces: RetainedTerrainSurface[] = [];
   let ownSurface: RetainedTerrainSurface | undefined;
   if (request.type === "start_cached") {
@@ -663,14 +664,106 @@ function* execute(
   geometry.setAttribute("uv", new BufferAttribute(source.uv, 2));
   geometry.setIndex(new BufferAttribute(source.index, 1));
   geometry.setDrawRange(0, source.drawCount);
-  return yield* groundGrassBladeSteps({
+  return {
     ...request.settings,
     ...request.constraints,
     data: request.data,
     geometry,
     ownSurface,
     surfaces,
-  });
+  };
+}
+
+/** Keep setup's yields and lazy ownership unchanged, but forward the hot fit
+ * directly instead of resuming another native generator for every blade step.
+ * The continuation still charges every yield and the final next exactly once. */
+class GroundingWorkerExecution implements Generator<
+  string,
+  GrassBladeGroundingResult,
+  void
+> {
+  private active: Generator<string, unknown, void> | null;
+  private fitting = false;
+  private running = false;
+
+  constructor(setup: Generator<string, GrassBladeGroundingRequest, void>) {
+    this.active = setup;
+  }
+
+  [Symbol.iterator](): Generator<string, GrassBladeGroundingResult, void> {
+    return this;
+  }
+
+  next(): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("next");
+  }
+
+  return(
+    value: GrassBladeGroundingResult,
+  ): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("return", value);
+  }
+
+  throw(error: unknown): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("throw", error);
+  }
+
+  private resume(
+    method: "next" | "return" | "throw",
+    value?: unknown,
+  ): IteratorResult<string, GrassBladeGroundingResult> {
+    // A caught reentrant call must not close the still-running outer call.
+    if (this.running) throw new TypeError("Generator is already running");
+    this.running = true;
+    try {
+      if (!this.active) {
+        if (method === "throw") throw value;
+        return {
+          done: true,
+          value: (method === "return"
+            ? value
+            : undefined) as GrassBladeGroundingResult,
+        };
+      }
+      let step =
+        method === "return"
+          ? this.active.return(value)
+          : method === "throw"
+            ? this.active.throw(value)
+            : this.active.next();
+      // A delegated return may yield from finally. Keep that child suspended;
+      // the next normal next/throw/return is forwarded just like native yield*.
+      if (!step.done) return step;
+      if (method !== "return" && !this.fitting) {
+        this.fitting = true;
+        this.active = groundGrassBladeSteps(
+          step.value as GrassBladeGroundingRequest,
+        );
+        // No boundary yield: setup completion and the first fit step have
+        // always happened in this same charged continuation resumption.
+        step = this.active.next();
+        if (!step.done) return step;
+      }
+      this.active = null;
+      return step as IteratorReturnResult<GrassBladeGroundingResult>;
+    } catch (error) {
+      this.active = null;
+      throw error;
+    } finally {
+      this.running = false;
+    }
+  }
+}
+
+function execute(
+  request: GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest,
+  owners: SurfaceOwners,
+  geometries: BufferGeometry[],
+  rebuilt: () => void,
+): Generator<string, GrassBladeGroundingResult, void> {
+  return new GroundingWorkerExecution(
+    prepareExecution(request, owners, geometries, rebuilt),
+  );
 }
 
 type ResultResponse = Extract<GrassGroundingWorkerResponse, { type: "result" }>;
