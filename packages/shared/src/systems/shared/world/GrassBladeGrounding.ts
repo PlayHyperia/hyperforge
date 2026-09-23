@@ -1106,6 +1106,11 @@ export function* groundGrassBladeSteps(
   const left: Point = { x: 0, y: 0, z: 0 },
     right: Point = { x: 0, y: 0, z: 0 },
     point: Point = { x: 0, y: 0, z: 0 };
+  // Reuse the endpoint transforms already required for terrain fitting. These
+  // fixed, clump-local buffers preserve doubles and signed zero; they are not
+  // a geometry snapshot. Borrowed root coordinates must still match at use.
+  const fittedRootSource = new Float64Array(blades * 2 * 3),
+    fittedRootWorld = new Float64Array(blades * 2 * 3);
   try {
     for (let index = 0; index < request.roadSegments.length; index++) {
       const road = request.roadSegments[index];
@@ -1230,6 +1235,18 @@ export function* groundGrassBladeSteps(
       for (let blade = 0; blade < blades; blade++) {
         transform(blade * verticesPerBlade, 1, left);
         transform(blade * verticesPerBlade + 1, 1, right);
+        // Capture before any endpoint suspension or terrain-Y correction.
+        for (let side = 0; side < 2; side++) {
+          const v = blade * verticesPerBlade + side,
+            root = (blade * 2 + side) * 3,
+            endpoint = side === 0 ? left : right;
+          fittedRootSource[root] = position.getX(v);
+          fittedRootSource[root + 1] = position.getY(v);
+          fittedRootSource[root + 2] = position.getZ(v);
+          fittedRootWorld[root] = endpoint.x;
+          fittedRootWorld[root + 1] = endpoint.y;
+          fittedRootWorld[root + 2] = endpoint.z;
+        }
         let deltaLeft = 0,
           deltaRight = 0;
         // Keep endpoint order, suspension points and charges in this existing
@@ -1309,19 +1326,21 @@ export function* groundGrassBladeSteps(
         // expression. A zero-height vertex has identical fade endpoints, so
         // evaluate its one distinct point once rather than charging/computing
         // duplicate transforms and idempotent extrema. This does not omit any
-        // actual swept vertex or cache geometry across a yielded slice.
+        // actual swept vertex. Root transforms can also be reused below, but
+        // only after checking their borrowed coordinates across suspension.
         if (v % verticesPerBlade === 0) yield "blade_swept_bounds";
         const blade = Math.floor(v / verticesPerBlade),
           d = (i * blades + blade) * 2;
-        // Cache only within this uninterrupted vertex. Nothing crosses the
-        // next blade suspension; borrowed attributes are reread on resumption.
+        // Reread borrowed attributes and wind on resumption. Root correction
+        // and wind remain live even when the unchanged root transform is reused.
         const u = uv.getX(v),
           px = position.getX(v),
+          py = position.getY(v),
           pz = position.getZ(v);
         const correction = deltas[d] * (1 - u) + deltas[d + 1] * u;
         const windFactor = getGrassBladeWindFactor(
           uv.getY(v),
-          position.getY(v),
+          py,
           scale,
           geometryLayout,
         );
@@ -1329,10 +1348,24 @@ export function* groundGrassBladeSteps(
           windZ = wind.z * bankHeightScale * windFactor;
         const rx = (px * cos - pz * sin) * scale,
           rz = (px * sin + pz * cos) * scale,
-          scaledY = position.getY(v) * bankHeightScale * scale;
+          scaledY = py * bankHeightScale * scale;
+        const localVertex = v % verticesPerBlade,
+          root = (blade * 2 + localVertex) * 3,
+          reuseRoot =
+            localVertex < 2 &&
+            scaledY === 0 &&
+            Object.is(px, fittedRootSource[root]) &&
+            Object.is(py, fittedRootSource[root + 1]) &&
+            Object.is(pz, fittedRootSource[root + 2]);
         for (let fade = 0; fade < (scaledY === 0 ? 1 : 2); fade++) {
-          take();
-          applyTransform(rx, scaledY * fade, rz, point);
+          if (reuseRoot) {
+            point.x = fittedRootWorld[root];
+            point.y = fittedRootWorld[root + 1];
+            point.z = fittedRootWorld[root + 2];
+          } else {
+            take();
+            applyTransform(rx, scaledY * fade, rz, point);
+          }
           box.minX = Math.min(box.minX, point.x - windX - NUMERIC_GUARD);
           box.maxX = Math.max(box.maxX, point.x + windX + NUMERIC_GUARD);
           box.minZ = Math.min(box.minZ, point.z - windZ - NUMERIC_GUARD);

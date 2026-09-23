@@ -385,8 +385,10 @@ type AllocationBaseline = {
 
 /** Captured before allocation-only changes from f50b8d985 under Node/V8.
  * Ordered phase hashes include every yield, not merely a phase census. All
- * charges and shortcut counts remain exact; semantic bytes retain NATIVE25's
- * independent goldens above. No wall-clock value enters either expectation. */
+ * historical charges remain frozen here. Current expectations deduct only the
+ * independently counted reused root transforms; shortcut counts, phase traces
+ * and NATIVE25 semantic bytes stay exact. No wall-clock value enters either
+ * expectation. */
 const F50_ALLOCATION_BASELINE: Record<
   AllocationBaselineCase,
   AllocationBaseline
@@ -566,7 +568,7 @@ const F50_ALLOCATION_BASELINE: Record<
 
 describe("allocation-only grounding continuation contract", () => {
   it.each(ALLOCATION_BASELINE_CASES)(
-    "preserves frozen f50 phase trace, charges and semantic bytes: %s",
+    "preserves frozen f50 trace and semantic bytes with exact root-transform savings: %s",
     (id) => {
       const fixture = createSameFaceCase(id);
       try {
@@ -593,7 +595,27 @@ describe("allocation-only grounding continuation contract", () => {
           sameFaceEdges: result.receipt.sameFaceEdges,
           refinedSameFaceEdges: result.receipt.refinedSameFaceEdges,
         };
-        expect(actual).toEqual(F50_ALLOCATION_BASELINE[id]);
+        const blades = getGrassBladeLayout(
+          fixture.request.lod,
+          fixture.request.geometryLayout,
+        ).bladesPerClump;
+        const sweptBladePhases = trace.filter(
+          (phase) => phase === "blade_swept_bounds",
+        ).length;
+        // Every observed envelope here completes its sweep; overlapping owners
+        // defer during coverage before processedClumps increments. Missing
+        // support/one-unit budget cases stop before any swept blade instead.
+        const completedEnvelopes = sweptBladePhases / blades;
+        expect(Number.isInteger(completedEnvelopes)).toBe(true);
+        expect(completedEnvelopes).toBe(
+          result.receipt.processedClumps + Number(id === "overlapping-owners"),
+        );
+        expect(actual).toEqual({
+          ...F50_ALLOCATION_BASELINE[id],
+          workUnits:
+            F50_ALLOCATION_BASELINE[id].workUnits -
+            completedEnvelopes * blades * 2,
+        });
         expect(trace.length + 1).toBe(operations);
         expect(sameFaceHash(result)).toBe(NATIVE25[id].hash);
         expect(sameFaceInputHash(fixture)).toBe(before);
@@ -984,8 +1006,9 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             if (position.getY(vertex) === 0) zeroHeightVertices++;
           // The overlapping-owner fixture defers after its first complete
           // envelope but before processedClumps is incremented. Preserve all
-          // historical charges except zero-height fade work and the new
-          // coverage proof. The reversed two-owner case skips one pair per
+          // historical charges except duplicate zero-height fade work, two
+          // reused root transforms per blade, and the new coverage proof.
+          // The reversed two-owner case skips one pair per
           // envelope after one proof. The three-owner overlapping case checks
           // the touching pair, then finds the overlap on its second proof pair
           // and deliberately keeps the original rejection path.
@@ -998,9 +1021,12 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             trace.filter((phase) => phase === "coverage_owner_pair"),
           ).toHaveLength(proofPairs);
           const skippedOverlapChecks = fixtureIndex === 2 ? envelopes : 0;
+          const reusedRootsPerEnvelope =
+            getGrassBladeLayout(item.request.lod, item.request.geometryLayout)
+              .bladesPerClump * 2;
           expect(serial.result.receipt.workUnits).toBe(
             reference.receipt.workUnits -
-              zeroHeightVertices * envelopes +
+              (zeroHeightVertices + reusedRootsPerEnvelope) * envelopes +
               proofPairs -
               skippedOverlapChecks,
           );
@@ -1088,7 +1114,7 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
   );
 
   it.each(["refined-skinny-neighbor", "indexed-refined-only"] as const)(
-    "keeps exact indexed fallback work except duplicate zero-height fades for %s",
+    "keeps exact indexed fallback work except duplicate fades and reused root transforms for %s",
     (id) => {
       const fixture = createSameFaceCase(id);
       try {
@@ -1102,9 +1128,15 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
         let zeroHeightVertices = 0;
         for (let v = 0; v < position.count; v++)
           if (position.getY(v) === 0) zeroHeightVertices++;
+        const reusedRootsPerClump =
+          getGrassBladeLayout(
+            fixture.request.lod,
+            fixture.request.geometryLayout,
+          ).bladesPerClump * 2;
         expect(result.receipt.workUnits).toBe(
           NATIVE25[id].workUnits -
-            zeroHeightVertices * result.receipt.processedClumps,
+            (zeroHeightVertices + reusedRootsPerClump) *
+              result.receipt.processedClumps,
         );
         expect(result.receipt.triangleVisits).toBe(NATIVE25[id].triangleVisits);
         expect(sameFaceHash(result)).toBe(NATIVE25[id].hash);
@@ -1123,7 +1155,7 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
     "fine-lod2",
     "fine-near4",
   ] as const)(
-    "preserves frozen signed-zero output with only the observed two-interval resumption savings: %s",
+    "preserves frozen signed-zero output with exact pair resumptions and root-transform savings: %s",
     (id) => {
       for (const zero of [0, -0])
         for (const wind of [
@@ -1166,15 +1198,22 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
             );
             expect(sameFaceInputHash(fixture)).toBe(before);
             // Each actual pair replaces one allocation, two merge and two
-            // copy resumptions with one ordering resumption; no other saving
-            // is admitted by this independent historical comparison.
+            // copy resumptions with one ordering resumption; cached roots add
+            // no resumption savings. Work charges additionally omit duplicate
+            // zero-height fades and two reused root transforms per blade.
             expect(current.operations).toBe(legacy.operations - 4 * pairOrders);
             expect(current.result.receipt.triangleVisits).toBe(
               legacy.result.receipt.triangleVisits,
             );
+            const reusedRootsPerClump =
+              getGrassBladeLayout(
+                fixture.request.lod,
+                fixture.request.geometryLayout,
+              ).bladesPerClump * 2;
             expect(current.result.receipt.workUnits).toBe(
               legacy.result.receipt.workUnits -
-                zeroHeightVertices * current.result.receipt.processedClumps,
+                (zeroHeightVertices + reusedRootsPerClump) *
+                  current.result.receipt.processedClumps,
             );
           } finally {
             fixture.dispose();
@@ -1274,7 +1313,9 @@ describe("same-face shortcut versus independent native25 grounding goldens", () 
         for (let v = 0; v < position.count; v++)
           if (position.getY(v) === 0) zeroHeightVertices++;
         expect(current.result.receipt.workUnits).toBe(
-          legacy.result.receipt.workUnits - zeroHeightVertices,
+          legacy.result.receipt.workUnits -
+            zeroHeightVertices -
+            layout.bladesPerClump * 2,
         );
       } finally {
         fixture.dispose();

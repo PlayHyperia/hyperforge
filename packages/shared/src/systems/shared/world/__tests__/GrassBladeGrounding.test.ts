@@ -33,6 +33,8 @@ import {
   COMPACT_MEADOW_APPEARANCE,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
+  FINE_GRASS_CLOSE_DETAIL,
+  FINE_GRASS_LEAF_VOLUME_LIGHTING,
   GRASS_CONFIG,
   createClumpGeometry,
 } from "../GrassVisualManager";
@@ -87,14 +89,17 @@ const sample = (): TerrainGridSample => ({
 });
 
 function analyticOwner(
-  appearance: "ordinary" | "fine" | "isolated-fine-near4" = "ordinary",
+  appearance:
+    "ordinary" | "fine" | "isolated-fine-near4" | "folded-close" = "ordinary",
 ) {
   const fine = appearance !== "ordinary";
   const geometryLayout = !fine
     ? undefined
-    : appearance === "isolated-fine-near4"
-      ? "fine-linear-sweep-near4-v1"
-      : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT;
+    : appearance === "folded-close"
+      ? "fine-folded-sheath-near5-v1"
+      : appearance === "isolated-fine-near4"
+        ? "fine-linear-sweep-near4-v1"
+        : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT;
   const config = fine
     ? createTerrainWorkerConfig(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, 16)
     : null;
@@ -132,6 +137,12 @@ function analyticOwner(
     undefined,
     undefined,
     fine ? FINE_MEADOW_APPEARANCE.id : undefined,
+    undefined,
+    appearance === "folded-close"
+      ? FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+      : undefined,
+    undefined,
+    appearance === "folded-close" ? FINE_GRASS_CLOSE_DETAIL.id : undefined,
   );
   const geometries: THREE.BufferGeometry[] = [];
   // Explicit four-layout geometry exercises the real generator/grounding seam,
@@ -308,7 +319,18 @@ function appendOriginalScalarSweep(
       2;
     const u = uv.getX(v);
     const correction = rootDeltas[d] * (1 - u) + rootDeltas[d + 1] * u;
-    const windFactor = uv.getY(v) ** 1.8;
+    const t = uv.getY(v);
+    const b = t * (2 * 0.76 + t * (0.95 - 2 * 0.76));
+    const heightFlex =
+      request.geometryLayout === "fine-folded-lancet-v1" ||
+      request.geometryLayout === "fine-folded-sheath-near5-v1";
+    // Independent policy algebra; never call the production wind/cache helper.
+    const fraction = b / 0.95;
+    const windFactor = heightFlex
+      ? Math.min(1, (scale * position.getY(v)) / (Math.max(b, 1e-5) * 0.86)) *
+        fraction *
+        fraction
+      : t ** 1.8;
     const windX = wind.x * heightScale * windFactor;
     const windZ = wind.z * heightScale * windFactor;
     const rx = (position.getX(v) * cos - position.getZ(v) * sin) * scale;
@@ -1902,6 +1924,9 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     ["isolated-fine-near4", 0],
     ["isolated-fine-near4", 1],
     ["isolated-fine-near4", 2],
+    ["folded-close", 0],
+    ["folded-close", 1],
+    ["folded-close", 2],
   ] as const)(
     "matches the exact original swept scalar expression for %s LOD%s on rotated scaled slopes",
     (appearance, lod) => {
@@ -1969,10 +1994,15 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     },
   );
 
-  it.each([0, -0])(
-    "keeps exact scalar swept bounds for signed-zero roots, rotation and wind (%s)",
-    (zero) => {
-      const f = analyticOwner("fine");
+  it.each([
+    ["fine", 0],
+    ["fine", -0],
+    ["folded-close", 0],
+    ["folded-close", -0],
+  ] as const)(
+    "keeps exact scalar swept bounds for %s signed-zero roots, rotation and wind (%s)",
+    (appearance, zero) => {
+      const f = analyticOwner(appearance);
       try {
         const surface = f.makeSurface();
         const data = f.dataAt(surface, [[0, 0, zero]]);
@@ -2015,6 +2045,176 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       }
     },
   );
+
+  it.each(["x", "y", "z", "signed-x", "signed-y", "signed-z"] as const)(
+    "falls back to original root transforms after borrowed %s changes, charging only executed transforms",
+    (change) => {
+      const f = analyticOwner("folded-close");
+      try {
+        const surface = f.makeSurface();
+        const request = f.request(surface, f.dataAt(surface, [[0, 0, 0.7]]), 0);
+        const position = request.geometry.getAttribute("position");
+        if (!(position instanceof THREE.BufferAttribute))
+          throw Error("Expected actual non-interleaved close geometry");
+        const axis = change.endsWith("x") ? 0 : change.endsWith("y") ? 1 : 2;
+        const signed = change.startsWith("signed-");
+        // Keep the first endpoint distinct from its unchanged paired root.
+        // Mutations below occur only after complete root fitting/admission.
+        if (signed) position.setComponent(0, axis, 0);
+        const baseline = drainPipeline(groundGrassBladeSteps(request));
+        if (baseline.result.status !== "ready" || !baseline.result.sweptBounds)
+          throw Error("Expected unmodified close-root fixture");
+        const version = position.version;
+        const iterator = groundGrassBladeSteps(request);
+        let changed = false;
+        const actual = drainPipeline(
+          (function* () {
+            for (;;) {
+              const step = iterator.next();
+              if (step.done) return step.value;
+              if (!changed && step.value === "blade_swept_bounds") {
+                position.setComponent(
+                  0,
+                  axis,
+                  signed ? -0 : axis === 1 ? 2 : 4,
+                );
+                // No needsUpdate: a version-only guard must not pass this test.
+                expect(position.version).toBe(version);
+                if (signed)
+                  expect(Object.is(position.getComponent(0, axis), -0)).toBe(
+                    true,
+                  );
+                changed = true;
+              }
+              yield step.value;
+            }
+          })(),
+        );
+        expect(changed).toBe(true);
+        expect(actual.trace).toEqual(baseline.trace);
+        if (actual.result.status !== "ready" || !actual.result.sweptBounds)
+          throw Error("Expected exact borrowed-root fallback");
+        const expected = emptyScalarSweepBounds();
+        appendOriginalScalarSweep(
+          request,
+          baseline.result.rootDeltas,
+          0,
+          0,
+          position.count,
+          1,
+          expected,
+        );
+        expect(actual.result.sweptBounds).toEqual(expected);
+        expect(actual.result.rootDeltas).toEqual(baseline.result.rootDeltas);
+        expect(actual.result.sourceIndices).toEqual(
+          baseline.result.sourceIndices,
+        );
+        expect(actual.result.data).toEqual(baseline.result.data);
+        // One changed zero-height root executes one old point transform; a
+        // nonzero Y now needs both fade endpoints. No charge is hidden/reset.
+        expect(actual.result.receipt.workUnits).toBe(
+          baseline.result.receipt.workUnits + (!signed && axis === 1 ? 2 : 1),
+        );
+        if (signed)
+          expect(actual.result.sweptBounds).toEqual(
+            baseline.result.sweptBounds,
+          );
+        else
+          expect(actual.result.sweptBounds).not.toEqual(
+            baseline.result.sweptBounds,
+          );
+        // This deliberately changes borrowed input after fitting to exercise
+        // the old continuation semantics, not to approve mutated root contact.
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("reuses only uncorrected root XYZ while reading UV correction and wind fresh after a yield", () => {
+    const f = analyticOwner("folded-close");
+    try {
+      const surface = f.makeSurface(
+        1,
+        0,
+        0,
+        64,
+        (x, z) => 20 + 0.02 * x * x + 0.03 * z * z + 0.001 * x * z,
+      );
+      // Keep both original/changed envelopes inside the same road-grid cell;
+      // fresh wind must not introduce unrelated broadphase work-count changes.
+      const request = f.request(surface, f.dataAt(surface, [[9, 9, 0.7]]), 0);
+      const baseline = drainPipeline(groundGrassBladeSteps(request));
+      if (baseline.result.status !== "ready" || !baseline.result.sweptBounds)
+        throw Error("Expected fitted nonlinear retained terrain");
+      const fitted = baseline.result;
+      const layout = getGrassBladeLayout(0, request.geometryLayout);
+      let blade = -1;
+      let largestDifference = 0;
+      for (let candidate = 0; candidate < layout.bladesPerClump; candidate++) {
+        const difference = Math.abs(
+          fitted.rootDeltas[candidate * 2 + 1] -
+            fitted.rootDeltas[candidate * 2],
+        );
+        if (difference > largestDifference) {
+          largestDifference = difference;
+          blade = candidate;
+        }
+      }
+      expect(largestDifference).toBeGreaterThan(1e-8);
+      const uv = request.geometry.getAttribute("uv");
+      const d = blade * 2;
+      // An observable borrowed-UV extrapolation after validation: changing only
+      // u must still affect world-Y correction despite an identical cached XYZ.
+      // It is an adversarial continuation check, not an admitted authored UV.
+      const changedU =
+        (-2 - fitted.rootDeltas[d]) /
+        (fitted.rootDeltas[d + 1] - fitted.rootDeltas[d]);
+      expect(Number.isFinite(changedU)).toBe(true);
+      const iterator = groundGrassBladeSteps(request);
+      let changed = false;
+      const actual = drainPipeline(
+        (function* () {
+          for (;;) {
+            const step = iterator.next();
+            if (step.done) return step.value;
+            if (!changed && step.value === "blade_swept_bounds") {
+              uv.setX(blade * layout.verticesPerBlade, changedU);
+              request.wind.x = 0.9;
+              request.wind.z = 0.7;
+              changed = true;
+            }
+            yield step.value;
+          }
+        })(),
+      );
+      expect(changed).toBe(true);
+      expect(actual.trace).toEqual(baseline.trace);
+      if (actual.result.status !== "ready" || !actual.result.sweptBounds)
+        throw Error("Expected fresh UV/wind with matching source roots");
+      const expected = emptyScalarSweepBounds();
+      appendOriginalScalarSweep(
+        request,
+        fitted.rootDeltas,
+        0,
+        0,
+        request.geometry.getAttribute("position").count,
+        1,
+        expected,
+      );
+      expect(actual.result.sweptBounds).toEqual(expected);
+      expect(actual.result.sweptBounds.minY).toBeLessThan(
+        fitted.sweptBounds!.minY - 1,
+      );
+      expect(actual.result.sweptBounds.maxX).toBeGreaterThan(
+        fitted.sweptBounds!.maxX,
+      );
+      expect(actual.result.rootDeltas).toEqual(fitted.rootDeltas);
+      expect(actual.result.receipt.workUnits).toBe(fitted.receipt.workUnits);
+    } finally {
+      f.close();
+    }
+  });
 
   it("rereads real position and wind after a swept-blade yield without changing phases or work", () => {
     const f = analyticOwner("fine");
