@@ -1,5 +1,40 @@
 # Hyperia graphics reference library
 
+## 2026-09-22 — Folded grass native review: partial progress, not promotion
+
+- [x] Built isolated build70 from the checkpoint: exactly three grass source
+  differences from build69; 1,093 other inputs and all configuration unchanged.
+  Eight focused harness/preflight tests passed; native capture syntax and
+  independent admission review passed.
+- [x] Native141 captured four matching native138 cameras on actual Chrome/Metal
+  WebGPU at 1280×720/DPR1, unchanged density, flowers, daylight and terrain.
+  Accepted clump counts match per cell in all four views: 75,947 / 59,416 /
+  57,061 / 79,650. Current masks are stable before/after each still; historical
+  mask bits were not retained, so equal counts do not establish mask equality.
+- [x] Actual submitted near and mid geometry/program/storage bindings passed.
+  The physical near fold is active without stacking the old cosmetic fold.
+  Far LOD and traversal transitions were not exercised.
+- [x] Root and independent visual review: clearer cross-leaf shading/volume,
+  but broad angular bends, blunt lower cutoffs, bright exposed ground and some
+  rod-like blades remain. Wider meadow improvement is modest. Keep this as an
+  opt-in intermediate candidate, not a finished or default-promoted result.
+- [x] Six-second natural wind clip saved; 60 observations, no captured GPU error
+  or device loss. Wind phase is not matched to the baseline. Full motion/contact
+  acceptance remains open; local player compatibility blocked playback review.
+- [x] Owned browser, runtime111 and temporary database cleaned up; protected
+  localhost:3333, persistent data, lock and 145 compiled outputs unchanged.
+- [ ] Improve blade silhouette/curvature and canopy-to-ground integration
+  together; lighting-only adjustments have not solved the visible defects.
+- [ ] Measure the explicit +80% near-triangle cost and qualify LOD2, traversal,
+  full motion/contact and wider gameplay before default/performance approval.
+
+Evidence: `inland-pond-integration01-UNQUALIFIED/native141/`,
+`grass-folded-native-review01.json`; service-layout
+`grass-folded-build70-01`, `grass-folded-preflight01`,
+`grass-folded-native141-01`. Source checkpoint: `7b9ee5a`.
+This is native integration evidence and limited art progress, not AAA acceptance.
+
+
 ## 2026-09-22 — Folded grass source checkpoint; native qualification still open
 
 - [x] Added an explicit near-only folded-lancet geometry study to the existing
