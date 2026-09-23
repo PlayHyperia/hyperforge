@@ -598,7 +598,7 @@ function createMeadowSprigGeometry(height: number): THREE.BufferGeometry {
       const length =
         height * scale * 0.068 * (1 + 0.025 * Math.sin(variation * 2.3));
       const width =
-        height * scale * 0.031 * (1 + 0.025 * Math.cos(variation * 1.7));
+        height * scale * 0.041 * (1 + 0.025 * Math.cos(variation * 1.7));
       lamina(
         rootId,
         [0.18, 0.46, 0.73, 0.93],

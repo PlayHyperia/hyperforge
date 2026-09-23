@@ -1,5 +1,15 @@
 # Hyperia graphics reference library
 
+## 2026-09-23 — Flower readability trial implemented; native comparison pending
+
+- [x] Broadened only the explicit two-head meadow sprig's petal-width ratio from **0.031 to 0.041**, retaining length0.068, the existing353 vertices/586 triangles, ten welded petal hinges, original single-head buffers, material and placement policy. This is an opt-in source trial, not a playable/default promotion.
+- [x] **99 geometry tests and160 shared integration tests pass.** Actual Float32 checks at six representative heights, including0.12/0.8 limits and0.75 game height, retain original static bounds, head spacing, finite normals, topology, attachment metadata, complete placement matrices and clearance/rejection decisions. Convex-sector and disjoint-height-slab checks establish static petal separation, not wind-deformed collision freedom.
+- [x] Reverting only the width to0.031 produces the six expected regression failures;0.041 is restored. Final no-emit check: **767 roots /2,571 source files /zero diagnostics**, stable source pins; scoped lint passes. The first type run observed a concurrent test edit and rejected its unstable pins; it was not accepted as evidence.
+- [ ] Fresh build80/runtime122/native165 must compare against retained native164 at the same cameras, lighting, textures, full population and native WebGPU quality. Preserve exact-zero terrain sampling, uniform single-map shadows and strict full terrain-shader qualification. Broader petal coverage can increase raster/shadow work despite unchanged triangle counts; no cost or visual improvement is assumed.
+- [ ] Future-only compact capture receipts are being qualified to eliminate repeated placement-array serialization without dropping comparison data. Historical captures remain immutable. Actual flower appearance, motion, broader grass/world art and sustained performance remain open.
+
+References: [official Three flower-scatter source](https://github.com/mrdoob/three.js/blob/dev/examples/webgl_instancing_scatter.html) for shared instancing and blossom variation; Grassworks remains a visual reference, not copied proprietary code. Evidence: service-layout `flower-width-geometry02`, `flower-width-integration01`, `flower-width-regression-red01`, `flower-width-types02`, and `flower-width-lint02`.
+
 ## 2026-09-23 — Uniform shadow full-world strict gate passed; art acceptance remains open
 
 - [x] Source checkpoint `5c478bb89dd6cd4834a7579039e43451ad10e9d5` is pushed as dreaminglucid. Build79 verifies **1,097 compiled inputs: five changed existing inputs, one added helper, 1,091 unchanged**, unchanged grass configuration and all **145 protected artifacts**.

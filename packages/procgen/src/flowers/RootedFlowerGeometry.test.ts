@@ -445,6 +445,222 @@ describe("opt-in two-headed meadow sprig geometry", () => {
         expect(sprig.boundingSphere!.radius).toBeLessThan(height);
       });
 
+      it("widens only the sprig's .031h lateral petals to .041h without changing its actual bounds", () => {
+        const geometry = createSprig(height),
+          position = geometry.getAttribute("position"),
+          metadata = geometry.getAttribute("flowerHeight"),
+          petal = geometry.getAttribute("flowerPetal");
+        const original = geometry.clone();
+        owned.push(original);
+        const originalPosition = original.getAttribute("position");
+        let changed = 0;
+        // Independent, local lamina oracle only: the existing support, index,
+        // welded-head, original-variant and normal tests remain authoritative.
+        for (let head = 0; head < 2; head++) {
+          const scale = head === 0 ? 1 : 0.9;
+          const center =
+            head === 0
+              ? [
+                  height * (0.02 + 0.023 * Math.sin(Math.PI)),
+                  height * (-0.015 + 0.011 * Math.sin(Math.PI * 2)),
+                ]
+              : [height * 0.012, height * 0.095];
+          const top = head === 0 ? height : height * 0.835;
+          for (let lobe = 0; lobe < 5; lobe++) {
+            const variation = head * 5 + lobe;
+            const angle =
+              (head === 0 ? 0 : Math.PI / 4) + (lobe / 5) * Math.PI * 2;
+            const rx = Math.cos(angle),
+              rz = Math.sin(angle);
+            const hinge = [
+              center[0] + rx * 0.022 * height * scale,
+              top - height * 0.015 * scale,
+              center[1] + rz * 0.022 * height * scale,
+            ];
+            const sample = (t: number, across: number, widthRatio: number) => {
+              const arch = Math.sin(Math.PI * t);
+              const length =
+                height *
+                scale *
+                0.068 *
+                (1 + 0.025 * Math.sin(variation * 2.3));
+              const width =
+                height *
+                scale *
+                widthRatio *
+                (1 + 0.025 * Math.cos(variation * 1.7));
+              const lateral = across * width * arch ** 0.48 * (0.68 + 0.32 * t);
+              const radial =
+                length * t - height * scale * 0.003 * across * across * arch;
+              const cup = height * scale * 0.01 * arch * across * across;
+              return [
+                hinge[0] + rx * radial - rz * lateral,
+                hinge[1] +
+                  height * scale * (-0.012 * arch - 0.002 * t + 0.006 * t * t) +
+                  cup,
+                hinge[2] + rz * radial + rx * lateral,
+              ].map(Math.fround);
+            };
+            for (let local = 0; local < 21; local++) {
+              const vertex = 123 + variation * 21 + local;
+              const t =
+                local === 20
+                  ? 1
+                  : [0.18, 0.46, 0.73, 0.93][Math.floor(local / 5)];
+              const across =
+                local === 20 ? 0 : [-1, -0.5, 0, 0.5, 1][local % 5];
+              const expected = sample(t, across, 0.041);
+              const previous = sample(t, across, 0.031);
+              expect(point(position, vertex).toArray()).toEqual(expected);
+              expect(expected[1]).toBe(previous[1]);
+              expect(metadata.getX(vertex)).toBe(previous[1]);
+              expect(point(petal, vertex).toArray()).toEqual(
+                hinge.map(Math.fround),
+              );
+              expect(petal.getW(vertex)).toBe(Math.fround(t * t));
+              if (across === 0) expect(expected).toEqual(previous);
+              else {
+                expect(expected).not.toEqual(previous);
+                changed++;
+              }
+              originalPosition.setXYZ(
+                vertex,
+                previous[0],
+                previous[1],
+                previous[2],
+              );
+            }
+          }
+        }
+        expect(changed).toBe(160);
+        original.computeBoundingBox();
+        original.computeBoundingSphere();
+        expect(geometry.boundingBox).toEqual(original.boundingBox);
+        expect(geometry.boundingSphere).toEqual(original.boundingSphere);
+      });
+
+      it("keeps all rotated flutter hinges bounded and adjacent petals in disjoint convex sectors", () => {
+        const geometry = createSprig(height),
+          position = geometry.getAttribute("position");
+        const petal = geometry.getAttribute("flowerPetal"),
+          index = geometry.getIndex()!;
+        const fullHeight = geometry.getAttribute("flowerHeight").getY(0);
+        const key = (id: number) => point(petal, id).toArray().join(",");
+        type PetalGroup = {
+          hinge: THREE.Vector3;
+          ids: number[];
+          triangles: number;
+        };
+        const groups = new Map<string, PetalGroup>();
+        for (let i = 0; i < position.count; i++) {
+          const hinge = point(petal, i);
+          if (hinge.lengthSq() === 0) continue;
+          const group = groups.get(key(i)) ?? { hinge, ids: [], triangles: 0 };
+          group.ids.push(i);
+          groups.set(key(i), group);
+        }
+        expect(position.count).toBe(353);
+        expect(index.count).toBe(586 * 3);
+        expect(groups.size).toBe(10);
+        for (let i = 0; i < index.count; i += 3) {
+          const ids = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+          const flexed = ids.find((id) => petal.getW(id) > 0);
+          if (flexed === undefined) continue;
+          const group = groups.get(key(flexed))!;
+          for (const id of ids) expect(key(id)).toBe(key(flexed));
+          group.triangles++;
+        }
+        const heads = new Map<number, PetalGroup[]>();
+        for (const group of groups.values()) {
+          expect(group.ids).toHaveLength(22);
+          expect(group.triangles).toBe(32);
+          const head = heads.get(group.hinge.y) ?? [];
+          head.push(group);
+          heads.set(group.hinge.y, head);
+        }
+        expect(heads.size).toBe(2);
+        const heightIntervals = [...heads.values()]
+          .map((head) => {
+            const ys = head.flatMap((group) =>
+              group.ids.map((id) => position.getY(id)),
+            );
+            return { min: Math.min(...ys), max: Math.max(...ys) };
+          })
+          .sort((a, b) => a.min - b.min);
+        // All actual petal triangle vertices, including shared hinges, lie in
+        // these disjoint slabs. Triangle interiors are convex combinations,
+        // so the two static heads' petals cannot intersect one another.
+        expect(heightIntervals[0].max).toBeLessThan(heightIntervals[1].min);
+        for (const head of heads.values()) {
+          expect(head).toHaveLength(5);
+          // Five evenly spaced actual attachment points determine the head
+          // centre, independent of the generator's authored centre formula.
+          const center = head
+            .reduce((sum, group) => sum.add(group.hinge), new THREE.Vector3())
+            .multiplyScalar(1 / 5);
+          for (const yaw of [
+            0,
+            Math.PI / 7,
+            Math.PI / 2,
+            Math.PI,
+            Math.PI * 1.75,
+          ]) {
+            const rotation = new THREE.Matrix4().makeRotationY(yaw);
+            const rotatedCenter = center.clone().applyMatrix4(rotation);
+            const sectors = head
+              .map((group) => {
+                const hinge = group.hinge.clone().applyMatrix4(rotation);
+                const direction = new THREE.Vector2(
+                  hinge.x - rotatedCenter.x,
+                  hinge.z - rotatedCenter.z,
+                ).normalize();
+                let minAngle = Infinity,
+                  maxAngle = -Infinity;
+                for (const id of group.ids) {
+                  const p = point(position, id).applyMatrix4(rotation);
+                  expect(
+                    Math.hypot(p.x - hinge.x, p.z - hinge.z),
+                  ).toBeLessThanOrEqual(0.08 * fullHeight);
+                  const offset = new THREE.Vector2(
+                    p.x - rotatedCenter.x,
+                    p.z - rotatedCenter.z,
+                  );
+                  const forward = offset.dot(direction);
+                  expect(forward).toBeGreaterThan(0);
+                  const angle = Math.atan2(
+                    direction.x * offset.y - direction.y * offset.x,
+                    forward,
+                  );
+                  minAngle = Math.min(minAngle, angle);
+                  maxAngle = Math.max(maxAngle, angle);
+                }
+                expect(
+                  Math.max(Math.abs(minAngle), Math.abs(maxAngle)),
+                ).toBeLessThan(Math.PI / 5);
+                return {
+                  axis: Math.atan2(direction.y, direction.x),
+                  minAngle,
+                  maxAngle,
+                };
+              })
+              .sort((a, b) => a.axis - b.axis);
+            for (let i = 0; i < sectors.length; i++) {
+              const current = sectors[i],
+                next = sectors[(i + 1) % sectors.length];
+              const nextAxis =
+                next.axis + (i === sectors.length - 1 ? Math.PI * 2 : 0);
+              expect(current.axis + current.maxAngle).toBeLessThan(
+                nextAxis + next.minAngle,
+              );
+            }
+            // Each projected triangle is a convex combination of vertices in
+            // one <pi wedge. Strictly separated wedges therefore prove no
+            // adjacent same-head triangle intersection, including interiors.
+            // Neither static proof claims wind-deformed collision freedom.
+          }
+        }
+      });
+
       it("uses 353 real vertices and 586 nondegenerate correctly wound triangles", () => {
         const geometry = createSprig(height),
           position = geometry.getAttribute("position");
