@@ -2,7 +2,7 @@
 
 ## 2026-09-23 — Fuller pond-margin planting with complete fishing-access coverage
 
-Current status: **build93 adds a field-only root-albedo contrast adjustment to build92's planting/soffit; fresh native187/188 complete the matched four-view comparison.** Actual submitted grass geometry, masks and accepted XZ/rotation/scale/hash placements match; the fragment shader changes only the intended root coefficient. Visual review finds a modest improvement, not a solution to wiry silhouettes or distant noise. Motion, sustained2× performance and intermittent grass-loading reliability remain open. Earlier 28-instance planting comparisons still do not qualify the later34-instance recipe.
+Current status: **checkpoint d5fd8eaf5 retains build99's opt-in low-leaf posture candidate; native198 shows a modest still-image improvement and native199 verifies bounded same-cell motion/LOD continuity.** Smaller crowns and wider leaves were rejected; shorter low-leaf reach reduces crossing bars without thinning configured grass. Close-up angular/thin-line noise, complete perceptual motion review, reverse/low-sun, genuine in-game 2×, sustained performance and intermittent grass-loading reliability remain open. The saved regular localhost game is unchanged. Earlier 28-instance planting comparisons still do not qualify the later 34-instance recipe. Historical entries retain their original outcomes; the latest results are recorded in “Low-leaf posture” and “Meadow motion.”
 
 Earlier 28-instance checkpoint (retained history):
 
@@ -263,6 +263,41 @@ This 2026-09-24 checkpoint completes the earlier pending full-world posture comp
 - [ ] Qualify the retained candidate under camera motion/LOD transitions, reverse/low-sun lighting, the actual in-game 2× setting and sustained full-density performance. Keep the saved regular game unchanged until those gates support promotion. Do not substitute another geometry guess for these checks.
 
 Evidence: inland-pond `isolated-build99-report.json`, `runtime152/process.json`, `native198/process.json` and `native198/visual-review.json`; service-layout `low-arc-world-appearance01`, `low-arc-world-types01`, `low-arc-world-grounding-summary01`, `low-arc-world-native198-review01-result.json`, `low-arc-world-native198-program-review01-result.json`, `meadow-low-arc-native198-offline02-result.json`, `low-arc-world-patch-preservation01` and `low-arc-world-postflight01`. Offline comparator validation rejects 27 deliberately invalid changes; its first fixture failed on Uint16 versus the native UInt32 index representation, preserved before correcting representation alone.
+
+### G01 local reference benchmark — prospective thresholds, no performance pass yet
+
+These local development gates are fixed before the next timing run. They are not historical results, a universal minimum-hardware specification or shipping-tier approval. Existing capture safety limits remain unchanged.
+
+Reference device: Mac17,2, Apple M5, 24 GiB, macOS 26.6.1, Chrome 153.0.8010.54, real WebGPU/ANGLE Metal, AC power and nominal thermal state. Record display refresh, browser version, foreground visibility and background CPU/memory load on every run; contaminated measurements cannot establish a clean reference-device pass.
+
+The first **same-settings 2× diagnostic lane** uses 1280×720 CSS and the ordinary game preference to obtain a verified 2560×1440 drawing buffer. Retain MSAA4, medium shadows and **postprocessing off**, matching the current meadow art settings except resolution. Do not bypass the startup-fixed streaming DPR contract. This is not the unchanged `island-fine-meadow-720p60-v1` profile and is not shipping Ultra. Normal gameplay with shipping postprocessing/bloom/depth blur, the 1920×1080 CSS → 3840×2160 cinematic lane, streaming hardware and representative agent/duel/Hyperbet co-load each remain separate unfinished qualifications.
+
+Freeze source/build/assets, cameras, phase, wind settings, resource eligibility, full density and LOD policy. Retain 58 dressing instances and 14 fishing resources. Native198's settled reference populations (clumps / chunks / flowers) are arrival **149,353 / 86 / 262**, natural close **116,993 / 63 / 215**, flower close **112,346 / 61 / 232**, landing **156,719 / 90 / 167**. Match contents/region hashes as well as counts where deterministic; travel must allow valid load/unload transitions. Natural wind and actor phases are observed, not frozen or falsely claimed identical.
+
+Protocol: three browser-cold launches in fresh owned contexts and three warm reloads; three five-minute unrecorded runs across all four poses and repeated camera/LOD travel; then one 30-minute repeated-route stability run. Browser-cold does not mean flushed OS cache. Record navigation-to-interactive and full-workload-ready separately. Do not reuse the short motion recorder or lengthen its safety limits to perform this benchmark.
+
+Prospective local pass gates:
+
+- Each warm run averages at least 59 **unique main-canvas render submissions** per second, with p95 interval ≤18.5 ms and p99 ≤25 ms. At most 0.1% of intervals exceed 33.4 ms; none exceed 50 ms during the measured interactive workload. Include travel stalls; do not select only quiet holds.
+- Complete-frame GPU timing has p95 ≤14 ms and p99 ≤16.67 ms. Missing/incomplete timestamp coverage leaves this gate unqualified. Report CPU update/render-submit spans, GPU pass intervals and end-to-end submission cadence separately; CPU/GPU work overlaps and must not be added. Render submissions, RAF callbacks, encoded frames and presentation are different observations.
+- Browser-cold full workload ready ≤45 s and warm ≤20 s. Existing harder cleanup/ownership requirements still apply; these prospective readiness targets do not relax any production job cap.
+- Zero uncaught errors, device loss, failed grounding jobs, lost return-path coverage or unbounded resource growth. After route warm-up, final five-minute lower-envelope JS heap growth ≤max(32 MiB, 5%) and owned-process RSS growth ≤max(128 MiB, 10%) relative to the initial five-minute window. Report peaks/resource counts separately; do not force GC during timing. Shared GPU-process memory is diagnostic unless ownership is demonstrated.
+
+Pin the route, workload and instrumentation before measurement; report failures honestly and profile their cause without lowering resolution, population or quality. G01 remains open until these measurements and the separate shipping/gameplay lanes have adequate evidence. Source/host inventory: service-layout `meadow-motion-host-and-two-x-source02`; its first attempt is a preserved script syntax failure before any actions.
+
+### Meadow motion — same-cell LOD continuity passes; visual polish remains open
+
+Native199 uses unchanged build99/source checkpoint `d5fd8eaf5`, with a six-second close yaw and a separate twelve-second spectator out-and-return flight. This is a bounded 1280×720 / DPR1 diagnostic, not the requested final 2× capture or a performance benchmark.
+
+- [x] Observe **1,080 natural completed renders** and 168 bounded snapshots across both clips. The tracked cell `gcell_v1_18_16` actually publishes and submits **LOD 0 → 1 → 2 → 1 → 0**, retaining 2,500 clumps; no missing, unsubmitted or out-of-frustum frames were observed for that cell. This does not prove every world cell or walking route.
+- [x] Independent audit verifies all 1,097 build inputs, 34 capture pins, actual camera/main-render-list/native-pipeline receipts, 41 terrain-clearance probes and video/still hashes. Both clips restore ownership cleanly; runtime153/browser/temporary database stop, and all 145 protected artifacts, 13 unrelated changes, saved localhost services and playable database remain intact. The already-deferred missing cow asset is the sole HTTP 404.
+- [x] Preserve actual VP9 videos: yaw **180 decoded frames**, rail **357**, both 1280×720. Maximum encoded PTS gaps are 50 ms and 68 ms respectively. Requested 30 fps, codec metadata, natural render callbacks and display presentation are different observations; no sustained performance pass follows from these short recordings.
+- [ ] Root and independent sampled-frame reviews retain continuous endpoint meadow cover but still see angular ribbons, thin high-contrast crossings and exposed patterned turf. Foreground tree-leaf screen-door fading partly obscures the first LOD transition; tree-fade quality is not qualified by this test. Lossy-video softening is not a visual improvement. Full continuous-playback smoothness and brief-transition-artifact acceptance remain open; do not mark the noisy-grass complaint solved.
+- [ ] Next: compare the ordinary game's genuine **2× preference** in an isolated owned context, then reverse/low-sun views and the separately specified full-density benchmark. Retain the opt-in candidate only; do not promote defaults or change the saved playable game.
+
+The capture helper's independent pure checks pass 22 plan checkpoints, two valid receipts and 26 rejected adversarial cases. The first failed helper-contract run is preserved; its validator gaps were corrected before GPU capture. No production source change or new geometry guess was made in this checkpoint.
+
+Evidence: inland-pond `native199/meadow-temporal.json`, `native199/meadow-yaw.webm`, `native199/meadow-rail.webm`, `native199/root-visual-review.json`, `native199/independent-visual-review.json` and `runtime153/process.json`; service-layout `meadow-motion-helper-contract02`, `meadow-low-arc-motion-native199-admission02`, `meadow-motion-native199-review01` and `meadow-motion-postflight01`.
 
 ## 2026-09-23 — Shadow-aware meadow leaf illumination
 
