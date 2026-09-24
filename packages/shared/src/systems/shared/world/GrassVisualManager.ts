@@ -91,6 +91,7 @@ import {
   usesGrassCloseDetailLods,
   FINE_GRASS_FOLDED_BLADE_INDICES,
   FINE_GRASS_HEIGHT_FLEX_RESPONSE,
+  GRASS_MEADOW_REFINEMENT,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
@@ -988,6 +989,104 @@ export function createClumpGeometry(
       writable: false,
     });
   return geo;
+}
+
+/** Build the close-detail template without changing placement or live LODs.
+ * The caller owns both returned geometries. Parent pairs index coarseGeometry
+ * globally; store them as a shared read-only storage table, not an extra
+ * per-instance vertex stream. They must be evaluated after wind/ground tilt.
+ * Fresh coarse+fine envelope fitting and explicit worker/GPU admission are
+ * required before this template may replace a rendered coarse clump.
+ */
+export function createMeadowDetailClumpGeometry(): {
+  geometry: THREE.BufferGeometry;
+  coarseGeometry: THREE.BufferGeometry;
+  coarseVertexPairs: Uint32Array;
+  layout: typeof GRASS_MEADOW_REFINEMENT;
+} {
+  const layout = GRASS_MEADOW_REFINEMENT;
+  const geometry = new THREE.BufferGeometry();
+  let coarseGeometry: THREE.BufferGeometry | undefined;
+  let dense: THREE.BufferGeometry | undefined;
+  try {
+    coarseGeometry = createClumpGeometry(
+      layout.bladesPerClump,
+      3,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    dense = createClumpGeometry(
+      layout.bladesPerClump,
+      6,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    const count = layout.bladesPerClump * layout.verticesPerBlade;
+    const positions = new Float32Array(count * 3);
+    const normals = new Float32Array(count * 3);
+    const uvs = new Float32Array(count * 2);
+    const indices = new Uint16Array(
+      layout.bladesPerClump * layout.indices.length,
+    );
+    const coarseVertexPairs = new Uint32Array(count * 2);
+    const coarseUv = coarseGeometry.getAttribute("uv");
+    for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+      const coarseBase = blade * layout.sourceVerticesPerBlade;
+      const detailBase = blade * layout.verticesPerBlade;
+      const denseBase = blade * 13;
+      for (let local = 0; local < layout.verticesPerBlade; local++) {
+        const vertex = detailBase + local;
+        const [a, b] = layout.parentPairs[local];
+        coarseVertexPairs.set([coarseBase + a, coarseBase + b], vertex * 2);
+        uvs[vertex * 2] =
+          (coarseUv.getX(coarseBase + a) + coarseUv.getX(coarseBase + b)) * 0.5;
+        uvs[vertex * 2 + 1] =
+          (coarseUv.getY(coarseBase + a) + coarseUv.getY(coarseBase + b)) * 0.5;
+        for (const [name, output] of [
+          ["position", positions],
+          ["normal", normals],
+        ] as const) {
+          if (local < layout.sourceVerticesPerBlade) {
+            const source = coarseGeometry.getAttribute(name);
+            output[vertex * 3] = source.getX(coarseBase + local);
+            output[vertex * 3 + 1] = source.getY(coarseBase + local);
+            output[vertex * 3 + 2] = source.getZ(coarseBase + local);
+          } else {
+            // The same generator evaluates original seeded parameters at the
+            // new stations. Never fit a curve to rounded coarse positions.
+            const [row, side] =
+              layout.fineSamples[local - layout.sourceVerticesPerBlade];
+            const source = dense.getAttribute(name);
+            const left = denseBase + row * 2;
+            output[vertex * 3] =
+              source.getX(left) * (1 - side) + source.getX(left + 1) * side;
+            output[vertex * 3 + 1] =
+              source.getY(left) * (1 - side) + source.getY(left + 1) * side;
+            output[vertex * 3 + 2] =
+              source.getZ(left) * (1 - side) + source.getZ(left + 1) * side;
+          }
+        }
+      }
+      for (let i = 0; i < layout.indices.length; i++)
+        indices[blade * layout.indices.length + i] =
+          detailBase + layout.indices[i];
+    }
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    Object.defineProperty(geometry.userData, "grassRootComposition", {
+      value: FINE_GRASS_MEADOW_FIELD_COMPOSITION,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+    return { geometry, coarseGeometry, coarseVertexPairs, layout };
+  } catch (error) {
+    geometry.dispose();
+    coarseGeometry?.dispose();
+    throw error;
+  } finally {
+    dense?.dispose();
+  }
 }
 
 // ---------------------------------------------------------------------------

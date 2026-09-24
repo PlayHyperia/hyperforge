@@ -151,6 +151,64 @@ const layouts = Object.freeze({
 
 export type GrassBladeLayout = ReturnType<typeof tier>;
 
+/** Conforming refinement of the retained LOD0 meadow ribbon, not another
+ * whole-cell LOD. Each original triangle is partitioned into three children.
+ * The seven original vertices stay first; shared diagonal midpoints are
+ * shared vertices, never independent copies. This template is deliberately
+ * not admitted by getGrassBladeLayout or the grounding worker yet.
+ *
+ * The coarse endpoint must average the two already-deformed parent vertices
+ * (and their varyings), not deform an averaged source vertex. In particular,
+ * the last two UV.x values are 0.25/0.75 even though the authored fine sample
+ * lies on a left/right edge. Root-height interpolation needs that distinction.
+ */
+export const GRASS_MEADOW_REFINEMENT = Object.freeze({
+  id: "meadow-longitudinal-refinement-v1",
+  sourceLayout: "fine-meadow-ribbon-v1" as const,
+  sourceLod: 0,
+  bladesPerClump: 21,
+  sourceVerticesPerBlade: 7,
+  verticesPerBlade: 15,
+  trianglesPerBlade: 15,
+  parentPairs: Object.freeze(
+    [
+      [0, 0],
+      [1, 1],
+      [2, 2],
+      [3, 3],
+      [4, 4],
+      [5, 5],
+      [6, 6],
+      [0, 2],
+      [1, 2],
+      [1, 3],
+      [2, 4],
+      [3, 4],
+      [3, 5],
+      [4, 6],
+      [5, 6],
+    ].map((pair) => Object.freeze(pair)),
+  ),
+  // Added vertices sample rows 1/3/5 of the same six-segment authored curve.
+  // The second component is geometric side, independent of grounding UV.x.
+  fineSamples: Object.freeze(
+    [
+      [1, 0],
+      [1, 0.5],
+      [1, 1],
+      [3, 0],
+      [3, 0.5],
+      [3, 1],
+      [5, 0],
+      [5, 1],
+    ].map((sample) => Object.freeze(sample)),
+  ),
+  indices: Object.freeze([
+    0, 1, 7, 1, 8, 7, 7, 8, 2, 1, 9, 8, 9, 3, 8, 3, 2, 8, 2, 3, 10, 3, 11, 10,
+    10, 11, 4, 3, 12, 11, 12, 5, 11, 5, 4, 11, 4, 5, 13, 5, 14, 13, 13, 14, 6,
+  ]),
+});
+
 export function getGrassBladeLayout(
   lod: number,
   geometryLayout?: FineGrassGeometryLayout,
