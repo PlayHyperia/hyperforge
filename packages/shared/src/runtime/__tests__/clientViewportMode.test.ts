@@ -16,6 +16,7 @@ import {
   isStreamPageRoute,
   isStreamingLikeViewport,
   resolveClientViewportRuntimeProfile,
+  resolveLocalPlayerWorldPreview,
   resolveExplicitStreamingRenderProfile,
   resolveExplicitStreamingWorldProfile,
   resolveCompactDirtProjectionCandidate,
@@ -52,6 +53,112 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit local playable world preview", () => {
+  const query =
+    "worldPreview=retained-v1&streamRenderProfile=island-fine-meadow-720p60-v1";
+  function previewWindow(
+    search = query,
+    base = "http://localhost:3333/",
+  ): Window {
+    return { location: new URL(`${base}?${search}`) } as unknown as Window;
+  }
+
+  it("does not opt in ordinary players or change broadcast admission", () => {
+    expect(resolveLocalPlayerWorldPreview()).toBe(false);
+    expect(resolveLocalPlayerWorldPreview(previewWindow(""))).toBe(false);
+    expect(() =>
+      resolveExplicitStreamingRenderProfile(
+        previewWindow("streamRenderProfile=island-fine-meadow-720p60-v1"),
+      ),
+    ).toThrow("StreamingMode route");
+  });
+
+  it("admits island art without disabling any interactive world capabilities", () => {
+    const win = previewWindow(
+      `${query}&grassAppearance=fine-meadow-v1&flowers=rooted-v1&skyAtmosphere=scattering-v1&shadowFlow=uniform-v1`,
+    );
+    expect(resolveLocalPlayerWorldPreview(win)).toBe(true);
+    expect(resolveExplicitStreamingRenderProfile(win)?.id).toBe(
+      "island-fine-meadow-720p60-v1",
+    );
+    expect(resolveGrassAppearanceCandidate(win)).toBe("fine-meadow-v1");
+    expect(resolveRootedFlowerCandidate(win)).toBe("rooted-v1");
+    expect(resolveSkyAtmosphereMode(win)).toBe("scattering-v1");
+    expect(resolveSingleMapShadowFlow(win)).toBe("uniform-v1");
+    expect(isStreamPageRoute(win)).toBe(false);
+    expect(isStreamingLikeViewport(win)).toBe(false);
+    expect(resolveClientViewportRuntimeProfile(win)).toEqual(
+      resolveClientViewportRuntimeProfile(previewWindow("")),
+    );
+    expect(resolveClientViewportRuntimeProfile(win).enableLocalPhysics).toBe(
+      true,
+    );
+    expect(shouldAdmitNetworkEntityInViewport("resource", win)).toBe(true);
+    expect(shouldAdmitNetworkEntityInViewport("npc", win)).toBe(true);
+  });
+
+  it.each([
+    "http://localhost:3334/",
+    "http://127.0.0.1:3333/",
+    "https://localhost:3333/",
+    "https://example.com/",
+    "http://localhost:3333/play",
+    "http://localhost:3333/stream.html",
+  ])("rejects preview outside the explicit local player route: %s", (base) => {
+    expect(() =>
+      resolveLocalPlayerWorldPreview(previewWindow(query, base)),
+    ).toThrow();
+  });
+
+  it.each([
+    "page=stream",
+    "page=play",
+    "mode=spectator",
+    "embedded=false",
+    "streamWorld=preparation-v1",
+    "worldPreview=retained-v1",
+    "streamRenderProfile=island-fine-meadow-720p60-v1",
+  ])("rejects conflicting or ambiguous selectors: %s", (extra) => {
+    const win = previewWindow(`${query}&${extra}`);
+    expect(() => resolveLocalPlayerWorldPreview(win)).toThrow();
+    expect(() => resolveExplicitStreamingRenderProfile(win)).toThrow();
+    expect(() => resolveClientViewportRuntimeProfile(win)).toThrow();
+  });
+
+  it.each(["", "retained-v2", "RETAINED-V1", "%20retained-v1"])(
+    "rejects malformed preview values: %s",
+    (value) => {
+      expect(() =>
+        resolveLocalPlayerWorldPreview(
+          previewWindow(
+            `worldPreview=${value}&streamRenderProfile=island-fine-meadow-720p60-v1`,
+          ),
+        ),
+      ).toThrow("worldPreview requires exactly one retained-v1");
+    },
+  );
+
+  it("rejects missing or different profiles and embedded window configuration", () => {
+    for (const profile of ["", "island-720p60-v1", "canonical-720p60-v1"]) {
+      expect(() =>
+        resolveLocalPlayerWorldPreview(
+          previewWindow(
+            `worldPreview=retained-v1&streamRenderProfile=${profile}`,
+          ),
+        ),
+      ).toThrow("fine meadow profile");
+    }
+    for (const config of [
+      { __HYPERIA_EMBEDDED__: true },
+      { __HYPERIA_CONFIG__: { mode: "spectator" } },
+    ]) {
+      expect(() =>
+        resolveLocalPlayerWorldPreview(Object.assign(previewWindow(), config)),
+      ).toThrow();
+    }
+  });
+});
 
 describe("explicit uniform single-map shadow flow", () => {
   it("keeps every existing profile unchanged without selection", () => {

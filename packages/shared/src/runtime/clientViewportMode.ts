@@ -572,11 +572,46 @@ export function resolveSkyAtmosphereMode(win?: Window): SkyAtmosphereMode {
 export type StreamingRenderProfile =
   (typeof STREAMING_RENDER_PROFILES)[StreamingRenderProfileId];
 
+/**
+ * Explicit local art preview for an ordinary playable client. This only admits
+ * the retained island selectors; it never applies broadcast preferences or
+ * turns off controls, local physics, or exploration systems.
+ */
+export function resolveLocalPlayerWorldPreview(win?: Window): boolean {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return false;
+  const params = getSearchParams(windowRef);
+  const selections = params?.getAll("worldPreview") ?? [];
+  if (!selections.length) return false;
+  if (selections.length !== 1 || selections[0] !== "retained-v1") {
+    throw new Error("worldPreview requires exactly one retained-v1 value");
+  }
+  if (
+    windowRef.location.origin !== "http://localhost:3333" ||
+    windowRef.location.pathname !== "/" ||
+    ["page", "mode", "embedded", "streamWorld"].some((key) =>
+      params?.has(key),
+    ) ||
+    windowRef.__HYPERIA_EMBEDDED__ === true ||
+    windowRef.__HYPERIA_CONFIG__?.mode === "spectator"
+  ) {
+    throw new Error(
+      "worldPreview requires the non-embedded localhost player route",
+    );
+  }
+  const profiles = params?.getAll("streamRenderProfile") ?? [];
+  if (profiles.length !== 1 || profiles[0] !== "island-fine-meadow-720p60-v1") {
+    throw new Error("worldPreview requires exactly one fine meadow profile");
+  }
+  return true;
+}
+
 export function resolveExplicitStreamingRenderProfile(
   win?: Window,
 ): StreamingRenderProfile | null {
   const windowRef = getWindowRef(win);
   if (!windowRef) return null;
+  const localPlayerPreview = resolveLocalPlayerWorldPreview(windowRef);
   const params = getSearchParams(windowRef);
   const selections = params?.getAll("streamRenderProfile") ?? [];
   if (selections.length > 1) {
@@ -594,7 +629,7 @@ export function resolveExplicitStreamingRenderProfile(
     STREAMING_RENDER_PROFILES[rawProfile as StreamingRenderProfileId];
   if (
     profile.shadows === "med" &&
-    (!isStreamPageRoute(windowRef) ||
+    ((!isStreamPageRoute(windowRef) && !localPlayerPreview) ||
       parseTruthy(params?.get("embedded")) ||
       windowRef.__HYPERIA_EMBEDDED__ === true)
   ) {
@@ -1074,6 +1109,7 @@ export interface ClientViewportRuntimeProfile {
 export function resolveClientViewportRuntimeProfile(
   win?: Window,
 ): ClientViewportRuntimeProfile {
+  resolveLocalPlayerWorldPreview(win);
   const streamingLike = isStreamingLikeViewport(win);
   const interactive = !streamingLike;
   const preparation =
