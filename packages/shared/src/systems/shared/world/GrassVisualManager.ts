@@ -360,7 +360,7 @@ export const FINE_GRASS_MEADOW_FIELD_COMPOSITION = Object.freeze({
   // middle/tall silhouette or adding plants. Refit the full swept footprint.
   heightFactors: Object.freeze([0.52, 0.84, 1] as const),
   widthFactors: Object.freeze([0.95, 1.05, 0.8] as const),
-  arcFactors: Object.freeze([1.3, 1, 0.8] as const),
+  arcFactors: Object.freeze([0.52, 1, 0.8] as const),
 } as const);
 
 export const FINE_GRASS_MEADOW_FIELD_SHAPE = Object.freeze({

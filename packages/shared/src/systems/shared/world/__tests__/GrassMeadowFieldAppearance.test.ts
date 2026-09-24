@@ -29,7 +29,9 @@ type Tier = (typeof TIERS)[number];
 // Independent literals, not expectations derived from candidate exports.
 const HEIGHTS = [0.52, 0.84, 1] as const;
 const WIDTHS = [0.95, 1.05, 0.8] as const;
-const ARCS = [1.3, 1, 0.8] as const;
+// Opt-in field posture: the low leaf keeps proportionate horizontal reach.
+// These numerical contracts do not establish final artwork or performance.
+const ARCS = [0.52, 1, 0.8] as const;
 
 function make(tier: Tier) {
   return createClumpGeometry(
@@ -153,6 +155,8 @@ describe("explicit dense meadow ribbon source geometry", () => {
       // Independent native169 source-buffer fingerprints, captured before the
       // low-layer change. These protect the other roles without rebuilding
       // expected buffers from the candidate constants or generator.
+      // Root fingerprints include positions only. Low-role normals follow
+      // the changed curve derivative, verified by the independent normal test.
       const middleTall = [
         "73880966f5374e2a93296c63879635310557ecbaa684d48358cd6d6e702b8c7b",
         "073e7da623b4c02ac79010a3babbbf9a086cefc13054f54e9ffd9cd5f441e487",
@@ -248,6 +252,15 @@ describe("explicit dense meadow ribbon source geometry", () => {
           expect(arc.length()).toBeLessThanOrEqual(
             plantHeight * 0.4 * ARCS[role] * 1.2 + 1e-7,
           );
+          if (role === 0) {
+            const authoredLeafHeight = plantHeight * 0.52;
+            const reachToHeight = arc.length() / authoredLeafHeight;
+            // Independent low-leaf target: 0.4 times shared [0.8, 1.2]
+            // variation. The allowance covers Float32 endpoint subtraction
+            // divided by the minimum authored low-leaf height (0.1976m).
+            expect(reachToHeight).toBeGreaterThanOrEqual(0.32 - 1e-6);
+            expect(reachToHeight).toBeLessThanOrEqual(0.48 + 1e-6);
+          }
           for (let row = 0; row < tier.segments; row++) {
             const vertex = first + row * 2;
             const width = vector(geometry, "position", vertex + 1).distanceTo(
