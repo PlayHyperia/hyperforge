@@ -189,6 +189,9 @@ export class Environment extends System {
 
   // Shadow stabilization - prevents flickering/swimming
   private targetLightDirection: THREE.Vector3 = new THREE.Vector3(0, -1, 0);
+  // Unit ray used only for placement; never feed normalization into the lerp.
+  // Retain the last valid ray while opposite sun/moon vectors cancel out.
+  private readonly lightPlacementDirection = new THREE.Vector3(0, -1, 0);
   private lastLightAnchor: THREE.Vector3 = new THREE.Vector3();
   private readonly compactLightAnchor = new THREE.Vector3();
   private useCompactLightAnchor = false;
@@ -713,7 +716,9 @@ export class Environment extends System {
    * an overview camera. Camera cuts therefore cannot translate the shadow volume
    * above the ground. This is not an all-world depth/texel-quality certificate.
    * CSM retains its camera anchor and internal per-cascade fitting/snapping.
-   * The existing interpolated light ray is deliberately not normalized here.
+   * Normalize only the placement ray: its length must not pull the shadow
+   * camera into the island during sun/moon interpolation. A light-only height
+   * offset would tilt surface lighting away from the sky and water direction.
    */
   private updateSunLightPosition(): void {
     if (!this.sunLight) return;
@@ -724,14 +729,18 @@ export class Environment extends System {
         : this.world.camera.position,
     );
 
-    // Position light OPPOSITE to light direction (light comes FROM this position)
-    this.sunLight.position.set(
-      this.lastLightAnchor.x - this.lightDirection.x * this.LIGHT_DISTANCE,
-      this.lastLightAnchor.y -
-        this.lightDirection.y * this.LIGHT_DISTANCE +
-        100,
-      this.lastLightAnchor.z - this.lightDirection.z * this.LIGHT_DISTANCE,
-    );
+    const rayLengthSq = this.lightDirection.lengthSq();
+    if (Number.isFinite(rayLengthSq) && rayLengthSq > 1e-12) {
+      this.lightPlacementDirection
+        .copy(this.lightDirection)
+        .multiplyScalar(1 / Math.sqrt(rayLengthSq));
+    }
+
+    // Match water's target-to-light ray except when the input has no reliable
+    // direction; that brief cancellation keeps the last valid placement above.
+    this.sunLight.position
+      .copy(this.lastLightAnchor)
+      .addScaledVector(this.lightPlacementDirection, -this.LIGHT_DISTANCE);
 
     // Target and light translate together, preserving direction and radiometry.
     this.sunLight.target.position.copy(this.lastLightAnchor);
@@ -1092,8 +1101,6 @@ export class Environment extends System {
     if (!csmConfig.enabled) {
       // Shadow quality controls occlusion, not sun/moon illumination.
       this.sunLight.name = "SunLight_NoShadows";
-      this.sunLight.position.set(100, 200, 100);
-      this.sunLight.target.position.set(0, 0, 0);
     } else if (useCSM) {
       // ---- CSM PATH ----
       this.sunLight.name = useWebGPU ? "SunLight_CSM" : "SunLight_WebGL";
@@ -1111,9 +1118,6 @@ export class Environment extends System {
       shadowCam.top = baseFrustumSize;
       shadowCam.bottom = -baseFrustumSize;
       shadowCam.updateProjectionMatrix();
-
-      this.sunLight.position.set(100, 200, 100);
-      this.sunLight.target.position.set(0, 0, 0);
 
       const customSplitCallback = (
         cascades: number,
@@ -1167,8 +1171,6 @@ export class Environment extends System {
       shadowCam.bottom = -SINGLE_SHADOW_FRUSTUM;
       shadowCam.updateProjectionMatrix();
 
-      this.sunLight.position.set(100, 200, 100);
-      this.sunLight.target.position.set(0, 0, 0);
       this.csmShadowNode = null;
       if (this.singleMapShadowFlow === "uniform-v1") {
         this.singleMapShadowNode = new UniformDirectionalShadowNode(
@@ -1184,7 +1186,7 @@ export class Environment extends System {
 
     scene.add(this.sunLight);
     scene.add(this.sunLight.target);
-    if (this.useCompactLightAnchor) this.updateSunLightPosition();
+    this.updateSunLightPosition();
     if (terrainProfileIdentity !== null) {
       this.sunLightTerrainProfileIdentity = terrainProfileIdentity;
       this.sunLightTerrainProfileOwner = this.sunLight;

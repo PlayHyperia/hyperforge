@@ -199,7 +199,7 @@ describe("directional illumination independent of shadow quality", () => {
   });
 
   it("none retains a direct sun and target without a shadow map or scene changes", async () => {
-    const { environment, scene } = await create();
+    const { environment, scene, world } = await create();
     const neighbor = new THREE.Object3D();
     scene.add(neighbor);
     const fog = new THREE.Fog(0x223344, 10, 100);
@@ -213,8 +213,10 @@ describe("directional illumination independent of shadow quality", () => {
     expect(light.shadow.mapPass).toBeNull();
     expect(light.intensity).toBe(1.8);
     expect(light.color.toArray()).toEqual([1, 1, 1]);
-    expect(light.position.toArray()).toEqual([100, 200, 100]);
-    expect(light.target.position.toArray()).toEqual([0, 0, 0]);
+    expect(light.position).toEqual(
+      world.camera.position.clone().add(new THREE.Vector3(0, 400, 0)),
+    );
+    expect(light.target.position).toEqual(world.camera.position);
     expect(scene.children).toEqual([neighbor, light, light.target]);
     expect(scene.fog).toBe(fog);
     expect(scene.environment).toBeNull();
@@ -434,7 +436,7 @@ describe("directional illumination independent of shadow quality", () => {
             environment.buildSunLight();
             environment.updateSunLightPosition();
             assert.deepEqual(environment.sunLight.target.position.toArray(), [350,335,433]);
-            assert.deepEqual(environment.sunLight.position.toArray(), [350,835,433]);
+            assert.deepEqual(environment.sunLight.position.toArray(), [350,735,433]);
             assert.equal(environment.sunLight.shadow.bias, .0002);
             assert.equal(environment.getSunLightTerrainProfileIdentity(), null);
           }
@@ -504,7 +506,7 @@ describe("directional illumination independent of shadow quality", () => {
     expect(child.stdout).toContain("UNIFORM_SHADOW_NONSCULPT_REJECTION_OK");
   });
 
-  it("keeps compact shadow matrices fixed across camera cuts without changing the existing light ray or budget", async () => {
+  it("keeps compact shadow matrices fixed across camera cuts along the intended unit ray without changing the budget", async () => {
     // Actual canonical startup admission, not a fabricated terrain/renderer.
     const { environment, world } = await create("med");
     environment.buildSunLight();
@@ -535,10 +537,15 @@ describe("directional illumination independent of shadow quality", () => {
         world.camera.position.fromArray(camera);
         environment["updateSunLightPosition"]();
         expect(light.target.position).toEqual(anchor);
-        expect(light.position.toArray()).toEqual(
-          direction.map(
-            (v, i) => anchor.getComponent(i) - 400 * v + (i === 1 ? 100 : 0),
+        const unitRay = new THREE.Vector3().fromArray(direction).normalize();
+        expect(
+          light.position.distanceTo(
+            anchor.clone().addScaledVector(unitRay, -400),
           ),
+        ).toBeLessThan(1e-10);
+        expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+          400,
+          10,
         );
         expect(environment.lightDirection.toArray()).toEqual(direction);
         // Actual Three update performed by a renderer; this test is CPU-only.
@@ -579,6 +586,88 @@ describe("directional illumination independent of shadow quality", () => {
     expect(environment.getSunLightTerrainProfileIdentity()).toBe(
       worldTerrainProfileIdentity(profile),
     );
+  });
+
+  it.each([false, true])(
+    "keeps the same illumination ray through quality rebuilds with CSM=%s",
+    async (csm) => {
+      const { environment, prefs, world } = await create();
+      vi.stubEnv("ENABLE_CSM", String(csm));
+      world.camera.position.set(354, 33.5, 324);
+      // A low sun and a non-unit interpolation state: normalize for placement,
+      // not for the next interpolation step or the water's direction input.
+      const direction = new THREE.Vector3(-0.62, -0.09, 0.31);
+      const unitRay = direction.clone().normalize();
+      environment.lightDirection.copy(direction);
+      for (const level of ["none", "low", "med", "high", "none"]) {
+        prefs.shadows = level;
+        environment.buildSunLight();
+        const light = environment.sunLight!;
+        const actualRay = light.target.position
+          .clone()
+          .sub(light.position)
+          .normalize();
+        expect(actualRay.distanceTo(unitRay)).toBeLessThan(1e-12);
+        expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+          400,
+          10,
+        );
+        expect(environment.lightDirection).toEqual(direction);
+        if (csm || level === "none") {
+          expect(light.target.position).toEqual(world.camera.position);
+        }
+      }
+    },
+  );
+
+  it("keeps a finite fixed-distance ray across zero-length sun/moon interpolation", async () => {
+    const { environment } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const scratch = environment["lightPlacementDirection"];
+    const initialTarget = light.target.position.clone();
+    let lastValid = new THREE.Vector3(0, -1, 0);
+    // Cancellation has no direction. Keep the last valid placement through it,
+    // then resume the unchanged interpolation state when it has a valid ray.
+    for (const direction of [
+      new THREE.Vector3(),
+      new THREE.Vector3(0.2, -0.03, 0.1),
+      new THREE.Vector3(1e-8, -1e-8, 0),
+      new THREE.Vector3(1e-6, 0, 0),
+      new THREE.Vector3(Number.NaN, 0, 0),
+      new THREE.Vector3(0, Number.POSITIVE_INFINITY, 0),
+      new THREE.Vector3(),
+      new THREE.Vector3(-0.001, 0.00015, -0.0005),
+      new THREE.Vector3(-0.2, 0.03, -0.1),
+    ]) {
+      environment.lightDirection.copy(direction);
+      if (
+        direction.toArray().every(Number.isFinite) &&
+        direction.lengthSq() > 1e-12
+      )
+        lastValid = direction.clone().normalize();
+      environment["updateSunLightPosition"]();
+      const actualRay = light.target.position
+        .clone()
+        .sub(light.position)
+        .normalize();
+      expect(actualRay.distanceTo(lastValid)).toBeLessThan(1e-12);
+      expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+        400,
+        10,
+      );
+      expect(light.target.position).toEqual(initialTarget);
+      expect(environment.lightDirection).toEqual(direction);
+      expect(environment["lightPlacementDirection"]).toBe(scratch);
+      light.updateMatrixWorld(true);
+      light.shadow.camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      light.shadow.camera.updateProjectionMatrix();
+      light.shadow.updateMatrices(light);
+      expect(
+        light.shadow.camera.matrixWorldInverse.elements.every(Number.isFinite),
+      ).toBe(true);
+      expect(light.shadow.matrix.elements.every(Number.isFinite)).toBe(true);
+    }
   });
 
   it("retains camera following for compact CSM and reselects fixed anchoring after a quality rebuild", async () => {
