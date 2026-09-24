@@ -269,6 +269,13 @@ function graph(root: unknown): Set<Node> {
     if (found.has(node)) return;
     if (found.size > 4096) throw new Error("Unexpected shader graph growth");
     found.add(node);
+    // Stage-owned functions still borrow the same real wind/fade nodes. Walk
+    // their construction-time bodies as well as the retained wrapper nodes.
+    const shader: unknown = Reflect.get(node, "shaderNode");
+    if (shader instanceof THREE.Node) {
+      const fn: unknown = Reflect.get(shader, "jsFunc");
+      if (typeof fn === "function" && fn.length === 0) visit(requireNode(fn()));
+    }
     for (const child of node.getChildren()) visit(child);
   };
   visit(requireNode(root));

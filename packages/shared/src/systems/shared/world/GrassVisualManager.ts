@@ -56,6 +56,12 @@ import {
 } from "./TerrainShader";
 import { MeshSSSNodeMaterial, MeshStandardNodeMaterial } from "three/webgpu";
 import { faceDirection } from "three/tsl";
+import type Node from "three/src/nodes/core/Node.js";
+import {
+  createGrassMeadowRefinementResponse,
+  type GrassMeadowRefinementSample,
+  type GrassMeadowRefinementResponse,
+} from "./GrassMeadowRefinementGpu";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
 import type {
   RetainedTerrainSurface,
@@ -1304,6 +1310,13 @@ export class GrassVisualManager implements QuadTreeListener {
   private material: MeshStandardNodeMaterial;
   private foldedMaterial: MeshStandardNodeMaterial | null = null;
   private foldedBladeNormalNode: MeshStandardNodeMaterial["normalNode"] = null;
+  private meadowDetailMaterialFactory:
+    | ((
+        geometry: THREE.BufferGeometry,
+        coarseGeometry: THREE.BufferGeometry,
+        weight: Node<"float">,
+      ) => MeshStandardNodeMaterial)
+    | null = null;
   private lodGeometries: THREE.BufferGeometry[];
 
   private frustum = new THREE.Frustum();
@@ -3240,6 +3253,7 @@ export class GrassVisualManager implements QuadTreeListener {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.meadowDetailMaterialFactory = null;
     this.pendingNodes.length = 0;
     this.settledWorkerResults.length = 0;
     this.workerInflight.clear();
@@ -3655,6 +3669,19 @@ export class GrassVisualManager implements QuadTreeListener {
       : this.material;
   }
 
+  /** Isolated detail binding; this does not publish a placement or admit its
+   * grounding. Caller owns the returned material and supplied geometry.
+   * Both borrow this owner's live uniforms and require its lifetime. */
+  createMeadowDetailMaterial(
+    geometry: THREE.BufferGeometry,
+    coarseGeometry: THREE.BufferGeometry,
+    weight: Node<"float">,
+  ): MeshStandardNodeMaterial {
+    if (this.destroyed || !this.meadowDetailMaterialFactory)
+      throw new Error("Meadow detail requires a live leaf-volume field owner");
+    return this.meadowDetailMaterialFactory(geometry, coarseGeometry, weight);
+  }
+
   private createMaterial(): MeshStandardNodeMaterial {
     const compactMeadow = this.compactMeadow;
     const appearance = this.meadowAppearance;
@@ -3914,7 +3941,6 @@ export class GrassVisualManager implements QuadTreeListener {
     ) {
       // This opt-in graph shares its fade and wind between vertex position and
       // smooth normals. Existing appearance graphs above remain unchanged.
-      const rawPosition = attribute("position", "vec3");
       const offset = attribute("instanceOffset", "vec3");
       const rsh = attribute("instanceRotScaleHash", "vec3");
       const t = uv().y;
@@ -3955,47 +3981,6 @@ export class GrassVisualManager implements QuadTreeListener {
       ).toVar("naturalGrassFade");
       const wt = time.mul(uWindSpeed);
       const heightFlex = usesGrassBladeHeightFlex(this.geometryLayout);
-      const c = appearance.BLADE_CONTROL_HEIGHT;
-      const q = appearance.BLADE_TIP_HEIGHT;
-      const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
-      const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
-      // Recover uncompressed source height; bank wear and distance fade are
-      // applied separately. The root denominator is guarded in both branches.
-      // Scaling only the wind amplitude would leave the sparse tip interval
-      // over-bent: distribute flex quadratically over actual blade height too.
-      const heightFraction = curve.div(q);
-      const flexAmplitude = rawPosition.y
-        .mul(scale)
-        .div(curve.max(1e-5).mul(uBladeHeight))
-        .min(1);
-      const bend = heightFlex
-        ? heightFraction
-            .mul(heightFraction)
-            .mul(flexAmplitude)
-            .toVar("naturalGrassHeightFlex")
-        : pow(t, float(1.8));
-      // Chunk-local offsets repeat at each chunk boundary. Key both waves to
-      // the actual world-space clump base, not to an animated blade vertex.
-      const displacement = vec3(
-        sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
-          .mul(uWindStrength)
-          .mul(bend)
-          .mul(uBladeHeight),
-        float(0),
-        sin(
-          wt
-            .mul(0.67)
-            .add(worldBase.x.mul(0.18))
-            .add(worldBase.z.mul(0.28))
-            .add(2),
-        )
-          .mul(uWindStrength)
-          .mul(0.55)
-          .mul(bend)
-          .mul(uBladeHeight),
-      )
-        .mul(bankHeightScale)
-        .toVar("naturalGrassDisplacement");
       const cosR = cos(rsh.x);
       const sinR = sin(rsh.x);
       const nx = terrainNormal.x;
@@ -4018,170 +4003,309 @@ export class GrassVisualManager implements QuadTreeListener {
             .add(z.mul(ny.add(nx.mul(nx).mul(invOnePlusNy)))),
         );
       };
-      mat.positionNode = turnToGround(
-        vec3(
-          rawPosition.x,
-          rawPosition.y.mul(fade).mul(bankHeightScale),
-          rawPosition.z,
-        ).mul(scale),
-      )
-        .add(displacement)
-        .add(offset);
+      const evaluateVertex = (
+        sample: GrassMeadowRefinementSample,
+        label = "",
+      ): GrassMeadowRefinementResponse => {
+        const rawPosition = sample.position;
+        const sourceNormal = sample.normal;
+        const t = sample.t;
+        // The retained graph keeps its original labels. Parent/fine response
+        // evaluations must not alias named vertex temporaries or varyings.
+        const named = (name: string) => (label ? name + label : name);
+        const c = appearance.BLADE_CONTROL_HEIGHT;
+        const q = appearance.BLADE_TIP_HEIGHT;
+        const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
+        const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
+        // Recover uncompressed source height; bank wear and distance fade are
+        // applied separately. The root denominator is guarded in both branches.
+        // Scaling only the wind amplitude would leave the sparse tip interval
+        // over-bent: distribute flex quadratically over actual blade height too.
+        const heightFraction = curve.div(q);
+        const flexAmplitude = rawPosition.y
+          .mul(scale)
+          .div(curve.max(1e-5).mul(uBladeHeight))
+          .min(1);
+        const bend = heightFlex
+          ? heightFraction
+              .mul(heightFraction)
+              .mul(flexAmplitude)
+              .toVar(named("naturalGrassHeightFlex"))
+          : pow(t, float(1.8));
+        // Chunk-local offsets repeat at each chunk boundary. Key both waves to
+        // the actual world-space clump base, not to an animated blade vertex.
+        const displacement = vec3(
+          sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
+            .mul(uWindStrength)
+            .mul(bend)
+            .mul(uBladeHeight),
+          float(0),
+          sin(
+            wt
+              .mul(0.67)
+              .add(worldBase.x.mul(0.18))
+              .add(worldBase.z.mul(0.28))
+              .add(2),
+          )
+            .mul(uWindStrength)
+            .mul(0.55)
+            .mul(bend)
+            .mul(uBladeHeight),
+        )
+          .mul(bankHeightScale)
+          .toVar(named("naturalGrassDisplacement"));
+        const position = turnToGround(
+          vec3(
+            rawPosition.x,
+            rawPosition.y.mul(fade).mul(bankHeightScale),
+            rawPosition.z,
+          ).mul(scale),
+        )
+          .add(displacement)
+          .add(offset);
 
-      // Cofactor of the smooth ribbon deformation, without division by fade:
-      // f*h*H + n.y*N + k*(H*dot(d,N) - N*dot(d,H)). Here H is the
-      // yaw/tilt-rotated horizontal source normal; d is actual tip displacement.
-      // The local vertical factor h also scales d; source XZ/root width stays
-      // unchanged. CPU grounding certifies this same height/wind envelope.
-      // Recover source blade height from raw y=height*B(t), not deformed y.
-      // The deformation adds no normal/height attribute, texture or pass.
-      // The selected bank color treatment shares one explicit locality varying.
-      const sourceNormal = attribute("normal", "vec3");
-      const horizontalNormal = turnToGround(
-        vec3(sourceNormal.x, float(0), sourceNormal.z),
-      ).toVar("naturalGrassHorizontalNormal");
-      // Both guarded denominators are exact on retained non-root vertices.
-      // Roots have t=B(t)=d=0, so their wind correction remains exactly zero.
-      // D is proportional to B(t)^2 for the explicit flex path. Therefore
-      // D'/D divided by the source vertical derivative is 2/(scale*rawY).
-      // The per-blade height cap is constant along the ideal blade surface;
-      // it changes amplitude, not this derivative. D remains exactly zero at
-      // the root, so its guarded finite coefficient contributes zero there.
-      const k = heightFlex
-        ? float(2).div(scale.mul(rawPosition.y.max(1e-5)))
-        : curve
-            .mul(1.8)
-            .div(
-              t
-                .max(1e-5)
-                .mul(scale)
-                .mul(rawPosition.y.max(1e-5))
-                .mul(curveDerivative),
+        // Cofactor of the smooth ribbon deformation, without division by fade:
+        // f*h*H + n.y*N + k*(H*dot(d,N) - N*dot(d,H)). Here H is the
+        // yaw/tilt-rotated horizontal source normal; d is actual tip displacement.
+        // The local vertical factor h also scales d; source XZ/root width stays
+        // unchanged. CPU grounding certifies this same height/wind envelope.
+        // Recover source blade height from raw y=height*B(t), not deformed y.
+        // The deformation adds no normal/height attribute, texture or pass.
+        // The selected bank color treatment shares one explicit locality varying.
+        // Construct the guarded normal's temporaries inside their own stack.
+        // In r186, a loose Var reached through a varying's conditional source
+        // can be appended to the fragment base stack during setup. A Fn owns
+        // these declarations before that traversal; wrapping an already-built
+        // expression would leave its Vars unowned and leak the same dead work.
+        const bladeNormal = Fn(() => {
+          const horizontalNormal = turnToGround(
+            vec3(sourceNormal.x, float(0), sourceNormal.z),
+          ).toVar(named("naturalGrassHorizontalNormal"));
+          // Both guarded denominators are exact on retained non-root vertices.
+          // Roots have t=B(t)=d=0, so their wind correction remains exactly zero.
+          // D is proportional to B(t)^2 for the explicit flex path. Therefore
+          // D'/D divided by the source vertical derivative is 2/(scale*rawY).
+          // The per-blade height cap is constant along the ideal blade surface;
+          // it changes amplitude, not this derivative. D remains exactly zero at
+          // the root, so its guarded finite coefficient contributes zero there.
+          const k = heightFlex
+            ? float(2).div(scale.mul(rawPosition.y.max(1e-5)))
+            : curve
+                .mul(1.8)
+                .div(
+                  t
+                    .max(1e-5)
+                    .mul(scale)
+                    .mul(rawPosition.y.max(1e-5))
+                    .mul(curveDerivative),
+                );
+          const deformedNormal = horizontalNormal
+            .mul(fade)
+            .mul(bankHeightScale)
+            .add(terrainNormal.mul(sourceNormal.y))
+            .add(
+              horizontalNormal
+                .mul(dot(displacement, terrainNormal))
+                .sub(terrainNormal.mul(dot(displacement, horizontalNormal)))
+                .mul(k),
+            )
+            .toVar(named("naturalGrassDeformedNormal"));
+          const normalLengthSq = dot(deformedNormal, deformedNormal);
+          // A fully distance-collapsed root has no unique ribbon normal. Use its
+          // finite terrain normal, including when both branches are evaluated.
+          return normalLengthSq
+            .greaterThan(1e-12)
+            .select(
+              deformedNormal.div(pow(normalLengthSq.max(1e-12), 0.5)),
+              terrainNormal,
             );
-      const deformedNormal = horizontalNormal
-        .mul(fade)
-        .mul(bankHeightScale)
-        .add(terrainNormal.mul(sourceNormal.y))
-        .add(
-          horizontalNormal
-            .mul(dot(displacement, terrainNormal))
-            .sub(terrainNormal.mul(dot(displacement, horizontalNormal)))
-            .mul(k),
-        )
-        .toVar("naturalGrassDeformedNormal");
-      const normalLengthSq = dot(deformedNormal, deformedNormal);
-      // A fully distance-collapsed root has no unique ribbon normal. Use its
-      // finite terrain normal, including when both branches are evaluated.
-      const bladeNormal = normalLengthSq
-        .greaterThan(1e-12)
-        .select(
-          deformedNormal.div(pow(normalLengthSq.max(1e-12), 0.5)),
-          terrainNormal,
-        )
-        .toVarying("v_curvedGrassNormal");
-      // Opposite valid vertex normals can cancel during raster interpolation,
-      // especially at full distance fade. Guard the fragment value as well as
-      // the vertices, keeping both select operands finite even at exact zero.
-      const interpolatedLengthSq = dot(bladeNormal, bladeNormal).toVar(
-        "naturalGrassInterpolatedLengthSq",
-      );
-      const fragmentBladeNormal = interpolatedLengthSq
-        .greaterThan(1e-12)
-        .select(
-          bladeNormal.div(pow(interpolatedLengthSq.max(1e-12), 0.5)),
-          terrainNormal,
-        );
-      const leafVolume =
-        this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
-      const meadowField =
-        this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT;
-      const lightingRecipe = leafVolume
-        ? meadowField
-          ? FINE_GRASS_MEADOW_FIELD_LIGHTING
-          : FINE_GRASS_LEAF_VOLUME_LIGHTING
-        : FINE_GRASS_CANOPY_NORMAL_LIGHTING;
-      let shadingBladeNormal = fragmentBladeNormal;
-      if (leafVolume) {
-        // Positive UV width is (cr,0,sr), not a frame reconstructed from the
-        // wind-deformed normal: that cross product can reverse during fade.
-        // Wind is uniform across a row. Its true width axis therefore remains
-        // yaw/ground-tilted source width; only this candidate adds a vec3 varying.
+        }, "vec3")();
         const widthAxis = turnToGround(
           vec3(sourceNormal.z, float(0), sourceNormal.x.negate()),
         );
-        const widthVarying = widthAxis
-          .div(pow(dot(widthAxis, widthAxis).max(1e-12), 0.5))
-          .toVarying("v_fineGrassWidthAxis");
-        // Interpolation can lose orthogonality; project before bending. An
-        // exactly degenerate width yields zero bend, with no NaN operand.
-        const transverse = widthVarying.sub(
-          fragmentBladeNormal.mul(dot(widthVarying, fragmentBladeNormal)),
+        const width = widthAxis.div(
+          pow(dot(widthAxis, widthAxis).max(1e-12), 0.5),
         );
-        const transverseUnit = transverse.div(
-          pow(dot(transverse, transverse).max(1e-12), 0.5),
+
+        return { position, normal: bladeNormal, width };
+      };
+      const buildSurface = (response: GrassMeadowRefinementResponse) => {
+        // Normalize each original vertex before interpolation, but never
+        // renormalize a refined midpoint at the vertex stage. The guarded
+        // fragment normalization below remains the one surface operation.
+        const bladeNormal = response.normal.toVarying("v_curvedGrassNormal");
+        // Opposite valid vertex normals can cancel during raster interpolation,
+        // especially at full distance fade. Guard the fragment value as well as
+        // the vertices, keeping both select operands finite even at exact zero.
+        const interpolatedLengthSq = dot(bladeNormal, bladeNormal).toVar(
+          "naturalGrassInterpolatedLengthSq",
         );
-        const fold = uv()
-          .x.mul(2)
-          .sub(1)
-          .mul(lightingRecipe.foldTangent)
-          .mul(
-            float(1).sub(
-              smoothstep(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTipStart, 1, t),
-            ),
-          )
-          .toVar("fineGrassTransverseFold");
-        const curved = fragmentBladeNormal.add(transverseUnit.mul(fold));
-        shadingBladeNormal = curved.div(
-          pow(dot(curved, curved).max(1e-12), 0.5),
-        );
-      }
-      const canopyNormalWeight = this.lightingCandidate
-        ? mix(
-            float(lightingRecipe.rootWeight),
-            float(lightingRecipe.upperWeight),
-            smoothstep(
-              float(lightingRecipe.rootEnd),
-              float(lightingRecipe.upperStart),
-              t,
-            ),
-          ).toVar("fineGrassCanopyNormalWeight")
-        : float(appearance.BLADE_NORMAL_WEIGHT);
-      const mixedNormal = mix(
-        terrainNormal,
-        shadingBladeNormal.mul(faceDirection),
-        canopyNormalWeight,
-      );
-      // Guard the final shading mixture too; both select operands stay finite.
-      const mixedLengthSq = dot(mixedNormal, mixedNormal);
-      mat.normalNode = cameraViewMatrix.transformDirection(
-        leafVolume
-          ? mixedLengthSq
-              .greaterThan(1e-12)
-              .select(
-                mixedNormal.div(pow(mixedLengthSq.max(1e-12), 0.5)),
-                terrainNormal,
-              )
-          : mixedNormal.normalize(),
-      );
-      if (usesGrassBladeHeightFlex(this.geometryLayout)) {
-        const physicalNormal = mix(
+        const fragmentBladeNormal = interpolatedLengthSq
+          .greaterThan(1e-12)
+          .select(
+            bladeNormal.div(pow(interpolatedLengthSq.max(1e-12), 0.5)),
+            terrainNormal,
+          );
+        const leafVolume =
+          this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
+        const meadowField =
+          this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT;
+        const lightingRecipe = leafVolume
+          ? meadowField
+            ? FINE_GRASS_MEADOW_FIELD_LIGHTING
+            : FINE_GRASS_LEAF_VOLUME_LIGHTING
+          : FINE_GRASS_CANOPY_NORMAL_LIGHTING;
+        let shadingBladeNormal = fragmentBladeNormal;
+        if (leafVolume) {
+          // Positive UV width is (cr,0,sr), not a frame reconstructed from the
+          // wind-deformed normal: that cross product can reverse during fade.
+          // Wind is uniform across a row. Its true width axis therefore remains
+          // yaw/ground-tilted source width; only this candidate adds a vec3 varying.
+          const widthVarying = response.width.toVarying("v_fineGrassWidthAxis");
+          // Interpolation can lose orthogonality; project before bending. An
+          // exactly degenerate width yields zero bend, with no NaN operand.
+          const transverse = widthVarying.sub(
+            fragmentBladeNormal.mul(dot(widthVarying, fragmentBladeNormal)),
+          );
+          const transverseUnit = transverse.div(
+            pow(dot(transverse, transverse).max(1e-12), 0.5),
+          );
+          const fold = uv()
+            .x.mul(2)
+            .sub(1)
+            .mul(lightingRecipe.foldTangent)
+            .mul(
+              float(1).sub(
+                smoothstep(FINE_GRASS_LEAF_VOLUME_LIGHTING.foldTipStart, 1, t),
+              ),
+            )
+            .toVar("fineGrassTransverseFold");
+          const curved = fragmentBladeNormal.add(transverseUnit.mul(fold));
+          shadingBladeNormal = curved.div(
+            pow(dot(curved, curved).max(1e-12), 0.5),
+          );
+        }
+        const canopyNormalWeight = this.lightingCandidate
+          ? mix(
+              float(lightingRecipe.rootWeight),
+              float(lightingRecipe.upperWeight),
+              smoothstep(
+                float(lightingRecipe.rootEnd),
+                float(lightingRecipe.upperStart),
+                t,
+              ),
+            ).toVar("fineGrassCanopyNormalWeight")
+          : float(appearance.BLADE_NORMAL_WEIGHT);
+        const mixedNormal = mix(
           terrainNormal,
-          // Folded meshes already have transverse geometry normals. Only the
-          // explicit flat-ribbon field uses the labelled shading relief.
-          (meadowField ? shadingBladeNormal : fragmentBladeNormal).mul(
-            faceDirection,
-          ),
+          shadingBladeNormal.mul(faceDirection),
           canopyNormalWeight,
         );
-        const lengthSq = dot(physicalNormal, physicalNormal);
-        this.foldedBladeNormalNode = cameraViewMatrix.transformDirection(
-          lengthSq
-            .greaterThan(1e-12)
-            .select(
-              physicalNormal.div(pow(lengthSq.max(1e-12), 0.5)),
-              terrainNormal,
-            ),
+        // Guard the final shading mixture too; both select operands stay finite.
+        const mixedLengthSq = dot(mixedNormal, mixedNormal);
+        const normal = cameraViewMatrix.transformDirection(
+          leafVolume
+            ? mixedLengthSq
+                .greaterThan(1e-12)
+                .select(
+                  mixedNormal.div(pow(mixedLengthSq.max(1e-12), 0.5)),
+                  terrainNormal,
+                )
+            : mixedNormal.normalize(),
         );
+        let foldedNormal: MeshStandardNodeMaterial["normalNode"] = null;
+        if (usesGrassBladeHeightFlex(this.geometryLayout)) {
+          const physicalNormal = mix(
+            terrainNormal,
+            // Folded meshes already have transverse geometry normals. Only the
+            // explicit flat-ribbon field uses the labelled shading relief.
+            (meadowField ? shadingBladeNormal : fragmentBladeNormal).mul(
+              faceDirection,
+            ),
+            canopyNormalWeight,
+          );
+          const lengthSq = dot(physicalNormal, physicalNormal);
+          foldedNormal = cameraViewMatrix.transformDirection(
+            lengthSq
+              .greaterThan(1e-12)
+              .select(
+                physicalNormal.div(pow(lengthSq.max(1e-12), 0.5)),
+                terrainNormal,
+              ),
+          );
+        }
+
+        return { position: response.position, normal, foldedNormal };
+      };
+      const surface = buildSurface(
+        evaluateVertex({
+          position: attribute("position", "vec3"),
+          normal: attribute("normal", "vec3"),
+          t,
+        }),
+      );
+      mat.positionNode = surface.position;
+      mat.normalNode = surface.normal;
+      if (surface.foldedNormal)
+        this.foldedBladeNormalNode = surface.foldedNormal;
+
+      if (
+        this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT &&
+        this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+      ) {
+        this.meadowDetailMaterialFactory = (
+          geometry,
+          coarseGeometry,
+          weight,
+        ) => {
+          // Borrow the selected near material's existing uniforms, albedo and
+          // SSS graph. Re-running createMaterial would orphan uniform owners.
+          const detail = this.materialForLod(0).clone();
+          try {
+            let responseIndex = 0;
+            const refined = createGrassMeadowRefinementResponse(
+              geometry,
+              coarseGeometry,
+              weight,
+              (sample) => evaluateVertex(sample, "Refined" + responseIndex++),
+            );
+            const detailSurface = buildSurface(refined);
+            detail.positionNode = detailSurface.position;
+            detail.normalNode =
+              detailSurface.foldedNormal ?? detailSurface.normal;
+            // NodeMaterial.clone JSON-copies userData, losing readonly
+            // descriptors. Restore the same production recipe receipts.
+            if (detail instanceof MeshSSSNodeMaterial)
+              publishFineGrassLighting(detail, this.geometryLayout);
+            publishFineGrassCanopyLighting(
+              detail,
+              this.lightingCandidate,
+              true,
+              this.geometryLayout,
+            );
+            if (this.habitatComposition)
+              Object.defineProperty(
+                detail.userData,
+                "compactHabitatComposition",
+                {
+                  enumerable: true,
+                  writable: false,
+                  configurable: false,
+                  value: this.habitatComposition,
+                },
+              );
+            Object.defineProperty(detail.userData, "grassMeadowRefinement", {
+              enumerable: true,
+              writable: false,
+              configurable: false,
+              value: GRASS_MEADOW_REFINEMENT,
+            });
+            return detail;
+          } catch (error) {
+            detail.dispose();
+            throw error;
+          }
+        };
       }
       // The existing per-edge root-height correction is applied afterwards by
       // GrassGroundingGpu. Its small cross-blade warp is not in this smooth N.

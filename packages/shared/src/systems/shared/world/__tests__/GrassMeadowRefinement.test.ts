@@ -1,4 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { Fn, uniform } from "three/tsl";
+import {
+  MeshSSSNodeMaterial,
+  StorageBufferAttribute,
+  WGSLNodeBuilder,
+  ConvertNode,
+} from "three/webgpu";
+import { JSDOM } from "jsdom";
+import type Node from "three/src/nodes/core/Node.js";
 import THREE from "../../../../extras/three/three";
 import {
   GRASS_MEADOW_REFINEMENT,
@@ -9,7 +18,17 @@ import {
   createClumpGeometry,
   createMeadowDetailClumpGeometry,
   FINE_GRASS_MEADOW_FIELD_SHAPE,
+  FINE_MEADOW_GRASS_VISUAL_PROFILE,
+  GrassVisualManager,
 } from "../GrassVisualManager";
+import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
+import { SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE } from "../WorldTerrainProfile";
+import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
+import {
+  GRASS_MEADOW_COARSE_POSITION_T_ATTRIBUTE,
+  GRASS_MEADOW_COARSE_NORMAL_U_ATTRIBUTE,
+  GRASS_MEADOW_PARENT_PAIRS_ATTRIBUTE,
+} from "../GrassMeadowRefinementGpu";
 
 // Actual generated buffers and CPU mathematics; not native motion, grounding,
 // material interpolation or measured GPU-cost acceptance.
@@ -64,6 +83,348 @@ function withTemplate(
     r.coarseGeometry.dispose();
   }
 }
+
+/** Real material owner with no world-placement requests. This is CPU graph
+ * ownership evidence, not a renderer, worker or gameplay substitute. */
+function materialOwner(leafVolume = true) {
+  const config = createTerrainWorkerConfig(
+    SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    16,
+  );
+  const unavailable = (): never => {
+    throw new Error("Material-only test must not request world placement");
+  };
+  return new GrassVisualManager(
+    config.TERRAIN_PROFILE_IDENTITY,
+    new THREE.Group(),
+    unavailable,
+    unavailable,
+    config.WATER_THRESHOLD,
+    unavailable,
+    unavailable,
+    unavailable,
+    {
+      terrainConfig: config,
+      seed: config.TERRAIN_PROFILE.seed,
+      biomeCenters: [],
+      biomes: {},
+      grassConfigs: {},
+      tileSize: config.TILE_SIZE,
+      getRoadSegmentsForRegion: unavailable,
+      getTerrainSurfaceForRegion: unavailable,
+    },
+    FINE_MEADOW_GRASS_VISUAL_PROFILE,
+    undefined,
+    undefined,
+    undefined,
+    "fine-meadow-v1",
+    undefined,
+    leafVolume ? "leaf-volume-v1" : undefined,
+    undefined,
+    leafVolume ? "meadow-field-v1" : undefined,
+  );
+}
+
+function containsNode(root: unknown, wanted: Node): boolean {
+  if (!(root instanceof THREE.Node))
+    throw new Error("Expected an actual material node");
+  const pending = [root];
+  const visited = new Set<Node>();
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (node === wanted) return true;
+    if (visited.has(node)) continue;
+    visited.add(node);
+    pending.push(...node.getChildren());
+  }
+  return false;
+}
+
+/** Actual r186 position/normal response flows and their stage declarations.
+ * The renderer is never initialized: no GPU/device/capability substitution.
+ * Complete production materials also sample a float fog texture, requiring a
+ * native feature query. Their full programs remain the native study's gate. */
+function materialStages(
+  geometry: THREE.BufferGeometry,
+  material: THREE.Material,
+) {
+  for (const [name, values] of [
+    ["instanceOffset", [0, 0, 0]],
+    ["instanceRotScaleHash", [0.6, 1.3, 0.4]],
+    ["instanceGroundNormal", [0.3, Math.sqrt(0.87), -0.2]],
+    ["instanceGroundColor", [0.1, 0.15, 0.04]],
+    ["instanceGrassTint", [1, 1, 1, 1]],
+  ] as const)
+    geometry.setAttribute(
+      name,
+      new THREE.InstancedBufferAttribute(
+        new Float32Array(values),
+        values.length,
+      ),
+    );
+  const mesh = createStorageInstancedMesh(geometry, material, 1);
+  const dom = new JSDOM("<canvas></canvas>");
+  const canvas = dom.window.document.querySelector("canvas");
+  if (!canvas) throw new Error("Missing real constructor canvas");
+  const renderer = new THREE.WebGPURenderer({ canvas });
+  try {
+    const builder = new WGSLNodeBuilder(mesh, renderer);
+    Reflect.set(
+      builder,
+      "camera",
+      new THREE.PerspectiveCamera(52, 1, 0.1, 100),
+    );
+    const generate: unknown = Reflect.get(builder, "flowStagesNode");
+    const declarations: unknown = Reflect.get(builder, "getUniforms");
+    if (typeof generate !== "function" || typeof declarations !== "function")
+      throw new Error("Missing actual stage flow/declarations");
+    const flow = (stage: string, field: string) => {
+      const node: unknown = Reflect.get(material, field);
+      if (!(node instanceof THREE.Node))
+        throw new Error("Missing actual material response node");
+      Reflect.set(builder, "shaderStage", stage);
+      // NodeMaterial normally supplies a stage function/block around this node.
+      // Use an actual typed Fn, not a fabricated builder context or stack.
+      const result: unknown = generate.call(
+        builder,
+        // The concrete lazy conversion accepts Material's erased Node type.
+        // Unlike eager getNodeType(), it preserves native staging and requires
+        // neither a type cast nor premature setup of nested conditional nodes.
+        Fn(() => new ConvertNode<"vec3">(node, "vec3"), "vec3")(),
+        "vec3",
+      );
+      if (
+        !result ||
+        typeof result !== "object" ||
+        !("code" in result) ||
+        !("result" in result) ||
+        typeof result.code !== "string" ||
+        typeof result.result !== "string"
+      )
+        throw new Error("Missing generated response flow");
+      return result.code + result.result;
+    };
+    const fragmentFlow = flow("fragment", "normalNode");
+    const vertexFlow = flow("vertex", "positionNode");
+    const stages: unknown = Reflect.get(builder, "flowCode");
+    if (!stages || typeof stages !== "object")
+      throw new Error("Missing automatic varying flows");
+    const varyingVertex: unknown = Reflect.get(stages, "vertex");
+    const vertexDeclarations: unknown = declarations.call(builder, "vertex");
+    const fragmentDeclarations: unknown = declarations.call(
+      builder,
+      "fragment",
+    );
+    if (
+      typeof varyingVertex !== "string" ||
+      typeof vertexDeclarations !== "string" ||
+      typeof fragmentDeclarations !== "string"
+    )
+      throw new Error("Missing actual stage strings");
+    const vertex = vertexDeclarations + varyingVertex + vertexFlow;
+    const fragment = fragmentDeclarations + fragmentFlow;
+    const uniforms: unknown = Reflect.get(builder, "uniforms");
+    if (!uniforms || typeof uniforms !== "object")
+      throw new Error("Missing stage uniforms");
+    const parentNames = [
+      GRASS_MEADOW_COARSE_POSITION_T_ATTRIBUTE,
+      GRASS_MEADOW_COARSE_NORMAL_U_ATTRIBUTE,
+      GRASS_MEADOW_PARENT_PAIRS_ATTRIBUTE,
+    ]
+      .map((name) => geometry.getAttribute(name))
+      .filter(Boolean);
+    const storageNames = (stage: string) => {
+      const rows: unknown = Reflect.get(uniforms, stage);
+      if (!Array.isArray(rows)) throw new Error("Missing uniform stage");
+      return rows.flatMap((row: unknown) => {
+        if (!row || typeof row !== "object")
+          throw new Error("Invalid native uniform row");
+        const value: unknown = Reflect.get(row, "value"),
+          name: unknown = Reflect.get(row, "name");
+        return parentNames.some((a) => a === value) && typeof name === "string"
+          ? [name]
+          : [];
+      });
+    };
+    return {
+      vertex,
+      fragment,
+      parentVertex: storageNames("vertex"),
+      parentFragment: storageNames("fragment"),
+    };
+  } finally {
+    renderer.dispose();
+    dom.window.close();
+    mesh.removeFromParent();
+    mesh.dispose();
+  }
+}
+
+describe("real meadow detail material ownership, not native GPU proof", () => {
+  it("keeps coarse and refined normal evaluation in generated vertex response flows only", () => {
+    const owner = materialOwner();
+    const template = createMeadowDetailClumpGeometry();
+    let detail: THREE.Material | undefined;
+    try {
+      const coarse = materialStages(
+        template.coarseGeometry,
+        owner["materialForLod"](0),
+      );
+      detail = owner.createMeadowDetailMaterial(
+        template.geometry,
+        template.coarseGeometry,
+        uniform(0.4),
+      );
+      const refined = materialStages(template.geometry, detail);
+      for (const generated of [coarse, refined]) {
+        expect(generated.vertex).toMatch(/naturalGrassDeformedNormal\w*\s*=/);
+        expect(generated.fragment).not.toContain("naturalGrassDeformedNormal");
+        expect(generated.fragment).not.toMatch(
+          /naturalGrass(?:Displacement|HeightFlex)\w*\s*=/,
+        );
+        expect(generated.fragment).not.toMatch(/var<storage/);
+        expect(generated.fragment).toContain("v_curvedGrassNormal");
+        expect(generated.fragment).toContain("v_fineGrassWidthAxis");
+        expect(generated.fragment).toContain(
+          "naturalGrassInterpolatedLengthSq",
+        );
+        expect(generated.parentFragment).toEqual([]);
+        expect(generated.vertex + generated.fragment).not.toMatch(
+          /undefined|NaN|Infinity/,
+        );
+      }
+      expect(coarse.parentVertex).toEqual([]);
+      expect(refined.parentVertex).toHaveLength(3);
+      for (const name of refined.parentVertex) {
+        expect(refined.vertex).toContain(`var<storage, read> ${name}`);
+        expect(refined.vertex).toContain(`${name}.value[`);
+        expect(refined.fragment).not.toContain(name);
+      }
+      expect(refined.vertex).toContain("vertexIndex");
+    } finally {
+      detail?.dispose();
+      template.geometry.dispose();
+      template.coarseGeometry.dispose();
+      owner.destroy();
+    }
+  });
+
+  it("borrows live shading and uniforms without replacing coarse graphs or sharing storage owners", () => {
+    const owner = materialOwner();
+    const first = createMeadowDetailClumpGeometry();
+    const second = createMeadowDetailClumpGeometry();
+    const base = owner["materialForLod"](0);
+    const originalPosition = base.positionNode;
+    const originalNormal = base.normalNode;
+    const originalFolded = owner["foldedBladeNormalNode"];
+    const player = owner["playerPosUniform"]!;
+    const alpha = uniform(0);
+    const details: MeshSSSNodeMaterial[] = [];
+    try {
+      for (const template of [first, second]) {
+        const detail = owner.createMeadowDetailMaterial(
+          template.geometry,
+          template.coarseGeometry,
+          alpha,
+        );
+        expect(detail).toBeInstanceOf(MeshSSSNodeMaterial);
+        if (!(detail instanceof MeshSSSNodeMaterial))
+          throw new Error("SSS required");
+        details.push(detail);
+        expect(detail).not.toBe(base);
+        expect(detail.colorNode).toBe(base.colorNode);
+        expect(detail.thicknessColorNode).toBe(
+          (base as MeshSSSNodeMaterial).thicknessColorNode,
+        );
+        expect(detail.aoNode).toBe(base.aoNode);
+        expect(detail.roughness).toBe(base.roughness);
+        expect(detail.metalness).toBe(base.metalness);
+        expect(detail.side).toBe(base.side);
+        for (const name of ["fineGrassLighting", "fineGrassCanopyLighting"]) {
+          expect(detail.userData[name]).toEqual(base.userData[name]);
+          expect(
+            Object.getOwnPropertyDescriptor(detail.userData, name),
+          ).toMatchObject({
+            writable: false,
+            configurable: false,
+          });
+        }
+        expect(detail.userData.grassMeadowRefinement).toBe(
+          GRASS_MEADOW_REFINEMENT,
+        );
+        expect(containsNode(detail.positionNode, player)).toBe(true);
+        expect(containsNode(detail.positionNode, alpha)).toBe(true);
+        expect(containsNode(detail.normalNode, alpha)).toBe(true);
+      }
+      const storage = (geometry: THREE.BufferGeometry) =>
+        Object.values(geometry.attributes).filter(
+          (attribute) => attribute instanceof StorageBufferAttribute,
+        );
+      const a = storage(first.geometry),
+        b = storage(second.geometry);
+      expect(a).toHaveLength(3);
+      expect(b).toHaveLength(3);
+      for (let i = 0; i < a.length; i++) {
+        expect(a[i]).not.toBe(b[i]);
+        expect(a[i].array.buffer).not.toBe(b[i].array.buffer);
+        expect(Array.from(a[i].array)).toEqual(Array.from(b[i].array));
+      }
+      details[0].dispose();
+      first.geometry.dispose();
+      // Disposal events do not rewrite a survivor's actual borrowed graph.
+      expect(containsNode(details[1].positionNode, player)).toBe(true);
+      expect(containsNode(details[1].normalNode, alpha)).toBe(true);
+      expect(base.positionNode).toBe(originalPosition);
+      expect(base.normalNode).toBe(originalNormal);
+      expect(owner["foldedBladeNormalNode"]).toBe(originalFolded);
+      expect(owner["playerPosUniform"]).toBe(player);
+      expect(owner["materialForLod"](0)).toBe(base);
+    } finally {
+      for (const detail of details) detail.dispose();
+      for (const template of [first, second]) {
+        template.geometry.dispose();
+        template.coarseGeometry.dispose();
+      }
+      owner.destroy();
+    }
+    withTemplate((template) => {
+      expect(() =>
+        owner.createMeadowDetailMaterial(
+          template.geometry,
+          template.coarseGeometry,
+          alpha,
+        ),
+      ).toThrow("live leaf-volume field owner");
+      expect(Object.keys(template.geometry.attributes)).toEqual([
+        "position",
+        "normal",
+        "uv",
+      ]);
+    });
+  });
+
+  it("does not admit detail material through a non-leaf owner", () => {
+    const owner = materialOwner(false);
+    try {
+      withTemplate((template) => {
+        expect(() =>
+          owner.createMeadowDetailMaterial(
+            template.geometry,
+            template.coarseGeometry,
+            uniform(1),
+          ),
+        ).toThrow("live leaf-volume field owner");
+        expect(Object.keys(template.geometry.attributes)).toEqual([
+          "position",
+          "normal",
+          "uv",
+        ]);
+      });
+    } finally {
+      owner.destroy();
+    }
+  });
+});
 
 describe("bounded meadow longitudinal refinement template", () => {
   it("keeps all actual refined triangles nondegenerate and facing their authored normals", () => {

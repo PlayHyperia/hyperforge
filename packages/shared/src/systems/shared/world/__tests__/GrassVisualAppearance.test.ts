@@ -134,7 +134,9 @@ function expand(input: unknown): Node {
   const shaderNode: unknown = Reflect.get(node, "shaderNode");
   if (shaderNode instanceof THREE.Node) {
     const jsFunc: unknown = Reflect.get(shaderNode, "jsFunc");
-    if (typeof jsFunc === "function") {
+    // Only construction-time closures are executable without a real builder.
+    // Three accessor callbacks with parameters keep their original graph.
+    if (typeof jsFunc === "function" && jsFunc.length === 0) {
       const result: unknown = jsFunc();
       if (!(result instanceof THREE.Node)) throw new Error("Expected Fn node");
       return result;
@@ -149,6 +151,11 @@ function graph(root: unknown): Set<Node> {
     if (nodes.has(node)) return;
     expect(nodes.size).toBeLessThan(4096);
     nodes.add(node);
+    // Vertex-stage ownership can place an actual Fn beneath a varying. Keep
+    // the wrapper in the graph, and inspect its real body rather than hiding
+    // dependencies merely because it is no longer the material's root node.
+    const expanded = expand(node);
+    if (expanded !== node) visit(expanded);
     for (const child of node.getChildren()) visit(child);
   };
   visit(expand(root));
