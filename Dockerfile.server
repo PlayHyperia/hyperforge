@@ -11,9 +11,11 @@
 
 # ─── Builder ────────────────────────────────────────────────────────────────
 
-FROM node:22-bookworm-slim AS node-build-tools
+FROM oven/bun:1.1.38-debian AS bun-build-tools
 
-FROM oven/bun:1.1.38-debian AS builder
+# Keep Bun pinned without inheriting its obsolete Debian Bullseye base.
+FROM node:22-bookworm-slim AS builder
+COPY --from=bun-build-tools /usr/local/bin/bun /usr/local/bin/bun
 
 RUN apt-get update && apt-get install -y \
     python3 make g++ pkg-config \
@@ -26,11 +28,6 @@ WORKDIR /app
 ENV CI=true \
     SKIP_ASSETS=true \
     HYPERIA_SKIP_BROWSER_INSTALL=true
-
-# Vite 8 requires Node 20.19+ or 22.12+. Bun 1.1.38 reports Node 22.6.0 when
-# running Vite-backed scripts, so copy in a current real Node binary for those
-# build steps while keeping Bun pinned for installs and the rest of the build.
-COPY --from=node-build-tools /usr/local/bin/node /usr/local/bin/node
 
 # Root manifests.
 COPY package.json bun.lock turbo.json tsconfig.json ./
@@ -145,7 +142,7 @@ COPY --from=builder /app/packages/client/package.json          ./packages/client
 #   3. Per-package node_modules for every workspace member used at runtime
 COPY --from=builder /app/node_modules ./node_modules
 
-RUN mkdir -p node_modules/@hyperia && \
+RUN mkdir -p node_modules/@hyperforge && \
     ln -s ../../packages/physx-js-webidl    node_modules/@hyperforge/physx-js-webidl && \
     ln -s ../../packages/decimation         node_modules/@hyperforge/decimation && \
     ln -s ../../packages/impostors          node_modules/@hyperforge/impostor && \
