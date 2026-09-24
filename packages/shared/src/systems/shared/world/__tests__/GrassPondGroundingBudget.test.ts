@@ -37,6 +37,7 @@ import {
   FINE_GRASS_FOLDED_BLADE_LIGHTING,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_MEADOW_FIELD_COMPOSITION,
+  FINE_GRASS_MEADOW_FIELD_LIGHTING,
 } from "../GrassVisualManager";
 import {
   getGrassBladeLayout,
@@ -3787,7 +3788,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
               selected.userData.fineGrassCanopyLighting,
             );
             expect(mesh.material.userData.fineGrassCanopyLighting).toEqual({
-              ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+              ...FINE_GRASS_MEADOW_FIELD_LIGHTING,
               foldTangent: Math.tan((18 * Math.PI) / 180),
               normalSource: "geometry-ribbon-relief",
               geometryLayout: "fine-meadow-ribbon-v1",
