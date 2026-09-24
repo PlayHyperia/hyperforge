@@ -272,6 +272,47 @@ export function createOpenWorkshop(
       },
     );
     for (const geometry of [...gable.roofs, ...gable.walls]) take(geometry);
+    if (pondBank && options.architecturalFinish === "haven-v1") {
+      // The closed shell has distinct, hard-normal underside faces. Route
+      // those existing triangles to timber, not an extra coincident deck or
+      // material pass. The ridge cap and every exterior triangle stay shingles.
+      const shell = gable.roofs[0];
+      const normal = shell.getAttribute("normal");
+      const exterior: number[] = [],
+        underside: number[] = [];
+      const corners = shell.index?.count ?? normal.count;
+      for (let corner = 0; corner < corners; corner += 3) {
+        const a = shell.index?.getX(corner) ?? corner,
+          b = shell.index?.getX(corner + 1) ?? corner + 1,
+          c = shell.index?.getX(corner + 2) ?? corner + 2;
+        const down = [a, b, c].map((index) => normal.getY(index) < -0.5);
+        if (down.some(Boolean) && !down.every(Boolean))
+          throw new Error("Pavilion roof contains a mixed underside face");
+        (down[0] ? underside : exterior).push(a, b, c);
+      }
+      if (underside.length !== 12 || exterior.length === 0)
+        throw new Error("Pavilion roof requires two closed deck slopes");
+      const skin = take(shell.clone()),
+        deck = take(shell.clone());
+      skin.setIndex(exterior);
+      deck.setIndex(underside);
+      const positions = deck.getAttribute("position"),
+        uv = deck.getAttribute("uv");
+      const pitchCos = Math.cos((pitchDegrees * Math.PI) / 180);
+      for (const index of underside)
+        uv.setXY(
+          index,
+          positions.getZ(index),
+          Math.abs(positions.getX(index)) / pitchCos,
+        );
+      // Assign metre-scale grain along the ridge before translating the roof.
+      // Appending after the permanent frame gives the deck the same courtRoof
+      // cutaway/pointer policy as the shell, including unfaded shadow passes.
+      gable.roofs[0] = skin;
+      gable.walls.push(deck);
+      owned.delete(shell);
+      shell.dispose();
+    }
     if (pondBank) {
       // Shift the closed roof and its trim together; supports stay on their
       // exact canonical feet. Longer exposed lakeward beams carry this eave.

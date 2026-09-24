@@ -207,7 +207,7 @@ describe("compact service court client geometry and lifecycle (not rendered acce
       1492, 1396, 1492, 1300,
     ]);
     expect(leases.map((lease) => lease.geometryBytes)).toEqual([
-      247200, 231888, 247200, 216576,
+      247200, 231936, 247200, 216576,
     ]);
     const ready = collectStreamingBankPavilionReadiness(
       world,
@@ -239,6 +239,29 @@ describe("compact service court client geometry and lifecycle (not rendered acce
     const pond = leases[1],
       town = leases[0],
       record = records[1];
+    // Real owner/material routing: the exposed deck is wood, not the exterior
+    // shingles. Its existing upper-frame mask still owns pointer cutaway.
+    const deckRay = new THREE.Raycaster(
+      new THREE.Vector3(1, 2, -4.6).applyMatrix4(pond.root.matrixWorld),
+      new THREE.Vector3(0, 1, 0).transformDirection(pond.root.matrixWorld),
+      0,
+      4,
+    );
+    deckRay.layers.enableAll();
+    const deckHit = deckRay.intersectObject(pond.root, true)[0];
+    const timberMesh = pond.root.children[0] as THREE.Mesh<
+      THREE.BufferGeometry,
+      THREE.MeshStandardNodeMaterial
+    >;
+    expect(deckHit.object).toBe(timberMesh);
+    expect(deckHit.face!.normal.y).toBeLessThan(-0.5);
+    expect(timberMesh.material.name).toBe("compact-bank-wood-plank");
+    expect(
+      timberMesh.geometry
+        .getAttribute("courtRoof")
+        .getX(deckHit.faceIndex! * 3),
+    ).toBe(1);
+    expect(pond.root.children).toHaveLength(3);
     const physical = owner["resources"][1];
     expect(physical.body!.actor).toBeTruthy();
     expect(physical.colliders).toHaveLength(3);
@@ -297,6 +320,16 @@ describe("compact service court client geometry and lifecycle (not rendered acce
       false,
     ]);
     expect(pond.cutaway.value).toBe(1);
+    expect(deckRay.intersectObject(pond.root, true)).toHaveLength(0);
+    // Cutaway hides only the pointer/render view; the actual triangle remains
+    // present for the roof policy and non-main passes.
+    const physicalDeckHits: THREE.Intersection[] = [];
+    THREE.Mesh.prototype.raycast.call(timberMesh, deckRay, physicalDeckHits);
+    expect(physicalDeckHits[0].face!.normal.y).toBeLessThan(-0.5);
+    expect(pond.cutaway.isUpperHit(physicalDeckHits[0])).toBe(true);
+    expect(pond.cutaway.valueForPass(new THREE.Camera(), camera, 41, 656)).toBe(
+      0,
+    );
     expect(world.stage.scene.children).toContain(pond.root);
     visual.destroy();
     visual.destroy();

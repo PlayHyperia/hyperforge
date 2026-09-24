@@ -306,7 +306,8 @@ const POND_BANK_PAVILION_RUNTIME_CONTRACT = Object.freeze({
   ...BANK_PAVILION_RUNTIME_CONTRACT,
   recipeId: "open-timber-pond-bank-haven-v1",
   triangles: 1396,
-  geometryBytes: 231_888,
+  // Twelve existing deck corners now carry the timber batch's cutaway scalar.
+  geometryBytes: 231_936,
 });
 
 function finiteVector(value: unknown): value is Vector3Like {

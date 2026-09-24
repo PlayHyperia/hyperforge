@@ -305,7 +305,7 @@ describe("opt-in Haven architectural geometry", () => {
     {
       recipe: "pond-bank-pavilion-v1" as const,
       triangles: 1396,
-      bytes: 231888,
+      bytes: 231936,
       minZ: -4.95,
       maxZ: 4.1,
       pitch: 22,
@@ -506,7 +506,7 @@ describe("opt-in Haven architectural geometry", () => {
           6,
         );
       }
-      const plaque = cornersOf(pond.timber, 1148 * 3, 28 * 3);
+      const plaque = cornersOf(pond.timber, 1152 * 3, 28 * 3);
       const bow = cornersOf(pond.footings, 112 * 3, 48 * 3);
       const shaft = cornersOf(pond.footings, 160 * 3, 20 * 3);
       for (const part of [plaque, bow, shaft]) {
@@ -539,10 +539,12 @@ describe("opt-in Haven architectural geometry", () => {
         else expect(p.getY(i)).toBeGreaterThan(2.5);
       }
       expect(permanent / 3).toBe(112 + 28);
-      // Shifted roof retains its closed underside and negative-Y normals.
+      // The closed roof union retains its underside in the existing timber
+      // batch, with its original negative-Y normals and physical surface.
       ray.set(new THREE.Vector3(1, 2, -4.6), new THREE.Vector3(0, 1, 0));
       ray.far = 4;
-      const underside = ray.intersectObject(group.children[1])[0];
+      const underside = ray.intersectObject(group, true)[0];
+      expect(underside.object).toBe(group.children[0]);
       expect(underside.face!.normal.y).toBeLessThan(0);
       expect(pond.roof.boundingBox!.max.y).toBeLessThan(
         town.roof.boundingBox!.max.y - 0.65,
@@ -555,6 +557,212 @@ describe("opt-in Haven architectural geometry", () => {
     }
     expect(disposals).toEqual({ timber: 1, roof: 1, footings: 1 });
   });
+
+  it.each([false, true])(
+    "routes only the four pond shell underside triangles to timber without changing the closed physical union, uneven feet=%s",
+    (uneven) => {
+      const feet = BANK_PAVILION_POSTS.map((_, i) => ({
+        bottom: -0.08 - (uneven ? i * 0.01 : 0),
+        top: 0.22 + (uneven ? i * 0.02 : 0),
+      }));
+      const candidate = createOpenWorkshop(feet, {
+        recipe: "pond-bank-pavilion-v1",
+        architecturalFinish: "haven-v1",
+      });
+      const legacy = createOpenWorkshop(feet, {
+        recipe: "pond-bank-pavilion-v1",
+      });
+      const repeated = createOpenWorkshop(feet, {
+        recipe: "pond-bank-pavilion-v1",
+        architecturalFinish: "haven-v1",
+      });
+      const reference = (architecturalFinish?: "haven-v1") => {
+        const result = createGabledRoof(8, 8, 3.2, "wood", {
+          pitchDegrees: 22,
+          openEnds: true,
+          architecturalFinish,
+        });
+        for (const g of [...result.roofs, ...result.walls]) own(g);
+        return result;
+      };
+      const before = reference(),
+        finished = reference("haven-v1");
+      const shell = finished.roofs[0];
+      const downward = (g: THREE.BufferGeometry) => {
+        const p = g.getAttribute("position"),
+          n = g.getAttribute("normal");
+        const count = g.index?.count ?? p.count;
+        return Array.from({ length: count / 3 }, (_, triangle) =>
+          [0, 1, 2].every(
+            (corner) =>
+              n.getY(
+                g.index?.getX(triangle * 3 + corner) ?? triangle * 3 + corner,
+              ) < -0.5,
+          ),
+        );
+      };
+      const undersideFlags = downward(shell);
+      const metricShell = own(shell.clone());
+      const p = metricShell.getAttribute("position"),
+        uv = metricShell.getAttribute("uv");
+      const cosine = Math.cos((22 * Math.PI) / 180);
+      // Author-space metres, BEFORE the -0.35m roof translation. This is
+      // deliberately independent of the roof's 0.3 shingle UV scaling.
+      for (let i = 0; i < p.count; i++)
+        uv.setXY(i, p.getZ(i), Math.abs(p.getX(i)) / cosine);
+      for (const g of [
+        ...before.roofs,
+        ...before.walls,
+        ...finished.roofs,
+        ...finished.walls,
+        metricShell,
+      ])
+        g.translate(0, 0, -0.35);
+      const rows = (g: THREE.BufferGeometry, names: readonly string[]) => {
+        const count = g.index?.count ?? g.getAttribute("position").count;
+        return Array.from({ length: count / 3 }, (_, triangle) =>
+          JSON.stringify(
+            [0, 1, 2].map((corner) => {
+              const index =
+                g.index?.getX(triangle * 3 + corner) ?? triangle * 3 + corner;
+              return names.flatMap((name) => {
+                const attribute = g.getAttribute(name);
+                // Independent roof parts do not have the owner's upper mask.
+                if (name === "courtRoof" && attribute === undefined) return [1];
+                if (!(attribute instanceof THREE.BufferAttribute))
+                  throw new Error(`Expected real ordinary ${name} attribute`);
+                return Array.from({ length: attribute.itemSize }, (_, c) =>
+                  attribute.getComponent(index, c),
+                );
+              });
+            }),
+          ),
+        );
+      };
+      const subtract = (whole: string[], removed: string[]) => {
+        const remaining = [...whole];
+        for (const row of removed) {
+          const index = remaining.indexOf(row);
+          expect(
+            index,
+            "exact oriented triangle must occur in its owner",
+          ).toBeGreaterThanOrEqual(0);
+          remaining.splice(index, 1);
+        }
+        return remaining;
+      };
+      const names = Object.keys(candidate.timber.attributes);
+      const physicalNames = ["position", "normal"];
+      // The only finish-dependent frame parts are GabledRoof.walls. Replace
+      // those actual legacy parts with actual Haven parts to reconstruct the
+      // former closed-shell Haven output without copying OpenWorkshop logic.
+      const previousFrame = (attributes: readonly string[]) =>
+        subtract(
+          rows(legacy.timber, attributes),
+          before.walls.flatMap((g) => rows(g, attributes)),
+        ).concat(finished.walls.flatMap((g) => rows(g, attributes)));
+      const moved = rows(metricShell, names).filter(
+        (_, i) => undersideFlags[i],
+      );
+      const movedPhysical = rows(shell, physicalNames).filter(
+        (_, i) => undersideFlags[i],
+      );
+      const disposalCounts = [0, 0, 0];
+      for (const [i, role] of (
+        ["timber", "roof", "footings"] as const
+      ).entries())
+        candidate[role].addEventListener("dispose", () => disposalCounts[i]++);
+      try {
+        expect(undersideFlags.filter(Boolean)).toHaveLength(4);
+        expect(moved).toHaveLength(4);
+        expect(movedPhysical).toHaveLength(4);
+        expect(candidate.timber.getAttribute("courtRoof").count).toBe(
+          candidate.timber.getAttribute("position").count,
+        );
+        expect(candidate.timber.index).toBeNull();
+        expect(candidate.roof.index).toBeNull();
+        expect(candidate.timber.getAttribute("position").count).toBe(
+          (1176 + 4) * 3,
+        );
+        expect(candidate.roof.getAttribute("position").count).toBe(
+          (40 - 4) * 3,
+        );
+        expect(subtract(rows(candidate.timber, names), moved).sort()).toEqual(
+          previousFrame(names).sort(),
+        );
+        const roofNames = Object.keys(candidate.roof.attributes);
+        expect(rows(candidate.roof, roofNames).sort()).toEqual(
+          [
+            ...rows(shell, roofNames).filter((_, i) => !undersideFlags[i]),
+            ...rows(finished.roofs[1], roofNames),
+          ].sort(),
+        );
+        // The ridge cap retains ALL original attributes, including its own
+        // downward faces; it is not accidentally classified with the shell.
+        const capDown = rows(finished.roofs[1], roofNames).filter(
+          (_, i) => downward(finished.roofs[1])[i],
+        );
+        expect(capDown).toHaveLength(4);
+        expect(subtract(rows(candidate.roof, roofNames), capDown)).toHaveLength(
+          32,
+        );
+        expect(
+          rows(candidate.roof, physicalNames).some((row) =>
+            movedPhysical.includes(row),
+          ),
+        ).toBe(false);
+        expect(digest(candidate.footings)).toBe(digest(legacy.footings));
+        expect(rows(legacy.roof, roofNames).sort()).toEqual(
+          before.roofs.flatMap((g) => rows(g, roofNames)).sort(),
+        );
+        const physicalBefore = [
+          ...previousFrame(physicalNames),
+          ...finished.roofs.flatMap((g) => rows(g, physicalNames)),
+          ...rows(legacy.footings, physicalNames),
+        ].sort();
+        const physicalAfter = [
+          candidate.timber,
+          candidate.roof,
+          candidate.footings,
+        ]
+          .flatMap((g) => rows(g, physicalNames))
+          .sort();
+        expect(physicalBefore).toHaveLength(1396);
+        expect(physicalAfter).toEqual(physicalBefore);
+        for (const g of finished.roofs) assertSolid(g);
+        const beforeBounds = new THREE.Box3();
+        for (const row of physicalBefore)
+          for (const values of JSON.parse(row) as number[][])
+            beforeBounds.expandByPoint(
+              new THREE.Vector3(values[0], values[1], values[2]),
+            );
+        const afterBounds = new THREE.Box3();
+        for (const role of ["timber", "roof", "footings"] as const) {
+          const g = candidate[role];
+          afterBounds.union(g.boundingBox!);
+          expect(g.groups).toEqual([]);
+          expect(g).not.toBe(repeated[role]);
+          expect(digest(g)).toBe(digest(repeated[role]));
+          for (const name of Object.keys(g.attributes))
+            expect(g.getAttribute(name).array.buffer).not.toBe(
+              repeated[role].getAttribute(name).array.buffer,
+            );
+        }
+        expect(afterBounds).toEqual(beforeBounds);
+        const independentHash = digest(repeated.timber);
+        candidate.timber.getAttribute("uv").setX(0, 123);
+        expect(digest(repeated.timber)).toBe(independentHash);
+        candidate.dispose();
+        candidate.dispose();
+        expect(disposalCounts).toEqual([1, 1, 1]);
+        expect(digest(repeated.timber)).toBe(independentHash);
+      } finally {
+        candidate.dispose();
+        legacy.dispose();
+        repeated.dispose();
+      }
+    },
+  );
 
   it("changes only the eight bank brace labels against recorded pre-change physical buffers", () => {
     // Captured from OpenWorkshop.ts SHA256
