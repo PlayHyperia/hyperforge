@@ -762,6 +762,106 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     _modelWorldMatrix: new THREE.Matrix4().toArray(),
   });
 
+  it.each([0, 1, 2])(
+    "selects the reduced root contrast only for the actual meadow-field albedo graph at LOD%i",
+    (lod) => {
+      const lanes = [
+        { owner: fine(), root: 0.98, tip: 1.2, end: 1, ambient: 0 },
+        {
+          owner: fine("canopy-normal-v1"),
+          root: 0.98,
+          tip: 1.2,
+          end: 1,
+          ambient: 0,
+        },
+        ...(
+          [
+            undefined,
+            "sheath-close-v1",
+            "rooted-fan-v1",
+            "meadow-canopy-v1",
+          ] as const
+        ).map((geometry) => ({
+          owner: fine("leaf-volume-v1", undefined, geometry),
+          root: 0.55,
+          tip: 1.12,
+          end: 0.75,
+          ambient: 0,
+        })),
+        {
+          owner: fine("leaf-volume-v1", undefined, "meadow-field-v1"),
+          root: 0.78,
+          tip: 1.12,
+          end: 0.75,
+          ambient: 0.5,
+        },
+      ];
+      try {
+        for (const { owner, root, tip, end, ambient } of lanes) {
+          const material = owner["materialForLod"](lod);
+          if (!(material instanceof MeshSSSNodeMaterial))
+            throw new Error("Expected actual fine grass SSS graph");
+          const inputs = inputsAt(owner["lodGeometries"][lod], 2);
+          for (const ground of [
+            [0.2, 0.4, 0.1],
+            [0.9, 0.95, 1],
+          ]) {
+            inputs.instanceGroundColor = ground;
+            for (const t of [0, 0.125, 0.375, 0.625, 0.75, 1]) {
+              inputs.uv[1] = t;
+              const tint = ground.map(
+                (value, channel) =>
+                  value +
+                  (inputs.instanceGrassTint[channel] - value) *
+                    inputs.instanceGrassTint[3],
+              );
+              const expected = ground.map((value, channel) =>
+                Math.min(
+                  1,
+                  value * root +
+                    (tint[channel] * tip - value * root) * smooth(0, end, t),
+                ),
+              );
+              const actual = colorValue(material.colorNode, inputs);
+              actual.forEach((value, channel) => {
+                expect(value).toBeCloseTo(expected[channel], 13);
+                expect(value).toBeGreaterThanOrEqual(0);
+                expect(value).toBeLessThanOrEqual(1);
+              });
+              // SSS remains tinted by this exact albedo: its coefficients and
+              // root gate are unchanged, rather than a separate brightness lift.
+              expect(colorValue(material.thicknessColorNode, inputs)).toEqual(
+                actual.map((value) => value * smooth(0.05, 0.65, t)),
+              );
+              expect(colorValue(material.aoNode, inputs)[0]).toBeCloseTo(
+                0.78 + 0.22 * smooth(0, 0.35, t),
+                13,
+              );
+            }
+          }
+          for (const [key, value] of [
+            ["thicknessAttenuationNode", 0.2],
+            ["thicknessScaleNode", 1],
+            ["thicknessPowerNode", 2],
+            ["thicknessDistortionNode", 0.1],
+            ["thicknessAmbientNode", ambient],
+          ] as const)
+            expect(colorValue(material[key], {})).toEqual([value]);
+          expect(material.emissive.toArray()).toEqual([0, 0, 0]);
+          expect(material.emissiveNode).toBeNull();
+          expect(material.transmission).toBe(0);
+          expect(material.transmissionNode).toBeNull();
+          expect(material.side).toBe(THREE.DoubleSide);
+          expect(material.transparent).toBe(false);
+          expect(material.roughness).toBe(1);
+          expect(material.depthWrite).toBe(true);
+        }
+      } finally {
+        lanes.forEach(({ owner }) => owner.destroy());
+      }
+    },
+  );
+
   it("bounds meadow-field fill using the installed Three SSS direct graph, not native rendering", () => {
     const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
     try {
@@ -882,6 +982,22 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       expect(material.userData.fineGrassLighting).toBe(
         FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
       );
+      expect(
+        Object.getOwnPropertyDescriptor(
+          material.userData,
+          "fineGrassCanopyLighting",
+        ),
+      ).toEqual({
+        value: FINE_GRASS_MEADOW_FIELD_LIGHTING,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+      expect(material.userData.fineGrassCanopyLighting).toBe(
+        FINE_GRASS_MEADOW_FIELD_LIGHTING,
+      );
+      expect(FINE_GRASS_MEADOW_FIELD_LIGHTING.rootBrightness).toBe(0.78);
+      expect(FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness).toBe(0.55);
       for (const [key, value] of [
         ["thicknessAttenuationNode", 0.2],
         ["thicknessScaleNode", 1],
@@ -939,6 +1055,9 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
           // rebinds the recipe's identity and immutable descriptor.
           expect(clone.userData.fineGrassLighting).toEqual(
             FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING,
+          );
+          expect(clone.userData.fineGrassCanopyLighting).toEqual(
+            FINE_GRASS_MEADOW_FIELD_LIGHTING,
           );
           for (const key of [
             "thicknessColorNode",
@@ -1958,9 +2077,14 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
     },
   );
 
-  it.each([0, 1, 2])(
-    "isolates the shorter albedo ramp from the prior full-length ramp at LOD%i, including soil and bank tips",
-    (lod) => {
+  it.each(
+    [0, 1, 2].flatMap((lod) => [
+      { lod, geometry: undefined, rootGain: 0.55 },
+      { lod, geometry: "meadow-field-v1" as const, rootGain: 0.78 },
+    ]),
+  )(
+    "isolates the authored albedo ramp at LOD$lod/$geometry, including soil and bank tips",
+    ({ lod, geometry, rootGain }) => {
       // The historical default sculpt fixture has no coastal meadow. Admit
       // the current authored descriptor through the real terrain profile path;
       // the manager must derive its bank macro field, not receive an injected one.
@@ -2000,6 +2124,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             habitat,
             "leaf-volume-v1",
             grade,
+            geometry,
           );
           try {
             expect(owner["compactMacroField"]?.coastalMeadow).toBe(true);
@@ -2073,15 +2198,17 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                 );
                 for (let channel = 0; channel < 3; channel++) {
                   // These real-color samples stay below the albedo clamp;
-                  // the exact difference therefore isolates the ramp timing,
-                  // not a different root/tip color, AO or scattering coefficient.
+                  // Retain the exact historical .55/full-length ramp oracle.
+                  // Only the field adds a root-color delta; the tip, AO and
+                  // scattering coefficients are unchanged in both lanes.
                   expect(historical[channel]).toBeGreaterThan(0);
                   expect(historical[channel]).toBeLessThan(1);
                   expect(actual[channel]).toBeGreaterThan(0);
                   expect(actual[channel]).toBeLessThan(1);
                   expect(actual[channel] - historical[channel]).toBeCloseTo(
                     (tinted[channel] * tip - rootGround[channel] * 0.55) *
-                      (blend - oldBlend),
+                      (blend - oldBlend) +
+                      rootGround[channel] * (rootGain - 0.55) * (1 - blend),
                     13,
                   );
                   if (t >= 0.75)
@@ -2113,6 +2240,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
         const geometry = owner["lodGeometries"][lod];
         expect(material.userData.fineGrassCanopyLighting).toEqual({
           ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          rootBrightness: 0.78,
           foldTangent: Math.tan(Math.PI / 10),
           normalSource: "geometry-ribbon-relief",
           geometryLayout: "fine-meadow-ribbon-v1",

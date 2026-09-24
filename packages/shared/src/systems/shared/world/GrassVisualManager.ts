@@ -440,11 +440,13 @@ const FINE_GRASS_SHEATH_BLADE_LIGHTING = Object.freeze({
   geometryLayout: FINE_GRASS_CLOSE_DETAIL.geometryLayout,
 });
 
-/** Shading-only transverse relief on the explicit meadow field. The ribbon
+/** Shading-only transverse relief and root albedo on the explicit meadow field. The ribbon
  * silhouette, surface fitting and wind envelope remain physical and unchanged;
  * this small normal bend is not leaf thickness or self-shadowing. */
 export const FINE_GRASS_MEADOW_FIELD_LIGHTING = Object.freeze({
   ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  // Reduce authored blade/ground contrast without lifting actual shadow or AO.
+  rootBrightness: 0.78,
   foldTangent: Math.tan((18 * Math.PI) / 180),
   normalSource: "geometry-ribbon-relief",
   geometryLayout: FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT,
@@ -4109,7 +4111,10 @@ export class GrassVisualManager implements QuadTreeListener {
         const leafVolume =
           this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
         const rootBrightness = leafVolume
-          ? FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
+          ? this.geometryLayout ===
+            FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+            ? FINE_GRASS_MEADOW_FIELD_LIGHTING.rootBrightness
+            : FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
           : appearance.ROOT_BRIGHTNESS;
         const tipBrightness = leafVolume
           ? FINE_GRASS_LEAF_VOLUME_LIGHTING.tipBrightness
