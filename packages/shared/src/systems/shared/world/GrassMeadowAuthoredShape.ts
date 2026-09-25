@@ -1,4 +1,4 @@
-import THREE from "../../../extras/three/three";
+import type THREE from "../../../extras/three/three";
 import { GRASS_MEADOW_REFINEMENT } from "./GrassBladeLayout";
 
 /** A separate artistic endpoint, never an implicit live geometry/LOD change.
@@ -78,6 +78,15 @@ function requireValue(value: boolean, message: string): asserts value {
   if (!value) throw new Error(message);
 }
 
+// Keep the source generator's exact arithmetic without loading the renderer
+// graph into workers that only validate canonical authored geometry.
+function smoothstep(x: number, min: number, max: number) {
+  if (x <= min) return 0;
+  if (x >= max) return 1;
+  x = (x - min) / (max - min);
+  return x * x * (3 - 2 * x);
+}
+
 function recipeCopy(
   blades: readonly GrassMeadowAuthoredBlade[],
   sourceShape: GrassMeadowAuthoredSourceShape,
@@ -140,13 +149,12 @@ function halfWidth(
         shape.BLADE_WIDTH_FALLOFF_POWER,
       );
   if (shape.BLADE_UPPER_WIDTH_GAIN !== 0)
-    width *=
-      1 + shape.BLADE_UPPER_WIDTH_GAIN * THREE.MathUtils.smoothstep(t, 0, 0.5);
+    width *= 1 + shape.BLADE_UPPER_WIDTH_GAIN * smoothstep(t, 0, 0.5);
   return (
     width *
     (shape.BLADE_BASE_WIDTH_FACTOR +
       (1 - shape.BLADE_BASE_WIDTH_FACTOR) *
-        THREE.MathUtils.smoothstep(t, 0, shape.BLADE_FULL_WIDTH_HEIGHT))
+        smoothstep(t, 0, shape.BLADE_FULL_WIDTH_HEIGHT))
   );
 }
 
@@ -254,6 +262,16 @@ function coarseSample(
   };
 }
 
+function isPlainAttribute(value: unknown): value is THREE.BufferAttribute {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Reflect.get(value, "isBufferAttribute") === true &&
+    Reflect.get(value, "isInstancedBufferAttribute") !== true &&
+    Reflect.get(value, "isInterleavedBufferAttribute") !== true
+  );
+}
+
 function stream(
   geometry: THREE.BufferGeometry,
   name: string,
@@ -262,12 +280,11 @@ function stream(
 ) {
   const value = geometry.getAttribute(name);
   requireValue(
-    value instanceof THREE.BufferAttribute &&
-      !(value instanceof THREE.InstancedBufferAttribute) &&
+    isPlainAttribute(value) &&
       value.array instanceof Float32Array &&
       value.count === count &&
       value.itemSize === size &&
-      !value.normalized &&
+      value.normalized === false &&
       value.array.length === count * size,
     `Invalid authored meadow ${name} stream`,
   );
@@ -276,7 +293,7 @@ function stream(
 
 function assertCoarse(geometry: THREE.BufferGeometry, recipe: Recipe) {
   requireValue(
-    geometry instanceof THREE.BufferGeometry,
+    geometry?.isBufferGeometry === true,
     "Actual coarse meadow geometry required",
   );
   const positions = stream(geometry, "position", 147, 3),
@@ -284,12 +301,13 @@ function assertCoarse(geometry: THREE.BufferGeometry, recipe: Recipe) {
     uv = stream(geometry, "uv", 147, 2);
   const index = geometry.index;
   requireValue(
-    !!index &&
+    isPlainAttribute(index) &&
       (index.array instanceof Uint16Array ||
         index.array instanceof Uint32Array) &&
       index.count === 315 &&
       index.itemSize === 1 &&
-      !index.normalized,
+      index.normalized === false &&
+      index.array.length === 315,
     "Invalid authored meadow coarse indices",
   );
   for (const blade of recipe.blades) {
@@ -355,7 +373,8 @@ function buildBuffers(recipe: Recipe, coarseGeometry: THREE.BufferGeometry) {
   return { positions, normals, uv, indices, coarseVertexPairs };
 }
 
-export function createMeadowAuthoredShapeGeometry(
+/** Pure canonical buffers: the renderer owner constructs its own geometry. */
+export function createMeadowAuthoredShapeBuffers(
   coarseGeometry: THREE.BufferGeometry,
   blades: readonly GrassMeadowAuthoredBlade[],
   sourceShape: GrassMeadowAuthoredSourceShape,
@@ -363,22 +382,7 @@ export function createMeadowAuthoredShapeGeometry(
   const recipe = recipeCopy(blades, sourceShape);
   assertCoarse(coarseGeometry, recipe);
   const buffers = buildBuffers(recipe, coarseGeometry);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    "position",
-    new THREE.BufferAttribute(buffers.positions, 3),
-  );
-  geometry.setAttribute(
-    "normal",
-    new THREE.BufferAttribute(buffers.normals, 3),
-  );
-  geometry.setAttribute("uv", new THREE.BufferAttribute(buffers.uv, 2));
-  geometry.setIndex(new THREE.BufferAttribute(buffers.indices, 1));
-  Object.defineProperty(geometry.userData, R.metadataKey, {
-    value: recipe,
-    enumerable: true,
-  });
-  return { geometry, coarseVertexPairs: buffers.coarseVertexPairs, layout: R };
+  return { ...buffers, recipe, layout: R };
 }
 
 /** Clone-compatible strict endpoint admission. Metadata alone never establishes
@@ -388,7 +392,7 @@ export function assertGrassMeadowAuthoredEndpoint(
   coarseGeometry: THREE.BufferGeometry,
 ): void {
   requireValue(
-    geometry instanceof THREE.BufferGeometry && geometry !== coarseGeometry,
+    geometry?.isBufferGeometry === true && geometry !== coarseGeometry,
     "Distinct authored meadow endpoint required",
   );
   const data: unknown = geometry.userData[R.metadataKey];
@@ -423,12 +427,13 @@ export function assertGrassMeadowAuthoredEndpoint(
   }
   const index = geometry.index;
   requireValue(
-    !!index &&
+    isPlainAttribute(index) &&
       (index.array instanceof Uint16Array ||
         index.array instanceof Uint32Array) &&
       index.count === expected.indices.length &&
       index.itemSize === 1 &&
-      !index.normalized &&
+      index.normalized === false &&
+      index.array.length === expected.indices.length &&
       index.array.every((value, i) => value === expected.indices[i]),
     "Changed authored meadow topology",
   );

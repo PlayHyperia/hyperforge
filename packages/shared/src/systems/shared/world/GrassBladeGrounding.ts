@@ -10,12 +10,14 @@ import {
   type CompactTerrainBankVerge,
 } from "./CompactTerrainPalette";
 import {
+  GRASS_MEADOW_REFINEMENT,
   getGrassBladeLayout,
   getGrassBladeWindFactor,
   getFoldedGrassBladeIndices,
   isFoldedGrassBladeLayout,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
+import { assertGrassMeadowAuthoredEndpoint } from "./GrassMeadowAuthoredShape";
 import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
@@ -56,6 +58,14 @@ export type GrassGroundingRoadSegment = {
   maxInfluence?: number;
 };
 
+/** CPU-only union sweep, not an admitted worker/render topology. The actual
+ * render endpoint has fifteen vertices; seven coarse samples are also tested
+ * for every blade before any exclusion or retained-region acceptance. */
+export type GrassAuthoredMeadowUnion = Readonly<{
+  kind: "meadow-authored-union-v1";
+  coarseGeometry: THREE.BufferGeometry;
+}>;
+
 export type GrassBladeGroundingRequest = {
   /** Already projected by projectGrassAnchors; never mutated or reseeded. */
   data: GrassAnchorData;
@@ -63,6 +73,8 @@ export type GrassBladeGroundingRequest = {
   lod: 0 | 1 | 2;
   /** Omission is the ordinary layout, not automatic fine topology detection. */
   geometryLayout?: FineGrassGeometryLayout;
+  /** Explicit certificate work only. Never projects or republishes anchors. */
+  authoredMeadow?: GrassAuthoredMeadowUnion;
   /** Explicit candidate: retain only blades whose full sweep clears roads. */
   roadClearance?: "per-blade-v1";
   /** Explicit fine-meadow vertical deformation; never changes root sampling. */
@@ -122,6 +134,11 @@ export type GrassBladeGroundingReceipt = {
   retainedClumps: number;
   bladesPerClump: number;
   geometryLayout?: FineGrassGeometryLayout;
+  authoredMeadow?: Readonly<{
+    kind: "meadow-authored-union-v1";
+    authoredVerticesPerBlade: 15;
+    coarseVerticesPerBlade: 7;
+  }>;
   endpointQueries: number;
   triangleVisits: number;
   /** Base edges proved strictly inside their one retained sampled face. */
@@ -180,6 +197,76 @@ type EndpointFace = {
   surface: RetainedTerrainSurface | null;
   faceIndex: number;
 };
+
+function captureAuthoredMeadow(
+  request: GrassBladeGroundingRequest,
+): GrassAuthoredMeadowUnion | undefined {
+  if (!("authoredMeadow" in request)) return undefined;
+  const field = Object.getOwnPropertyDescriptor(request, "authoredMeadow");
+  if (!field || !("value" in field))
+    throw new Error("Invalid authored meadow union property");
+  if (field.value === undefined) return undefined;
+  const value: unknown = field.value;
+  if (!value || typeof value !== "object")
+    throw new Error("Invalid authored meadow union descriptor");
+  const keys = Reflect.ownKeys(value);
+  const kind = Object.getOwnPropertyDescriptor(value, "kind");
+  const coarse = Object.getOwnPropertyDescriptor(value, "coarseGeometry");
+  if (
+    keys.length !== 2 ||
+    !keys.every((key) => key === "kind" || key === "coarseGeometry") ||
+    !kind ||
+    !("value" in kind) ||
+    kind.value !== "meadow-authored-union-v1" ||
+    !coarse ||
+    !("value" in coarse) ||
+    request.lod !== 0 ||
+    request.geometryLayout !== "fine-meadow-ribbon-v1"
+  )
+    throw new Error("Invalid authored meadow union admission");
+  // The strict endpoint validator below validates the actual coarse object and
+  // all its canonical streams. No constructor dependency belongs in the worker.
+  return Object.freeze({ kind: kind.value, coarseGeometry: coarse.value });
+}
+
+type GroundingVertexStream = Pick<
+  THREE.BufferAttribute,
+  "count" | "getX" | "getY" | "getZ"
+>;
+
+/** Numeric view only: no new geometry, indices, source copies or GPU streams.
+ * Both sources stay borrowed and are reread after every existing suspension.
+ * Logical blade stride 22 is private to the union sweep, never render addressing. */
+class MeadowUnionStream implements GroundingVertexStream {
+  readonly count = GRASS_MEADOW_REFINEMENT.bladesPerClump * 22;
+
+  constructor(
+    private readonly authored: GroundingVertexStream,
+    private readonly coarse: GroundingVertexStream,
+  ) {}
+
+  getX(index: number): number {
+    const blade = Math.floor(index / 22),
+      local = index % 22;
+    return local < 15
+      ? this.authored.getX(blade * 15 + local)
+      : this.coarse.getX(blade * 7 + local - 15);
+  }
+  getY(index: number): number {
+    const blade = Math.floor(index / 22),
+      local = index % 22;
+    return local < 15
+      ? this.authored.getY(blade * 15 + local)
+      : this.coarse.getY(blade * 7 + local - 15);
+  }
+  getZ(index: number): number {
+    const blade = Math.floor(index / 22),
+      local = index % 22;
+    return local < 15
+      ? this.authored.getZ(blade * 15 + local)
+      : this.coarse.getZ(blade * 7 + local - 15);
+  }
+}
 
 function overlaps(a: TerrainGridBounds, b: TerrainGridBounds): boolean {
   return (
@@ -260,7 +347,62 @@ function* validateGeometry(
   geometry: THREE.BufferGeometry,
   lod: 0 | 1 | 2,
   geometryLayout?: FineGrassGeometryLayout,
-) {
+  authoredMeadow?: GrassAuthoredMeadowUnion,
+): Generator<
+  string,
+  {
+    blades: number;
+    verticesPerBlade: number;
+    position: GroundingVertexStream;
+    uv: GroundingVertexStream;
+  },
+  void
+> {
+  if (authoredMeadow) {
+    yield "authored_meadow_endpoint";
+    assertGrassMeadowAuthoredEndpoint(geometry, authoredMeadow.coarseGeometry);
+    const coarse = yield* validateGeometry(
+      authoredMeadow.coarseGeometry,
+      lod,
+      geometryLayout,
+    );
+    const position = geometry.getAttribute("position");
+    const uv = geometry.getAttribute("uv");
+    const index = geometry.getIndex();
+    if (
+      !index ||
+      geometry.groups.length ||
+      Object.keys(geometry.morphAttributes).length ||
+      geometry.drawRange.start !== 0 ||
+      (geometry.drawRange.count !== Infinity &&
+        geometry.drawRange.count !== index.count)
+    )
+      throw new Error("Invalid authored meadow draw topology");
+    for (const name of ["position", "normal", "uv"]) {
+      for (const value of geometry.getAttribute(name).array) {
+        yield "geometry_value";
+        if (!Number.isFinite(value))
+          throw new Error("Invalid authored meadow vertex attributes");
+      }
+    }
+    for (let v = 0; v < position.count; v++) {
+      yield "geometry_vertex";
+      if (
+        position.getY(v) < 0 ||
+        Math.hypot(position.getX(v), position.getY(v), position.getZ(v)) > 16
+      )
+        throw new Error("Authored meadow geometry exceeds bounded envelope");
+    }
+    // Validate again after the resumable stream checks. The continuation owner
+    // still supplies the complete geometry/input lease through publication.
+    assertGrassMeadowAuthoredEndpoint(geometry, authoredMeadow.coarseGeometry);
+    return {
+      blades: GRASS_MEADOW_REFINEMENT.bladesPerClump,
+      verticesPerBlade: 22,
+      position: new MeadowUnionStream(position, coarse.position),
+      uv: new MeadowUnionStream(uv, coarse.uv),
+    };
+  }
   const {
     bladesPerClump: blades,
     bladeSegments: segments,
@@ -381,6 +523,7 @@ export function* groundGrassBladeSteps(
   yield "request_bounds";
   const started = performance.now();
   const { data, ownSurface, geometry, lod, wind, geometryLayout } = request;
+  const authoredMeadow = captureAuthoredMeadow(request);
   const bankVerge = captureGrassBankVerge(request);
   const pondServiceGround = captureGrassBankVerge(request, "pondServiceGround");
   const bankField =
@@ -407,6 +550,7 @@ export function* groundGrassBladeSteps(
     !Number.isSafeInteger(data.count) ||
     data.count < 0 ||
     data.count > GRASS_BLADE_GROUNDING_LIMITS.maxClumps ||
+    (authoredMeadow !== undefined && data.count > 128) ||
     !Number.isSafeInteger(workBudget) ||
     workBudget < 1 ||
     workBudget > GRASS_BLADE_GROUNDING_LIMITS.maximumWorkBudget ||
@@ -516,6 +660,7 @@ export function* groundGrassBladeSteps(
     geometry,
     lod,
     geometryLayout,
+    authoredMeadow,
   );
   const entries: SurfaceEntry[] = request.surfaces.map((surface) => ({
     surface,
@@ -548,6 +693,15 @@ export function* groundGrassBladeSteps(
     retainedClumps: 0,
     bladesPerClump: blades,
     ...(geometryLayout === undefined ? {} : { geometryLayout }),
+    ...(authoredMeadow === undefined
+      ? {}
+      : {
+          authoredMeadow: Object.freeze({
+            kind: "meadow-authored-union-v1" as const,
+            authoredVerticesPerBlade: 15 as const,
+            coarseVerticesPerBlade: 7 as const,
+          }),
+        }),
     endpointQueries: 0,
     triangleVisits: 0,
     sameFaceEdges: 0,
@@ -1005,8 +1159,8 @@ export function* groundGrassBladeSteps(
   // The main sweep already evaluates these exact XZ extrema. Borrowed source
   // checks below allow road admission to reuse them without a second transform.
   const bladeBounds = perBladeRoads ? new Float64Array(blades * 4) : undefined;
-  // At the largest admitted layout these add 11,928 bytes: 360 * 4 doubles,
-  // 24 * 2 doubles and 24 flags. This is core-layout-bounded fitting scratch,
+  // Ordinary layouts use at most 11,928 bytes. Explicit authored union work uses
+  // 15,141 bytes: 462 * 4 doubles, 21 * 2 doubles and 21 flags. This is bounded scratch,
   // not retained topology counted by the worker's maximumDerivedBytes limit.
   // Doubles preserve exact attribute reads and signed zero across suspension.
   const sweptBladeSources = perBladeRoads
@@ -1382,8 +1536,9 @@ export function* groundGrassBladeSteps(
       // The caller retains the exact blade yields; all borrowed reads and
       // work charges below still happen after the same suspension point.
       const accumulateSweptVertex = (v: number): void => {
-        // One blade is a bounded batch: at most fifteen vertices / thirty
-        // transforms at LOD0. Keep every suspension point and floating-point
+        // One blade is a bounded batch: ordinarily fifteen vertices / thirty
+        // transforms; explicit authored union work has 22 vertices / 44 transforms.
+        // Keep every suspension point and floating-point
         // expression. A zero-height vertex has identical fade endpoints, so
         // evaluate its one distinct point once rather than charging/computing
         // duplicate transforms and idempotent extrema. This does not omit any

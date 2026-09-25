@@ -102,7 +102,7 @@ import {
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import {
-  createMeadowAuthoredShapeGeometry,
+  createMeadowAuthoredShapeBuffers,
   type GrassMeadowAuthoredBlade,
 } from "./GrassMeadowAuthoredShape";
 import {
@@ -1127,16 +1127,36 @@ export function createMeadowAuthoredClumpGeometry() {
     undefined,
     (blade) => blades.push(blade),
   );
+  let geometry: THREE.BufferGeometry | undefined;
   try {
-    return {
-      ...createMeadowAuthoredShapeGeometry(
-        coarseGeometry,
-        blades,
-        FINE_GRASS_MEADOW_FIELD_SHAPE,
-      ),
+    const buffers = createMeadowAuthoredShapeBuffers(
       coarseGeometry,
+      blades,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(buffers.positions, 3),
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.BufferAttribute(buffers.normals, 3),
+    );
+    geometry.setAttribute("uv", new THREE.BufferAttribute(buffers.uv, 2));
+    geometry.setIndex(new THREE.BufferAttribute(buffers.indices, 1));
+    Object.defineProperty(geometry.userData, buffers.layout.metadataKey, {
+      value: buffers.recipe,
+      enumerable: true,
+    });
+    return {
+      geometry,
+      coarseGeometry,
+      coarseVertexPairs: buffers.coarseVertexPairs,
+      layout: buffers.layout,
     };
   } catch (error) {
+    geometry?.dispose();
     coarseGeometry.dispose();
     throw error;
   }

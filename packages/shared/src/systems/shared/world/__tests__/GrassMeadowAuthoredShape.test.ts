@@ -8,7 +8,7 @@ import {
 } from "../GrassVisualManager";
 import {
   assertGrassMeadowAuthoredEndpoint,
-  createMeadowAuthoredShapeGeometry,
+  createMeadowAuthoredShapeBuffers,
   GRASS_MEADOW_AUTHORED_SHAPE,
   sampleGrassMeadowAuthoredBlade,
   type GrassMeadowAuthoredBlade,
@@ -199,6 +199,23 @@ describe("explicit authored meadow silhouette endpoint", () => {
       ({ geometry, coarseGeometry, coarseVertexPairs, layout }, blades) => {
         const next = createMeadowAuthoredClumpGeometry();
         try {
+          const buffers = createMeadowAuthoredShapeBuffers(
+            coarseGeometry,
+            blades,
+            FINE_GRASS_MEADOW_FIELD_SHAPE,
+          );
+          expect(buffers.positions).toEqual(
+            geometry.getAttribute("position").array,
+          );
+          expect(buffers.normals).toEqual(
+            geometry.getAttribute("normal").array,
+          );
+          expect(buffers.uv).toEqual(geometry.getAttribute("uv").array);
+          expect(buffers.indices).toEqual(geometry.index!.array);
+          expect(buffers.coarseVertexPairs).toEqual(coarseVertexPairs);
+          expect(buffers.recipe).toEqual(
+            geometry.userData.grassMeadowAuthoredShape,
+          );
           expect(layout.id).toBe("meadow-authored-silhouette-v1");
           expect(geometry.getAttribute("position").count).toBe(315);
           expect(geometry.index!.count).toBe(945);
@@ -429,6 +446,47 @@ describe("explicit authored meadow silhouette endpoint", () => {
       }
     }));
 
+  it("rejects noncanonical real attribute types on both source and endpoint", () =>
+    withFixture(({ geometry, coarseGeometry }) => {
+      for (const target of [geometry, coarseGeometry]) {
+        const original = target.getAttribute("position");
+        const values = new Float32Array(original.array);
+        try {
+          for (const invalid of [
+            new THREE.InstancedBufferAttribute(values, 3),
+            new THREE.InterleavedBufferAttribute(
+              new THREE.InterleavedBuffer(values, 3),
+              3,
+              0,
+            ),
+            new THREE.BufferAttribute(values, 3, true),
+            new THREE.BufferAttribute(new Float64Array(values), 3),
+          ]) {
+            target.setAttribute("position", invalid);
+            expect(() =>
+              assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry),
+            ).toThrow();
+          }
+        } finally {
+          target.setAttribute("position", original);
+        }
+        const index = target.index!;
+        try {
+          target.setIndex(
+            new THREE.InstancedBufferAttribute(new Uint16Array(index.array), 1),
+          );
+          expect(() =>
+            assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry),
+          ).toThrow();
+        } finally {
+          target.setIndex(index);
+        }
+      }
+      expect(() =>
+        assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry),
+      ).not.toThrow();
+    }));
+
   it("does not relabel the existing conforming endpoint", () => {
     const old = createMeadowDetailClumpGeometry();
     try {
@@ -521,7 +579,7 @@ describe("explicit authored meadow silhouette endpoint", () => {
   it("rejects incomplete or nonfinite actual source parameters and invalid sample coordinates", () =>
     withFixture(({ coarseGeometry }, blades) => {
       expect(() =>
-        createMeadowAuthoredShapeGeometry(
+        createMeadowAuthoredShapeBuffers(
           coarseGeometry,
           blades.slice(1),
           FINE_GRASS_MEADOW_FIELD_SHAPE,
@@ -530,7 +588,7 @@ describe("explicit authored meadow silhouette endpoint", () => {
       const corrupt = blades.map((blade) => ({ ...blade }));
       corrupt[0].width = NaN;
       expect(() =>
-        createMeadowAuthoredShapeGeometry(
+        createMeadowAuthoredShapeBuffers(
           coarseGeometry,
           corrupt,
           FINE_GRASS_MEADOW_FIELD_SHAPE,

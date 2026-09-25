@@ -32,7 +32,7 @@ export type GrassGroundingInputLease = {
 
 type PipelineRequest = Omit<
   GrassBladeGroundingRequest,
-  "terrainSurface" | "roadSegments"
+  "terrainSurface" | "roadSegments" | "authoredMeadow"
 >;
 type ProjectedGrass =
   ReturnType<typeof projectGrassAnchorSteps> extends Generator<
@@ -129,6 +129,20 @@ class GroundedGrassPipeline implements Generator<
         if (this.phase === "closed")
           return { done: true, value: undefined as never };
         if (this.phase === "initial") {
+          // Union certification must preserve already-installed anchors. Never
+          // send it through this projection/remap/publication pipeline, including
+          // JS callers that bypass the explicit request type exclusion.
+          const request = this.context!.request;
+          if ("authoredMeadow" in request) {
+            const field = Object.getOwnPropertyDescriptor(
+              request,
+              "authoredMeadow",
+            );
+            if (!field || !("value" in field) || field.value !== undefined)
+              throw new Error(
+                "Authored meadow requires installed-anchor certification",
+              );
+          }
           // Snapshot nested optional wear before even the admission yield;
           // caller edits cannot change deformation during any suspension.
           this.bankVerge = captureGrassBankVerge(this.context!.request);
