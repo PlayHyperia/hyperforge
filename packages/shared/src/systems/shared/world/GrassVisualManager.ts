@@ -59,6 +59,7 @@ import { faceDirection } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
 import {
   createGrassMeadowRefinementResponse,
+  createGrassMeadowAuthoredResponse,
   type GrassMeadowRefinementSample,
   type GrassMeadowRefinementResponse,
 } from "./GrassMeadowRefinementGpu";
@@ -100,6 +101,10 @@ import {
   GRASS_MEADOW_REFINEMENT,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
+import {
+  createMeadowAuthoredShapeGeometry,
+  type GrassMeadowAuthoredBlade,
+} from "./GrassMeadowAuthoredShape";
 import {
   projectGrassAnchors,
   type GrassGrounding,
@@ -589,6 +594,7 @@ export function createClumpGeometry(
   bladeSegments = GRASS_CONFIG.BLADE_SEGMENTS,
   shape: GrassBladeShape = GRASS_CONFIG,
   crossSection?: "folded-lancet-v1" | "folded-sheath-v1",
+  onBlade?: (blade: GrassMeadowAuthoredBlade) => void,
 ): THREE.BufferGeometry {
   const meadowField = shape.ROOT_COMPOSITION === "meadow-field-v1";
   const meadowCanopy =
@@ -782,6 +788,21 @@ export function createClumpGeometry(
       : variedArcDist;
     const curveDirX = Math.cos(curveAngle) * arcDist;
     const curveDirZ = Math.sin(curveAngle) * arcDist;
+    // Optional geometry-authoring receipt, before Float32 storage. Ordinary
+    // generation allocates no receipt and retains its exact RNG/arithmetic.
+    if (onBlade)
+      onBlade(
+        Object.freeze({
+          index: b,
+          rootX: ox,
+          rootZ: oz,
+          height: h,
+          width: w,
+          facingAngle,
+          curveX: curveDirX,
+          curveZ: curveDirZ,
+        }),
+      );
 
     rng(); // consume one RNG value to keep deterministic sequence stable
     const baseVert = vi;
@@ -1095,6 +1116,32 @@ export function createMeadowDetailClumpGeometry(): {
   }
 }
 
+/** Separate authored endpoint only; no live profile/LOD selects this factory.
+ * It borrows the real seeded plant dimensions before they are rounded. */
+export function createMeadowAuthoredClumpGeometry() {
+  const blades: GrassMeadowAuthoredBlade[] = [];
+  const coarseGeometry = createClumpGeometry(
+    GRASS_MEADOW_REFINEMENT.bladesPerClump,
+    3,
+    FINE_GRASS_MEADOW_FIELD_SHAPE,
+    undefined,
+    (blade) => blades.push(blade),
+  );
+  try {
+    return {
+      ...createMeadowAuthoredShapeGeometry(
+        coarseGeometry,
+        blades,
+        FINE_GRASS_MEADOW_FIELD_SHAPE,
+      ),
+      coarseGeometry,
+    };
+  } catch (error) {
+    coarseGeometry.dispose();
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1315,6 +1362,7 @@ export class GrassVisualManager implements QuadTreeListener {
         geometry: THREE.BufferGeometry,
         coarseGeometry: THREE.BufferGeometry,
         weight: Node<"float">,
+        endpoint: "conforming" | "authored",
       ) => MeshStandardNodeMaterial)
     | null = null;
   private lodGeometries: THREE.BufferGeometry[];
@@ -3679,7 +3727,31 @@ export class GrassVisualManager implements QuadTreeListener {
   ): MeshStandardNodeMaterial {
     if (this.destroyed || !this.meadowDetailMaterialFactory)
       throw new Error("Meadow detail requires a live leaf-volume field owner");
-    return this.meadowDetailMaterialFactory(geometry, coarseGeometry, weight);
+    return this.meadowDetailMaterialFactory(
+      geometry,
+      coarseGeometry,
+      weight,
+      "conforming",
+    );
+  }
+
+  /** Opt-in authored shape binding. Uses the same live material/wind owner;
+   * no automatic replacement, grounding or quality-default admission. */
+  createMeadowAuthoredMaterial(
+    geometry: THREE.BufferGeometry,
+    coarseGeometry: THREE.BufferGeometry,
+    weight: Node<"float">,
+  ): MeshStandardNodeMaterial {
+    if (this.destroyed || !this.meadowDetailMaterialFactory)
+      throw new Error(
+        "Authored meadow requires a live leaf-volume field owner",
+      );
+    return this.meadowDetailMaterialFactory(
+      geometry,
+      coarseGeometry,
+      weight,
+      "authored",
+    );
   }
 
   private createMaterial(): MeshStandardNodeMaterial {
@@ -4257,13 +4329,18 @@ export class GrassVisualManager implements QuadTreeListener {
           geometry,
           coarseGeometry,
           weight,
+          endpoint,
         ) => {
           // Borrow the selected near material's existing uniforms, albedo and
           // SSS graph. Re-running createMaterial would orphan uniform owners.
           const detail = this.materialForLod(0).clone();
           try {
             let responseIndex = 0;
-            const refined = createGrassMeadowRefinementResponse(
+            const bindResponse =
+              endpoint === "authored"
+                ? createGrassMeadowAuthoredResponse
+                : createGrassMeadowRefinementResponse;
+            const refined = bindResponse(
               geometry,
               coarseGeometry,
               weight,
@@ -4299,6 +4376,12 @@ export class GrassVisualManager implements QuadTreeListener {
               writable: false,
               configurable: false,
               value: GRASS_MEADOW_REFINEMENT,
+            });
+            Object.defineProperty(detail.userData, "grassMeadowEndpoint", {
+              enumerable: true,
+              writable: false,
+              configurable: false,
+              value: endpoint,
             });
             return detail;
           } catch (error) {

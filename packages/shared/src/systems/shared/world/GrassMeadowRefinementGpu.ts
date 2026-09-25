@@ -3,6 +3,7 @@ import { attribute, mix, storage, uv, vertexIndex } from "three/tsl";
 import { StorageBufferAttribute } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
 import { GRASS_MEADOW_REFINEMENT } from "./GrassBladeLayout";
+import { assertGrassMeadowAuthoredEndpoint } from "./GrassMeadowAuthoredShape";
 
 export type GrassMeadowRefinementSample = Readonly<{
   position: Node<"vec3">;
@@ -92,6 +93,45 @@ export function createGrassMeadowRefinementResponse(
     sample: GrassMeadowRefinementSample,
   ) => GrassMeadowRefinementResponse,
 ): GrassMeadowRefinementResponse {
+  return createMeadowEndpointResponse(
+    geometry,
+    coarseGeometry,
+    weight,
+    evaluate,
+    "conforming",
+  );
+}
+
+/** Explicit authored endpoint. Unlike conforming subdivision this permits
+ * changed interior vertices only after full source-recipe validation. The
+ * weight-zero response is still evaluated on the original coarse triangles;
+ * this function grants no terrain fit, placement or runtime ownership. */
+export function createGrassMeadowAuthoredResponse(
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  weight: Node<"float">,
+  evaluate: (
+    sample: GrassMeadowRefinementSample,
+  ) => GrassMeadowRefinementResponse,
+): GrassMeadowRefinementResponse {
+  return createMeadowEndpointResponse(
+    geometry,
+    coarseGeometry,
+    weight,
+    evaluate,
+    "authored",
+  );
+}
+
+function createMeadowEndpointResponse(
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  weight: Node<"float">,
+  evaluate: (
+    sample: GrassMeadowRefinementSample,
+  ) => GrassMeadowRefinementResponse,
+  endpoint: "conforming" | "authored",
+): GrassMeadowRefinementResponse {
   if (
     !(geometry instanceof THREE.BufferGeometry) ||
     !(coarseGeometry instanceof THREE.BufferGeometry) ||
@@ -112,6 +152,8 @@ export function createGrassMeadowRefinementResponse(
   const cp = stream(coarseGeometry, "position", 3, COARSE_COUNT);
   const cn = stream(coarseGeometry, "normal", 3, COARSE_COUNT);
   const cu = stream(coarseGeometry, "uv", 2, COARSE_COUNT);
+  if (endpoint === "authored")
+    assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry);
   for (let b = 0; b < R.bladesPerClump; b++) {
     const c = b * R.sourceVerticesPerBlade;
     const f = b * R.verticesPerBlade;
@@ -124,7 +166,7 @@ export function createGrassMeadowRefinementResponse(
         )
           throw new Error("Noncanonical meadow refinement barycentric UV");
       }
-      if (v < R.sourceVerticesPerBlade) {
+      if (v < R.sourceVerticesPerBlade && endpoint === "conforming") {
         for (let k = 0; k < 3; k++) {
           if (
             p[(f + v) * 3 + k] !== cp[(c + v) * 3 + k] ||
@@ -132,6 +174,8 @@ export function createGrassMeadowRefinementResponse(
           )
             throw new Error("Changed meadow refinement original vertex");
         }
+      }
+      if (v < R.sourceVerticesPerBlade) {
         for (let k = 0; k < 2; k++) {
           if (cu[(c + v) * 2 + k] !== Math.fround(COARSE_UV[v * 2 + k]))
             throw new Error("Noncanonical meadow refinement coarse UV");

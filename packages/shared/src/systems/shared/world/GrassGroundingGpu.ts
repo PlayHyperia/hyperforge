@@ -14,11 +14,65 @@ import type Node from "three/src/nodes/core/Node.js";
 import type { GrassBladeGroundingResult } from "./GrassBladeGrounding";
 import {
   getGrassBladeLayout,
+  GRASS_MEADOW_REFINEMENT,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
+import {
+  assertGrassMeadowAuthoredEndpoint,
+  GRASS_MEADOW_AUTHORED_SHAPE,
+} from "./GrassMeadowAuthoredShape";
 
 export const GRASS_ROOT_STORAGE_ATTRIBUTE = "grassRootDeltas";
 export const GRASS_BLADE_VISIBILITY_ATTRIBUTE = "grassBladeVisibility";
+
+/** Separate addressing, never a replacement for the admitted seven-vertex LOD.
+ * This binds an already-certified batch; it does not certify swept terrain
+ * clearance or enforce the lifecycle owner's global 640-slot reservation. */
+export const GRASS_MEADOW_AUTHORED_GROUNDING = Object.freeze({
+  id: "meadow-authored-grounding-v1",
+  endpointId: GRASS_MEADOW_AUTHORED_SHAPE.id,
+  bladesPerClump: GRASS_MEADOW_REFINEMENT.bladesPerClump,
+  verticesPerBlade: GRASS_MEADOW_REFINEMENT.verticesPerBlade,
+  verticesPerClump:
+    GRASS_MEADOW_REFINEMENT.bladesPerClump *
+    GRASS_MEADOW_REFINEMENT.verticesPerBlade,
+  rootComponents: 2,
+  maximumBatchClumps: 128,
+} as const);
+
+export function createGroundedGrassMeadowAuthoredMaterial(
+  base: MeshStandardNodeMaterial,
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  rootDeltas: Float32Array,
+  count: number,
+  bladeVisibility?: Uint32Array,
+): MeshStandardNodeMaterial {
+  assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry);
+  if (
+    !(base.positionNode instanceof THREE.Node) ||
+    !Number.isSafeInteger(count) ||
+    count < 1 ||
+    count > GRASS_MEADOW_AUTHORED_GROUNDING.maximumBatchClumps ||
+    !(rootDeltas instanceof Float32Array) ||
+    rootDeltas.length !==
+      count *
+        GRASS_MEADOW_AUTHORED_GROUNDING.bladesPerClump *
+        GRASS_MEADOW_AUTHORED_GROUNDING.rootComponents ||
+    rootDeltas.some((value) => !Number.isFinite(value)) ||
+    geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)
+  )
+    throw new Error("Invalid authored meadow grounding batch");
+  return bindGroundedGrassMaterial(
+    base,
+    geometry,
+    rootDeltas,
+    count,
+    GRASS_MEADOW_AUTHORED_GROUNDING,
+    "grassMeadowAuthoredGrounding",
+    bladeVisibility,
+  );
+}
 
 /** One chunk's correction binding. Shared material nodes/uniforms/maps stay
  * borrowed. Geometry owns the storage buffer's native lifetime, not material. */
@@ -32,6 +86,31 @@ export function createGroundedGrassMaterial(
   bladeVisibility?: Uint32Array,
 ): MeshStandardNodeMaterial {
   const tier = getGrassBladeLayout(lod, geometryLayout);
+  return bindGroundedGrassMaterial(
+    base,
+    geometry,
+    rootDeltas,
+    count,
+    tier,
+    geometryLayout === undefined ? undefined : "grassBladeLayout",
+    bladeVisibility,
+  );
+}
+
+function bindGroundedGrassMaterial(
+  base: MeshStandardNodeMaterial,
+  geometry: THREE.BufferGeometry,
+  rootDeltas: Float32Array,
+  count: number,
+  tier: Readonly<{
+    bladesPerClump: number;
+    verticesPerBlade: number;
+    verticesPerClump: number;
+    rootComponents: number;
+  }>,
+  receiptName: "grassBladeLayout" | "grassMeadowAuthoredGrounding" | undefined,
+  bladeVisibility?: Uint32Array,
+): MeshStandardNodeMaterial {
   if (
     !base.positionNode ||
     !Number.isSafeInteger(count) ||
@@ -70,8 +149,8 @@ export function createGroundedGrassMaterial(
     .add(vertexIndex.div(uint(tier.verticesPerBlade)));
   const delta = roots.element(address);
   const material = base.clone();
-  if (geometryLayout !== undefined)
-    Object.defineProperty(material.userData, "grassBladeLayout", {
+  if (receiptName !== undefined)
+    Object.defineProperty(material.userData, receiptName, {
       enumerable: true,
       configurable: false,
       writable: false,

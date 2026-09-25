@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
-import { instanceIndex, uniform, vec3, vertexIndex } from "three/tsl";
+import { JSDOM } from "jsdom";
+import {
+  MeshStandardNodeMaterial,
+  StorageBufferAttribute,
+  WGSLNodeBuilder,
+} from "three/webgpu";
+import {
+  attribute,
+  Fn,
+  instanceIndex,
+  uniform,
+  varying,
+  vec3,
+  vertexIndex,
+} from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
+import ConvertNode from "three/src/nodes/utils/ConvertNode.js";
 import type StorageBufferNode from "three/src/nodes/accessors/StorageBufferNode.js";
 import {
   getGrassBladeLayout,
@@ -10,6 +24,8 @@ import {
 import THREE from "../../../../extras/three/three";
 import {
   createGroundedGrassMaterial,
+  createGroundedGrassMeadowAuthoredMaterial,
+  GRASS_MEADOW_AUTHORED_GROUNDING,
   GRASS_BLADE_VISIBILITY_ATTRIBUTE,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
@@ -19,6 +35,7 @@ import {
 } from "../GrassTerrainProjection";
 import {
   createClumpGeometry,
+  createMeadowAuthoredClumpGeometry,
   FINE_GRASS_FOLDED_BLADE_SHAPE,
   FINE_MEADOW_APPEARANCE,
 } from "../GrassVisualManager";
@@ -93,6 +110,82 @@ function childNode(node: Node, name: string): Node {
   if (!(child instanceof THREE.Node))
     throw new Error(`Missing actual ${name} on ${node.type}`);
   return child;
+}
+
+/** Generate the actual installed r186 stage flow using a real uninitialized
+ * WebGPU renderer. This is not full material compilation or GPU execution. */
+function groundingStageFlow(
+  geometry: THREE.BufferGeometry,
+  material: MeshStandardNodeMaterial,
+) {
+  const dom = new JSDOM("<canvas></canvas>");
+  const canvas = dom.window.document.querySelector("canvas");
+  if (!canvas) throw new Error("Missing constructor canvas");
+  const renderer = new THREE.WebGPURenderer({ canvas });
+  try {
+    const builder = new WGSLNodeBuilder(
+      new THREE.Mesh(geometry, material),
+      renderer,
+    );
+    Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+    const generate: unknown = Reflect.get(builder, "flowStagesNode");
+    const declarations: unknown = Reflect.get(builder, "getUniforms");
+    if (typeof generate !== "function" || typeof declarations !== "function")
+      throw new Error("Missing installed stage builder methods");
+    const flow = (stage: "vertex" | "fragment", node: unknown) => {
+      if (!(node instanceof THREE.Node))
+        throw new Error("Missing actual material node");
+      Reflect.set(builder, "shaderStage", stage);
+      const result: unknown = generate.call(
+        builder,
+        Fn(() => new ConvertNode<"vec3">(node, "vec3"), "vec3")(),
+        "vec3",
+      );
+      if (
+        !result ||
+        typeof result !== "object" ||
+        !("code" in result) ||
+        !("result" in result) ||
+        typeof result.code !== "string" ||
+        typeof result.result !== "string"
+      )
+        throw new Error("Missing actual generated flow");
+      return result.code + result.result;
+    };
+    const fragment = flow("fragment", material.normalNode);
+    const vertex = flow("vertex", material.positionNode);
+    const vertexDeclarations: unknown = declarations.call(builder, "vertex");
+    const fragmentDeclarations: unknown = declarations.call(
+      builder,
+      "fragment",
+    );
+    if (
+      typeof vertexDeclarations !== "string" ||
+      typeof fragmentDeclarations !== "string"
+    )
+      throw new Error("Missing actual declarations");
+    const attributes: unknown = Reflect.get(builder, "attributes");
+    if (!Array.isArray(attributes))
+      throw new Error("Missing actual builder attributes");
+    const attributeNames = attributes.map((value: unknown) => {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        !("name" in value) ||
+        typeof value.name !== "string"
+      )
+        throw new Error("Invalid actual builder attribute");
+      return value.name;
+    });
+    return {
+      vertex: vertexDeclarations + vertex,
+      fragment: fragmentDeclarations + fragment,
+      attributes: attributeNames,
+    };
+  } finally {
+    renderer.dispose();
+    dom.window.close();
+  }
 }
 
 /** Actual graph topology and inputs, excluding allocation-specific UUIDs. */
@@ -1289,5 +1382,275 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
     expect(() =>
       drain(remapGrassGroundingSteps(source, new Uint32Array([0]))),
     ).toThrow();
+  });
+});
+
+describe("explicit authored meadow grounding prerequisite (no runtime admission)", () => {
+  it.each([1, 3, 128])(
+    "addresses all 21 blades and 15 vertices for %s clumps",
+    (count) => {
+      const { geometry, coarseGeometry } = createMeadowAuthoredClumpGeometry();
+      const base = new MeshStandardNodeMaterial(),
+        time = uniform(0.37),
+        texture = new THREE.Texture();
+      base.positionNode = attribute("position", "vec3").add(vec3(time, 0, 0));
+      base.normalNode = varying(
+        attribute("normal", "vec3"),
+        "authoredGroundingNormal",
+      );
+      base.map = texture;
+      const deltas = Float32Array.from(
+        { length: count * 42 },
+        (_, i) => (i - 17) / 32,
+      );
+      const masks = Uint32Array.from({ length: count }, (_, i) =>
+        i % 3 === 0 ? 1 : i % 3 === 1 ? 1 << 20 : 0x155555,
+      );
+      geometry.setAttribute(
+        "instanceOffset",
+        new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3),
+      );
+      const positions = geometry.getAttribute("position").array.slice();
+      const original = {
+        position: base.positionNode,
+        normal: base.normalNode,
+        deltas: deltas.slice(),
+        masks: masks.slice(),
+      };
+      let material: MeshStandardNodeMaterial | undefined;
+      let baseDisposals = 0,
+        textureDisposals = 0;
+      base.addEventListener("dispose", () => baseDisposals++);
+      texture.addEventListener("dispose", () => textureDisposals++);
+      try {
+        expect(() =>
+          createGroundedGrassMaterial(
+            base,
+            geometry,
+            deltas,
+            count,
+            0,
+            "fine-meadow-ribbon-v1",
+            masks,
+          ),
+        ).toThrow(/binding/);
+        expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(false);
+        material = createGroundedGrassMeadowAuthoredMaterial(
+          base,
+          geometry,
+          coarseGeometry,
+          deltas,
+          count,
+          masks,
+        );
+        expect(material.userData.grassMeadowAuthoredGrounding).toBe(
+          GRASS_MEADOW_AUTHORED_GROUNDING,
+        );
+        expect(GRASS_MEADOW_AUTHORED_GROUNDING.endpointId).toBe(
+          "meadow-authored-silhouette-v1",
+        );
+        expect(
+          Object.getOwnPropertyDescriptor(
+            material.userData,
+            "grassMeadowAuthoredGrounding",
+          ),
+        ).toMatchObject({ writable: false, configurable: false });
+        expect(
+          Object.isFrozen(material.userData.grassMeadowAuthoredGrounding),
+        ).toBe(true);
+        expect(material.userData.grassBladeLayout).toBeUndefined();
+        const roots = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE),
+          visibility = geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE);
+        expect(roots).toBeInstanceOf(StorageBufferAttribute);
+        expect(visibility).toBeInstanceOf(StorageBufferAttribute);
+        expect(roots.array).toBe(deltas);
+        expect(visibility.array).toBe(masks);
+        expect(roots.count).toBe(count * 21);
+        expect(roots.itemSize).toBe(2);
+        expect(visibility.count).toBe(count);
+        expect(visibility.itemSize).toBe(1);
+        const node = material.positionNode;
+        if (!(node instanceof THREE.Node))
+          throw new Error("Missing authored grounded position");
+        const condition = childNode(node, "condNode");
+        const collapsed = childNode(node, "elseNode");
+        expect(Reflect.get(collapsed, "_attributeName")).toBe("instanceOffset");
+        expect([...collapsed.getChildren()]).toEqual([]);
+        const nodes = new Set<Node>();
+        node.traverse((value) => nodes.add(value));
+        const mixes = [...nodes].filter(
+          (value) =>
+            value.type === "MathNode" && Reflect.get(value, "method") === "mix",
+        );
+        expect(mixes).toHaveLength(1);
+        const mixNode = mixes[0],
+          left = childNode(mixNode, "aNode"),
+          right = childNode(mixNode, "bNode"),
+          blend = childNode(mixNode, "cNode");
+        const access = childNode(left, "node");
+        expect(access.type).toBe("StorageArrayElementNode");
+        expect(childNode(right, "node")).toBe(access);
+        expect(Reflect.get(left, "components")).toBe("x");
+        expect(Reflect.get(right, "components")).toBe("y");
+        expect(Reflect.get(childNode(access, "node"), "value")).toBe(roots);
+        expect(Reflect.get(blend, "components")).toBe("x");
+        expect(Reflect.get(childNode(blend, "node"), "_attributeName")).toBe(
+          "uv",
+        );
+        const address = childNode(access, "indexNode"),
+          uv = geometry.getAttribute("uv");
+        for (let instance = 0; instance < count; instance++)
+          for (let v = 0; v < 315; v++) {
+            const blade = Math.floor(v / 15),
+              index = storageAddress(address, instance, v);
+            expect(index).toBe(instance * 21 + blade);
+            expect(
+              storageAddress(condition, instance, v, masks[instance]),
+            ).toBe(Number((masks[instance] & (1 << blade)) !== 0));
+            // The actual graph above is exactly mix(owned vec2.x, vec2.y, actual UV.x).
+            const u = uv.getX(v);
+            expect(roots.getX(index) * (1 - u) + roots.getY(index) * u).toBe(
+              deltas[(instance * 21 + blade) * 2] * (1 - u) +
+                deltas[(instance * 21 + blade) * 2 + 1] * u,
+            );
+          }
+        expect(uv.getX(13)).toBe(0.25);
+        expect(uv.getX(14)).toBe(0.75);
+        expect(storageAddress(address, count - 1, 314)).toBe(count * 21 - 1);
+        const bindings = [...nodes].filter(
+          (value) => value.type === "StorageBufferNode",
+        );
+        expect(bindings).toHaveLength(2);
+        for (const binding of bindings) {
+          expect(Reflect.get(binding, "access")).toBe("readOnly");
+          expect(Reflect.get(binding, "bufferCount")).toBe(0);
+        }
+        expect(
+          [...nodes]
+            .filter((value) => value.type === "AttributeNode")
+            .map((value) => Reflect.get(value, "_attributeName")),
+        ).not.toContain(GRASS_ROOT_STORAGE_ATTRIBUTE);
+        expect(
+          [...nodes]
+            .filter((value) => value.type === "AttributeNode")
+            .map((value) => Reflect.get(value, "_attributeName")),
+        ).not.toContain(GRASS_BLADE_VISIBILITY_ATTRIBUTE);
+        expect(material.normalNode).toBe(original.normal);
+        expect(material.map).toBe(texture);
+        expect(base.positionNode).toBe(original.position);
+        expect(base.normalNode).toBe(original.normal);
+        expect(geometry.getAttribute("position").array).toEqual(positions);
+        expect(deltas).toEqual(original.deltas);
+        expect(masks).toEqual(original.masks);
+        if (count === 3) {
+          const stages = groundingStageFlow(geometry, material);
+          expect(stages.vertex).toMatch(/vertexIndex\s*\/\s*15u/);
+          expect(stages.vertex).toMatch(/instanceIndex\s*\*\s*21u/);
+          expect(stages.vertex).toContain("mix(");
+          expect(stages.vertex.match(/var<storage,\s*read>/g)).toHaveLength(2);
+          expect(stages.fragment).not.toMatch(
+            /NodeBuffer_|var<storage|vertexIndex/,
+          );
+          expect(stages.attributes).not.toContain(GRASS_ROOT_STORAGE_ATTRIBUTE);
+          expect(stages.attributes).not.toContain(
+            GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+          );
+          expect(stages.vertex + stages.fragment).not.toMatch(
+            /undefined|NaN|Infinity/,
+          );
+        }
+        expect(() =>
+          createGroundedGrassMeadowAuthoredMaterial(
+            base,
+            geometry,
+            coarseGeometry,
+            deltas,
+            count,
+            masks,
+          ),
+        ).toThrow();
+      } finally {
+        material?.dispose();
+        geometry.dispose();
+        coarseGeometry.dispose();
+        expect(baseDisposals).toBe(0);
+        expect(textureDisposals).toBe(0);
+        base.dispose();
+        texture.dispose();
+      }
+    },
+  );
+
+  it("rejects malformed authored batches without publishing either storage binding", () => {
+    const base = new MeshStandardNodeMaterial();
+    base.positionNode = vec3(0);
+    try {
+      for (const kind of [
+        "zero",
+        "over-batch",
+        "fraction",
+        "root-length",
+        "nonfinite",
+        "empty-mask",
+        "high-mask",
+        "mask-length",
+        "wrong-topology",
+        "changed-root",
+        "prior-binding",
+      ] as const) {
+        const { geometry, coarseGeometry } =
+          createMeadowAuthoredClumpGeometry();
+        const count =
+          kind === "zero"
+            ? 0
+            : kind === "over-batch"
+              ? 129
+              : kind === "fraction"
+                ? 1.5
+                : 1;
+        const deltas = new Float32Array(kind === "root-length" ? 41 : 42);
+        if (kind === "nonfinite") deltas[17] = NaN;
+        const mask =
+          kind === "mask-length"
+            ? new Uint32Array(2)
+            : new Uint32Array([
+                kind === "empty-mask" ? 0 : kind === "high-mask" ? 1 << 21 : 1,
+              ]);
+        geometry.setAttribute(
+          "instanceOffset",
+          new THREE.InstancedBufferAttribute(new Float32Array(3), 3),
+        );
+        if (kind === "wrong-topology") {
+          if (!geometry.index) throw new Error("Missing authored topology");
+          geometry.index.setX(1, 2);
+        }
+        if (kind === "changed-root")
+          geometry.getAttribute("position").setY(0, 0.01);
+        if (kind === "prior-binding")
+          geometry.setAttribute(
+            GRASS_ROOT_STORAGE_ATTRIBUTE,
+            new StorageBufferAttribute(new Float32Array(42), 2),
+          );
+        const before = { ...geometry.attributes };
+        try {
+          expect(() =>
+            createGroundedGrassMeadowAuthoredMaterial(
+              base,
+              geometry,
+              coarseGeometry,
+              deltas,
+              count,
+              mask,
+            ),
+          ).toThrow();
+          expect(geometry.attributes).toEqual(before);
+        } finally {
+          geometry.dispose();
+          coarseGeometry.dispose();
+        }
+      }
+    } finally {
+      base.dispose();
+    }
   });
 });

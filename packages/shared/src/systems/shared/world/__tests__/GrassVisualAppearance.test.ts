@@ -44,6 +44,7 @@ import {
   GRASS_CONFIG,
   GrassVisualManager,
   createClumpGeometry,
+  createMeadowAuthoredClumpGeometry,
   STREAMING_GRASS_VISUAL_PROFILE,
   type GrassVisualProfile,
   type GrassWorkerSetup,
@@ -729,6 +730,71 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       grassColorGrade,
       geometry,
     );
+
+  it("borrows field material nodes for an explicit authored endpoint without installing it", () => {
+    const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
+    const r = createMeadowAuthoredClumpGeometry();
+    let detail: MeshStandardNodeMaterial | undefined;
+    try {
+      const base = owner["materialForLod"](0);
+      const before = owner["lodGeometries"].map((g) =>
+        Array.from(g.getAttribute("position").array),
+      );
+      const weight = float(0);
+      detail = owner.createMeadowAuthoredMaterial(
+        r.geometry,
+        r.coarseGeometry,
+        weight,
+      );
+      expect(detail).toBeInstanceOf(MeshSSSNodeMaterial);
+      expect(detail.userData.grassMeadowEndpoint).toBe("authored");
+      expect(
+        Object.getOwnPropertyDescriptor(detail.userData, "grassMeadowEndpoint")
+          ?.writable,
+      ).toBe(false);
+      for (const key of [
+        "colorNode",
+        "aoNode",
+        "outputNode",
+        "roughnessNode",
+      ] as const)
+        expect(detail[key]).toBe(base[key]);
+      expect(detail.positionNode).not.toBe(base.positionNode);
+      expect(detail.normalNode).not.toBe(base.normalNode);
+      expect(
+        owner["lodGeometries"].map((g) =>
+          Array.from(g.getAttribute("position").array),
+        ),
+      ).toEqual(before);
+      expect(owner["chunks"].size).toBe(0);
+      expect(detail.userData.fineGrassCanopyLighting).toBe(
+        FINE_GRASS_MEADOW_FIELD_LIGHTING,
+      );
+      const oldPosition = detail.positionNode;
+      detail.dispose();
+      detail = undefined;
+      expect(base.positionNode).not.toBe(oldPosition);
+    } finally {
+      detail?.dispose();
+      r.geometry.dispose();
+      r.coarseGeometry.dispose();
+      owner.destroy();
+    }
+    const unused = createMeadowAuthoredClumpGeometry();
+    try {
+      expect(() =>
+        owner.createMeadowAuthoredMaterial(
+          unused.geometry,
+          unused.coarseGeometry,
+          float(0),
+        ),
+      ).toThrow(/live leaf-volume field owner/);
+    } finally {
+      unused.geometry.dispose();
+      unused.coarseGeometry.dispose();
+    }
+  });
+
   const smooth = (low: number, high: number, value: number) => {
     const x = Math.max(0, Math.min(1, (value - low) / (high - low)));
     return x * x * (3 - 2 * x);

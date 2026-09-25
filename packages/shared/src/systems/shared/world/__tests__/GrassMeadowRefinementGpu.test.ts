@@ -4,10 +4,14 @@ import { float, vec3, vertexIndex } from "three/tsl";
 import { StorageBufferAttribute, WGSLNodeBuilder } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
 import THREE from "../../../../extras/three/three";
-import { createMeadowDetailClumpGeometry } from "../GrassVisualManager";
+import {
+  createMeadowDetailClumpGeometry,
+  createMeadowAuthoredClumpGeometry,
+} from "../GrassVisualManager";
 import { GRASS_MEADOW_REFINEMENT } from "../GrassBladeLayout";
 import {
   createGrassMeadowRefinementResponse,
+  createGrassMeadowAuthoredResponse,
   GRASS_MEADOW_COARSE_POSITION_T_ATTRIBUTE,
   GRASS_MEADOW_COARSE_NORMAL_U_ATTRIBUTE,
   GRASS_MEADOW_PARENT_PAIRS_ATTRIBUTE,
@@ -447,6 +451,151 @@ describe("geometry-owned meadow refinement response", () => {
         renderer.dispose();
         dom.window.close();
         material.dispose();
+      }
+    }));
+});
+
+describe("explicit authored meadow endpoint response", () => {
+  function authored(
+    action: (r: ReturnType<typeof createMeadowAuthoredClumpGeometry>) => void,
+  ) {
+    const r = createMeadowAuthoredClumpGeometry();
+    try {
+      action(r);
+    } finally {
+      r.geometry.dispose();
+      r.coarseGeometry.dispose();
+    }
+  }
+
+  it.each([-1, 0, 0.5, 1, 2])(
+    "preserves evaluated coarse parents at clamped weight %s",
+    (weight) =>
+      authored(({ geometry, coarseGeometry }) => {
+        const before = Array.from(
+          coarseGeometry.getAttribute("position").array,
+        );
+        const result = createGrassMeadowAuthoredResponse(
+          geometry,
+          coarseGeometry,
+          float(weight),
+          response,
+        );
+        const w = Math.max(0, Math.min(1, weight));
+        let changedInterior = 0;
+        for (let v = 0; v < 315; v++) {
+          const base = Math.floor(v / 15) * 7;
+          const pair = GRASS_MEADOW_REFINEMENT.parentPairs[v % 15];
+          const a = expected(coarseGeometry, base + pair[0]);
+          const b = expected(coarseGeometry, base + pair[1]);
+          const fine = expected(geometry, v);
+          for (const key of ["position", "normal", "width"] as const) {
+            const want = a[key].map(
+              (x, i) => (x + b[key][i]) * 0.5 * (1 - w) + fine[key][i] * w,
+            );
+            evaluateGraph(result[key], geometry, v).forEach((x, i) =>
+              expect(x).toBeCloseTo(want[i], 12),
+            );
+          }
+          if (
+            v % 15 >= 2 &&
+            v % 15 <= 5 &&
+            Math.abs(fine.position[0] - a.position[0]) +
+              Math.abs(fine.position[2] - a.position[2]) >
+              1e-5
+          )
+            changedInterior++;
+        }
+        expect(changedInterior).toBeGreaterThan(40);
+        expect(
+          Array.from(coarseGeometry.getAttribute("position").array),
+        ).toEqual(before);
+        expect(
+          nodes(Object.values(result)).some(
+            (n) => Reflect.get(n, "method") === "normalize",
+          ),
+        ).toBe(false);
+        expect(NAMES.map((name) => geometry.getAttribute(name).count)).toEqual([
+          147, 147, 315,
+        ]);
+      }),
+  );
+
+  it("keeps the conforming endpoint's exact original-vertex contract", () =>
+    authored(({ geometry, coarseGeometry }) => {
+      let called = false;
+      expect(() =>
+        createGrassMeadowRefinementResponse(
+          geometry,
+          coarseGeometry,
+          float(0),
+          (s) => {
+            called = true;
+            return response(s);
+          },
+        ),
+      ).toThrow(/Changed meadow refinement original vertex/);
+      expect(called).toBe(false);
+      expect(NAMES.every((name) => !geometry.hasAttribute(name))).toBe(true);
+    }));
+
+  it("rejects an unmarked conforming endpoint before binding", () =>
+    fixture(({ geometry, coarseGeometry }) => {
+      let called = false;
+      expect(() =>
+        createGrassMeadowAuthoredResponse(
+          geometry,
+          coarseGeometry,
+          float(0),
+          (s) => {
+            called = true;
+            return response(s);
+          },
+        ),
+      ).toThrow();
+      expect(called).toBe(false);
+      expect(NAMES.every((name) => !geometry.hasAttribute(name))).toBe(true);
+    }));
+
+  it.each(["position", "normal", "uv"] as const)(
+    "rejects altered authored %s before binding",
+    (name) =>
+      authored(({ geometry, coarseGeometry }) => {
+        const a = geometry.getAttribute(name);
+        a.setX(12, a.getX(12) + 0.02);
+        let called = false;
+        expect(() =>
+          createGrassMeadowAuthoredResponse(
+            geometry,
+            coarseGeometry,
+            float(1),
+            (s) => {
+              called = true;
+              return response(s);
+            },
+          ),
+        ).toThrow();
+        expect(called).toBe(false);
+        expect(NAMES.every((key) => !geometry.hasAttribute(key))).toBe(true);
+      }),
+  );
+
+  it("validates cloned metadata and owns detached storage", () =>
+    authored(({ geometry, coarseGeometry }) => {
+      const clone = geometry.clone();
+      try {
+        createGrassMeadowAuthoredResponse(
+          clone,
+          coarseGeometry,
+          float(0.5),
+          response,
+        );
+        expect(NAMES.every((name) => !geometry.hasAttribute(name))).toBe(true);
+        expect(clone.getAttribute(NAMES[0]).array).not.toBe(
+          coarseGeometry.getAttribute("position").array,
+        );
+      } finally {
+        clone.dispose();
       }
     }));
 });
