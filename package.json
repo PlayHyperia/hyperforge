@@ -56,6 +56,7 @@
     "assets:optimize:models": "node scripts/optimize-assets.mjs --models",
     "models:audit": "node scripts/audit-models.mjs",
     "models:audit:verbose": "node scripts/audit-models.mjs --verbose",
+    "models:audit:test": "node --test scripts/audit-models.test.mjs",
     "avatars:audit:launch": "node scripts/audit-avatar-lods.mjs",
     "avatars:lod:runtime:verify": "node scripts/verify-duel-avatar-lod-runtime.mjs",
     "avatars:candidates:build": "node scripts/build-duel-avatar-candidates.mjs",

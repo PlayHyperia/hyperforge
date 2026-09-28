@@ -1,0 +1,1138 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-28",
+  "auditor": "scripts/audit-models.mjs",
+  "scope": {
+    "assetsRoot": "/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/assets-v10",
+    "selection": "Five current compact-island tree kinds plus their resident inferred LOD files and shared stump; six code-owned pond props; one nine-mesh rock LOD library.",
+    "wholeLaunchCoverage": false,
+    "treeKinds": [
+      "tree_oak",
+      "tree_maple",
+      "tree_general",
+      "tree_magic",
+      "tree_mahogany"
+    ]
+  },
+  "acceptance": "Partial metadata census only. Legacy file caps are provisional; rock-moss-set is a variant/LOD library, not one placed asset. No model was changed. Not a full launch inventory or runtime performance pass.",
+  "summary": {
+    "total": 56,
+    "passed": 55,
+    "failed": 1,
+    "inspectionErrors": 0
+  },
+  "models": [
+    {
+      "asset": "models/trees/oak/oak_01.glb",
+      "sha256": "d8c4f37c0209d441d29cde7e301ca5abc57d32d821a7a33eeb786d42dfbd68f2",
+      "bytes": 1114188,
+      "definitionTriangles": 7062,
+      "allNodeTriangles": 7062,
+      "triangles": 7062,
+      "vertices": 13758,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 7062,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/oak/oak_01_lod1.glb",
+      "sha256": "bdda5d6fb6a28c54f12fa9ca2cc810de409568eb4aa82433a300e2b1552af493",
+      "bytes": 760240,
+      "definitionTriangles": 3530,
+      "allNodeTriangles": 3530,
+      "triangles": 3530,
+      "vertices": 7816,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3530,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/oak/oak_01_lod2.glb",
+      "sha256": "bdda5d6fb6a28c54f12fa9ca2cc810de409568eb4aa82433a300e2b1552af493",
+      "bytes": 760240,
+      "definitionTriangles": 3530,
+      "allNodeTriangles": 3530,
+      "triangles": 3530,
+      "vertices": 7816,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3530,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/oak/oak_02.glb",
+      "sha256": "b645314321f436ef1aac8f6adfa27aa7e5fcb5bae4ff4b5c6d213a336b6591de",
+      "bytes": 1149952,
+      "definitionTriangles": 7310,
+      "allNodeTriangles": 7310,
+      "triangles": 7310,
+      "vertices": 14370,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 7310,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/oak/oak_02_lod1.glb",
+      "sha256": "ee4df43ca3faaa6d3fefdb4b5cb379d208dd8599347011018c4ac896b4db5953",
+      "bytes": 760760,
+      "definitionTriangles": 3654,
+      "allNodeTriangles": 3654,
+      "triangles": 3654,
+      "vertices": 7812,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3654,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/oak/oak_02_lod2.glb",
+      "sha256": "ee4df43ca3faaa6d3fefdb4b5cb379d208dd8599347011018c4ac896b4db5953",
+      "bytes": 760760,
+      "definitionTriangles": 3654,
+      "allNodeTriangles": 3654,
+      "triangles": 3654,
+      "vertices": 7812,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3654,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/wood-tree-stump/wood-tree-stump.glb",
+      "sha256": "c24144a82e23a4e507af1d3b2b20b2b0aac98d9f8f639d761a42c29c8438a03b",
+      "bytes": 3620312,
+      "definitionTriangles": 13139,
+      "allNodeTriangles": 13139,
+      "triangles": 13139,
+      "vertices": 11384,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 13139,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_01.glb",
+      "sha256": "f01de5491b50477fb9ea270295088b5ebcfb502a8553b2f2d19281c57b944c8c",
+      "bytes": 637092,
+      "definitionTriangles": 3226,
+      "allNodeTriangles": 3226,
+      "triangles": 3226,
+      "vertices": 3240,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3226,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_01_lod1.glb",
+      "sha256": "5bdee96b57dd6290d668508d47f805e5be0eb76ad29ef686b429d8dca08540dc",
+      "bytes": 578564,
+      "definitionTriangles": 1612,
+      "allNodeTriangles": 1612,
+      "triangles": 1612,
+      "vertices": 2368,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1612,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_01_lod2.glb",
+      "sha256": "5bdee96b57dd6290d668508d47f805e5be0eb76ad29ef686b429d8dca08540dc",
+      "bytes": 578564,
+      "definitionTriangles": 1612,
+      "allNodeTriangles": 1612,
+      "triangles": 1612,
+      "vertices": 2368,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1612,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_02.glb",
+      "sha256": "a397bc8ccff6f7aa6cbbe047f841ae28eaa1a8397a9d868c678533e001e7423a",
+      "bytes": 679936,
+      "definitionTriangles": 3918,
+      "allNodeTriangles": 3918,
+      "triangles": 3918,
+      "vertices": 3931,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3918,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_02_lod1.glb",
+      "sha256": "68e28dabc0afc98ab4789d1e526a570190d8eadff3cc39eaafd37130322cadb6",
+      "bytes": 608692,
+      "definitionTriangles": 1958,
+      "allNodeTriangles": 1958,
+      "triangles": 1958,
+      "vertices": 2869,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1958,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_02_lod2.glb",
+      "sha256": "68e28dabc0afc98ab4789d1e526a570190d8eadff3cc39eaafd37130322cadb6",
+      "bytes": 608692,
+      "definitionTriangles": 1958,
+      "allNodeTriangles": 1958,
+      "triangles": 1958,
+      "vertices": 2869,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1958,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_03.glb",
+      "sha256": "1a279fc0dbfdefcc37acea4de135b103db20397c668a8db39cfd5f112c51776c",
+      "bytes": 695272,
+      "definitionTriangles": 5036,
+      "allNodeTriangles": 5036,
+      "triangles": 5036,
+      "vertices": 4085,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 5036,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_03_lod1.glb",
+      "sha256": "2df3c924222ebdac12811ad5ba9bf8b3cff2d817b57a73bea7e666e3e5a466db",
+      "bytes": 607812,
+      "definitionTriangles": 2518,
+      "allNodeTriangles": 2518,
+      "triangles": 2518,
+      "vertices": 2793,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2518,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_03_lod2.glb",
+      "sha256": "6cd996513b98589ba73f7105b7654248c5427a3760ec511591f1715fa5805397",
+      "bytes": 554096,
+      "definitionTriangles": 1258,
+      "allNodeTriangles": 1258,
+      "triangles": 1258,
+      "vertices": 1969,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1258,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_04.glb",
+      "sha256": "1dd5b9fa12e2e0fc011fea23c0f0b8f7290ee7d737c2ea75de9af2ef0acac286",
+      "bytes": 705132,
+      "definitionTriangles": 4832,
+      "allNodeTriangles": 4832,
+      "triangles": 4832,
+      "vertices": 4283,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4832,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_04_lod1.glb",
+      "sha256": "4a7efa91cbfb5d49b85ccd98c0a0412c8878211beddb4aeeecf6bdafbb150644",
+      "bytes": 619736,
+      "definitionTriangles": 2416,
+      "allNodeTriangles": 2416,
+      "triangles": 2416,
+      "vertices": 3017,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2416,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/maple/maple_04_lod2.glb",
+      "sha256": "df3386012369f7545224dd12b512a6738fc895072cd4c83c9a419b23ac3ada51",
+      "bytes": 564936,
+      "definitionTriangles": 1208,
+      "allNodeTriangles": 1208,
+      "triangles": 1208,
+      "vertices": 2168,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1208,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_01.glb",
+      "sha256": "ae02a2f38a04039fa66e8e4871a49b4a870701efb7f9dc8abd61d0abf551cbb8",
+      "bytes": 2323856,
+      "definitionTriangles": 7948,
+      "allNodeTriangles": 7948,
+      "triangles": 7948,
+      "vertices": 17845,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 7948,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_01_lod1.glb",
+      "sha256": "3c17729ac2a6c61322765ed19116bef7885b918075d3fb0e34b3ecd2880abcfb",
+      "bytes": 1871388,
+      "definitionTriangles": 4082,
+      "allNodeTriangles": 4082,
+      "triangles": 4082,
+      "vertices": 9590,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4082,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_01_lod2.glb",
+      "sha256": "5dfdd3cba003d8781c1d735e6995abccc9b296bd2c3188ab6600c92d42268aa3",
+      "bytes": 1521772,
+      "definitionTriangles": 1255,
+      "allNodeTriangles": 1255,
+      "triangles": 1255,
+      "vertices": 3193,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1255,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_02.glb",
+      "sha256": "61e31929c751f6b0c9853e9b3a0c7cf43b72729ac6183c715c89029c261ad189",
+      "bytes": 2338256,
+      "definitionTriangles": 7956,
+      "allNodeTriangles": 7956,
+      "triangles": 7956,
+      "vertices": 18121,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 7956,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_02_lod1.glb",
+      "sha256": "967a0230602c4a66536e8818541de6984cb6111929f8ec59809fe0d56f9c0e02",
+      "bytes": 1875792,
+      "definitionTriangles": 4079,
+      "allNodeTriangles": 4079,
+      "triangles": 4079,
+      "vertices": 9675,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4079,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_02_lod2.glb",
+      "sha256": "88d30b2aae27b940772bffeb869a4e234ce42ce4149d9e56fabf88547dbe28e1",
+      "bytes": 1506556,
+      "definitionTriangles": 1129,
+      "allNodeTriangles": 1129,
+      "triangles": 1129,
+      "vertices": 2915,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1129,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_03.glb",
+      "sha256": "c6caec21c24d1629fd05acc1533750a20c098ea60d28c1ef7cce9693b51fd2ac",
+      "bytes": 1896372,
+      "definitionTriangles": 4536,
+      "allNodeTriangles": 4536,
+      "triangles": 4536,
+      "vertices": 10018,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4536,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_03_lod1.glb",
+      "sha256": "b8c6088bc3109689b2b80d9dcd555931072d4d1611af5092273ca7f9423ac159",
+      "bytes": 1690248,
+      "definitionTriangles": 2734,
+      "allNodeTriangles": 2734,
+      "triangles": 2734,
+      "vertices": 6262,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2734,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_03_lod2.glb",
+      "sha256": "07dd38118cf9bb0b488b00bba9d7a9696f4fd6dbe3515e320a0db3a8b69204ef",
+      "bytes": 1452472,
+      "definitionTriangles": 764,
+      "allNodeTriangles": 764,
+      "triangles": 764,
+      "vertices": 1917,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 764,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_04.glb",
+      "sha256": "61e31929c751f6b0c9853e9b3a0c7cf43b72729ac6183c715c89029c261ad189",
+      "bytes": 2338256,
+      "definitionTriangles": 7956,
+      "allNodeTriangles": 7956,
+      "triangles": 7956,
+      "vertices": 18121,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 7956,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_04_lod1.glb",
+      "sha256": "967a0230602c4a66536e8818541de6984cb6111929f8ec59809fe0d56f9c0e02",
+      "bytes": 1875792,
+      "definitionTriangles": 4079,
+      "allNodeTriangles": 4079,
+      "triangles": 4079,
+      "vertices": 9675,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4079,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_04_lod2.glb",
+      "sha256": "88d30b2aae27b940772bffeb869a4e234ce42ce4149d9e56fabf88547dbe28e1",
+      "bytes": 1506556,
+      "definitionTriangles": 1129,
+      "allNodeTriangles": 1129,
+      "triangles": 1129,
+      "vertices": 2915,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1129,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_05.glb",
+      "sha256": "c864c3088799be39fbd42b3e54da885031b71812111037d4d3c29bec69298fc2",
+      "bytes": 1800428,
+      "definitionTriangles": 3617,
+      "allNodeTriangles": 3617,
+      "triangles": 3617,
+      "vertices": 8279,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3617,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_05_lod1.glb",
+      "sha256": "b25aa006b34fa9f676afb71ba9b57edd84542f00f25f7a472805afb13694948a",
+      "bytes": 1629120,
+      "definitionTriangles": 2193,
+      "allNodeTriangles": 2193,
+      "triangles": 2193,
+      "vertices": 5149,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2193,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_05_lod2.glb",
+      "sha256": "3b09b65c3471c808e388b09ca1d8cdd50c1586662ff5f63cba4eb83e5ff64e6b",
+      "bytes": 1437708,
+      "definitionTriangles": 636,
+      "allNodeTriangles": 636,
+      "triangles": 636,
+      "vertices": 1648,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 636,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_06.glb",
+      "sha256": "70bf43e2dcf2a4656a1bfa7ddea48e1781f6b6eb418519f97c474dc4fa782154",
+      "bytes": 1748988,
+      "definitionTriangles": 3208,
+      "allNodeTriangles": 3208,
+      "triangles": 3208,
+      "vertices": 7337,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3208,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_06_lod1.glb",
+      "sha256": "33b2fb5b391001430705787a9f2e2e7b2bdfb284010e2d98fdb1b655fe7dacf5",
+      "bytes": 1596388,
+      "definitionTriangles": 1903,
+      "allNodeTriangles": 1903,
+      "triangles": 1903,
+      "vertices": 4553,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1903,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/general/general_06_lod2.glb",
+      "sha256": "9d3d4ed567102bbc8b1a1b3d4bbb85538f0b98eab5d8e8c9b9311b4e497dfa94",
+      "bytes": 1429008,
+      "definitionTriangles": 580,
+      "allNodeTriangles": 580,
+      "triangles": 580,
+      "vertices": 1487,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 580,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_01.glb",
+      "sha256": "6ee7094ba8c8ce1ffe199c31a515aba16cd6deaf094a5ea28cb0ac57a6da00bb",
+      "bytes": 2743916,
+      "definitionTriangles": 9971,
+      "allNodeTriangles": 9971,
+      "triangles": 9971,
+      "vertices": 9967,
+      "primitives": 3,
+      "materials": 3,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 9971,
+          "primitiveCount": 3
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_01_lod1.glb",
+      "sha256": "a0126d5c8ed968ccc84ed555acc18313ebfc0438428e304ab40b2807a7b315b7",
+      "bytes": 2561000,
+      "definitionTriangles": 4985,
+      "allNodeTriangles": 4985,
+      "triangles": 4985,
+      "vertices": 7235,
+      "primitives": 3,
+      "materials": 3,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 4985,
+          "primitiveCount": 3
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_01_lod2.glb",
+      "sha256": "13c7d936aa2ca6ce3f9540e11c7ee10cdaff328fe99739fe4a8bc0e8e893456a",
+      "bytes": 2419144,
+      "definitionTriangles": 2493,
+      "allNodeTriangles": 2493,
+      "triangles": 2493,
+      "vertices": 4992,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2493,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_02.glb",
+      "sha256": "499a06be737cb3037459360bd4454e29baf0ea1367066a51106b1a816180c81e",
+      "bytes": 2875704,
+      "definitionTriangles": 12208,
+      "allNodeTriangles": 12208,
+      "triangles": 12208,
+      "vertices": 12081,
+      "primitives": 3,
+      "materials": 3,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 12208,
+          "primitiveCount": 3
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_02_lod1.glb",
+      "sha256": "e058cf89522d0d0999c016b0f8f197a591e6fe70714486c49df4143e278bea3f",
+      "bytes": 2652756,
+      "definitionTriangles": 6104,
+      "allNodeTriangles": 6104,
+      "triangles": 6104,
+      "vertices": 8754,
+      "primitives": 3,
+      "materials": 3,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 6104,
+          "primitiveCount": 3
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/magic/magic_02_lod2.glb",
+      "sha256": "40b85a74743d24b086d773fcedec091e305fb4d6049f71a680b2f1960f017b46",
+      "bytes": 2484192,
+      "definitionTriangles": 3052,
+      "allNodeTriangles": 3052,
+      "triangles": 3052,
+      "vertices": 6094,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 3052,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_01.glb",
+      "sha256": "435208bb48bc492e53e996a30ab5cbcf149ac97813ef3b8f78fdfc0bdb982b70",
+      "bytes": 1519904,
+      "definitionTriangles": 1838,
+      "allNodeTriangles": 1838,
+      "triangles": 1838,
+      "vertices": 2199,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1838,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_01_lod1.glb",
+      "sha256": "93f7c428a1ee52e0aa7254d70cc817f46b93446ab588d3987d359af46f5d7f47",
+      "bytes": 1482664,
+      "definitionTriangles": 918,
+      "allNodeTriangles": 918,
+      "triangles": 918,
+      "vertices": 1633,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 918,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_01_lod2.glb",
+      "sha256": "93f7c428a1ee52e0aa7254d70cc817f46b93446ab588d3987d359af46f5d7f47",
+      "bytes": 1482664,
+      "definitionTriangles": 918,
+      "allNodeTriangles": 918,
+      "triangles": 918,
+      "vertices": 1633,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 918,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_02.glb",
+      "sha256": "85f6529d938b630cd67e17cdfec3c46ec5e9066f2f26f87145383fab16b25592",
+      "bytes": 1542328,
+      "definitionTriangles": 2076,
+      "allNodeTriangles": 2076,
+      "triangles": 2076,
+      "vertices": 2574,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 2076,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_02_lod1.glb",
+      "sha256": "569e410ff7e0726b3b70bf055d2aba53e4e395633d3339e0977540608687bcdf",
+      "bytes": 1499684,
+      "definitionTriangles": 1038,
+      "allNodeTriangles": 1038,
+      "triangles": 1038,
+      "vertices": 1924,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1038,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "models/trees/mahogany/mahogany_02_lod2.glb",
+      "sha256": "569e410ff7e0726b3b70bf055d2aba53e4e395633d3339e0977540608687bcdf",
+      "bytes": 1499684,
+      "definitionTriangles": 1038,
+      "allNodeTriangles": 1038,
+      "triangles": 1038,
+      "vertices": 1924,
+      "primitives": 2,
+      "materials": 2,
+      "meshes": [
+        {
+          "index": 0,
+          "name": null,
+          "triangles": 1038,
+          "primitiveCount": 2
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_boulder.glb",
+      "sha256": "c96db0d9be6562094e25a5eabb9d29fa0f6e65838d8f5e9ace2c3e8b90139610",
+      "bytes": 1257312,
+      "definitionTriangles": 778,
+      "allNodeTriangles": 778,
+      "triangles": 778,
+      "vertices": 2278,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "Cube.072",
+          "triangles": 778,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_flat_stone.glb",
+      "sha256": "682d3f94df9ea794d1b0aeb2327c0ff5c0b66abcc281d451107a4215ba90c70e",
+      "bytes": 1701240,
+      "definitionTriangles": 182,
+      "allNodeTriangles": 182,
+      "triangles": 182,
+      "vertices": 231,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "Cube.076",
+          "triangles": 182,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_fern.glb",
+      "sha256": "8d486e7a907ba633a08e79ab00a2c49fe07c8e9e96810db189981a88a51ab86f",
+      "bytes": 1163648,
+      "definitionTriangles": 2248,
+      "allNodeTriangles": 2248,
+      "triangles": 2248,
+      "vertices": 1594,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "Plane.004",
+          "triangles": 2248,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_bush.glb",
+      "sha256": "c1a66e5b7b28d1c940e0a3186bf70e5eb08bbfa6fd4bd71350ae5c68accbd4d2",
+      "bytes": 932520,
+      "definitionTriangles": 1396,
+      "allNodeTriangles": 1396,
+      "triangles": 1396,
+      "vertices": 4188,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "Plane.003",
+          "triangles": 1396,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_reed_clump.glb",
+      "sha256": "9ac6653b60a9b4c1795d92b0387d2cd1be4c3a2ef5b2fc1df0fb8fc38391c95f",
+      "bytes": 114164,
+      "definitionTriangles": 972,
+      "allNodeTriangles": 972,
+      "triangles": 972,
+      "vertices": 1904,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "pond_reed_clump_geometry",
+          "triangles": 972,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "vegetation/compact-pond-v1/pond_sorrel.glb",
+      "sha256": "2f887028b517ad2e6ea3c75665dc4790c59a0ae66ea41ff6185e5b5375777d22",
+      "bytes": 1267868,
+      "definitionTriangles": 1629,
+      "allNodeTriangles": 1629,
+      "triangles": 1629,
+      "vertices": 1392,
+      "primitives": 1,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "Plane.005",
+          "triangles": 1629,
+          "primitiveCount": 1
+        }
+      ]
+    },
+    {
+      "asset": "rocks/compact-outcrops-v1/rock-moss-set.glb",
+      "sha256": "62c8c753c57b7108f79c98ee0f1bbb2497c27e3fe55a15979765fa02da184c55",
+      "bytes": 2993320,
+      "definitionTriangles": 31428,
+      "allNodeTriangles": 31428,
+      "triangles": 31428,
+      "vertices": 16916,
+      "primitives": 9,
+      "materials": 1,
+      "meshes": [
+        {
+          "index": 0,
+          "name": "rock10_LOD0_SOURCE_NEAR_NO_MODIFIERS",
+          "triangles": 8000,
+          "primitiveCount": 1
+        },
+        {
+          "index": 1,
+          "name": "rock10_LOD1_DERIVED",
+          "triangles": 2000,
+          "primitiveCount": 1
+        },
+        {
+          "index": 2,
+          "name": "rock10_LOD2_DERIVED",
+          "triangles": 500,
+          "primitiveCount": 1
+        },
+        {
+          "index": 3,
+          "name": "rock11_LOD0_SOURCE_NEAR_NO_MODIFIERS",
+          "triangles": 8000,
+          "primitiveCount": 1
+        },
+        {
+          "index": 4,
+          "name": "rock11_LOD1_DERIVED",
+          "triangles": 2000,
+          "primitiveCount": 1
+        },
+        {
+          "index": 5,
+          "name": "rock11_LOD2_DERIVED",
+          "triangles": 500,
+          "primitiveCount": 1
+        },
+        {
+          "index": 6,
+          "name": "rock13_LOD0_SOURCE_NEAR_NO_MODIFIERS",
+          "triangles": 7928,
+          "primitiveCount": 1
+        },
+        {
+          "index": 7,
+          "name": "rock13_LOD1_DERIVED",
+          "triangles": 2000,
+          "primitiveCount": 1
+        },
+        {
+          "index": 8,
+          "name": "rock13_LOD2_DERIVED",
+          "triangles": 500,
+          "primitiveCount": 1
+        }
+      ]
+    }
+  ]
+}
