@@ -1,4 +1,29 @@
-/** Pure layout for zone discovery. No renderer, manifest mutation or world state. */
+/** Pure minimap projection/layout. No renderer, manifest mutation or world state. */
+export class MinimapViewportMetrics {
+  majorPixels = 200;
+  halfWidth = 10;
+  halfHeight = 10;
+  pixelsPerWorld = 10;
+
+  /** One isotropic world scale for camera projection and cached terrain. */
+  update(width: number, height: number, halfExtent: number): void {
+    if (
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !Number.isFinite(halfExtent) ||
+      width <= 0 ||
+      height <= 0 ||
+      halfExtent <= 0
+    )
+      throw new Error("Positive finite minimap viewport required");
+    this.majorPixels = Math.max(width, height);
+    // Ratio first keeps a square viewport's original half-extent exact.
+    this.halfWidth = halfExtent * (width / this.majorPixels);
+    this.halfHeight = halfExtent * (height / this.majorPixels);
+    this.pixelsPerWorld = this.majorPixels / (2 * halfExtent);
+  }
+}
+
 export type MinimapZoneKind = "safe" | "arena";
 
 export type MinimapZoneArea = {
@@ -57,6 +82,9 @@ export function getMinimapZoneKind(
   area: MinimapZoneArea,
 ): MinimapZoneKind | null {
   if (area.id === "duel_arena") return "arena";
+  // The arena POI represents this whole campus, including its safe grounds.
+  // Navigation deduplication does not change zone safety or border rendering.
+  if (area.id === "arena_grounds") return null;
   return area.safeZone && !area.pvpEnabled ? "safe" : null;
 }
 
