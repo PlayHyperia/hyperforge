@@ -6,6 +6,7 @@ import { getDuelArenaGradeHeight } from "../../../data/arena-grading";
 import { DuelArenaVisualsSystem } from "../DuelArenaVisualsSystem";
 import {
   applyDuelStoneSurface,
+  createDuelStoneLayout,
   DUEL_STONE_SURFACE,
 } from "../DuelStoneMaterial";
 
@@ -18,6 +19,91 @@ type Construction = {
   createLobbyFloor(): void;
   createHospitalFloor(): void;
 };
+
+const numericLayoutOperations = {
+  add: (a: number, b: number) => a + b,
+  sub: (a: number, b: number) => a - b,
+  mul: (a: number, b: number) => a * b,
+  div: (a: number, b: number) => a / b,
+  floor: Math.floor,
+  fract: (a: number) => a - Math.floor(a),
+  min: Math.min,
+};
+
+describe("world-space stone layout arithmetic (not GPU or visual proof)", () => {
+  const c = DUEL_STONE_SURFACE;
+  const sample = (x: number, z: number, grain = 0) =>
+    createDuelStoneLayout(numericLayoutOperations, x, z, grain);
+
+  it("uses human-scale, bounded varied courses at positive and negative world positions", () => {
+    const widths = new Set<number>();
+    for (let row = -20; row <= 20; row++) {
+      const z = (row + 0.5) * c.blockLength;
+      const result = sample(0, z);
+      expect(result).toEqual(sample(0, z));
+      expect(result.row).toBe(row);
+      expect(result.width).toBeGreaterThanOrEqual(0.558 - 1e-12);
+      expect(result.width).toBeLessThanOrEqual(0.682 + 1e-12);
+      expect(result.offset).toBeGreaterThanOrEqual(-0.1);
+      expect(result.offset).toBeLessThan(0.6);
+      widths.add(result.width);
+      const center = sample((3.5 - result.offset) * result.width, z);
+      expect(center.column).toBe(3);
+      expect(center.edge).toBeCloseTo(c.blockLength / 2, 10);
+    }
+    expect(widths.size).toBeGreaterThan(35);
+    expect(c.blockWidth).toBe(0.62);
+    expect(c.blockLength).toBe(0.38);
+    expect(c.jointWidth * 2).toBe(0.01);
+    expect(c.reliefMeters).toBe(0.0035);
+    expect(c.jointWidth + c.bevelWidth + c.grainWarpMeters / 2).toBeLessThan(
+      c.blockLength / 10,
+    );
+  });
+
+  it("shares every vertical seam across neighbors without per-stone offsets or gaps", () => {
+    const epsilon = 1e-7;
+    for (const row of [-17, -1, 0, 1, 19]) {
+      for (const grain of [-0.5, 0, 0.5]) {
+        const warp = grain * c.grainWarpMeters;
+        const z = (row + 0.5) * c.blockLength - warp * 0.5;
+        const course = sample(0, z, grain);
+        for (let column = -3; column <= 3; column++) {
+          const seam = (column - course.offset) * course.width - warp;
+          const left = sample(seam - epsilon, z, grain);
+          const right = sample(seam + epsilon, z, grain);
+          expect(left.column).toBe(column - 1);
+          expect(right.column).toBe(column);
+          expect(left.row).toBe(row);
+          expect(right.row).toBe(row);
+          expect(left.edge).toBeCloseTo(epsilon, 10);
+          expect(right.edge).toBeCloseTo(epsilon, 10);
+          expect(sample(seam, z, grain).edge).toBeCloseTo(0, 10);
+        }
+      }
+    }
+  });
+
+  it("joins differently sized courses on the same continuous horizontal boundary", () => {
+    const epsilon = 1e-7;
+    for (const row of [-12, -1, 0, 1, 12]) {
+      for (const grain of [-0.5, 0.17, 0.5]) {
+        const seam = row * c.blockLength - grain * c.grainWarpMeters * 0.5;
+        for (const x of [-13.2, -0.03, 0, 0.83, 14.7]) {
+          const below = sample(x, seam - epsilon, grain);
+          const above = sample(x, seam + epsilon, grain);
+          expect(below.row).toBe(row - 1);
+          expect(above.row).toBe(row);
+          expect(below.edge).toBeGreaterThanOrEqual(0);
+          expect(above.edge).toBeGreaterThanOrEqual(0);
+          expect(below.edge).toBeLessThan(epsilon * 1.01);
+          expect(above.edge).toBeLessThan(epsilon * 1.01);
+          expect(sample(x, seam, grain).edge).toBeCloseTo(0, 10);
+        }
+      }
+    }
+  });
+});
 
 describe("actual shared campus stone owners", () => {
   it("creates all three real floor meshes with one material and unchanged support geometry", () => {

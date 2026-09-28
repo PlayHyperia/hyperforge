@@ -10,6 +10,10 @@ Evidence: [public native state](/Users/lucid/Downloads/hyperia-public06-native-s
 
 Earlier numbered sections below are historical evidence. Their statements that public3333 is unchanged no longer describe the current playable build.
 
+Follow-up checkpoint `30061479ebf34106a9714fd07a8e3431689d6691` is pushed with the user's verified author and committer. The actual saved rectangular panel now renders a298×170 canvas at y1 instead of cropping a298×298 canvas at y−63. Native zoom and click-to-walk pass; the arena campus shows a single crossed-blades cue rather than an overpainted safe shield. All22 pure projection/layout tests pass, including isotropic rotated rectangular projection. Native arbitrary-resize/rotation acceptance is not implied by those CPU tests. Saved HUD layout and public database remain unchanged.
+
+Canonical build159 compiles with975 actual production inputs, zero source overrides and no private diagnostic exports. Its five changed production inputs are the retained-meadow convergence, opt-in clump cache, authored-shape compatibility, cache wiring and arena stone material. Initial native ordinary entry confirms3024×1724 at2×/MSAA4, ready terrain28/28 and grass123/123, idle preparation, registered avatar and no device loss. Cache-off is verified. Matched cache cost, stone appearance and broader stability remain under test; compilation and entry are not performance or final-art acceptance.
+
 ## Native249: matched matrix-free experiment does not earn promotion
 
 Frozen build157 compiled from checkpoint249. Two90-second ordinary-player Chrome/Metal samples used identical camera/player coordinates, normalized camera quaternion, midday phase0.45,3024×1724 drawing buffer,DPR2 andMSAA4. Each retained94 published grass owners,123/123 ready grass chunks,28/28 terrain chunks, enabled reflections/postprocessing/bloom,883 reported draws and10,489,241 Three-counter triangles per tick. The shadow preference was High; actual depth blur remained disabled despite its saved preference. Temporary local camera/sky controls were restored afterward. Wind/gameplay clocks continued normally; these are not bitwise temporal-image comparisons.
