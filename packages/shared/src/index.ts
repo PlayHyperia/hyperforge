@@ -661,6 +661,10 @@ export { ELEMENTAL_STAVES } from "./data/runes";
 
 // Export world area data for server use
 export { ALL_WORLD_AREAS, STARTER_TOWNS } from "./data/world-areas";
+export {
+  resolveZoneNavigationMode,
+  type ZoneNavigationMode,
+} from "./runtime/clientViewportMode";
 
 // Export systems (organized by platform for tree-shaking)
 export { Entities } from "./systems/shared";

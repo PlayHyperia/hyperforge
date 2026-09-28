@@ -1,5 +1,24 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
+<!-- world249-native-summary -->
+**Current world checkpoint — updated playable build and native-verified minimap navigation.**
+
+This section is current; numbered checkpoint sections below are retained history, not additional acceptance gates.
+
+- [x] Commit and push environment checkpoint `fe3e4217d8404012e85c92ee74132a3b9ec9b1ad` on `codex/sol-duel-stream-launch`, with the user's verified Git author and committer.
+- [x] Compile build157 and verify 94 actual grass owners switch from InstancedMesh/identity matrices to the matrix-free path. Both paths render the avatar and retained world in the matched views.
+- [x] Complete two 90-second native Chrome/Metal runs at 3024×1724, DPR2/MSAA4, fixed camera and midday phase: baseline **19.433** versus candidate **19.000** primary CPU submissions/s. Both retain 883 reported draws and 10,489,241 reported triangles per tick. This is not physical-display FPS, and one pair does not establish a regression. **No performance win: leave the candidate disabled.**
+- [x] Restore temporary camera/clock controls; stop private249 with no cleanup errors. No graphics quality, population or resolution reduction.
+- [x] Replace localhost3333's old September24/build109 client/server with build158/UI05. Validate database backups; preserve the existing database, character, inventory, quests and preferences. Native Chrome/Metal confirms the avatar is present, visual preparation is ready/idle, the drawing buffer is3024×1724 at2×/MSAA4, and the device is not lost. Experimental grass/ground/shadow performance flags remain absent.
+- [x] Validate the actual minimap overlay in native WebGPU: safe-zone shields and arena direction cues replace oversized world markers in the selected presentation, while resource markers remain. Ordinary walking works. Fourteen pure projection/layout tests and18 world-marker policy tests pass. Correct a real private UI-adapter omission caught by native inspection before refreshing the playable build.
+- [x] Stop private250 and remove its disposable runtime cleanly; leave the saved public database/server available. Source formatting does not alter the verified UI05 artwork snapshot.
+- Navigation checkpoint scope: the verified minimap source, its tests/exports and this evidence. Unrelated work and unaccepted performance prototypes remain separate.
+- [ ] Address repeated clump-invariant grass calculations; qualify actual benefit before enabling. Keep the shadow-reuse prototype separately opt-in until native parity/cost are known.
+- [ ] Still open: sustained60FPS at2×, natural paths/shoreline and world composition, all-day meadow cohesion, traversal/reconnect/loading and stability acceptance.
+
+[Detailed measurements and limitations](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/grass-canopy-visibility-research-20260928.md).
+<!-- /world249-native-summary -->
+
 <!-- world249-summary -->
 **Checkpoint 249 — source optimization implemented; AAA/60 FPS acceptance still open.**
 

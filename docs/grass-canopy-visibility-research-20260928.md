@@ -1,5 +1,30 @@
 # Grass canopy visibility: research checkpoint
 
+## Current playable checkpoint: build158, UI05 and minimap navigation
+
+Localhost3333 now serves the updated frozen client/server and verified minimap UI, replacing its September24/build109 runtime. Two database backup archives were validated before refresh; the same database volume and existing character were retained. Native Chrome/Metal confirms the saved avatar, inventory and quest UI, ready/idle visuals, no device loss, a3024×1724 drawing buffer, DPR2 andMSAA4. The grass-instancing, verge, ground-sampling and shadow-reuse experiments are absent. This is a playable smoke check, not a performance pass or all-day art acceptance.
+
+The private250 check caught a genuine integration failure: the UI snapshot map contained the new minimap, but its loader predicate did not serve that path. After correcting the adapter, native zoomed minimap captures show safe-zone shields, an arena direction cue and existing resources. Ordinary click-to-walk moved the avatar successfully. Canonical navigation verification passes14 pure layout/projection tests and18 world-marker policy tests. Private250 stopped with no cleanup errors; the public saved database remains available. The shadow prototype recorded zero reused maps and remains off in the public build.
+
+Evidence: [public native state](/Users/lucid/Downloads/hyperia-public06-native-smoke.json), [verified zoomed navigation](/Users/lucid/Downloads/hyperia-runtime250-zoomed-minimap.png), [private movement/navigation state](/Users/lucid/Downloads/hyperia-runtime250-navigation-smoke.json). Full-scene visual quality, smooth2× performance, path/shoreline composition, loading/reconnect and sustained stability still require work.
+
+Earlier numbered sections below are historical evidence. Their statements that public3333 is unchanged no longer describe the current playable build.
+
+## Native249: matched matrix-free experiment does not earn promotion
+
+Frozen build157 compiled from checkpoint249. Two90-second ordinary-player Chrome/Metal samples used identical camera/player coordinates, normalized camera quaternion, midday phase0.45,3024×1724 drawing buffer,DPR2 andMSAA4. Each retained94 published grass owners,123/123 ready grass chunks,28/28 terrain chunks, enabled reflections/postprocessing/bloom,883 reported draws and10,489,241 Three-counter triangles per tick. The shadow preference was High; actual depth blur remained disabled despite its saved preference. Temporary local camera/sky controls were restored afterward. Wind/gameplay clocks continued normally; these are not bitwise temporal-image comparisons.
+
+| Run | Primary CPU submissions/s | Interval P50 / P95 / P99 |
+| --- | --- | --- |
+| Instanced baseline02 | 19.4331 | 51.6 / 55.0 / 56.8ms |
+| Matrix-free candidate02 | 18.9998 | 52.6 / 57.0 / 60.2ms |
+
+Both samplers report acceptable measurement, zero flagged/empty ticks, no errors and no device loss. This one ordered pair shows **no demonstrated speedup**, not a statistically established regression or physical-display FPS. Do not enable matrix-free grass by default. Actual owners confirm the candidate uses ordinary Mesh/InstancedBufferGeometry without instanceMatrix; both new full-resolution stills show the avatar. The earlier candidate01 at3840×1984 is a standalone sample, excluded from this comparison because the native window dimensions changed. Its absent-avatar still was not reproduced in the new matched pair; complete motion/loading verification remains open.
+
+Evidence: [baseline JSON](/Users/lucid/Downloads/hyperia-runtime249-baseline02.json),SHA256 `e9cbe70618b3fdebe9dfe88fe33ec08d9f125c9d50561e8f061758ca30102dee`; [candidate JSON](/Users/lucid/Downloads/hyperia-runtime249-candidate02.json),SHA256 `017dbca963cad8ad33bb0235bc3b2ce66fe39cec6d02cc32753218b65385d93d`; [baseline still](/Users/lucid/Downloads/hyperia-runtime249-baseline-midday-2x02.png); [candidate still](/Users/lucid/Downloads/hyperia-runtime249-candidate-midday-2x02.png). Private249 stopped with errors empty. The source checkpoint was pushed as `fe3e4217d8404012e85c92ee74132a3b9ec9b1ad` using the user's verified author/committer.
+
+Next: finish existing minimap navigation in-game and replace the explicitly pinned public3333/build109 launcher with the tested current client/server while retaining saved state. Then target clump-invariant shader work instead of repeating scalar grass tweaks. Native250's first ordinary-player check recorded1,343 primary shadow scopes,zero reused reflections and1,343 fallbacks (`callback:Mesh#3600:`); this prototype earns no promotion or performance claim. Its17 focused tests and scoped compiler/lint checks do not replace native benefit. Sustained60FPS, low-light meadow cohesion, natural terrain/path/water presentation and world-design gates remain open.
+
 <!-- world249-checkpoint-20260928 -->
 ## Checkpoint 249: matrix-free meadow source checkpoint
 

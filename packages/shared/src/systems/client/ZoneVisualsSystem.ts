@@ -23,7 +23,7 @@ import { ZoneDetectionSystem } from "../shared/death/ZoneDetectionSystem";
 import { Chat } from "../shared/presentation/Chat";
 import { ALL_WORLD_AREAS } from "../../data/world-areas";
 import type { WorldArea } from "../../types/core/core";
-import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import { resolveZoneNavigationMode } from "../../runtime/clientViewportMode";
 
 // Zone visual colors
 const ZONE_COLORS = {
@@ -37,11 +37,12 @@ type ZoneEmojiType = "skull" | "home" | "swords";
 /**
  * Broadcast and embedded spectator cameras cover preparation as well as the
  * arena. Eight-metre floating navigation emojis obscure those scenes and can
- * be mistaken for buildings. Keep navigation markers for ordinary gameplay;
- * this presentation policy does not affect zone detection, borders or warnings.
+ * be mistaken for buildings. The explicit minimap presentation moves ordinary
+ * discovery cues into the HUD; omission preserves the existing world markers.
+ * This policy does not affect zone detection, borders or warnings.
  */
 export function shouldRenderZoneMarker(_areaId: string, win?: Window): boolean {
-  return !isStreamingLikeViewport(win);
+  return resolveZoneNavigationMode(win) === "world-v1";
 }
 
 // Visual configuration

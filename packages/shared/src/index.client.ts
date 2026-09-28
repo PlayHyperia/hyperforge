@@ -55,6 +55,8 @@ export {
 } from "./utils/movement/PlayerSupport";
 export {
   STREAMING_RENDER_PROFILES,
+  resolveZoneNavigationMode,
+  type ZoneNavigationMode,
   resolveExplicitStreamingRenderProfile,
   resolveStreamingRenderFrameRate,
   resolveStreamingRenderPreferences,

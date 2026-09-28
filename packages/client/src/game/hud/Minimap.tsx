@@ -19,6 +19,8 @@ import {
   THREE,
   TERRAIN_CONSTANTS,
   INPUT,
+  ALL_WORLD_AREAS,
+  resolveZoneNavigationMode,
 } from "@hyperforge/shared";
 import type { ClientWorld } from "../../types";
 import { type EntityPip, useMinimapEntityPips } from "./useMinimapEntityPips";
@@ -33,6 +35,10 @@ import {
   MINIMAP_TERRAIN_OVERSHOOT,
   useMinimapTerrainCache,
 } from "./useMinimapTerrainCache";
+import {
+  MinimapZoneNavigationState,
+  updateMinimapZoneNavigation,
+} from "./minimapZoneNavigation";
 // Shared with terrain-cache generation so draw-time coverage matches the
 // cached snapshot's real world footprint.
 const TERRAIN_OVERSHOOT = MINIMAP_TERRAIN_OVERSHOOT;
@@ -336,6 +342,8 @@ function drawRoadsAndBuildingsOverlay(
  * component instance now gets its own isolated set via renderStateRef.
  */
 interface MinimapRenderState {
+  /** Reusable zone POI and edge-cue layout storage. */
+  zoneNavigation: MinimapZoneNavigationState;
   /** Camera forward direction (XZ) */
   forwardVec: THREE.Vector3;
   /** Pip world→screen projection scratch */
@@ -354,6 +362,7 @@ interface MinimapRenderState {
 
 function createRenderState(): MinimapRenderState {
   return {
+    zoneNavigation: new MinimapZoneNavigationState(),
     forwardVec: new THREE.Vector3(),
     projectVec: new THREE.Vector3(),
     destVec: new THREE.Vector3(),
@@ -541,12 +550,7 @@ function _drawIconGlyph(
     font: string;
     textAlign: "left" | "right" | "center" | "start" | "end";
     textBaseline:
-      | "top"
-      | "hanging"
-      | "middle"
-      | "alphabetic"
-      | "ideographic"
-      | "bottom";
+      "top" | "hanging" | "middle" | "alphabetic" | "ideographic" | "bottom";
     fillText(text: string, x: number, y: number): void;
     fillRect(x: number, y: number, w: number, h: number): void;
     strokeRect(x: number, y: number, w: number, h: number): void;
@@ -571,6 +575,42 @@ function _drawIconGlyph(
   ctx.strokeStyle = "#000000";
 
   switch (subType) {
+    // Zone safety does not imply a town/building: use a shield, not a house.
+    case "zone_safe":
+      ctx.fillStyle = "#82b8a0";
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy - 5);
+      ctx.lineTo(cx + 5, cy - 5);
+      ctx.lineTo(cx + 4, cy + 2);
+      ctx.lineTo(cx, cy + 6);
+      ctx.lineTo(cx - 4, cy + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      break;
+
+    case "zone_arena":
+      // Crisp, cached crossed blades; no platform emoji or baked glow.
+      ctx.lineCap = "round";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy + 5);
+      ctx.lineTo(cx + 5, cy - 5);
+      ctx.moveTo(cx + 5, cy + 5);
+      ctx.lineTo(cx - 5, cy - 5);
+      ctx.stroke();
+      ctx.strokeStyle = "#d9dfdf";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.strokeStyle = "#b39b67";
+      ctx.beginPath();
+      ctx.moveTo(cx - 6, cy + 1);
+      ctx.lineTo(cx - 1, cy + 6);
+      ctx.moveTo(cx + 1, cy + 6);
+      ctx.lineTo(cx + 6, cy + 1);
+      ctx.stroke();
+      break;
+
     // --- Bank: gold coin ($) ---
     case "bank":
       ctx.fillStyle = "#daa520";
@@ -1052,6 +1092,9 @@ function MinimapInner({
 
     let rafId: number | null = null;
     let frameCount = 0;
+    // Candidate-only, matching the world-marker policy at session startup.
+    // Broadcast/embedded spectator viewports resolve to "none".
+    const showZoneNavigation = resolveZoneNavigationMode() === "minimap-v1";
 
     const render = () => {
       frameCount++;
@@ -1278,7 +1321,7 @@ function MinimapInner({
         }
       }
 
-      // Draw 2D overlay (roads → buildings → pips → flag) every frame
+      // Draw 2D overlay (roads → buildings → zone POIs → pips → flag) every frame
       const ctx = overlayCtxRef.current;
       if (ctx) {
         const cw = overlayCanvas.width;
@@ -1308,6 +1351,54 @@ function MinimapInner({
             cw,
             ch,
           );
+        }
+
+        if (showZoneNavigation && rs.hasCachedMatrix && cam && hasTarget) {
+          const navigation = rs.zoneNavigation;
+          updateMinimapZoneNavigation(
+            navigation,
+            ALL_WORLD_AREAS,
+            _cachedProjectionViewMatrix.elements,
+            _tempTargetPos.x,
+            _tempTargetPos.z,
+            cw,
+            ch,
+          );
+          ctx.save();
+          // Keep this overlay's drawing inside its canvas viewport.
+          ctx.beginPath();
+          ctx.rect(0, 0, cw, ch);
+          ctx.clip();
+          for (let index = 0; index < navigation.count; index++) {
+            const marker = navigation.markers[index];
+            drawMinimapIcon(
+              ctx,
+              marker.x,
+              marker.y,
+              marker.kind === "safe" ? "zone_safe" : "zone_arena",
+            );
+            if (marker.offMap) {
+              const ux = marker.directionX;
+              const uy = marker.directionY;
+              ctx.beginPath();
+              ctx.moveTo(
+                marker.x + ux * 8 - uy * 3,
+                marker.y + uy * 8 + ux * 3,
+              );
+              ctx.lineTo(marker.x + ux * 11, marker.y + uy * 11);
+              ctx.lineTo(
+                marker.x + ux * 8 + uy * 3,
+                marker.y + uy * 8 - ux * 3,
+              );
+              ctx.strokeStyle = "#172321";
+              ctx.lineWidth = 3;
+              ctx.stroke();
+              ctx.strokeStyle = "#e0e8e2";
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
         }
 
         // ── Entity pips ───────────────────────────────────────────────────────
@@ -1490,8 +1581,7 @@ function MinimapInner({
       if (!worldPos) return;
 
       const player = world.entities?.player as
-        | { position?: { x: number; z: number }; runMode?: boolean }
-        | undefined;
+        { position?: { x: number; z: number }; runMode?: boolean } | undefined;
       if (!player?.position) return;
       const dx = worldPos.x - player.position.x;
       const dz = worldPos.z - player.position.z;
@@ -1505,9 +1595,7 @@ function MinimapInner({
       }
 
       const terrainSystem = world.getSystem("terrain") as unknown as
-        | TerrainSystemLike
-        | null
-        | undefined;
+        TerrainSystemLike | null | undefined;
       let targetY = 0;
       if (terrainSystem?.getHeightAt) {
         const h = terrainSystem.getHeightAt(targetX, targetZ);
