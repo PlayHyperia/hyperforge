@@ -1,0 +1,818 @@
+# Grass canopy visibility: research checkpoint
+
+<!-- world249-checkpoint-20260928 -->
+## Checkpoint 249: matrix-free meadow source checkpoint
+
+- [x] Implement default-inert `grassInstancing=attributes-v1` for the admitted leaf-volume meadow field. Use ordinary Three Mesh plus InstancedBufferGeometry instead of allocating identity instance matrices. Geometry conversion precedes root/mask binding; the exact instance count is immutable, grounded material ownership is checked, and the existing clone is reused.
+- [x] Preserve the original local-normal normalization before custom position/grounding. Real installed r186 stage-generation tests remove the identity matrix/inverse work at all three LODs and retain the fixture's custom fragment flow. This is not full production shader, native pixel or FPS proof.
+- [x] Check actual worker → retained terrain → grounding → published chunks at all three LODs: placement/template arrays, material policy, storage ownership, transformed bounds, frustum behavior and retirement agree. Candidate grass is deliberately noninteractive; it no longer exposes misleading undeformed-template ray intersections.
+- [x] Run the combined 27-suite environment regression: **1,791 passed, 2 native-gated skipped** (1,793 total; 159.00 seconds). Earlier helper-test failures were corrected fixture/oracle mistakes, not accepted failures. Scoped ESLint and formatting pass. An unchanged-tsconfig comparison explicitly includes all four changed249 tests (730 roots / 2,374 source files) and retains exactly the same five inherited procedural-asset declaration diagnostics. GVM still has its pre-existing `@ts-nocheck`; runtime-owner tests cover that integration, not compiler verification of its internals.
+- [ ] Compile an isolated build from this checkpoint while retaining the admitted artwork inputs; qualify actual native shaders, full-resolution appearance, identical-view repeated 2× timings and motion. No new FPS gain or appearance acceptance is claimed.
+- [ ] Complete the sustained 60 FPS, all-day meadow, traversal, loading/reconnect and stability gates. The last two 248 samples are both around 14 primary CPU submissions/s and have differing cameras/lighting; neither is a matched speedup comparison.
+
+The user explicitly requested commits and pushes. This source checkpoint includes the accumulated grass grounding/worker and authored endpoint dependencies, terrain material work, reflection-footprint experiment, flower-placement filtering, terrain-tree lifecycle fixes and loading gate. It excludes unrelated server/gameplay/UI/WASM/pnpm and duplicate files. New rendering candidates remain opt-in; the reflection footprint remains disabled by default. Existing-path changes include conservative flower road/exclusion filtering, split/reversal lifecycle handling, awaited procedural sky initialization without unused legacy sky downloads, and broader packed normal/AO/roughness filtering inside the already-opt-in substrate mode.
+
+Native evidence below belongs to frozen build156 and earlier builds, not this newly edited canonical source. Five historical artwork overrides mean canonical source is not identical to those captured builds. Existing material tests use locally provisioned ignored texture assets; this checkpoint does not establish clean-clone asset provisioning. Public3333/build109 is unchanged, although the user now permits closing it when useful. The private248 process/ports/container and owned browser windows were cleaned up before editing.
+
+Focused receipts: [viewport 584/584](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-instancing249-viewport-tests01.log), [binding 83/83](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-instancing249-gpu-tests05.log), [actual production chunks](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-instancing249-generation-tests02.log). Root's combined run additionally covers the modified terrain/water/flower/loading suites and existing terrain-tree, grounding-handoff/publication and profile-admission regressions. Final source type declarations use the actual package-local r186 Object3D/Mesh contract; root corrected an older root-level Three type mismatch after the focused receipts.
+<!-- /world249-checkpoint-20260928 -->
+
+<!-- world248-checkpoint-20260928 -->
+## Checkpoint248: native candidate verified; 2× performance still fails
+
+- [x] Build156 compiled successfully after its no-output preflight. Exactly four production inputs differ from155; two framework bundles changed and seven bundles stayed exact. Five historical overrides, private exports, UI04/UI735 and145 protected artifacts are retained. No public build was replaced.
+- [x] The admitted source verification remains829 passing tests,2 native-gated skips, scoped lint clean, and five unchanged inherited TypeScript diagnostics with zero new/target diagnostics.
+- [x] Launch private248/build156 in native Chrome/Metal and verify actual grass/ground candidate owners at3024×1612, DPR2/MSAA4. Reflections and effects remain enabled; density, geometry and resolution were not reduced.
+- [x] Collect90 seconds with DevTools closed:1259 completed primary CPU submissions over90.001s, or13.9887/s; interval P50/P95/P99=70.8/85.3/96.6ms, maximum117.2ms, six intervals above100ms. This is not physical-display FPS. Pose and effective quality remained stable; natural day phase/exposure advanced, and reported draws varied892–898. The60FPS target remains unmet.
+- [x] Capture45 actual main-view grass programs across all three LODs. Reversing only the intended two branch wrappers/initializations restores all other vertex tokens. Fragment shader bytes, named chunk populations and draw parameters match the earlier baseline; main-view grass instances remain85,298. Different lighting prevents treating the older trace as visual parity proof.
+- [x] Compile six separate strict native shader modules—vertex and fragment at147/105/60 vertices—with zero compiler/validation messages. No game pipeline, shader or rendering hook is replaced by that compiler check. This is correctness evidence, not speedup or pixel acceptance.
+- [x] Save and inspect the raw baseline after renewed browser authorization:1244 submissions over90.008s (13.82099/s), with71.9/84.7/92.4ms P50/P95/P99. All92 samples retain stable per-run quality, pose and readiness. However, the baseline camera position/quaternion differs from the candidate, natural lighting differs, and draw populations are not exact. These are two failing2× samples, not a matched pair or causal speedup. [Raw baseline](/Users/lucid/Downloads/hyperia-runtime248-baseline01.json), SHA256 `399d4f8380b664ca9522298209b0fe1bc28931fc3954af2c88f2979512d1ea05`, records `disposed:true`, no sampler errors and no device loss.
+- [x] Complete independent private248 postflight: stopped2026-09-28T19:43:26.869Z/errors empty; private processes/ports/container removed; owned native Chrome game/DevTools closed. All frozen source/build/UI/diagnostic pins and public3333/build109 identities/database remain unchanged. [Postflight receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player248-postflight01.log), SHA256 `c8d4322221e66d3d46a8c220989bb9300c56026c927290e9460fc41be911ed04`. The user now permits closing3333 when useful. No production defaults are promoted.
+
+Candidate evidence: [raw cadence](/Users/lucid/Downloads/hyperia-runtime248-candidate01.json), SHA256 `fac78d32eb8a07ebb63dc62941192de61b212bcf1f0af6e1ce678c397f780360`; [actual shader/draw trace](/Users/lucid/Downloads/hyperia-runtime248-candidate-workload01.json), SHA256 `a4cd6387cf3d00addc715a502cbce3eca6a7e70e953cf6ab36972cd16b8f6d51`; [independent all-program analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player248-grass-work-analysis02.log), SHA256 `8e209c8672bdc1d712de7d5481a8a1b77cc35552ee0ffdc5bbcfdb449a104b6f`; [strict native receipt](/Users/lucid/Downloads/hyperia-runtime248-candidate-strict01.json), SHA256 `1010f6e86133036b7e2f7fc39ffc7bfe90a30b3608439e4418c0e1d1d50ca8f2`; [full-resolution candidate still](/Users/lucid/Downloads/hyperia-runtime248-candidate-2x.png), SHA256 `51f1e381f4c1f95dc91d1b1a519b9f452af8f2d1e4ff025cde31468351e8fc2e`. The still is a single night view, not all-day art acceptance. Candidate sampler cleanup was observed in the native console; its exported snapshot was taken before disposal and does not independently prove cleanup.
+
+[Build156 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/isolated-build156-report.json), SHA256 `acd38979b86e62243b23abb316aaae9b3219ce648ea3339af2d539297577ac09`; [successful build process](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-verge248-build01-process.json). The60FPS and all-day art targets remain open.
+### Next implementation: remove redundant grass instance transforms
+
+- [x] Source/native trace audit identifies identity-only instance matrices on every grass chunk and precompile representative. Actual emitted vertex programs still load those matrices and calculate inverse-transpose normal transforms before blade visibility. The captured main pass represents5.94 million template-vertex slots; this is static workload evidence, not a measured exclusive GPU cost.
+- [ ] Implement an explicitly selected grass-only `Mesh`/`InstancedBufferGeometry` path using the existing grounded material clone. Convert the template geometry before binding root/visibility storage, set the exact instance count, and retain local-normal normalization before the original position graph. Do not replace normals with terrain normals or override private Three material methods.
+- [ ] Keep attributes/index bytes, root/mask buffer ownership, instance counts, parent-transformed bounds/frustum behavior, material flags and precompile construction aligned. Candidate grass must explicitly opt out of raycasting: existing interaction flags already exclude it, but the current raycaster visits its undeformed template before filtering. This is a deliberate noninteractive-object policy, not a claim that raw intersections stay identical.
+- [ ] Add focused tests in the existing GPU-binding and real-owner suites, then verify actual emitted shaders, original fragment appearance, main/reflection draw populations and matched2× timing. Reject the optimization if it only moves cost or changes appearance. No implementation/native speedup is claimed by this audit.
+
+The installed r186 [instance transform](https://github.com/mrdoob/three.js/blob/r186/src/nodes/accessors/Instance.js) and [draw-parameter selection](https://github.com/mrdoob/three.js/blob/r186/src/renderers/common/RenderObject.js) support this standard geometry route. It avoids changing the shared instancing helper used by other game assets.
+
+Secondary candidates remain gated: [Three's public shadow controls](https://threejs.org/docs/pages/LightShadow.html) permit a fresh lazy update per primary render submission, but reflection-camera layers, view-dependent casters, initialization and depth-version retries must be respected before reusing a map. The two lake depth copies cannot simply be combined while the intervening backface pass writes depth. Existing reflection scissoring has prior bounded evidence (checkpoint238); finish its outstanding coverage instead of creating another competing implementation. The successful248 postflight released the source freeze for checkpoint249 below.
+<!-- /world248-checkpoint-20260928 -->
+
+<!-- world247-checkpoint-20260928 -->
+## Checkpoint247: current native workload identified; opt-in grass optimization implemented
+
+The last measured 2× result remains checkpoint246 below: approximately14 primary CPU render submissions/s, **not** a60FPS pass. This checkpoint is a one-frame structural capture, not a benchmark.
+
+- [x] Capture the current native Chrome/Metal scene at3024×1612, DPR2/MSAA4, without changing camera, population, quality or draw execution. The complete capture has908 draw records; all temporary hooks restored and errors were empty. The first capped/incomplete capture is excluded.
+- [x] Match45 main-camera grass programs to actual draws. They reduce to three vertex LOD variants after buffer-name normalization and share one fragment shader. All contain the same six unguarded capsule-distance calculations for localized bank/service wear. This establishes work to optimize, not its exclusive GPU cost or the fraction of vertices outside those areas.
+- [x] Identify two full-resolution depth copies owned by the lake's back/front draws. Separate node construction inside a shader function produces separate depth-copy caches. The intervening draw writes depth: sharing a snapshot or forcing a single pass is not accepted as equivalent without further water testing.
+- [x] Compare112 shadow draw records in each of two passes: all captured caster identities, transforms, camera/layers, material metadata and draw parameters match except render context. Instance/bone/storage/uniform contents and depth pixels were not compared; shadow reuse is still a hypothesis.
+- [x] Implement opt-in `grassVerge=exact-zero-v1`: independent exact-zero locality gates, unchanged positive-locality arithmetic and final minimum, unchanged default expression graph. Real-owner tests retain identical geometry/index/attribute arrays and profile metadata. No reduction to density, geometry, wind, appearance or resolution.
+- [x] Run the three affected suites together:829 tests passed,2 native-gated tests skipped. Coverage includes independent capsule arithmetic, edges, overlapping fields, tiny positive influence, default graph and invalid owner/URL selections. These are source/CPU checks, not native shader or speedup acceptance.
+- [x] Scoped lint passes for all seven changed source/test files. The matched TypeScript comparison explicitly includes the three changed tests and retains exactly five inherited procedural-asset declaration errors: zero new/target diagnostics. This is not a whole-project pass; GrassVisualManager retains its pre-existing `@ts-nocheck`, so its internals are covered here by real-owner CPU tests/source review, not this compiler check.
+- [ ] Compile private build156, inspect actual emitted vertex shaders for all three LODs and unchanged fragment appearance, then repeat matched full-content2× timing, visual and traversal checks. The existing build helper is prepared but remains `ready:false`; no build156 output or new runtime is claimed. Do not promote from CPU tests alone.
+
+The grass sort-depth mismatch is lower priority on Apple GPUs: ordinary opaque work benefits from hardware hidden-surface removal regardless of front-to-back ordering. Nested reflection/shadow renders do not themselves establish a split of the main attachment pass; the observed framebuffer copies do. [Apple's GPU guidance](https://developer.apple.com/videos/play/wwdc2020/10632/), [Three r186 RenderList](https://raw.githubusercontent.com/mrdoob/three.js/r186/src/renderers/common/RenderList.js).
+
+Evidence: [raw native trace](/Users/lucid/Downloads/hyperia-runtime247-workload02.json) SHA256 `6a6f15e015d42a990a2a514c3a26f27e0296c79a3f9abfd7c400fbe95a6ed017`; [grass analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player247-grass-work-analysis02.log) SHA256 `9dd4d5310eddfba905ed27aaf0c6d123217fa7847dfaa2461185ec2a8787c622`; [copy/shadow analysis with provenance correction](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player247-workload-analysis02.log) SHA256 `6fe6035585c62a21a5d2705138eee3e242e42f8b5a283bf6f0758e300e26170d`.
+
+Private247 stopped at2026-09-28T18:20:48.601Z with errors empty. Owned browser/DevTools tabs, private processes, ports and disposable DB are gone. [Independent postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player247-postflight01.log), SHA256 `d53a434366cf7b0ed6212846bf5e6b3c83c83a78ce0b5d2377f178901d55a89b`, verified frozen source/build/UI pins before subsequent source edits and preserved public3333/build109. No defaults promoted, commit or push.
+
+Source verification: [material tests](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-verge247-tests01.log), [real-owner tests](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-verge248-owner-tests02.log), [matched compiler comparison](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/grass-verge248-types-matched02.log) SHA256 `746962f62f970f5a723dba061db5b07f43028a917e77db5ee544c757dbe7827e`. Root's combined three-suite run passed829/skipped2 in37.46 seconds; all-seven-file scoped lint and `git diff --check` passed. These commands used the guarded Node22 runtime and existing test/lint configuration.
+<!-- /world247-checkpoint-20260928 -->
+
+<!-- world246-checkpoint-20260928 -->
+## Checkpoint246: measured candidate improvement; 2× performance still fails
+
+**There is measurable progress, but high-FPS gameplay is not qualified.** Frozen build155/UI04 ran in native Chrome/Metal on private3344. The first matched pair retained the full scene at 3024×1612, pixel ratio 2 and MSAA4. Reflections, postprocessing and bloom stayed enabled; no quality reduction was used.
+
+| 90-second stationary run | Primary CPU render submissions/s | Interval P50 / P95 / P99 |
+| --- | --- | --- |
+| Exact-zero ground candidate, first | 13.99 | 71.5 / 84.2 / 94.2 ms |
+| Baseline, second | 12.71 | 78.5 / 90.6 / 97.2 ms |
+
+The observed gain is 10.05% in this one candidate→baseline pair, not a proven repeatable speedup or physical-display FPS. Pose, effective quality, texture assets/samplers and draw counts matched. Natural phase/exposure trajectories were close, not identical; host load, cache and GC were not isolated. Both runs are far below the 60 FPS target. Earlier244 timings used different conditions and must not be treated as a direct regression comparison.
+
+Every sampled tick retained 892 reported draws, 10,710,753 Three-reported triangles and 6 renderer calls. These are counters across rendering passes, not unique visible geometry. Readiness stayed ready/idle/uncovered, and both cadence samplers restored their hooks without errors.
+
+- [x] Independently recompute both raw timing summaries and match pose, quality, asset bindings and draw counts.
+- [x] Inspect actual emitted candidate terrain WGSL: 6 grass and 6 dirt appearance reads are in their exact-zero branches, 18 rock reads retain their branch, and all 5 height reads remain outside. Projection derivatives are prepared before divergent sampling.
+- [x] Both baseline and candidate pass strict native derivative-uniformity compilation of their full captured vertex/fragment programs, with zero messages/errors. The candidate's fresh-session shader bytes exactly match the timed candidate. Only two diagnostic shader-module copies were compiled per mode; no game pipeline, program or renderer hook was replaced.
+- [x] Review original 3024×1612 baseline/candidate stills from the same pose and approximately the same natural lighting phase. No obvious terrain-shading regression in this view. Wind/clouds/animation advance, so these are not pixel-identical parity proof or all-day art acceptance.
+- [ ] Repeat ordering and representative viewpoints before promoting the candidate; check turf, paths, mineral/coastal blends and pond banks at dawn/day/night, near/far and in motion.
+- [ ] Optimize the measured grass/terrain workload without silently reducing resolution, coverage or effects. A grass-chunk sort-depth mismatch is a source-reviewed hypothesis only; test it independently before changing defaults. Do not alter shared geometry bounds blindly because raycasting also consumes them.
+- [ ] Complete three warmed 90-second traversal routes plus 10-minute stability, including loading/first-visit stalls, memory and quality/runtime agreement. The stationary pair is an early failure screen, not completion of those gates.
+- [ ] Resolve the reload/reconnect reliability issue recorded in245. Closing the owned tab and verifying two zero-socket observations allowed both fresh mode changes here; that protocol is a testing workaround, not a production fix.
+
+### Evidence and scope
+
+[Candidate raw capture](/Users/lucid/Downloads/hyperia-runtime246-candidate01.json), SHA256 `4ce326ee24ff3ea9b157ab22568d0a2da888f7f1d4d0651e94d095f4789bb2c8`; [baseline raw capture](/Users/lucid/Downloads/hyperia-runtime246-baseline01.json), SHA256 `3290aebf8bc4d5177089c226db31cd0b5b4e114343678a5675797979d84d9b83`; [independent pair analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player246-pair-analysis01.log), SHA256 `be621fea05773675f8c064068d17d740483cfdc59c05961a89e3592f69c7c189`.
+
+[Candidate strict native receipt](/Users/lucid/Downloads/hyperia-runtime246-candidate-shader02.json), SHA256 `8e36c1103e722f31949bef288d49bd9cb0c092a9fde49f9728d096ff510be24a`; [independent strict analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player246-candidate-strict-analysis01.log), SHA256 `b9d038e5cece292511d203179a7e222d972842429e2db32caae9d8d9d98fc93e`. Baseline strict compilation is retained in its raw capture. Candidate662.3ms /baseline716.2ms are diagnostic compilation durations, not rendering cost.
+
+[Baseline still](/Users/lucid/Downloads/hyperia-runtime246-baseline-2x.png), SHA256 `be79895bdb482ffb37abc533f730c56a0e32561ae67486f58801f9fbde910f30`; [candidate still](/Users/lucid/Downloads/hyperia-runtime246-candidate-2x.png), SHA256 `3f4d3e82330f0ca818532cfe541422914b187f412804a01232cc485a961c3714`. Both are original canvas exports taken after timing.
+
+The owned native tabs/DevTools are closed. Runtime246 stopped at 2026-09-28T17:47:39.901Z with `errors:[]` and controller exit0 after targeted shutdown. The [independent postflight audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player246-postflight01.log), SHA256 `e95bc1fb487be7e853dad454aa759a7f9c56de1fea84d6a2c30716df39ba08da`, confirms private processes, ports and disposable database removed; public3333 process identities/database, protected source/artifact pins, UI735 inventory and all9 build155 bundles/maps preserved. Host after-snapshot reported AC100% and no recorded thermal/performance warning, not continuous thermal qualification. Production defaults and public3333/build109 remain unchanged. No commit or push in this checkpoint.
+<!-- /world246-checkpoint-20260928 -->
+
+<!-- world245-checkpoint-20260928 -->
+## Checkpoint245: private native attempt inconclusive; no new FPS claim
+
+Build155/UI04 was admitted and launched only on private3344. The normal baseline reached ready/idle at the unchanged3024×1612, DPR2 framebuffer. Its attempted90-second cadence capture was discarded: DevTools remained open during measurement and subsequent focus handling sent input to the game. It is not a valid performance comparison or matched pose.
+
+The candidate reload selected `groundSampling=exact-zero-v1`, but the server rejected entry while the previous socket was still alive. The visible UI reported **“Player already active on another device or window.”** The server log independently records duplicate-spawn rejection and subsequent old-socket removal for `missed_pong x3`. This is a connection-lifecycle failure to investigate, not evidence of a GPU shader failure. The loading gate recorded zero successful primary submissions. The [candidate receipt attempt](/Users/lucid/Downloads/hyperia-runtime245-ground-shader01.json), SHA256 `9bdea8721da36f25115f53858813cb5c3fbdedd8b3993a7fa27e082cb17a7372`, records only `main opaque list absent`; no candidate native mapping, strict compilation, pixels or performance were qualified.
+
+- [x] Extend the existing read-only terrain receipt with exact grass/dirt branch checks and browser-native SHA.143 parser/historical-structure checks and21 strict-copy checks pass; historical collector/rock safeguards remain exact. These are diagnostic checks, not new rendered-game acceptance.
+- [ ] Retry the same frozen155 comparison with DevTools closed during timing and an observed normal-player ready state before collecting shaders. Start candidate-first from a fresh private session. Between modes, close the owned game tab and confirm server disconnection before opening another; do not disable duplicate-session protection.
+- [ ] Add reload/reconnect race reproduction and regression verification to launch reliability work. A delayed reopen is a testing workaround, not a fix or launch acceptance.
+- [ ] Candidate emitted WGSL, strict native compilation, matched visual parity, repeated2× timings and full traversal/stability gates remain open. Public3333/build109 and production defaults are unchanged.
+
+The bounded20-minute runtime stopped normally with `errors:[]` at2026-09-28T17:12:33.519Z. Its owned Chrome tab and DevTools were closed. The [independent cleanup audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player245-postflight01.log), SHA256 `9ccc8f64660c279da9c28622e4e0633e3f804c1274dc338c2f8816816a70d0d4`, confirms private processes/ports/disposable database absent; public3333/build109, its process identities/database,1107 raw/1118 effective inputs,735 UI sources and9 compiled bundles/maps preserved. No commit, push or performance improvement is claimed.
+<!-- /world245-checkpoint-20260928 -->
+
+<!-- world244-checkpoint-20260928 -->
+## Checkpoint244: native cost isolation; exact-zero ground candidate remains unqualified
+
+**The full-quality 2× scene is still below target.** The new result is measured attribution, not a shipped FPS improvement. A bounded native Chrome/Metal run on private3344/build153/UI04 alternated full scene, omitted grass draws, full scene, omitted terrain draws, then full scene. Temporary omission was a diagnostic intervention only: all content was restored, and no reduced-content scene is accepted or promoted.
+
+| Seven-second block | Full World.tick CPU P50 | Completed submission interval P50 | Submission cadence | Sampled GPU envelope P50 |
+| --- | --- | --- | --- | --- |
+| Full scene, first | 15.8 ms | 54.0 ms | 18.53/s | 49.81 ms |
+| Grass draws omitted | 14.2 ms | 34.1 ms | 29.00/s | 31.20 ms |
+| Full scene, middle | 15.7 ms | 54.6 ms | 18.49/s | 52.23 ms |
+| Terrain draws omitted | 13.9 ms | 36.2 ms | 27.53/s | 32.83 ms |
+| Full scene, final | 15.5 ms | 53.2 ms | 18.68/s | 50.20 ms |
+
+The first second of each block was excluded; each retained GPU block has only six samples. The35 native query records join exactly to their corresponding game ticks among783 total tick rows. Full scene had898 reported draws; omission removed87 grass draws (45 primary/42 reflected) or35 terrain draws (18 primary/17 reflected). Shadow override draws were retained. Geometry, camera, player, texture quality and 3024×1612 drawing buffer at DPR2/MSAA4 stayed fixed; natural time advanced. Reflections, postprocessing and bloom stayed enabled. Shadows preference was med; actual directional shadow passes were4096². This is still not acceptance of a named High preset.
+
+The result identifies both terrain and grass rendering as significant optimization targets. It does **not** measure exclusive/additive subsystem costs: removing draws changes overdraw and occlusion in primary and reflected views. Overlapping query intervals must not be summed or inverted into physical-display FPS. Full-tick CPU includes preTick/frame-budget work excluded by243, narrowing the scheduling hypothesis for this view; browser work outside World.tick remains unmeasured. Neither omission reaches the60 FPS target.
+
+### Implemented source candidate, not yet native-qualified
+
+- [x] Add default-inert `groundSampling=exact-zero-v1`, requiring the existing admitted exact-zero rock path. Missing/invalid/duplicate dependencies fail; public3333 is unchanged.
+- [x] Separate unchanged projected grass/dirt heights from appearance. Preserve all five height reads and final coverage arithmetic; defer packed albedo/roughness/normal/AO reads only when their final contribution is exactly zero. Tiny nonzero contributions are retained without epsilon thresholds.
+- [x] Preserve nested dirt through bank silt/coastal rock, rock through mineral-graded dirt, original grass grade order, and raw coastal soil before bank grading. Use finite inactive values and explicitly prepared derivatives.
+- [x] Source/CPU checks:568 viewport tests,165 compact-material tests and59 terrain tests pass;2 native-gated tests are skipped. Scoped lint passes. The matched compiler-host comparison includes all three changed tests and retains the same five inherited procgen declaration diagnostics, with zero new/target errors; it is not a clean whole-project typecheck. These checks do not prove emitted WGSL, identical pixels or speedup.
+- [x] Compile isolated build155 successfully:9 bundles/maps, exactly2 changed framework bundles and7 unchanged from153;1107 raw /977 compiled /1118 effective inputs,5 historical overrides retained and145 protected artifacts unchanged. This is JavaScript bundling, not actual GPU shader compilation or native acceptance. UI04/runtime/public3333 remain unchanged.
+- [ ] Inspect actual emitted GPU shader branch placement; verify five unchanged heights outside appearance branches, six grass and six dirt appearance reads inside their respective branches, and no implicit derivatives in divergent control flow.
+- [ ] Run matched full-content baseline/candidate at exact2× with unchanged appearance settings. Check pure turf, paths, rock, pond/coastal blends, dawn/day/night, movement and close/far views; report regressions, not just average gains.
+- [ ] Re-run the warmed traversal and stability acceptance gates from243. All-day soft-meadow art acceptance and sustained60 FPS remain open.
+
+### Retained evidence and cleanup
+
+[Raw native capture](/Users/lucid/Downloads/hyperia-runtime244-cost-isolation.json), SHA256 `5cf26ddd742398a495df3002106b715d1ab03ee780a11c89410077123e84d24c`; [independent frame-joined analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player244-cost-analysis01.log), SHA256 `c583dcf19447ebeb6cd7116f4f3801da3a8b1e74b8c96e443c3c5059ccf9849a`; [restored full-content 2× image](/Users/lucid/Downloads/hyperia-runtime244-restored-2x.png), SHA256 `59c46b45fa708e0d14f7ef49c85e0bf0352d6529c5e85a3f5cca857c72de3cd9`. The still is visual evidence only.
+
+[Stopped-runtime audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player244-postflight01.log), SHA256 `19301cbc0b2aba5dfdce1f4c049716b8c6fce3aae05fd06970153fb3762cee32`: private244 controller, children, ports and disposable database gone; public3333/build109 and its database preserved. No sampler/GPU errors or device loss, all105 owned query resources destroyed, zero pending readbacks and hooks restored. Host before/after reported AC100% and no recorded thermal warning, not continuous thermal qualification. One audit scope sentence retains the old243 label; its actual id, process, pins and cleanup are244. No default promotion, commit or push.
+
+Measurement separates game submissions, JavaScript work and GPU queries as recommended by [WebGPU timing guidance](https://webgpufundamentals.org/webgpu/lessons/webgpu-timing.html); no GPU-only timing is called display FPS. Source verification receipts use the `ground-sampling245-` prefix. [Matched type comparison](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/ground-sampling245-types-matched01.log), SHA256 `e8380003ee5a79e4100c15f7cd18b4052ed869d10baabd92a2867947272baafa`. [Built155 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/isolated-build155-report.json), SHA256 `3519c3bab47edab254557a5e3a7943b92248b2945138e471a05f4ebabcbb358f`; [independent bundle/source verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/ground-sampling245-build-verify01.log), SHA256 `402c480e08cbbbb8178f77bf063b0a353afd553244acbfa0bcb6456b90ef8db9`. Runtime245 has not been prepared/launched; actual emitted WGSL, GPU validation, matched-image parity and speedup remain the next gate.
+<!-- /world244-checkpoint-20260928 -->
+
+
+<!-- world243-checkpoint-20260928 -->
+## Checkpoint243: native 2× baseline fails the 60 FPS target
+
+**Verdict: measured progress, not a performance improvement.** Two completed 90-second normal-player runs in private3344/build153/UI04 establish a repeatable failure baseline. No production rendering, grass recipe, geometry, lighting, quality setting or public3333 build was changed in this slice. All-day meadow appearance remains unresolved.
+
+| Stationary view | Completed ticks / seconds | Primary render submissions/s | Frame interval P50 / P95 / P99 | Intervals >100 ms |
+| --- | --- | --- | --- | --- |
+| Spawn | 1690 / 90.0079 | 18.776 | 53.2 / 58.7 / 65.0 ms | 0 |
+| Pond-side after ordinary walking | 1386 / 90.0025 | 15.400 | 65.4 / 72.4 / 85.2 ms | 2 |
+
+These are advancing completed game ticks and successful **CPU primary-render submissions**, not measured GPU completion or physical-display FPS. Every sample had one completed primary submission, positive render calls and an advancing renderer frame; none were empty, overflowed or flagged invalid. Independent recomputation matches every retained interval and reported percentile. Both cameras and players were stationary throughout their respective timed intervals: the second label `meadow_short_walk02` does **not** make it a walking benchmark. The first label `spawn_day_baseline01` is also shorthand only: phase advanced naturally 0.878→0.253 with wrap; the second advanced 0.331→0.706. This is not a matched time-of-day A/B comparison, nor evidence that one scene is intrinsically slower.
+
+### Actual conditions and limitations
+
+- Apple M5, 10 GPU cores, 24 GiB RAM, macOS26.6.1; native Chrome/Metal WebGPU on a 60 Hz external display. Initial host receipt: AC power, 100% battery, no recorded thermal/performance warning; other applications were left alone.
+- Logical viewport1512×806; actual drawing buffer **3024×1612**, pixel ratio2, MSAA4, 4,874,688 pixels. Water reflections, postprocessing and bloom remained enabled. Shadows preference was `med`; separately inspected actual directional shadow map was4096×4096. Actual LUT and depth blur were disabled despite saved preferences. **This is not acceptance of the named High preset.**
+- All184 metadata samples were ready/uncovered with idle precompile, stable quality and ready terrain/water/flowers. Grass123/123 chunks at spawn and124/124 at pond-side. No screenshots, video, DevTools interaction or heavy source tests during either recording.
+- Synchronous game-tick P50 was15.3/16.5 ms, versus completed-frame intervals53.2/65.4 ms. This discrepancy and earlier GPU pass timings warrant render/scheduling attribution; they do not by themselves prove a specific shader bottleneck.
+- Three counters reported median892/821 draw calls and10.71M/9.78M triangles per sampled frame. These are renderer counters, not unique visible geometry or guaranteed whole-scene totals. Renderer-tracked allocations were stable within each run (~1.558/1.559 GB); these short runs do not establish leak freedom or long-duration stability.
+- The bounded sampler observes real preTick/postTick and existing renderer/gate counters, with 1 Hz metadata. It does not force rendering or request GPU queries. Its overhead is not zero;22 CPU arithmetic checks and syntax checks passed but are not native performance acceptance.
+- Sampler disposal was observed natively with hooks restored, owner removed and no recorded sampler error/device loss. Private tab and DevTools closed; runtime243 stopped normally with errors[]. Public3333 remains the previous build109; no default promotion, commit or push.
+
+### Evidence
+
+- [Raw samples, both runs](/Users/lucid/Downloads/hyperia-runtime243-2x-cadence02.json), SHA256 `7de357a385df548ee5f249a17f2c57523e679a482d001fc2c41d6d7d7047d37a`.
+- [Post-disposal receipt](/Users/lucid/Downloads/hyperia-runtime243-cadence-cleanup.json), SHA256 `0ae189672d9a20029ef770926fbbabe80dcb7f887636940c78bfaa2c46427f8f`. The initial native disposal result explicitly reported hooksRestored:true; this idempotent second disposal records disposed/ownerAbsent.
+- [Actual 2× canvas, captured after timing](/Users/lucid/Downloads/hyperia-runtime243-2x-meadow.png), SHA256 `77f61e2954ddab0f9d9f95f41c61551592b93e7d59a836f7eb54484d7d5eb7d1`. This still is visual evidence only.
+- [Host conditions](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/performance243-host-before01.log), [sampler arithmetic checks](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player243-cadence-cpu01.log), [runtime lifecycle](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime243/process.json).
+
+- [Independent stopped-runtime audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player243-postflight01.log), SHA256 `f5250a2a4f0b7cb30de7348dfbdb2faee240905efd55c17e1027b3b9143d5979`: private controller/children/ports/disposable database absent; public process identities, build109, database mounts, protected source/bundle pins preserved. After-run host still AC100% with no recorded thermal/performance warning; this does not prove continuous absence of throttling.
+
+### Next work, before more scene complexity
+
+- [x] Establish actual 2× native failure baseline and preserve raw evidence; independently verify arithmetic.
+- [ ] Attribute the dominant cost with existing bounded native GPU pass instrumentation and CPU scheduling evidence, separating shadows, reflection, main terrain/foliage and postprocessing. Do not sum overlapping GPU envelopes or invert them into claimed FPS.
+- [ ] Implement one evidence-led optimization with matched visual parity; retain exact2× dimensions, foliage coverage, shadows and reflections. Do not repeat rejected grass-shape sweeps or add complexity before measuring improvement.
+- [ ] Repeat three warmed90-second traversal routes (town, meadow, pond, arena; walking/turning/LOD; dawn/day/night), then10-minute stability. The two stationary runs are a useful early failure screen, **not completion of those acceptance tasks**.
+- [ ] Verify actual high-quality settings, correct any settings/runtime disagreement, and review motion separately. Performance and soft all-day meadow acceptance remain open.
+
+Earlier checkpoints are historical; this measured failure supersedes screenshot-based assumptions of smooth 2× gameplay.
+<!-- /world243-checkpoint-20260928 -->
+
+<!-- world242-checkpoint-20260928 -->
+## Current checkpoint242: stop repeated grass trials; 2× performance is not qualified
+
+**User-visible status:** the all-day meadow target remains unmet. Recent 2× native screenshots establish appearance evidence, not sustained high FPS. Do not describe the world as performance-qualified or production-ready. The latest source-only navigation work is separate from grass and is not a grass fix.
+
+The latest native timing is a warning, not a pass: [reflection238 timing analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/reflection-footprint238-timing-analysis01.log) reports GPU pass-envelope medians68.29 ms baseline /63.70 ms candidate over40 sparse ABBA samples; CPU medians16.10/16.15 ms. These overlapping intervals do not establish actual FPS, but they plainly do not justify a high-performance claim. Later240/241 loading observations and screenshots do not supersede this cost concern. The source setting is literal pixel ratio2:1512×806 logical pixels became3024×1612 physical pixels,4,874,688 pixels total, with MSAA4 also enabled.
+
+### Decision and immediate acceptance gate
+
+The history review found that generic extra curve segments, swept/arched leaves, shorter multi-height recipes, basal coverage, density/normal-response changes and full-scene AO have already failed the whole-day visual target in different ways. Checkpoint241's proposed silhouette/coverage follow-up is therefore superseded: do not repeat those recipes without a materially different, testable hypothesis. A coherent reference-based candidate needs a matched baseline and explicit day/night, motion and performance acceptance, not another unconstrained parameter sweep.
+
+- [ ] Establish a reproducible **60 FPS target at the user's 2× setting on this Mac**, not a promise for unspecified hardware or viewport sizes. Record CSS viewport, actual drawing-buffer dimensions, renderer pixel ratio, device/backend, display refresh, power/thermal conditions, preset and every quality override.
+- [ ] Measure normal rendered gameplay in the authorized private3344 session: town/stations, dense grass and trees, pond/water bank, arena; include walking, camera turns and LOD transitions. Reflections, ordinary agents and normal scene content must stay enabled. Test midday, dawn and night. Separate startup/first-visit shader or asset stalls from warmed traversal.
+- [ ] Use at least three repeatable 90-second warmed route runs plus a 10-minute stability pass; report achieved frame rate, frame-interval P50/P95/P99, 1% slow-frame behavior and counts/durations of stalls over 33.3/50/100 ms. Measure advancing game/render frames, not solely requestAnimationFrame callbacks or a single FPS-counter reading. A 60 FPS target has a nominal 16.67 ms frame budget; retained missed-budget outliers matter.
+- [ ] Collect CPU and GPU bottleneck evidence separately. Overlapping GPU pass intervals must not be summed into an exclusive GPU frame cost or inverted into claimed FPS. Capture memory/resource growth and readiness changes. Avoid screenshot/video capture during timing; use a separate identical-route visual review.
+- [ ] Repeat controlled conditions before attributing regressions to the game or other applications. Do not close the user's other apps without permission, silently lower resolution/density/shadows, disable water reflections, or omit busy views to manufacture a pass.
+- [ ] Optimize the measured bottleneck, then rerun the same route and review visual parity. No further scene-complexity increase or public promotion on the strength of screenshot-only results.
+
+Three's renderer distinguishes logical size, pixel ratio and physical drawing-buffer size; verify the actual latter rather than relying on a menu label ([official renderer documentation](https://threejs.org/docs/pages/Renderer.html)). A 2× scale in both dimensions is four times the pixels of 1× at the same logical viewport; it is not necessarily four times total frame cost.
+
+### Separate navigation candidate: CPU-qualified only
+
+- [x] Add a default-inert shared `zoneNavigation=minimap-v1` policy; invalid/duplicate selections fail explicitly, streaming-like views suppress these navigation markers, ordinary views retain the old default. Candidate removes persistent floating zone sprites in favor of cached minimap safe-area/arena cues; discovery and warnings remain.
+- [x] Add a reusable minimap projection/layout helper with live manifest handling, bounds clipping and a nearest relevant off-map cue. **14 actual Node/Three CPU tests and 18 shared real-system policy tests pass.** Targeted lint/format/diff checks pass. These are not in-game HUD readability or render acceptance.
+- [x] Compare against exact pre-change sources: shared typecheck retains 5 identical inherited procgen errors, zero new/target errors; UI comparison retains 2 identical external errors, zero new/owned errors. Neither is a clean whole-project typecheck.
+- [x] Detect a public compatibility hazard before promotion:3333 serves live client source against frozen shared build109, which lacks the new resolver export. Preserve candidate Minimap privately and restore canonical Minimap byte-for-byte to its pre-turn source. Read-only HTTP verification of the actual `/game/hud/Minimap.tsx` module returns JavaScript without the new import. No public browser reload or service restart was performed; this is source/module compatibility evidence, not fresh browser acceptance.
+- [x] Preserve candidate at [UI05 Minimap](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/ui-readiness05-UNQUALIFIED/Minimap.tsx), SHA256 `0d6852b054512b637f98838a700787bc7992fc5ddf9602035fb163d6876f30f7`; restored public source SHA256 `f5f1e17e7a4d8c75cd9fa2147ecc551dbbc7a75d1e5b289009d2e6e0d44dbb61`.
+- [x] Build154 **source admission preflight only** passes:1,107 raw /977 compiled /1,118 effective inputs, exactly four shared navigation changes, retained grass overrides and historical private export intact.
+- [ ] Build154, final private UI05 admission, runtime242 and native navigation/motion/FPS qualification **have not happened**. No new private runtime was launched, no appearance default promoted, and no commit/push occurred in this checkpoint.
+
+Final shared test SHA256 `aadfec0381360a8c8c17d20327c226397a4dd2b34dd5f7e86f840bee15ab9f2d`; [matched shared type receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/zone-navigation242-types04.log) SHA256 `55ecb4e14e8158014fd896a0012d319081c919272a25c201e5f5ba0ad43933b1`. Build helper SHA256 `19b11ee5c6ed546476d28d9f2c8277fc067d00e89717feb8c04ab758aa524535`; its exact inverse matches the pre242 helper. Runtime helper and frozen build153/UI04 remain unchanged.
+
+The earlier sections are historical evidence, not current acceptance or an instruction to repeat their superseded next steps.
+
+Private [UI05 checkpoint report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/ui-readiness05-UNQUALIFIED/report.json) is explicitly INCOMPLETE_UNQUALIFIED, ready:false and runtimeAdmitted:false (SHA256 `f319af756dcb7c38d3a2d94afa7b0e4f2d5e4505a8b5f1a33ff19a7ff30a5bcd`). Its735-source inventory permits only the added helper and package test-script changes; the separately pinned Minimap candidate is private. There is no missing successful runtime result to infer from this report.
+<!-- /world242-checkpoint-20260928 -->
+
+<!-- meadow241-contact-20260928 -->
+## Current checkpoint241: native contact-shading comparison rejected
+
+**The all-day soft-meadow target is still unmet. No grass appearance change or full-scene contact AO was promoted. Playable localhost:3333 remains build109, untouched.** Authorized private3344 reused frozen build153/UI04 at 3024×1612, 2× resolution, MSAA4 on native Chrome/Metal WebGPU.
+
+### What the images actually show
+
+Twelve original canvas PNGs cover dawn (.27), midday (.56) and low moon (.21), with direct-before, strength-zero neutral, active AO and direct-after for each. The camera, endpoint lighting, exposure and grass population stay fixed within each sequence. Water reflections are off in **all** comparison modes and restored afterward. Wind, clouds, animation and shadow time remain live: modes span three naturally advancing frames, not pixel-identical snapshots.
+
+Root and independent visual review agree: neutral and direct bookends are sufficiently consistent for this bounded qualitative comparison. Active full-scene AO produces modest inter-blade/root darkening but leaves the conspicuous long, angular ribbons and blade/ground separation. Its larger visible effect is excessively dark, sometimes near-black tree-canopy interiors. This configured treatment is rejected as the meadow fix; these stills do not test temporal stability, all cameras or every AO configuration.
+
+- [x] Save and visually review actual dawn/day/night controls and active output. No screenshot beautification, hidden resolution reduction or changed grass density.
+- [x] Observe actual native grass submissions: each direct bookend has60 canvas-framebuffer grass groups; each neutral/active mode has60 normal-prepass plus60 beauty groups. Zero pending pipelines/draw errors; native queue completion recorded. These are not FPS, physical-presentation or sustained performance measurements.
+- [x] Re-run the existing CompactContactAO CPU suite:12 tests pass. No new full-project typecheck or performance acceptance is claimed.
+- [ ] Next: a small, isolated plant-shape/coverage comparison, retaining lighting and palette, to test whether shorter, smoothly curved silhouettes and coherent multi-height canopy coverage reduce the visible ribbon/ground separation. Compare the actual prior swept/arched candidates first; do not repeat a rejected geometry or another undirected normal/color sweep.
+- [ ] Geometry-derived ground-only occlusion remains a distinct, untested research option—not validated or disproven by this full-scene screen-space AO test. Do not implement it merely because the current trial failed.
+- [ ] Then qualify full day/night motion, close/far LODs, moving camera, terrain/shoreline joins and representative frame/loading/memory budgets before promoting a playable default.
+
+### Diagnostic corrections and recovery
+
+Earlier private adapters are retained as failures, not successful tests. A incorrectly inferred active postprocessing from a routing flag; source and native getters show the unchanged composer bypasses inactive effects. B misclassified Three186's ordinary MSAA/tone-mapping framebuffer as a non-screen target. C attempted two scene-pass captures within the same Three node frame, so the frame-cached prepass did not re-run. D observes the existing framebuffer identity and waits for ordinary frame advancement without editing engine counters or forcing world ticks. A/B/C produced no accepted four-mode image set; B/C restored state and intentionally stopped the failed private page before reload.
+
+The first D lease captured dawn/day and restored via its four-minute watchdog. Midday images were then saved from retained completed data. A separately admitted second lease captured low moon and restored explicitly. Both cleanups disposed AO, restored water/camera/clock/light and removed owned hooks. Final native state: owners[], reflections true, deviceLost false, gate uncovered, precompile idle, terrain28/28 and grass123/123 ready,232 current flowers; ordinary world frames advanced9196→9799 afterward. Loading metadata still reports assets96% and terrainTimedOut:true; flower telemetry includes five slice overruns. These are not erased by strict readiness.
+
+Three ordinary loading entries completed around46/37/37 seconds in this run; cache/host state is uncontrolled, and warm-before-reveal remains roughly five seconds in later entries. Loading speed, missing placeholder-cow logs, unattributed movement-desync diagnostics and all-day art quality remain separate unresolved qualifications.
+
+### Evidence and reference scope
+
+[Runtime log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime241/client.log), [native D console](/Users/lucid/Downloads/hyperia-runtime241d-native-console-20260928.log), [CPU tests](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/meadow-contact241-cpu01.log), [private D adapter](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/build153/private-meadow-contact241d.mjs). D adapter SHA256: `777c0055d16a20e2f3c3a519b77dd4d2eaaf25e979274c6604e5c45e56d04556`.
+
+Image pairs: [dawn neutral](/Users/lucid/Downloads/hyperia-runtime241d-contact-dawn-neutral.png) / [active](/Users/lucid/Downloads/hyperia-runtime241d-contact-dawn-active.png); [midday neutral](/Users/lucid/Downloads/hyperia-runtime241d-contact-day-neutral.png) / [active](/Users/lucid/Downloads/hyperia-runtime241d-contact-day-active.png); [low-moon neutral](/Users/lucid/Downloads/hyperia-runtime241d-contact-lowmoon-neutral.png) / [active](/Users/lucid/Downloads/hyperia-runtime241d-contact-lowmoon-active.png). Direct-before/direct-after files accompany each pair in Downloads.
+
+Research informs hypotheses, not acceptance: [NVIDIA ambient occlusion](https://developer.nvidia.com/gpugems/gpugems/part-iii-materials/chapter-17-ambient-occlusion), [Three GTAO](https://threejs.org/docs/pages/GTAONode.html), [AMD procedural grass](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) and [Tidewater grass source](https://github.com/dgreenheck/tidewater/blob/4811ba48d795197de5621985f404e765c0b7c0ef/src/world/vegetation/GrassField.js#L752-L810). No external reference code was copied into production this slice.
+
+Private runtime241 stopped normally with errors[]; owned DevTools/test tab closed and the user's New Tab preserved. No production source/default edits, public reload, commit or push occurred in this slice.
+
+[Independent stopped postflight02 and image hashes](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player241-postflight02.log) passes: private PIDs/ports/container absent; public process/database identities intact;180 protected files,18 UI pins,734 canonical UI files,1,107 raw/1,118 effective inputs,145 protected artifacts and nine bundles preserved. All12 PNGs are3024×1612. Receipt SHA256: `6eaf7f583f344f1776059ff01d0387b58465508a67b12eae6077bdd1739895c2`; client log: `848353257a5b7e5092675a4732657c3bf7bc81d1313661b9366e63943e87f354`; native D console: `e980390d08b921a589ede32825ad8fb86d5cf7a7e8e77e222be28f23cc6c8dda`. Postflight01's overly broad log regex falsely matched explanatory shader-time prose to an error field; corrected02 retains that failure and classifies explicit GPU/native errors separately. Final native record did not independently capture the paired-near storage value or worker profile; pinned defaults and strict readiness are not substitutes for those missing fields.
+<!-- /meadow241-contact-20260928 -->
+
+
+<!-- normal240-loading-20260928 -->
+## Prior checkpoint240: private opaque-loading render gate
+
+**Playable localhost:3333 remains build109 and untouched. Grass appearance is unchanged and the all-day soft-meadow target remains unmet.** Private3344 tested build153/UI04 in native Chrome/Metal WebGPU at 3024×1612, 2× resolution and MSAA4. The new gate is default-inert; only the private UI query `loadingRender=opaque-v1` acquires it. Production CoreUI and public defaults were not changed.
+
+### Implementation and verification
+
+The renderer skips main scene/composer submissions only while an exclusively owned opaque loading cover is active. World ticks, preparation hooks, precompile and required offscreen work continue. Before fading, the private UI requires strict readiness and two successful primary submissions on distinct fresh world frames beneath the still-opaque cover. Stale leases, reentrant/direct draws, preparation invalidation, resize and cleanup are handled explicitly. These are CPU submission receipts, **not a GPU-completion or physical-presentation fence**.
+
+- [x] Add the gate and reviewed ClientGraphics integration; retain existing primary render dispatch. UI04 guards warmup, delayed readiness rechecks, cancellation, exceptions and cover release.
+- [x] **34 CPU tests pass** across the gate, preparation queue and sky boundary suites; targeted ESLint and formatting pass.
+- [x] Shared type comparison reports 5 existing errors, zero new/target errors; private UI against the real shared source reports 37 existing errors, zero new/target errors. **Neither is a clean whole-project typecheck.**
+- [x] Independently audit build153: exact raw delta is ClientGraphics plus the new gate utility; 1,107 raw / 1,118 effective inputs, nine bundles. Only the two framework bundles change from152; seven others and 145 protected artifacts remain exact. Initial verifier attempts01/02 had manifest/source-map assumptions; corrected03 verifies actual map contents and is retained alongside them.
+
+Source: [ClientGraphics.ts](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/systems/client/ClientGraphics.ts), [OpaqueLoadingRenderGate.ts](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/utils/rendering/OpaqueLoadingRenderGate.ts), [tests](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/utils/rendering/__tests__/OpaqueLoadingRenderGate.test.ts). Private UI: [UI04 CoreUI](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/ui-readiness04-UNQUALIFIED/CoreUI.tsx). Build report SHA256: `495f4d65fbc1ae42a3ba0652778ae80433278ea8eb05afc05c8870274204d549`.
+
+### Four successful native entries, not a controlled speedup benchmark
+
+The bounded recorder samples nominally every500 ms from before ordinary app import and stops after two presented/ready samples. Actual sampling gaps reach6.054 s. Transition brackets below are document ages, not exact transition timestamps.
+
+| Entry | Terrain ready | Full visual/grass ready | Curtain cleared | Ready terrain / grass | Skipped main submissions |
+| --- | --- | --- | --- | --- | --- |
+| Baseline1, lobby | 42.611–43.102 s | 52.615–53.172 s | 54.062–54.574 s | 28 / 123 | 0 |
+| Candidate1, town bank | 28.060–28.561 s | 29.562–30.058 s | 38.604–39.068 s | 30 / 122 | 1,231 |
+| Baseline2, town bank | 67.274–67.793 s | 70.310–70.819 s | 71.686–72.213 s | 30 / 122 | 0 |
+| Candidate2, town bank | 26.590–27.088 s | 27.587–28.094 s | 33.609–34.122 s | 30 / 122 | 1,143 |
+
+Candidate1 records two warm/reveal attempts; both reach two successful primary submissions with cover opacity1 and a visible document. Readiness recovery reacquires the cover between them; the exact triggering readiness field was not recorded. Candidate2 records one: warm-start28.368 s → warm-before-reveal33.5047 s, generation21, two successful primary frames ending at world frame1145. This leaves a roughly5.14 s initial full-render/warmup stall to investigate.
+
+The first pair is location-mismatched: a swallowed address-bar shortcut sent keys to the game after baseline1, apparently triggering home/debug controls; the camera subsequently confirms the town-bank location. Later entries use clean owned tabs and the same town-bank location/counts. Natural daylight, caches, host load and run order remain unmatched. Readiness getters can update internal caches/latches, so the recorder is not literally engine-state-neutral. **No percentage speedup, FPS, sustained budget, cold-load or universal no-flash claim is justified.** Density, resolution and visual settings were not reduced.
+
+One additional candidate attempt failed with `already_logged_in` before presentation and is excluded from the four successes. The old socket remained alive across same-tab navigation; reload recovered after missed heartbeats. Even about:blank retained a connection during a later attempt; closing the owned tab released it. Source review confirms the server's live-session guard and a client mapping that conflates most kick reasons with duplicate-user messaging. No reconnect fix was implemented.
+
+### Ordinary play, visual verdict and remaining work
+
+Ordinary clicks moved the local player from [350,28.5193,320] to [351.5,28.4293,332.5]. The final record reports strict readiness, 29/29 terrain and121/121 grass chunks, 223 current flowers with no failures, idle precompile, absent recorder ownership and the gate still uncovered (generation22; skips unchanged at1,143). The native screenshot was saved later under naturally changing daylight; it is not a matched appearance comparison.
+
+The saved consoles contain no GPUValidationError, device-lost or uncaught lines. Known placeholder-cow failures remain. TileInterpolator emits 6 candidate1 / 10 candidate2 desync diagnostics, but the message omits entity identity and the callsite handles arbitrary entities: **these cannot be attributed to the local player or dismissed as harmless**. They remain a separate qualification item, not proof that the gate caused a movement regression.
+
+- [x] Implement the default-inert gate; verify native warm-before-reveal receipts and release during ordinary walking.
+- [ ] Qualify production UI integration, first-visible-frame video, hidden/resume, resize, reconnect, unmount and error recovery before default promotion.
+- [ ] Investigate the5–6 s warmup stalls and terrain/grass preparation throughput; repeat controlled matched entry measurements.
+- [ ] Correct and test stale-session recovery/kick messaging; attribute movement diagnostics to entities before claiming smooth gameplay.
+- [ ] Finish shorter, cohesive grass composition, ground/blade lighting and motion across dawn/day/dusk/night. No repeated unprincipled color/normal scalar sweep; the rejected two-sided IBL trial remains rejected.
+- [ ] Continue natural shoreline/path/world composition and representative sustained performance/memory qualification. Reflection remains default-off; no new AAA or production acceptance.
+
+Evidence: [runtime240 client log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime240/client.log), [candidate1 native console](/Users/lucid/Downloads/hyperia-runtime240-candidate1-native-console-20260928.log), [candidate2 native console](/Users/lucid/Downloads/hyperia-runtime240-candidate2-native-console-20260928.log), [native game screenshot](/Users/lucid/Downloads/hyperia-runtime240-native-meadow-20260928.png), [build audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/opaque-loading240-build-root03.log). Candidate2 console SHA256: `4a624cc686cc43c0626068f91d599d6027df4d650292d9d9a7029f53e6485224`. CPU/type/lint evidence uses the `opaque-loading240-` prefix, including tests01, types01, ui-types02, lint01 and ui-lint02.
+
+[Independent stopped postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player240-postflight01.log) passes (SHA256 `4d28818d32f1531c666e370a02677c35a9ca31c29c567843ee178ad8353bdd3b`): private processes/ports/container absent; public process/database identities intact; 180 protected files, 18 UI pins, 734 canonical UI sources and all build closure/bundle pins preserved. Owned game/DevTools closed; user's New Tab preserved. Runtime stops normally with errors[]. Client log SHA256: `923a4e40ee56c687ec25b82d847314af8b71b071b24ec2f966495a22a31b31fd`. Native PNG: 3024×1612, SHA256 `7776127ef6b5b9e4a5b3e725f8e462ef33849f5055342aa4e877c1483fe01dcc`. No public reload, commit or push occurred.
+<!-- /normal240-loading-20260928 -->
+
+<!-- normal239-loading-20260928 -->
+## Prior checkpoint239: ordinary meadow review and loading-tail measurement
+
+**Public localhost:3333 remains build109 and untouched.** Authorized private3344 reused frozen build152/UI03 without changing grass, lighting, geometry, quality, camera controls or the natural day/night clock. The reflection optimization remained off. Native Chrome/Metal WebGPU reported a 3024×1612 drawing buffer, 2× resolution and MSAA4.
+
+### What the actual player run established
+
+Ordinary click-to-walk moved the player from [385,28.9193,374] to [378.5,28.0816,392.5]. Daylight and naturally progressing dusk/night were reviewed at the new position. The grass still has conspicuous flat ribbons, dark crossings and abrupt blade/ground contrast in low light; **the user's soft all-day meadow goal is not met**. This is baseline diagnosis, not a new visual improvement or matched A/B.
+
+[Native nighttime screenshot](/Users/lucid/Downloads/hyperia-runtime239-native-meadow-20260928.png) was saved through Chrome's screenshot command without resizing or changing quality (3024×1612; SHA256 `9fc03ac24b021682562850cbbb838c4abbe52884fe7a27656d314f63f0042043`). A preceding final-state record reports natural phase 0.802467634375; it is not a timestamp for the later screenshot. All readiness fields were true after walking, with 28 terrain chunks, 121 grass chunks, current water/topology and 160 flowers; precompile was idle and the temporary polling owner was absent.
+
+### Measured entry delay, not a cold-load benchmark
+
+A read-only 500 ms poll began at document age37.239 s and stopped automatically when presented and ready. The 51 samples bracket these transitions:
+
+| Milestone | Last unready → first ready, document age |
+| --- | --- |
+| Terrain | 49.278 → 49.774 s |
+| Ocean topology | 50.813 → 51.291 s |
+| Grass and full visual readiness | 60.291 → 60.800 s |
+| Loading curtain cleared | 61.740 → 62.270 s |
+
+Water, avatar, physics and compilation were already ready at the first sample; their first-ready times were not measured. Terrain/grass counts remained 3/28 and 26/123 for the first observed10.537 s while preparation advanced349 slices across349 renderer frames. Before presentation, renderer counters advanced3,744 calls across624 frames. Source inspection confirms full scene submission beneath the opaque loading curtain and a2 ms terrain preparation budget per frame. **This identifies a scheduling/rendering investigation, not proof that GPU work caused the delay or a demonstrated speedup.** The first37 seconds are unobserved; DevTools and polling make this unsuitable as a controlled cold-load benchmark. The probe's phase lookup was null; use only the separate corrected final phase.
+
+### Next bounded work
+
+- [x] Reproduce the user's low-light issue in ordinary gameplay; retain actual loading transition brackets.
+- [ ] Implement and qualify a narrowly owned initial-loading render gate if lifecycle review passes: preserve world ticks, precompile and primary-view preparation, and prove completed full frames before any fade. UI03 owns the tested readiness/fade; raw production CoreUI differs. Never gate visible play or wait on a readiness condition that itself requires suppressed draws.
+- [ ] Address terrain preparation throughput and the subsequent grass tail; compare repeated matched entries without lowering density, resolution, readiness or visual quality.
+- [ ] Finish grass plant composition/ground cohesion and natural motion across the full lighting cycle. Do not repeat the rejected symmetric two-sided IBL trial from runtime193/build118 or further unprincipled scalar sweeps.
+- [ ] Keep reflection default-off pending its remaining coverage gates; no public promotion or production-quality claim.
+
+Tidewater/SH9 diffuse research was screened, but it is **deferred**, not implemented or proven superior to the current PMREM. The previous two-sided irradiance experiment already failed the all-day appearance target.
+
+Evidence: [runtime239 client log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime239/client.log), [independent load analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player239-load-analysis01.log) (SHA256 `6cf8b6b875240fe08bd3c078d279619c89848d3ebe2bd09d750b0279f67a3cb0`), [runtime cleanup receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime239/process.json). Runtime239 stopped normally with errors[] and protectedUnchanged:true; owned game/DevTools closed, user's New Tab preserved. No production source/default changes, commit, push or public reload occurred.
+Independent postflight passes: [receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player239-postflight01.log), SHA256 `134c4a4c8395b614f0628f08e0683bcc118c3b517517a1ea1d3d1683a8f754e7`. Private processes/ports/container are absent; public process/database identities,180 protected files,734 UI files,1,106 raw/1,117 effective inputs and nine bundles remain unchanged. Four known placeholder-cow console errors remain; no new console/GPU/grounding errors were recorded. Loading metadata retains96% assets and terrainTimedOut:true despite strict readiness; these do not supersede the explicit readiness measurements. Final log SHA256: `a375ef08d2a3eece95b4651484315fa3f0eb80f31049a6ce16519e129087bda0`.
+<!-- /normal239-loading-20260928 -->
+
+<!-- reflection238-native-20260928 -->
+## Prior checkpoint238: native reflection tests and measured cost reduction
+
+**Public localhost:3333 remains build109 and was not reloaded or changed.** Authorized private3344 ran build151/runtime237 and then corrected build152/runtime238 in native Chrome/Metal WebGPU at 3024×1612, 2× resolution, MSAA4. The reflection candidate remains **off by default**. This is performance groundwork, not a new grass appearance or an AAA/performance acceptance.
+
+### Correct the actual sampler admission
+
+Runtime237 correctly fell back to the full reflection: the game's texture default reports anisotropy16. Installed Three0.186.0 maps the reflector's non-mip LinearFilter to nearest mip filtering and only applies anisotropy when all three native filters are linear. The effective sampler is bilinear with native maxAnisotropy1. The corrected helper checks that effective filter configuration without changing texture settings. See the [installed-version Three implementation](https://github.com/mrdoob/three.js/blob/r186/src/renderers/webgpu/utils/WebGPUTextureUtils.js).
+
+Four added cases cover texture defaults1/2/16 without mutation and rejection of unsupported filters/wrapping. **111 tests in six suites pass**, along with full shared production/material-test types (726 roots, 2,432 files, zero diagnostics), lint and formatting. Exact inverse checks isolate this correction from151. Build152 changes only WaterSystem among1,106 raw/1,117 effective inputs and the two framework bundles; seven other bundles and145 protected artifacts remain byte-exact151. Both framework source maps contain the actual edited source. The live reflector has zero manually supplied mipmaps; explicitly rejecting a future manually mipmapped target remains admission hardening before default promotion.
+
+### Native image and ownership evidence
+
+Separate synchronous full/full/candidate reflection-target crops use the same frame, camera, projection, wave time and wind. All three full/full controls are exact.
+
+| View | Pixels compared | Full/candidate difference |
+| --- | ---: | --- |
+| Spawn | 81,620 | 8 pixels /11 half-float channels; individual deltas were not recorded |
+| Spawn repeat | 81,620 | 7 pixels /13 channels, each one adjacent half-float value; maximum absolute radiance difference0.00006103515625; alpha unchanged |
+| Higher-angle view after a short ordinary walk | 134,140 | Zero differing pixels/channels |
+
+The comparison regions are nonblank with at least4,096 distinct colors. Actual native reflection scissoring, unchanged1512×806 viewport, and full4096² nested shadow rectangles are observed. Each readback destroys all three owned buffers and restores hooks/flags without GPU errors. **This is not universal bit-exact parity, final-frame equivalence, or proof that every future view samples only the retained region.** These extra renders/readbacks are excluded from timing.
+
+A separate30-second normal camera-orbit sweep records414 main/reflection frames,828 full shadow passes, four camera states and four different bounded rectangles. Main-entry/return scissor assertions pass; target and renderer flags restore. The player remains stationary during that sweep. Earlier normal clicks moved the player from[385,28.9193,374] to[387.5,28.8493,376.5]; walking while the candidate is active, grazing/eye-plane transitions and wider route coverage are still unqualified.
+
+### Same-quality timing result and limits
+
+Forty ordinary frames sampled about once per second use five-sample ABBA blocks repeated twice:20 full and20 candidate. No forced world tick, camera, clock, shader, resolution, reflection cadence or shadow-quality change. The timing probe asserts stable camera/player, target/viewport, readiness and ownership before each sample; its output records the initial camera and per-sample pass/time/wind data, not a full readiness/camera snapshot per sample.
+
+| Metric | Full reflection | Candidate |
+| --- | ---: | ---: |
+| Native render-pass envelope, median | 68.288512ms | 63.700992ms |
+| Envelope P95 | 75.759616ms | 69.206016ms |
+| Synchronous graphics.render CPU median | 16.10ms | 16.15ms |
+| CPU P95 | 18.2ms | 23.0ms |
+
+The envelope median is4.58752ms /6.72% lower in this run. Independent recomputation verifies sample order, query intervals and medians. **All40 frames contain overlapping GPU pass intervals: do not sum them, claim exclusive reflection cost, translate this to FPS, or call this sustained performance acceptance.** Natural time/wind and one short run limit causality; CPU benefit is not demonstrated and its tail was worse.120/120 owned timing resources are destroyed, pending readbacks zero, no timeout/device loss/error, hooks and preference restored.
+
+Final native readiness is true:28/28 terrain chunks,124/124 grass chunks, water field/topology and209 flowers current; precompile idle. At document age43.59s the initial sample was still unready. These observations do not measure first-ready loading latency or solve it. Flower telemetry also records slice overruns; it is not a blanket scheduling-budget pass.
+
+### Remaining work and retained evidence
+
+- [x] Fix real-sampler admission, regression/type/lint/format checks and independently verify build152.
+- [x] Native bounded-pass activation, full shadow coverage, scoped color comparison, ordinary camera-orbit restoration and short ABBA timing.
+- [ ] Harden unsupported manual-mipmap admission; extend grazing/eye-plane, active walking and final-water-image coverage before promoting the default.
+- [ ] Repeat matched timing and assess CPU tails/main-scene cost; current GPU envelope is still much too large for smooth60Hz rendering.
+- [ ] Finish the user's actual visual goal: softer dawn/night grass-to-ground cohesion, motion/LOD stability, natural shoreline/path/world composition, and representative sustained frame/memory/loading qualification. Do not spend another broad research loop polishing tiny numerical differences while these larger gaps remain.
+
+Source SHA256: `4138c8b387fac3780d71cc6da1074f863e79ecfd15a4c4b1affa88e9cd2088cd`; test SHA: `3aac9558d3e5017916146296622fe0f78148ba570aca6783158a4cc7c885b57e`. [Build152 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/isolated-build152-report.json) SHA: `2ad94f6fae894ce6de29fb147000979396d817a9ec47d60f6a0b26fbc1c22673`. Native records: [runtime238 client log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime238/client.log). Independent retained analyses: [color](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/reflection-footprint238-color-analysis01.log), [timing](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/reflection-footprint238-timing-analysis01.log), [motion](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/reflection-footprint238-motion-analysis01.log). Source/build receipts use `reflection-footprint238-`: tests02, types02, lint02, format02, source-scope01, build15201 and build152-root01. Prior failed/rejected attempts remain evidence, not successes.
+
+[Independent postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player238-postflight01.log) passes:180 protected files,734 UI files, all current raw/effective/bundle pins and public process/database identities preserved; private PIDs/ports/container absent. Client log SHA256: `72158d5f3ac7188c43f442aabfe025477d35c645e1941073377992905922e5c7`. Four known placeholder-cow errors remain; no new GPU/grounding/other console errors.
+
+Both private runtimes stop cleanly; all owned game/DevTools windows close and the user's existing New Tab is preserved. No public refresh, appearance promotion, commit or push.
+<!-- /reflection238-native-20260928 -->
+
+
+<!-- reflection237-footprint-20260928 -->
+## Prior implementation checkpoint237: native approval was pending
+
+Following236's measured render ownership, implement a higher-impact candidate in [WaterSystem.ts](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/systems/shared/world/WaterSystem.ts). It restricts rasterization of the existing lake-reflection image to a conservative sampled rectangle. It does **not** lower resolution, alter the mirrored camera/viewport, reduce reflection frequency, change water shading, remove casters or reuse a shadow map. The opt-in setter defaults to false; no playable setting is promoted.
+
+### Bounds and renderer ownership
+
+Cache each registered lake's local bounds while validating its existing planar source. For each capture, union all registered coplanar lake consumers, including those drawn after the first owner. Expand local geometry for the actual Gerstner wave amplitudes and live absolute wind value, then transform/project all eight bounding corners. Preserve the existing first-submitted-plane arbitration; different-height lakes still use their existing reflection-disabled blend.
+
+Map to the shader's screenUV.flipX convention (top-left Y unchanged), expand by the maximum 0.015 UV distortion plus two reflection texels, round outward and clamp. Nonpositive clip W, invalid/stale/unsupported geometry, custom mesh callbacks, morph/skinned/instanced/batched deformation, replaced position/vertex nodes, invalid planes/cameras or full/empty bounds retain full rendering. Runtime admission also requires the supported full viewport, ordinary WebGPU camera, unchanged UV graph and linear/clamped/no-mipmap/anisotropy-one reflection sampler.
+
+Apply the rectangle only after the owned reflector's native resize, and only to the target mapped to that exact owner camera. Three also calls the resize hook for a shared setup target; that target cannot consume this scope. Installed0.186.0 resets the rectangle on every resize call and gates target scissoring through a renderer-level flag. The wrapper scopes that flag and restores it plus the post-resize full target rectangle in finally. Native verification must still prove the nested shadow targets remain full-sized.
+
+This follows the [Three render-target scissor mechanism](https://threejs.org/docs/pages/RenderTarget.html). It can reduce raster/fragment work, not traversal, vertex processing, draw submission, attachment-clear/resolve or shadow workload. **A smaller rectangle is not a measured GPU saving.**
+
+### Verification and private build
+
+- Full six-suite water regression: **107 passed, zero skipped**. Eleven new cases cover coordinate orientation, non-square rounding, coplanar unions, transformed parents, changing/signed wind, eye-plane and screen-edge behavior, invalid planes/geometry and conservative fallback.
+- The sample-containment test evaluates the actual existing TSL wave graph using real Three geometry, not a copied wave formula: 110 vertex/barycentric points × three winds × three times × nine distortion combinations, checking all four clamped bilinear taps.
+- Full shared production plus the material tests: **726 roots, 2,432 source files, zero TypeScript diagnostics**, with stable source/test hashes; ESLint and full-file Prettier pass.
+- AST scope review preserves the other62 existing WaterSystem members. The first test attempt exposed an incorrect AttributeNode inspection property; corrected against the installed API. The initial type/format issues were repaired, then the complete suite and checks rerun. These are CPU/source checks, not native rendering acceptance.
+- Fresh build151 succeeds with nine bundles and syntax checks. Only actual WaterSystem changes among1,106 raw/1,117 effective inputs. Root independently verifies both framework source maps contain those exact edited source bytes; seven other bundles, including the worker/server, remain byte-exact150. All145 protected artifacts remain unchanged.
+
+Final source SHA256: `3a7e418c7e474f8b2fd690fbbeeb4fcea7a681b58f2036dea768748b6bec1f65`; material-test SHA: `cc46db851c257b7a67cb536bf86591293f8204c73b116af1dbda9b8977e6ebaa`. [Build151 report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/isolated-build151-report.json) SHA: `177ecb2571ea87752b7745eb631b00522e541c6efef61a02356cd97cfaab3d29`. Evidence under service-layout: `reflection-footprint237-tests02`, `types04`, `lint02`, `format02`, `member-scope02`, `build15101` and `build151-root01` (all with the same prefix). Historical failed attempts are retained.
+
+### Next native gates
+
+- [x] Actual source implementation, default-off ownership, CPU regression and isolated build.
+- [ ] Prepare a fresh3344 admission for build151; current runtime helper still admits236/build150. Do not mislabel an old runtime as the new source.
+- [ ] Verify real backend scissor and unchanged target dimensions, viewport, MSAA, reflection cadence and full nested-shadow rectangles.
+- [ ] Compare same-frame full-versus-scissored reflection pixels without another world tick; keep this extra render/readback separate from timing. If comparison differs, use a full/full control to distinguish render-callback variation. Retained-region equality alone does not establish that all consumers are inside it: also verify actual mesh/UV/wind ownership and moving/grazing/edge views.
+- [ ] Measure uninstrumented/matched ordinary cost after correctness; reject or revise if savings are negligible or artifacts appear. Default remains off.
+- [ ] Continue loading-critical-path, dawn/night meadow cohesion, motion/LOD and sustained frame/memory qualification. AO and shadow reuse remain deferred.
+
+No new browser session, private runtime, UI preparation, public refresh, commit or push occurs in237. Fresh process/listener checks retain public3333's original three process identities;3344 has no listener. This checkpoint delivers implementation and a private build—not an accepted visual improvement, loading-speed improvement or performance result.
+<!-- /reflection237-footprint-20260928 -->
+
+<!-- normal236-shadow-attribution-20260928 -->
+## Prior checkpoint236: shadow duplication proved; optimization still needs qualification
+
+Private236 retains build150/UI03 and ordinary native WebGPU settings: 3024×1612 drawing buffer, 2× resolution, MSAA4. Only authorized localhost:3344 is controlled. No walking, reload, camera/time override, quality reduction or production source change occurs in this pass. Sampled readiness at document age62.396s is not a measured load duration.
+
+### Actual render ownership
+
+Six passively sampled frames show the main camera's scene render invoking the owned sunlight shadow render, then the lake reflector's nested scene render invoking that same light and 4096² shadow target again. Main camera16 and reflection camera3144 use the same effective shadow layers and shadow matrices; the reflection target is1512×806. The capture follows actual renderer/backend ownership and queue submissions, not a guessed relationship between equal-sized targets.
+
+Each shadow render records70 unique object owners,110 reported draw calls and621,322 triangles. Four records have20/2/20/2 batched subdraws: these account for the additional40 calls. **Do not mistake that difference for transparent back/front duplication or justify a forceSinglePass change from it.** Recorded geometry/index/attribute versions, ranges, instance counts/matrices and world matrices match between each pair. Shared shadow-override material versions advance by16 in the first five pairs and14 in the last; the installed renderer's per-caster alphaTest assignment explains why that is not proof of source-material mutation.
+
+Initial owner maps and actual nested target/context records establish reflection ownership. An after-return wrapper's target:null field is excluded because its mutable frame camera no longer reliably identifies the entering reflection camera. Review attempts01/02 had incorrect draw/version expectations; corrected03 passes. Those retained review failures were not native rendering failures.
+
+### All-texel depth comparison
+
+A separate one-shot native WGSL diagnostic wraps the actual shadow node. Queue order is first shadow submission → save shader-readable depth → second shadow submission → compare → copy summary for readback. Both shadow renders remain intact; no live shadow texture is modified.
+
+In frame9368, all16,777,216 values from the same4096² depth24plus texture compare exactly: **zero differences**,195,428 non-clear values before and after. All65,536 workgroups report256 visits, preventing incomplete or all-clear comparisons from appearing successful. This is bit-exact equality of values returned by textureLoad, not a claim about opaque depth24plus backing storage.
+
+The diagnostic temporarily allocates66MiB across three buffers. All three destroy calls complete, hooks restore, the diagnostic owner disappears, and no device loss or GPU error occurs. This extra compute/readback is **not performance evidence**. One live frame does not establish future-frame, animated-caster, receiver-dependent LOD, motion or final-color equivalence.
+
+### Decision and remaining gates
+
+Installed Three0.186.0 keys shadow updates by receiving camera and frame; default shadow-camera layers can inherit from that receiver. A global once-per-frame shortcut is unsafe. Any owned-node reuse must match the registered main/reflection pair, frame, scene, renderer, light, target/depth identities, effective layers, matrices and configuration, and fall back for invalidation or unknown/view-dependent caster behavior. Moving player, wind, LOD boundaries and changed layers need native depth/image checks before unchanged-quality timing.
+
+The older235 shadow interval was approximately0.7ms within a64.324ms overlapping render-pass envelope. That is not an exclusive cost or a236 comparison; shadow reuse alone cannot reasonably address the broader cost warning. Do not spend disproportionate effort on a small saving or add heavier AO yet. Main-scene and reflection workload remain higher-impact investigation targets.
+
+- [x] Six-frame actual shadow/reflection ownership and submission attribution.
+- [x] One-frame full shader-readable depth equivalence with independently reviewed ordering and cleanup.
+- [ ] Implement and qualify a bounded cost correction; no optimization or speedup is claimed here.
+- [ ] Resolve actual loading latency, dawn/night meadow cohesion, motion/LOD appearance and sustained frame/memory budgets.
+- [ ] Keep public refresh separate;3333/build109 remains untouched.
+
+Final native state: terrain28/28, grass123/123, water/topology ready, flowers209/current, grounding worker idle and queues empty. All diagnostic owners are absent. Private controller/server/client, four ports and disposable database are gone; owned game/DevTools tabs closed and the user's New Tab preserved. Postflight verifies180 protected files,734 UI files,1,106 raw/1,117 effective inputs,145 build artifacts and nine bundles, plus public process/database preservation. The previously reviewed controls lockfile inventory delta remains documented, not silently normalized. Four known missing-cow errors remain separate from zero new grounding/GPU/other console errors. No commit, push or promotion.
+
+Evidence: [attribution review03](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/native-normal-player236-attribution-review03.log), [depth review01](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player236-depth-review01.log), [postflight01](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/normal-player236-postflight01.log). Stable client log SHA256: `44d0e583966898bb43f62c1c9ac952fce875c658e5f58bdf8f981c302eb4427e`. Depth review SHA: `a4c9252673887cd3d5f6dbbcffe331c8ce808863b6dacdb66c05e128b748c8bd`; postflight SHA: `faf14e311140eed169bf9ad1b44c0b45083c932b362404669fa391db61e1f3db`.
+
+Reference mechanisms: [Three ReflectorNode](https://threejs.org/docs/pages/ReflectorNode.html), [Three ShadowNode](https://threejs.org/docs/pages/ShadowNode.html) and [WGSL textureLoad](https://www.w3.org/TR/WGSL/#textureload). Installed0.186.0 source—not current online documentation alone—governs the observed behavior.
+<!-- /normal236-shadow-attribution-20260928 -->
+
+<!-- normal235-source-cost-20260928 -->
+## Prior checkpoint235: source integration works; ordinary 2× cost needs attention
+
+Private235/build150 is a source-integration check, **not a new grass appearance**. It compiles the actual edited `CompactTerrainMaterial.ts` instead of the retained149 virtual material overlay. Exactly one raw/effective compiled input changes. Independent source-map checks find the real edited bytes in both framework bundles; all nine emitted bundles preserve149's normalized executable logic, seven byte-for-byte. UI03, external procgen, grass and worker behavior are retained. The existing161-pass/one-opt-in-native-skip material test, full shared types, lint and formatting receipts remain valid for unchanged source/test hashes.
+
+### Native entry, movement and reload
+
+Use only authorized localhost:3344, leaving3333/build109 untouched. Ordinary saved settings remain3024×1612/DPR2/MSAA4, Medium shadows, postprocessing/bloom enabled and cinematic grading. No camera/clock/geometry/material adapter, forced render, quality reduction or paired-near switch is used.
+
+The first recorded state at document age34.09s is genuinely incomplete: terrain2/28, grass17/123, water topology pending. The UI later displays slow-loading guidance. At sampled age80.04s, terrain28/28, grass123/123, water/topology/flowers209 are ready. An ordinary ground click walks from spawn XZ(385,374) to meadow(380.5,394.5). The grass-heavy native view includes the pond bank, path and pavilion; close leaves still look angular and separate, while ground detail is restrained. It is not a matched art improvement or all-day acceptance.
+
+After timing has fully cleaned up, an ordinary reload also completes. Final `R235_FINAL` at sampled document age94.6405s: playerXYZ(380.5,27.855166140696802,394.5), terrain26/26, grass121/121, flowers160/current, water/topology ready, worker idle, three pending/inflight/settled queues zero, failedChunks0, no device loss, paired switch null, timing/review owners absent. These sample ages are **not instrumented time-to-ready durations**, and two completed loads do not establish fast or universally reliable startup. The slow guidance remains relevant launch work.
+
+### Passive native cost screen
+
+The old camera-locked timing harness cannot be installed unchanged for ordinary gameplay. A necessary private supplemental fork retains its actual unique-per-pass query core but uses registered player/world/render ownership, starts paused, caps40 attempts at1Hz with two pending readbacks, and cleans up on hidden/pagehide/60s watchdog. It never leases the world tick or changes scene/camera/clock/settings. Helper SHA256: `cee1772de65575cff8808cb287da0d93272a14dfcecfc0cdf301ee16c4d32676`.
+
+After readiness and walking, close DevTools before sampling; take no screenshots or further UI actions during the sample window. The live day cycle advances from phase0.90173 through midnight to0.08523. Player/camera are unchanged.40 samples span40.574s between first/last starts, with320 unique native pass pairs.
+
+| Observed interval | Median |
+| --- | ---: |
+| Synchronous instrumented graphics.render CPU span |15.400ms |
+| Earliest-to-latest sampled render-pass envelope |64.324ms |
+| Main-camera terrain-bearing pass,3024×1612 |45.777ms |
+| Secondary reflection terrain-bearing pass,1512×806 |17.170ms |
+
+Envelope range58.524–80.216ms. All timestamps/envelopes independently recompute;338 interval-pair overlaps mean **do not add these pass times**. They are not exclusive grass/terrain/reflection costs, total device workload or presentation FPS.21 quantized zero-duration intervals do not mean free work. No sustained60FPS or speedup claim follows.
+
+The main terrain-bearing pass submits292 reported draws/3,982,715 triangles, including40 grass draws/70,446 instances/2,860,272 triangles. Reflection submits288 draws/4,155,109 triangles, including39 grass draws/73,798 instances/3,039,642 triangles. These are overlapping submitted populations, not unique visible plants/fragments. Installed clumps remain165,219; only three grounding/admission counters advance. All120 query resources are destroyed, hooks/listeners restored, zero pending readbacks, timing/GPU errors or device loss.
+
+The host stays on AC. Memory pressure is1 before,2 after sampling and1 after shutdown; other app/system work remains present. Browser high-memory badges are observations, not allocation accounting. This single instrumented night window is a **cost warning**, not exclusive-device, scene-wide or sustained performance qualification.
+
+### Reference interpretation and next action
+
+Root revisits [Grassworks](https://grassworks.techredux.co/demo) in Sunny and Moon Light at its displayed1×. Individual close blade facets still exist, but a darker, dense basal canopy connects its field visually. Camera/scale/exposure differ from Hyperia2×; this is a composition reference, not a matched benchmark. Its [appearance documentation](https://grassworks.techredux.co/docs/grass/appearance) separates blade color/sheen/base AO. The reference does not prove our missing interaction's cause.
+
+A grass-to-ground indirect-occlusion hypothesis is plausible: retained grass does not cast shadows and substrate AO is texture-based. However, existing `CompactContactAO` already has [historical daylight probes](./compact-contact-lighting-20260912.md), not current all-day/cost acceptance. Its geometry prepass/AO/denoise/beauty/output workload is deferred. **Do not add heavier AO before investigating this existing cost.**
+
+Frozen150 water creates a half-resolution reflector; installed Three performs a nested scene render. Shadow updates are keyed by frame camera, making an additional update under reflection plausible. The two observed4096² shadow passes do not yet prove the same shadow-map owner. Next, passively correlate actual reflector virtual-camera/target identities, sun-shadow owners and nested render/submission parentage. Preserve resolution and quality; do not disable reflection/shadows and call the difference their exclusive cost. Then implement only a demonstrated redundant-work correction, with unchanged-image and measured-cost validation.
+
+- [x] Fresh source-integrated build, ordinary entry/walk/reload and bounded passive cost evidence.
+- [x] Clean private shutdown and independent source/public preservation.
+- [ ] Attribute and reduce existing render cost without silently cutting quality; no AO activation yet.
+- [ ] Measure and improve the actual loading critical path; do not hide it by extending a timeout.
+- [ ] Resolve dawn/night blade-ground cohesion, bank/path composition, motion/LOD stability and sustained frame/memory/loading budgets before meadow acceptance.
+- [ ] A future public refresh needs its own explicit scope;3333 was not reloaded.
+
+Evidence under service-layout: `turf-source-build150-root01`, `terrain-material150-code-equality01`, `normal-player235-admission01`, `native-normal-player235-timing-review01`, `normal-player235-timing-root01`, `normal-player235-postflight01`. Stable runtime235 client log SHA256 `d695ff371f4c270d91852c428d340f1e6f6cb0ddb8baeb951bc12534235ab8de`; build150 report SHA `82017f9c5bf48a992b1d8d458644667019b9fc956ddd0673c431318cf63d62bc`; postflight SHA `45085fa003a408b804024132c635341fad2b15fc4118c31cdc075f5505a60c65`. All three private PIDs/four ports/disposable database are gone; public owners/database/mounts,180 protected files,734 UI files,1,106 raw/1,117 effective inputs and nine bundles verified. Eight known missing-cow errors across two loads remain separate from zero new grounding/GPU/other console errors. No commit, push or promotion.
+<!-- /normal235-source-cost-20260928 -->
+
+<!-- normal234-turf-source-20260928 -->
+## Prior checkpoint234: ordinary gameplay reviewed; quieter turf retained in source
+
+On 2026-09-28, use the authorized private localhost:3344 player session at saved **2× resolution**, leaving localhost:3333/build109 untouched. Runtime234 uses the existing frozen149 integration with unchanged grass, ordinary click-to-walk and camera orbit, and its live 240-second day/night cycle. No grass, camera, lighting or clock adapter is installed.
+
+### Bounded gameplay evidence
+
+The player actually walks from spawn XZ(385,374), through the approach (376.5,389.5) and landing (384.5,421.5), to the grass slope beside the bank pavilion (377.5,431.5). These are observed player positions, not teleports or the entire originally proposed route. Screenshots in the native CUA transcript show the path, pond landing, pavilion and grass-covered slope. No saved screenshot/video suite or frame-time capture was produced.
+
+- Final `R234_FINAL` at 10:25:30 UTC: terrain28/28, grass122/122, water and water topology ready; flowers178/current with failedJobs0. All installed grass fits are current, all four work queues empty, worker idle and failedChunks0.
+- Actual drawing buffer3024×1612, pixel ratio2, MSAA4, native WebGPU=true, deviceLost=false. Paired-near switch absent and diagnostic globals empty.
+- The initially darker overhead view coincided with phase0.04194/night; it is **not evidence of a camera-lighting bug**. Landing and final slope records are phases0.51726 and0.52564. This uncontrolled day/night walk is not a matched lighting comparison.
+- Ground remained present at the observed stops; no obvious terrain hole appeared in the reviewed views. Ground detail is comparatively restrained, but blades still read as angular, separate high-contrast shapes and service/path margins still need art review. **All-day meadow quality is not accepted.**
+- Entry was observed ready at document age56.97seconds; this is not an instrumented time-to-ready result. Host memory pressure rose to2 during the run and returned to1 after shutdown. No sustained performance, loading-speed, full-island traversal, dock collision, combat or long-session claim follows.
+
+Close only the owned3344 tab and DevTools, then stop verified controller54732; runtime exits0 with errors[]. Independent postflight passes before any source edit: private three PIDs/four ports/disposable DB absent; public3333 process identities, ports, database and mounts unchanged; 1,106 raw inputs, 1,117 effective inputs, nine bundles, 180 protected files and734UI files intact. Four known missing-cow console errors remain; no new grounding/deadline/GPU or other console errors. Receipt: `normal-player234-postflight01.log` SHA256 `1280d4b3e08f05069e7881ba3e58b547acb1d46459ad8cecd0126da0fb01cefa`; stable `runtime234/client.log` SHA `3667de383d734fad082a6db904ca1c57f019276ec3b114a8b5f38729b6aab967`.
+
+### Source implementation and validation
+
+After successful postflight, integrate the previously reviewed build112 turf-material filtering into **CompactTerrainMaterial.ts** and update its existing tests. Reuse the existing7cm grass substrate gradients for the packed normal/AO sample and packed roughness alpha; retain35% fine linear RGB, original cotangent-frame derivatives, normal strength, height projection, palette, coverage and dirt/rock/wetness behavior. The existing `frequency-v1` admission remains unchanged. No additional texture owner or map is added; the frequency-enabled graph still has35 owned reads (two above its33-read non-substrate path).
+
+After normalizing the descriptive comment and formatting, the source equals frozen112/149; the tests equal the five prepared replacements. The inverse check confirms no other changes in either file. Do **not** infer that all149 changes have been integrated: shorter grass, geometry/lighting experiments, worker and loading changes and other integration deltas retain their own acceptance gates. Earlier matched109/112 native evidence is the narrow causal terrain comparison;234 is ordinary gameplay evidence for integrated149, not a new isolated terrain A/B.
+
+Fresh installed-tool results against the actual edited source:
+
+- Focused material/grade checks:11passed.
+- Entire existing terrain-material file:161passed,1skipped. The skipped case requires the explicit native WGSL browser harness; no CPU result substitutes for it. Real TSL graphs, local assets, real worker and in-process terrain tests execute without source-overlay substitution.
+- Full shared production TypeScript plus this material/test:726roots,2,530source files,0diagnostics; no emit and source hashes stable.
+- ESLint on both edited files:pass,0warnings.
+- The first Prettier check caught two newly introduced line-wrap differences; independent review confirms the baseline was clean. Fix only those two wraps. Final full-file formatting and lint pass; rerun full161 tests (one native skip) and TypeScript0diagnostics against the final files, all passing.
+
+Receipts are in `service-layout-network01-UNQUALIFIED`: `turf-source-tests01`, final `turf-source-full-tests02`, `turf-source-types02`, `turf-source-lint02`, `turf-source-format02`, and `turf-source-inverse01`. Final source SHA256 `9e24155898d3e7fd6687fd11a399de867b9240dc798ad629b9275ae5b87dbace`; test SHA `3dba9272694b75357ceb36c8ab995849d1401487d4fe8f1fadf1ae231dbb8db6`. Source is uncommitted and public3333 still serves109. Historical source inventories and frozen receipts are not rewritten to hide this intentional source delta; any next private build must establish its new input identity.
+
+- [x] Ordinary player walk and camera review at actual2× with retained grass and no diagnostic adapter.
+- [x] Independent private cleanup/public preservation audit.
+- [x] Retain the quieter ground treatment in editable source and verify focused/full CPU, types, lint and formatting.
+- [ ] Build/verify the edited source for a future playable refresh without silently promoting unrelated149 deltas. No public reload in this authorized3344-only session.
+- [ ] Resolve dawn/night leaf-ground separation, ordinary-distance motion/LOD quality, and sustained native cost before meadow acceptance. Independent-root arrangement233 remains rejected.
+<!-- /normal234-turf-source-20260928 -->
+
+
+<!-- arrangement233-20260928 -->
+## Private233: independent leaf arrangement — rejected, not promoted
+
+On 2026-09-28, test one different structural mechanism in the authorized private localhost:3344 normal-player session. The retained near/middle/far templates keep their 21/21/12 leaves, individual shapes, heights, UVs, indices and lighting. Only each leaf's basal XZ position and rigid yaw change: independent low-discrepancy placements replace the repeated three-leaf fans. This is still one repeated template per LOD, **not** a full plant-species/patch-variation system. [GPUOpen's procedural-grass reference](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) informs independent placement/direction and coverage-aware LOD; its mesh-shader pipeline is not a WebGPU drop-in.
+
+**Decision: no accepted visual improvement.** Native low-moon review still shows stark, separate overlapping ribbons against the ground. The far-LOD projected coverage gate also fails. Do not promote the candidate, claim an all-day comparison, or reopen a width/brightness/normal/density sweep on this evidence.
+
+### Geometry and ownership checks
+
+- Pure CPU checks preserve topology, leaf heights and dimensions (maximum dimension error 3.74e-8 m), UVs and original geometry buffers; relative per-leaf area error is at most 1.83e-6. Shared first-12 root/tip/end-normal prefixes agree across LODs. These are geometry checks, not appearance or GPU performance.
+- The retained minimum projected-union ratio is 0.95. Far top-view coverage falls from 9.17% to 8.62%, ratio 0.93977 at 256² and 0.92727 at 128²: **FAIL**. The far lower-15-cm, 30° view also falls below the gate. Near/middle top and 30° coverage decline modestly; no density increase hides this tradeoff. The native trial proceeds only as a near-field exploratory art screen, not overall qualification.
+- Fix a diagnostic-only metadata bug before native import: Three's geometry clone shares `userData`, so the candidate now receives a fresh metadata object. CPU02 verifies original metadata identity, keys, descriptors and nested values remain unchanged, with a negative control reproducing the old leak. Candidate numeric arrays remain byte-exact before/after that ownership fix.
+- Use ordinary worker fitting, road/water/resource exclusions, per-root offsets, visibility masks and swept bounds. Original template bytes and material owners are guarded. Candidate templates/halo switch synchronously before a full ordinary rebuild; original halo remains 4.436113965800983. No production shader, default, geometry source or public build is changed.
+
+### Actual native scope and result
+
+Frozen build149 runs in native Chrome WebGPU at an actual 3024×1612 canvas, 2× resolution and MSAA 4. Initial normal readiness passes terrain28/28, grass123/123, water and 209 flowers. Root visually reviews **four controlled screenshots**: original dawn0.27, midday0.56 and low moon0.21, plus candidate low moon0.21. The candidate midday0.56 same-frame receipt completes, but its screenshot is **not reviewed before the four-minute watchdog restores the scene**. Candidate dawn is not run. A later normal-camera restored screenshot is cleanup evidence, not a fifth controlled comparison.
+
+Five STATE records verify complete primary submissions, compiled pipelines, zero grounding failures and 15/15 foreground readiness with settled queues. Original records submit 60 grass objects / 97,296 instances; candidate records submit 60 / 97,122. Whole installed populations change from 94 chunks / 161,443 instances to 94 / 161,243 after fresh fitting. Installed LOD chunk counts also change from 2/4/88 to 4/11/79; these are **not per-submitted-draw LOD counts**. Do not infer exact primary LOD equality from the totals. This is a bounded qualitative screen, not a controlled pixel-difference, motion, gameplay, transition, loading-speed or native-cost acceptance. Wind, clouds, dynamic shadows and desktop billboards remain live.
+
+At 10:02:50 UTC the watchdog restores original template bytes, camera, clock, lighting inputs and draw-hook ownership with errors[], initially **queuing** the normal refit. At 10:06:17 UTC, `R233_FINAL` separately verifies that the refit has completed: grass123/123, terrain28/28, water ready, all installed chunks current, all four work queues empty, worker idle with no active generation/transport job or failed chunks, precompile idle, all four diagnostic globals absent, no candidate metadata on original templates, paired switch still absent, WebGPU=true and deviceLost=false. Root closes only the owned3344 tab and DevTools, then stops the freshly verified private controller; exit0 and stopped errors[]. Public3333 is not reloaded.
+
+Private module `build149/private-meadow-arrangement233.mjs` SHA256: `74a438a435b535ce25205001ae7aaf7174aeac06936ae02d5e5da6ffaf5ca52a`. Reused controls231: `d5d933a6a3e91fc11db3444e2e134f50c65791acf59c06f872aba0bafaf265cf`. CPU logs in `service-layout-network01-UNQUALIFIED`: `meadow-arrangement233-cpu01.log` SHA `cec7f46f99d4d78f7838c74cd098e49e984469a7d9303078c9384e0ded57003b`; `meadow-arrangement233-cpu02.log` SHA `ab128c58b93e36b23a3f9f7569ed2539f967ff5e528ca1e813c3b4a3f59aeba4`. Native evidence is the CUA transcript and `runtime233/client.log`, not a saved screenshot suite.
+
+Independent postflight **PASS**: private controller/server/client, four private ports and disposable database are absent. Public3333 process identities/database/mounts, 180 protected files, 734 UI files, 1,106 raw inputs, 1,117 effective inputs and nine frozen bundles remain pinned. No new grounding/deadline/GPU or other console errors; four known missing-cow model console errors remain. This does not qualify whole-game correctness or sustained cost. Evidence: `service-layout-network01-UNQUALIFIED/normal-player233-postflight01.log` SHA256 `71bb6b94430c84a23f4a0b101feb1f8cbc30a0f197e3f84d303894c5414c1ee6`; stopped-process SHA `1f48f9dee2eb433b09c88bdfa1a4bb685dcbc220e22326d1bd6b0a3fbd09bb3e`; stable client-log SHA `0e579668046d8538a7ebea9396d6460c80517b462afafa5062f27b4f748a6a2a`.
+
+### Source audit and remaining gate
+
+A targeted raw/effective-source audit finds no new double-sRGB conversion: linear CPU palette colors pass through worker buffers to TSL, while terrain albedo is sRGB and normal/AO maps remain linear. The frozen149 upper-normal weight0.45 is intentional; raw1.0 is not an unnoticed one-line correction, and full-weight trials already exist. These findings do not establish perfect color/material filtering.
+
+- [x] Test the independent-root mechanism without changing individual leaf shape or production defaults; retain the negative art and far-coverage results.
+- [x] Verify bounded normal loading, original refit and private lifecycle cleanup; do not mislabel this as performance qualification.
+- [ ] Next bounded delivery check: review the existing quieter terrain treatment retained in build149 through ordinary player-camera movement at saved 2×, leaving grass unchanged. Assess its practical benefit and regressions before proposing a public refresh; do not create another grass adapter for this check.
+- [ ] Deliver visibly coherent dawn/night grass at ordinary gameplay distance, then verify motion, banks/slopes, transitions and sustained native cost. Neither independent roots nor the prior authored-tuft screen closes this gate.
+<!-- /arrangement233-20260928 -->
+
+
+## Authored-tuft screen: useful shapes, not a selected meadow replacement
+
+On 2026-09-28, screen the [Poly Haven Grass Medium 01 source](https://polyhaven.com/a/grass_medium_01) in an isolated native Chrome WebGPU fixture, not the game. The retained source is CC0; six files total 3,713,817 bytes. Exact URLs, author credits, sizes and checksums are in `asset-studio/fine-meadow01/authored-grass-candidate/provenance.json`. All six source pins still match after review. The asset contains 17 individually named tufts; root visually reviewed **four**, not the whole set: tall_b, tiny_a, small_a and mid_a.
+
+- Actual render target 2532×1612, ratio 2, MSAA 4. Readiness requires a same-frame primary indexed draw, compiled/error-free pipeline, exact index/instance counts and a draw-call increment. Captured native pipeline descriptors verify coverage on/off, depth writes and no blending. The explicit grayscale alpha texture is required because the diffuse is JPEG; atlas orientation/color-space and source transforms/normals were independently checked. A generic derivative flag is explicitly not alpha proof.
+- Review tall_b as one plant/front/reverse and a 64-plant patch; review tiny_a and small_a close-up, small_a as a patch, and mid_a from above at an elevated angle. Tall_b also receives ordinary PBR, no-normal-map, albedo-only, fixed thin-leaf lighting, hard-cutout/coverage and day/low-angle/low-light studio checks. These are **not** matched island dawn/day/moon views. No overhead, wind, terrain fitting, LOD, gameplay or performance acceptance follows.
+- The authored branching and curved leaves offer more plant-specific detail. However, the reviewed patches remain visually separate, dark and wiry against the fixture's flat ground. Removing the normal map does not resolve that. Albedo-only appears lighter, but is a diagnostic, not a proposed unlit material. Reusing the existing meadow's fixed thin-leaf coefficients does not establish cohesion. The low-light fixture is very dark overall and cannot qualify the game's night readability. This is **not sufficient to select an island-wide replacement**, and does not reject all uses of the source asset.
+- Triangle costs matter: tall_b 310/plant, small_a 833, mid_a 2,287; their 64-plant patches submit 19,840 / 53,312 / 146,368 triangles, respectively. Those counts are not GPU-cost measurements or a comparable whole-meadow benchmark. The native source download provides only the named LOD0 meshes; other LODs must not be assumed.
+- Three's [alpha-to-coverage](https://threejs.org/docs/pages/Material.html#alphaToCoverage) is verified active and changes fine edge coverage; it does not itself solve material/ground contrast. Possible dark RGB-padding bleed during mip filtering remains an **unmeasured hypothesis**, not an established cause. Preserve the current source maps; do not start a brightness or width coefficient sweep.
+
+The reusable `preview.mjs` is a loopback-only art screen using installed r186, not a new game bundle. Final native receipt: frame 17381, 64 instances, 6,861 indices, compiled=true, pipelineError=false, draw increment 1, samples 4, alphaToCoverage=true, depthWrite=true, blend=false; renderer errors[]. Explicit owned cleanup completes with errors[], then the test tab, its DevTools and the temporary asset-reference tab close. Chrome displayed a six-warning badge whose bodies were not retained; **do not call this a warning-free console run**. Preview PIDs 50405/50646/50744 and port 3345 are absent afterward; public localhost:3333 owner PIDs 63609/63612/63613 are unchanged. No public refresh, game-source change, dependency install, commit or push. Evidence is the native CUA transcript and the retained source/preview. Final viewer SHA256 `46492248a976e177906c12dedc86421c92040e23aae704cd16483cd905b5fbde`; provenance SHA256 `c3ea9e0ffc2e0a88c6a358a7a90762b1cb99cc7beee7002da91f3372c163e07b`. Server syntax and the actual browser module execute successfully.
+
+- [x] Screen a genuinely different authored morphology and alpha-edge path before investing in game integration.
+- [ ] Establish a dense, target-height plant/ground composition under captured island lighting, including foliage-aware color/filtering agreement; this isolated fixture does not establish that solution. Keep these tufts as a morphology/possible accent reference, not a chosen core-meadow default.
+- [ ] If authored plants are selected, use a bounded instanced owner with explicit plant roots/rest-height/wind metadata and fresh retained-terrain/exclusion checks. Reuse low-level storage instancing and connected wind where appropriate; do not pass atlas UVs through ribbon-specific root/flex fitting. Existing generic loaders can select only the first mesh or discard this separate alpha material, so they are not drop-in integrations.
+- [ ] Require actual island dawn/day/night, ordinary camera/motion, banks/slopes, transitions and sustained native cost before promotion. Private233 above is the latest actual-world grass trial; private232's negative all-day result below remains unchanged.
+
+Historical private232 status: build149 completed the three-mode density/lighting interaction comparison at dawn, midday and low moon. Extra fitted grass fills some gaps and the fixed combined-diffuse response quiets dawn, but broad crossing silhouettes and night cutouts remain: **not accepted as the all-day meadow remedy**. Public localhost:3333 remains build109 and was not changed. Continue world work before avatars. Bounded entry/readiness observations do not qualify loading speed, memory, frame time or long-run stability.
+
+## Private232 outcome: density plus lighting is still insufficient
+
+- Reuse frozen149 with paired geometry **off**. Compare original population, freshly fitted near infill, then the same infill with229's existing fixed k=0.5 combined-diffuse response. This tests a previously untested interaction, not another parameter sweep or a new production default. It does not combine paired leaves with the response.
+- All three modes share one temporary material owner and the extra reference-lighting evaluation; a uniform selects the original or compressed output. Original geometry, albedo, normals, wind, specular, shadow reception, postprocessing and resolution remain. Therefore even the sparse mode is **not an unmodified performance baseline**. No native frame/memory-cost claim follows.
+- Each successful installation freshly prepares **639 supplementary clumps in five batches**, within the shared640-slot cap, from4,361 scanned donors/934 proposals. This is bounded5m near-camera infill, not an achieved fourfold island density. Complete existing terrain/ecology/road/water/root fitting remains; no retained-surface identity or fitting guard was relaxed. Original manager ownership covers94 chunks/161,443 instances. The reviewed primary frame submits60 original grass objects/97,296 instances, or65 objects with the five supplementary batches.
+- Root reviewed **nine native screenshots**: sparse/dense/dense-response at dawn0.27, midday0.56 and low moon0.21, at actual3024×1612,2×,MSAA4. Additional density reduces some ground windows but also repeats the broad crossing blades. The response makes dawn less bright/wiry; midday is broadly similar. Low moon still looks like dark, overlapping cutouts. These qualitative views do not meet the requested soft, coherent all-day meadow bar. The observer verifies actual compiled candidate markers, expected materials/geometry/counts and same-frame primary submissions; those execution checks do not establish artistic success.
+- Ten STATE records accompany nine visually reviewed modes: the first moon installation reached sparse/dense and its four-minute watchdog restored the scene before response review. Reinstallation at the same phase recorded an automatic sparse state and then the reviewed dense-response state. Wind, clouds and animated billboards were not frozen for pixel subtraction. No orthogonal view, ordinary follow-camera gameplay, movement, LOD-transition or performance acceptance was attempted after this mandatory visual failure.
+- The first installation's diagnostic settle gate incorrectly required desired LOD on culled cells, which the manager deliberately defers. It timed out and restored controls without publishing the overlay. The corrected gate requires current submitted cells to match desired LOD, all queues to settle, and the full chunk signature to remain stable. Preserve that failed diagnostic attempt; do not report it as a grounding/product failure. The final idle monitor also rejects a recorded draw-pipeline failure instead of waiting for another mode change.
+- Final native cleanup reports original bytes/ownership unchanged, original materials and camera/clock/light controls restored, all639 reserved slots released, no diagnostic owner, the original absent paired switch still absent, and no cleanup errors. Renderer health is WebGPU=true/deviceLost=false, still2×/MSAA4, with streaming readiness=true. The initial adapter-info field is empty; it does not independently prove a Metal vendor. Root closed only the owned3344 tab and DevTools, leaving the user's New Tab. Private232 stopped with errors[]. Independent filesystem/process/database postflight is recorded below when complete.
+
+Independent postflight **PASS**: private232 controller/server/client PIDs47076/47251/47252, private ports and disposable container are absent. Public3333 process identities, database/mounts and180 protected files are preserved;734 UI sources,1,106 raw inputs,1,117 effective inputs and all nine frozen bundles verify. All ten STATE records satisfy same-frame submissions,15/15 foreground readiness and exact per-phase endpoint lighting, including the separate moon reinstall. All five restoration records pass. No new grounding/deadline-future/GPU failures or other console errors were logged; four existing cow-model console errors remain disclosed. This is bounded lifecycle/provenance verification, not an error-free whole-game or loading-performance result. Evidence: `service-layout-network01-UNQUALIFIED/normal-player232-postflight01.log`, SHA256 `47688809a2b78bc6e64325372f0864e28487cfcf7bb72dddec80b0250d38ad7c`; stopped-process SHA256 `b890711a1920a1752818adcf63ef4dbedc925f00702d02284dd86f5efe9b8599`; client-log SHA256 `9b74b8157daeee2b0ff4086c052bed32fcf6491f7f9df6b6c1cec69b3fbe9f22`.
+
+Private final helper pins: interaction232 `a94952350faf28b75ec444c5402e18d4a72fa8e826d635de4fe18d90bb9ee1ef`; infill232 `ff566181530c842ca1687d21a7d6d6fac3bedc1b593cbae520017b89a8401d27`; reused controls231 `d5d933a6a3e91fc11db3444e2e134f50c65791acf59c06f872aba0bafaf265cf`; response229 `87e48fd004ebf6b16294fe2c92b9c6ffd8334a0a3e47e91682e0e6d561e4f914`. Dawn used the same corrected settle recipe before the idle-monitor failure check was added; its adapter hash was `b5fc427d0c2899c7b4e986cd450ed9174bd2d5ec3224a46d444df468a6199c84`. No active imported module was edited in place. Final syntax and real installed r186 TSL model construction pass; CPU construction is not WGSL execution proof. The prior554-test production regression result remains historical, not a newly rerun suite.
+
+The runtime serves the same on-disk149 framework with an append-only export list for existing local grounding helpers, preserving the same Three and retained-surface class identities. Framework disk SHA256 remains `4a6f7f0a54f24138f4271da73b17fdcae655653afacb4044d439c3b9a47debdf`. The infill module changes only its historical import block to use those identities. Evidence is in `inland-pond-integration01-UNQUALIFIED/runtime232/client.log` (STATE/RESTORE/R232_FINAL), the native CUA transcript and the runtime232 preparation receipt. No new production shader/default, public refresh, commit or push was made.
+
+### Reference implications and next decision
+
+The [GDC procedural-grass presentation](https://www.gdcvault.com/play/1027033/Advanced-Graphics-Summit-Procedural-Grass) discusses clump variation, coherent patches, rounded normals and specular aliasing. Root visually inspected slides14–17,21,33–34 and36–38 through a [public slide mirror](https://archive.thedatadungeon.com/ghost_of_tsushima_2020/documents/gdc_2021/gdc_2021_procedural_grass_in_got.pdf), not every slide. The illustrated aliasing improvement does not disclose enough to claim an exact implementation. [GPUOpen's source](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) remains a shape/coverage reference, and [Three's procedural-terrain example](https://threejs.org/examples/webgpu_tsl_procedural_terrain.html) is an integration reference, not proof of a finished meadow. These references inform diagnosis; none establishes this trial as AAA-quality.
+
+- [x] Test the bounded density × combined-diffuse interaction and retain its negative all-day result.
+- [ ] Resolve the visible repeated crossing structure and leaf/ground separation together; neither narrower leaves alone nor this density/lighting combination is an accepted solution. Do not start another scalar sweep or represent a denser foreground as a finished meadow.
+- [ ] Before another world trial, select a materially different, reference-backed plant/ground composition with a visual rejection criterion and preserve measured grazing coverage. The structural audit below narrows the problem but does not choose or prove the remedy.
+- [ ] After convincing dawn/day/night beauty, verify ordinary gameplay distance, motion, banks/slopes, transitions and sustained native performance before public promotion.
+
+## Structural audit before the private232 interaction experiment
+
+This is a read-only audit of the effective source embedded in frozen build147/build149 and the completed native231 records, not a new visual result. The baseline position, normal, UV and index arrays agree byte-for-byte across both builds at all three LODs. Do not substitute the current raw manager's dimensions or lighting settings for those effective sources.
+
+- Actual near/middle template tips are **0.215–0.603 m**, mean **0.417 m**, before instance scale, ground tilt or shader compression. Near maximum sampled full widths are **1.48–2.92 cm**, mean **2.26 cm**. The source height limits of 0.38–0.86 m are plant inputs, not the finished leaf-height range: each fan shares a seeded plant height, applies role factors 0.46 / 0.72 / 0.86, and ends at 0.95 of that result. Near and middle preserve those tips; far retains the first four of seven fans rather than applying another height multiplier.
+- Each instance repeats the same seeded template: seven fans, three roots per fan, with an unscaled root-circle radius of 6.5 cm and pairwise root spacing of approximately 11.3 cm. Fan arms are 120° apart; facing and curve jitter are bounded to approximately ±9.2° and ±6.9°. Independent clump yaw and scale disrupt global alignment but do not remove this repeated local motif. Short/middle/upper near-role height-to-width ratios repeat at approximately 12.23 / 17.32 / 27.15. This repeated structure is a plausible contributor to the comb-like appearance, not proof of its sole cause.
+- Placement scale is `(0.7 + 0.6 * clumpRng) * biomeHeightScale * pondMarginScale * bankClumpScale`. The same random value also participates in habitat acceptance, so accepted scales are not uniformly distributed: lower acceptance probabilities preferentially retain smaller clumps. Biome height scale is 0.8–1.0. Before bank/fade/tilt, the source envelope is approximately **15.0–78.4 cm** in forest, or **12.0–78.4 cm** including the other biome scale. These are mathematical envelopes, not measured native world heights.
+- The primary bank's whole-clump scale can fall to 0.55. A separate shader factor compresses only local Y and wind, leaving local XZ/width unchanged; its current ribbon strengths bound the primary-bank height factor at 0.41 and pond-service factor at 0.402, before distance fade. The configured 0.35 worn-height target is not reached merely because it appears in the descriptor. Fade compresses Y from 112–140 m. Horizontal wind adds no world Y, but ground tilt and the per-root UV-interpolated Y corrections mean actual vertical tip-to-ground height cannot be recovered from the scalar height formula alone. Endpoint grounding does not prove exact contact along the entire root edge.
+- Nominal placement is **four candidate clumps/m²**, or 2,500 proposals per 25×25 m cell, at every field LOD. That corresponds to 84 near/middle slots or 48 far slots per square metre before exclusions and per-slot masking; the paired near option has 168 physical leaves per square metre at that same nominal quota. Native231 off records 97,296 retained instances over 60 distinct full cells: **2.595 instances/m² over gross cell area**, not density over eligible grassland or visible leaf coverage. The two near cells retain 4,361 instances off versus 4,359 on; middle/far remain unchanged. Frustum-visible pixels and grass-eligible area are different denominators.
+
+Native231 did not record the instance scale/yaw values, ground normals, bank factors, root corrections or blade-visibility masks needed to reconstruct actual world-height distributions and visible leaf coverage. Its asynchronous live-owner hashes are not immutable GPU snapshots. The paired trial narrowed near leaves substantially but still failed whole-day cohesion, so oversized ribbons are not established as a sufficient explanation.
+
+Effective build149 source locations, inside `framework.client.js.map`: `GrassVisualManager.ts` lines 368–391, 686–827, 1766–1768, 3662–3693 and 4313–4404; `GrassWorker.ts` lines 678–735; `CompactTerrainMaterial.ts` lines 676–717; `GrassGroundingGpu.ts` lines 145–181. Evidence: `service-layout-network01-UNQUALIFIED/meadow-structure232-source02` (PASS), log SHA256 `bb0fcd558af6ae040fa61f816fbfa4cee58056fe8619824b0a0f489a8be7c75d`, process SHA256 `b7064a78e9572c949fd6037518fd0add58364ae2b42b6c4633d7e7db2072f9f1`. The first command attempt failed from shell quoting before measurement; it is not a product failure or accepted receipt.
+
+The predeclared bounded question was an **interaction test**, not another coefficient sweep: on unchanged build149 paired-off geometry, compare original sparse grass, freshly fitted near infill with the original response, and that same infill with the existing fixed k=0.5 combined-diffuse response from229. Original/infill populations must share one explicitly owned material switch, actual Three and retained-surface identities, current terrain/constraint leases, and restoration checks. All three modes perform the extra reference-lighting evaluation, so this is not an original-versus-candidate performance comparison. Its native outcome is recorded separately above; the audit itself is source evidence only.
+
+## Previous private231 outcome: finer leaves work, but whole-day cohesion remains open
+
+- Implemented an explicit near-only paired layout: each existing fitted basal edge supports two curved leaves with a common initial tangent. The 21 root/visibility slots remain 21; physical leaves increase to 42 and near geometry changes from 147 vertices / 105 triangles to 168 / 126 (+14.3% vertices, +20% triangles). Middle/far templates remain unchanged. This is not a free-performance or final LOD-continuity claim.
+- Preserve actual Float32 root endpoints, ordinary UV height-flex, common root normals and whole-group clearance/masking. Analytically solve the pair's middle width to preserve the original actual triangle area. Geometry, grounding, worker and GPU-layout tests cover both branches. Static projection separation tests establish rest-mesh separation, not wind-deformed nonintersection.
+- Synthetic flat-patch coverage screening passed admission to a visual trial, not artistic acceptance. At 256², top-down union is 17.468%→18.291%, front5° 96.645%→95.872%, reverse5° 95.982%→95.416%, and30° 40.997%→39.104%; total triangle-area ratio is 0.999999848. This is an orthographic CPU screen with no habitat, terrain slope, wind, materials or game perspective.
+- Final verification: **554/554 tests across eight suites**, full shared/source-alias plus explicit tests (731 roots / 2,437 files / zero diagnostics), formatting, lint and diff checks pass. Tests run under actual Node22; an earlier forced-Bun worker-transfer run was not treated as a product failure or used to weaken detachment assertions.
+- Private build149 activates the new near geometry only through a constructor-captured session switch. Off/all-LOD and on/middle-far geometry are byte-equivalent to frozen147. The raw production factory remains inactive; no default or public activation was made. Frozen147 material, wind and GPU recipes were preserved in the isolated build.
+- Native Chrome on Apple Metal3 rendered both documents at **3024×1612, actual2×, MSAA4**. Root reviewed six full native screenshots at dawn0.27, midday0.56 and low-moon0.21, using the same standing QA camera and matched endpoint lighting. This is not the ordinary follow camera, a frozen-wind pixel subtraction, a video or a performance measurement. The finer silhouette is visible, but dawn remains crosshatched and night still looks cut-out against the ground. Midday is modestly finer without establishing the requested soft meadow across the whole cycle.
+- Actual primary-list geometry records verify the baseline/candidate templates, native submitted index widening and branch selection. Both submit60 grass objects, but total instances differ97,296→97,294: one chunk, `GrassQT_gcell_v1_17_16`, changes1,861→1,859 after fresh fitting; other59 submitted counts/source-index/offset hashes agree. The precise two exclusions are not attributed to a particular mask. Records hash live CPU-owned arrays asynchronously, not a frozen GPU readback.
+- Readiness was observed at67.629s off and58.654s on; these are observation times, not exact completion or loading-speed acceptance. The candidate's final worker is idle, not terminated, with no last admission failure, and its renderer reports no device loss. Its bootstrap readback is complete. A narrowly filtered native resource-timing ledger was empty; do not claim loaded-module URL proof from it. Separate live HTTP checks verify the served framework/worker source-map inputs against149. Baseline health evidence is narrower than the candidate's final receipt. Existing missing-cow404s remain unrelated known errors; this is not an error-free whole-game result.
+- Camera, clock and smoothing inputs were restored before reload and at final cleanup; the original absent session switch was restored to absent. The owned test tab and DevTools were closed, leaving the user's New Tab. Private231 stopped with `errors: []`; independent postflight audit **passed**. Private processes/ports/container are absent; public3333 process identities, database/mounts and180 protected files remain intact. Six phase lighting comparisons match exactly, with15/15 foreground work units ready. No new grounding/deadline/GPU errors were logged; eight existing cow-model errors are disclosed. This is not whole-game or performance acceptance.
+
+Evidence: `service-layout-network01-UNQUALIFIED/meadow-paired-coverage02`, `meadow-paired-regression03`, `meadow-paired-types04`, `meadow-paired-format01`, `meadow-paired-lint02`, `normal-player231-live-provenance01`, `native-paired231-index-width01`, `native-paired231-population01`, `normal-player231-postflight01` (PASS), and `inland-pond-integration01-UNQUALIFIED/runtime231/client.log`; the six visual views are in the native computer-use transcript. Postflight log SHA256 `cf00239658e5036c84d0eca65e7b61ab92226dd319f6ff412e10f4e92832852b`; stopped-process SHA256 `119f41acb88fff8a94c27fdce99a5d76e630349ba15fcc30ef58dd59dd7a0039`. Build149 report SHA256 `8e40e4383a0a9745419045c3a115a41e5c2cf170ed3ec75161e5985cb092b36f`. Controls231 SHA256 `d5d933a6a3e91fc11db3444e2e134f50c65791acf59c06f872aba0bafaf265cf` differs from230 only by documented runtime/build labels and one trailing newline; do not describe that inverse as byte-exact.
+
+### Dependency repair at this checkpoint
+
+Build148 failed its unchanged Three.js singleton guard: the previous pnpm incident had redirected the root Three symlink to `.pnpm`, while shared/procgen still resolved the verified `.bun` copy. Preserve failed148 and its report. Restore only that root symlink to the path proven by147, preserving the previous link in `three-link-repair231.FZPY7L/three-before-link`; do not delete package trees. All eight checked contexts then agreed and the full tests/type-checks passed again. Retry149 built nine bundles with no warnings. The immutable UI inventory has exactly one reviewed control delta, `pnpm-lock.yaml`;734 UI sources and all other entries match. The new inventory digest is `a6d3f10db6ed9bb317104a62445e7f3c846bdb83322e70795ba85c09bff75b04`. Lock/metadata copies remain preserved; this is not a claim that all dependency links were restored. Evidence: `paired-near-three-link-repair01` and `paired-near149-build01`.
+
+### Next acceptance work
+
+- [ ] Resolve the remaining all-day leaf/ground visual cohesion. Paired leaves alone are insufficient; do not relabel this test as the fix or continue blind width/normal/coefficient sweeps.
+- [ ] Choose one distinct, reference-backed mechanism with an explicit visual rejection criterion before another beauty trial. Do not accumulate the rejected229/230 corrections onto this candidate.
+- [ ] After a convincing same-view dawn/day/night result, verify ordinary gameplay camera, wind/movement, slope/bank fitting and LOD transitions, then native sustained frame/memory cost before public promotion.
+
+## Previous source-only outcome: short underlayer lost the fuller canopy
+
+- Studied 14 low leaves and seven slender upper leaves, with actual width-axis twist and derivative normals, at unchanged near topology: 21 blades / 147 vertices / 105 triangles. Preserved roots/RNG/UV/index/height-flex; all three LODs received real geometry checks. No lighting or texture changes were mixed into this trial.
+- Candidate source passed 466 tests across seven suites, full shared/source-alias plus explicit test type-checking with zero diagnostics, and lint. This was source verification, not rendered beauty acceptance.
+- Compared actual frozen147 geometry to the candidate in a deterministic 2 m flat patch at 0.5 m nominal spacing, unit scale and varying yaw. Orthographic ground-ray union sampling at 128² and 256² agreed closely. There were no habitat masks, terrain slopes, wind, materials or actual-game perspective; the bottom band is authored Y, not world clearance.
+- At 256², coverage changed: top-down 17.47%→18.08%; front 5° 96.64%→74.63%; reverse 5° 95.98%→70.90%; 30° 41.00%→24.10%. Near-clump surface area fell 42.7%. Bottom-15 cm horizontal projection rose 4.09×, but grazing lower-band coverage also fell. Therefore more low projected area was not evidence of a fuller player-view meadow.
+- Rejected this particular recipe before build148 or runtime231. This does **not** prove that all fixed-budget designs are impossible. No coefficient search followed the failure. Exact source/test study patches preserve the experiment; GrassVisualManager and build helper were restored byte-for-byte to their pre-turn versions. Historical appearance tests pass 29/29; test-only formatting remains.
+- Retained six regression cases for the existing meadow's all-LOD, rotated/scaled flat/slope grounding. The test oracle had omitted meadow from its height-flex policy; extending that independent oracle fixed the new bounds assertions without changing production wind. Restored code passes 455/455 tests in seven suites and full shared/source-alias plus explicit tests with zero diagnostics.
+- Tooling incident: a subagent's pnpm exec unexpectedly attempted installation, failed the Node-version gate and rewrote pnpm lock/metadata files. These pre-existing untracked files were not deleted or guessed-back. Subsequent audit verifies 1,106 pinned raw inputs, 141 external runtime inputs, 145 protected artifacts and all nine frozen147 bundles unchanged. Tracked package.json/bun.lock remain unchanged. This is bounded verification, not proof that every dependency file or symlink was unchanged.
+
+Evidence: service-layout-network01-UNQUALIFIED/meadow-layered-coverage01, meadow-layered-regression01, meadow-layered-types01, meadow-layered-restored-regression01, meadow-layered-restored-types01 and meadow-layered-dependency-audit01. Study patches: inland-pond-integration01-UNQUALIFIED/meadow-layered-source-study.patch (SHA256 ae537e0f3c92ae64f75db3a9b24fc19668344cc5733c91c16106c347ce64620e) and meadow-layered-appearance-study.patch (6989a6810b3f7fdf15a5e5c7a04dfec7ff5b11377346efdc5a7cd081f1ad0366). The measured candidate hash03ddd61c… predates a four-line formatting-only change to c2a83eb1…; the preserved patch includes the latter. At that checkpoint raw GVM was restored to a85739a4…; the later inactive paired factory is described above.
+
+### Paired-leaf design rationale, subsequently implemented above
+
+Reproduction note: the source-study patch is a Git unified diff; the appearance-study patch uses apply_patch context syntax. Reconstructing the latter in memory and applying the original Prettier formatting exactly recovers the tested appearance-file SHA256 dc036b7d3c829d839825154e6f99ffc8366890f0663cadd8856a96c47d314928 (meadow-layered-study-patch02). No candidate was reapplied to the repository.
+
+Split overly dominant leaf faces into finer paired leaves while retaining canopy stature and measured coverage. Two curved two-segment leaves can share one real fitted basal edge: eight unique vertices / six triangles per slot versus seven/five today. At 21 slots this is 42 leaves / 168 vertices / 126 triangles, a 14.3% vertex and 20% triangle increase, not a fixed-budget or free-performance claim. Root queries/storage and visibility slots can stay unchanged; whole-group sweep cost increases.
+
+Shared root vertices require common initial tangents and compatible stored normals. Distinct tips alone do not establish noncoplanar first triangles; verify after Float32 storage. Each branch may retain Y=h·B(t), with UV heights 0, 0.5, 1 and its own height-flex. Both full branches need fresh clearance, and a common mask must hide both if either violates the road envelope. This requires an explicit geometry/worker/GPU layout—not bypassing current ribbon validation. Existing fitting certifies roots/base-edge tolerance and swept ownership/road/water bounds, not continuous leaf-interior terrain clearance. Prototype and compare coverage first; then actual dawn/day/night, gameplay camera/motion, LOD transitions and native cost. Opaque geometry is preferred for this trial over introducing unqualified alpha-card overdraw.
+
+## Previous private230 outcome: root-band correction did not resolve the appearance
+
+- Root reviewed six native Chrome WebGPU before/after views: established low moon 0.21, dawn 0.27 and midday 0.56, at 3024×1612, 2×, MSAA4. Each candidate had settled LOD/grounding and matched completed-frame lighting, with 60/60 cloned grass objects and 97,296 instances submitted. These are execution checks, not visual acceptance.
+- Low moon and dawn showed **no meaningful improvement**; midday remained broadly unchanged. No obvious bright cuffs appeared, but broad strap-like/cut-out blades and root-ground separation remained. This does not establish a 2 cm contact issue as the main cause. Existing root attachment checks validate sampled endpoints/support, not exact contact along every complete root edge.
+- The private adapter used `positionAttribute.y * instanceRotScaleHash.y` and a 0.02 m **scaled authored-rest-height** band, not world-space height above terrain. It multiplied original color by `mix(1/.78,1,w)`, mixed AO from 1 toward original AO, and robustly mixed ground-view toward original normal, selecting the original normal outside the band. The color correction is not exact adjacent terrain shading. SSS tint/coefficients stayed identical, but normal changes can affect SSS/specular and AO changes can affect indirect specular inside the band. Geometry, grounding, wind, population and ordinary beauty output remained unchanged.
+- Phase transitions and final cleanup restored/disposed all 60 clones. Final camera, clock and exposure restoration reported `errors: []`; private services were stopped and the test tab closed. Postflight verification passed. First complete readiness was observed at 63.48 s: **not a loading-speed success**.
+- CPU validation passed 2,001 weight cases and actual r186 TSL graph construction/ownership checks. Those checks are separate from the native submitted-shader evidence and do not themselves compile WGSL or establish performance. No production/default/public promotion or native performance acceptance follows from this run.
+
+Evidence: `service-layout-network01-UNQUALIFIED/native-grass-contact230-cpu01`, `native-grass-contact230-validation01`, `normal-player230-live-provenance01`, `normal-player230-postflight01` (PASS), and the native six-view computer-use transcript. Private contact SHA256 `7a7e958d7aacae9bb31a5cac5a081a18e3ca605f9fb5f753c2c7b12db78fda43`; controls `af07ee4be2d23a65d07475dcae441cf7a6a53ddedb0ccfdbc531a5b3e2dddf17`; stopped-process receipt `10d657b95bfc1557fc42e94a1954f68cde693d1f238c88c5487ab90595c65c6c`.
+
+### Primary references and the next inferred experiment
+
+- Grassworks documents natural initial bend, independent blade height/width variation, and separate density/geometric-detail controls across four LODs. Its public documentation is evidence for those controls, not an inspection of its proprietary implementation. It describes Blade and Billboard as alternative representations; no short-understory layer or simultaneous hybrid was verified. See [blade properties](https://grassworks.techredux.co/docs/grass/blade), [variation](https://grassworks.techredux.co/docs/grass/variation), [LOD](https://grassworks.techredux.co/docs/performance/lod), and [representations](https://grassworks.techredux.co/docs/grass/types).
+- GPUOpen publishes tapered quadratic-Bezier blade construction, curve-derived normals, length-preserving wind and fractional distance-LOD removal with width compensation. Borrow shape/coverage principles, not another normal-weight sweep. Preserve our existing grounding instead of replacing it with the reference's terrain-plane approximation, and do not widen foreground blades to hide gaps. Its mesh-shader pipeline is not a WebGPU drop-in. See [procedural grass source and explanation](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) and [WebGPU shader stages](https://gpuweb.github.io/gpuweb/wgsl/#shader-stages).
+- An additional inspectable MIT reference builds deterministic radial tufts with unequal heights/leans and pointed tips, plus shuffled stratified scatter for density subsets. It is deliberately painterly: broad dimensions, unlit material, and disabled shadow reception/culling are not suitable defaults to copy into this world. See the pinned [tuft geometry](https://github.com/matthew-kissinger/threejs-field-grass/blob/2a0d3a3256dc8d8f6d9de68f3dc1636a621559c5/src/three/tuftGeometry.ts), [scatter](https://github.com/matthew-kissinger/threejs-field-grass/blob/2a0d3a3256dc8d8f6d9de68f3dc1636a621559c5/src/core/scatter.ts), and [rendering setup](https://github.com/matthew-kissinger/threejs-field-grass/blob/2a0d3a3256dc8d8f6d9de68f3dc1636a621559c5/src/three/grassLayer.ts).
+- Official Three.js examples verify surface-normal-aware instancing and TSL instance deformation as reusable building blocks, not a finished meadow solution or a root-gap remedy. See [surface scatter](https://github.com/mrdoob/three.js/blob/dev/examples/webgl_instancing_scatter.html) and [WebGPU instance deformation](https://github.com/mrdoob/three.js/blob/dev/examples/webgpu_instance_path.html).
+
+The previously proposed fixed-budget low-understory hypothesis was implemented and rejected in the source-only coverage study above. It was our inference, not a verified Grassworks feature. Keep229/230 and this failed recipe as negative evidence; do not stack them onto the next candidate or repeat scalar sweeps without a distinct mechanism.
+
+## Private229 outcome: successful execution, insufficient all-day appearance
+
+- Native Chrome WebGPU rendered matched original/candidate views at dawn0.27, midday0.56 and established low-moon0.21, at3024×1612,2×,MSAA4. Camera-driven LOD/grounding settled before cloning. Each candidate submitted60/60 objects with60 clones and97,296 instances; actual shader markers were observed. All original geometry, normals, albedo, wind, shadow reception, specular and beauty postprocessing were retained.
+- Root visually inspected all six native screenshots in the computer-use transcript. Dawn's strong bright/wiry highlights were reduced; midday stayed broadly close in this view. Low moon still looked flat/dark with cut-out blades, and near-field ribbon silhouettes/root-ground separation remained. **The fixed k=0.5 recipe is not accepted as an all-day remedy.** This is qualitative review; moving wind/clouds and desktop billboards were preserved, not frozen for pixel subtraction.
+- Both phase transitions and final cleanup restored/disposed all60 clones. Final camera, clock and exposure restoration passed with no observer errors; private229 services/database/tab were retired. No production source or public build was changed.
+- Syntax,9,009 numeric-envelope cases, nine explicit zero-reference cases and real r186 SSS model-hook construction passed. CPU construction does not compile WGSL; native submissions are separate execution evidence. No native cost acceptance: one extra environment lookup remains untimed, loading was observed at71.45s, and host memory pressure reached warning before returning to normal after cleanup.
+- Next work must address the remaining edge/root separation and night readability at ordinary gameplay distance and in motion. Do not relabel this candidate as complete or repeat small coefficient/normal/SSS/IBL-cap sweeps without a distinct evidence-backed hypothesis.
+
+Evidence: `service-layout-network01-UNQUALIFIED/native-grass-response229-validation01`, `normal-player229-live-provenance02`, `normal-player229-postflight01`, and `inland-pond-integration01-UNQUALIFIED/runtime229/client.log`. Private response SHA256 `87e48fd004ebf6b16294fe2c92b9c6ffd8334a0a3e47e91682e0e6d561e4f914`; controls `c922e53398233da77e820be54cee87cfc705b735994dbf5d62b7f5156dd75a7d`. The hypothesis/recipe below is retained as experiment history, not the next untested treatment.
+
+## What the evidence supports
+
+Private226's matched dawn/day material-albedo views were substantially more cohesive than dawn beauty. Lighting contributes to the remaining blade/ground contrast, but this does not identify a single lighting term as the entire cause. Previous low-moon measurements also implicated indirect illumination. Normal-weight, uniform ground-normal, transmission, tone-mapping and indirect-light cap experiments have already failed whole-day visual review; do not repeat those scalar sweeps without new evidence.
+
+Private227 attempted to display the actual material angular term, `clamp(normalView dot lightTargetDirection(actualSun), 0, 1)`. Its second attempt verified native submissions for all 96 target objects, but a material/geometry/population ownership guard failed before acceptance. All 61 clones and camera/light/output changes were restored. There is no accepted dawn/day incidence pair from this run. Camera-driven LOD convergence is a source-supported explanation for the population change, not a recorded identification of the changed object.
+
+## Decision against the actual visual goal
+
+The goal is a soft, lush, coherent meadow at dawn and night, not just less direct-light energy. The geometry-derived canopy model below attenuates roots and middle leaves most strongly while leaving exposed tall tips almost unchanged. It could deepen the dark turf/cutout contrast and make the surviving bright tips more prominent. Retained low-moon measurements attributed roughly 65–69% of measured interior spread to indirect response, versus 26–30% to direct response; these are that prior study's measurements, not fresh build146 component attribution. A direct-only attenuation does not address the dominant measured night term.
+
+Therefore do not make canopy attenuation the next beauty trial merely because its optical-depth calculation is physically motivated. Preserve the research for provenance and possible later mutual-visibility work. The albedo control supports investigating the combined shading response, but does not prove that any proposed response compression will improve artistry or remove silhouette/root-boundary problems.
+
+## Deprioritized directional-canopy hypothesis and numerical provenance
+
+Neighboring blades should reduce directional illumination through the canopy. Plane-parallel transmittance depends on foliage above the shaded point and the path length in the light direction. This mechanism is distinct from changing normals or capping the already-integrated environment result. See [plant-canopy light attenuation](https://pmc.ncbi.nlm.nih.gov/articles/PMC4246799/) and [PBRT's one-dimensional transport derivation](https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Scattering_from_Layered_Materials).
+
+For a patch of area S, derive projected leaf area above physical rest height z from the actual accepted clumps, scales and triangle normals. For light elevation cosine mu, use `T = exp(-projectedAreaAbove / (S * max(mu, epsilon)))`. This is an approximate, opaque statistical canopy model, not calibrated multiple scattering. Infinite-slab assumptions overestimate occlusion near clump boundaries; lower-blade darkening and bright exposed tips are explicit rejection risks.
+
+A read-only CPU evaluation of frozen build146's effective geometry found 21 blades / 105 triangles and approximately 0.123423 square metres of single-sided leaf area per unscaled LOD0 clump. Nominal 0.5 m placement spacing is four attempted clumps per square metre, not accepted density. At the existing dawn/day directions, azimuth-averaged projected fractions are approximately 0.5755 / 0.3754. These estimates justify investigating directional visibility, not choosing a production coefficient.
+
+The frozen geometry differs from current raw source. Its embedded GrassVisualManager source SHA256 is `9b4cbedc93b3ccf524d881b64adad92419b6fd26025890e085f572532faeb8b6`. Do not transfer the estimates to another shape silently.
+
+## Tested hypothesis: terrain-referenced diffuse contrast
+
+This is a **different, explicitly artistic hypothesis**, not another normal-weight change, global ambient lift, tone-map sweep, one-sided indirect cap, or symmetric-leaf IBL average. Retain the current geometric and shading normals. Instead, compress both brighter and darker deviations of the completed diffuse response around a coarse terrain-normal lighting reference:
+
+- `D`: the existing grass `directDiffuse + indirectDiffuse`; Three's current SSS approximation is already included in `directDiffuse`.
+- `R`: the same grass albedo under a coarse ground-normal diffuse response, using the actual current shadowed lights, environment intensity and existing occlusion conventions. It is a lighting anchor, not a new pigment, emissive term, fixed daylight color, or screenshot-derived ground sample.
+- Apply one fixed, symmetric soft envelope to `D - R`, then retain the original direct and indirect specular contributions. For example, component-wise `D_new = R + (D - R) / (1 + abs(D - R) / (k * R))`, with guarded zero-reference channels. One predeclared moderate artistic envelope, such as `k = 0.5`, would bound those channels between `0.5R` and `1.5R`; this is a contrast policy, not a physical measurement or a proposed coefficient sweep. A zero reference must not create a positive emissive floor.
+
+The important distinction is the operation, not this example coefficient: one-sided caps only lower bright interiors, whereas this treatment can also reduce dark ribbon cutouts using existing scene illumination. Unlike setting all normals to the ground normal, it retains small residual leaf-response differences, original specular normals and the existing material albedo. Unlike separate direct/IBL tweaks, the same envelope governs the combined diffuse response at dawn, day and night.
+
+### Existing integration points and bounded cost
+
+- `packages/shared/src/systems/shared/world/GrassVisualManager.ts`: raw source lines 4188 and 4519–4535 expose the existing `instanceGroundNormal` and preserve the current mixed leaf normal. Lines 4784–4809 share the actual albedo with SSS and pass the completed material output through. Effective frozen146 retains upper normal weight `0.45`; raw source currently inherits `1.0`. Do not transplant raw settings into the comparison.
+- `packages/shared/src/systems/shared/world/TerrainShader.ts:2239–2256`: terrain uses a standard diffuse/specular material with its compact surface normal/AO and applies fog afterwards. The proposed anchor should be compatible with this lighting convention; `instanceGroundNormal` is only a coarse approximation, **not** the exact adjacent terrain pixel's texture-normal/AO/albedo response.
+- [Three r186 SSS material](https://github.com/mrdoob/three.js/blob/r186/src/materials/nodes/MeshSSSNodeMaterial.js): its SSS function adds to `directDiffuse` and then calls ordinary physical direct lighting. Lowering only the ordinary Lambert term would leave part of the same contrast outside the treatment.
+- [Three r186 LightsNode](https://github.com/mrdoob/three.js/blob/r186/src/nodes/lighting/LightsNode.js): local installed source lines 401–422 form total diffuse/specular and assign outgoing light before the lighting-model `finish` hook. A private material-local adapter can operate at this completion point; changing only the diffuse accumulator after outgoing light was assigned would be insufficient. Keep ordinary lighting evaluation unconditional, preserving the earlier shared-shadow initialization correctness fix.
+- [Three r186 EnvironmentNode](https://github.com/mrdoob/three.js/blob/r186/src/nodes/lighting/EnvironmentNode.js): local line 89 evaluates already-convolved environment irradiance using `normalWorld`. A faithful additional ground-normal reference requires another diffuse environment evaluation unless an equivalent reference is already available. This is not free: the earlier cap studies saw static environment sample sites increase from 8 to 12. Do not claim this candidate avoids that cost or assume those earlier timings transfer. No new texture, render target, readback, geometry, population, render pass or resolution change is needed in principle.
+
+### Caveats and acceptance boundary
+
+This compression raises previously dark diffuse facets and lowers bright ones; it is **not energy-conserving** and must not be described as calibrated canopy transport. It can flatten leaves, suppress desirable backlighting, alter hue with component-wise compression, or leave authored root-color/silhouette contrast unresolved. The coarse reference can also disagree with the actual terrain material. Sharing current light/shadow inputs is mandatory so that this does not become a shadow-bypassing fill light. Preserve the geometry, albedo, wind, AO, light cycle, postprocessing and actual 2× resolution during the comparison.
+
+Do not implement both canopy attenuation and response compression together. After loading is stable, admit one reversible private adapter and one predeclared envelope, with baseline recovery and the existing visible-frame/ownership/watchdog gates. Review the same camera at dawn, midday and the retained failing low-moon phase. Reject if the result is merely flatter, milkier, less readable, less naturally green, or smoother inside blades while boundaries remain equally harsh. Actual visual acceptance must precede a native cost check and broader motion/camera review. Nothing in this note establishes an accepted remedy.
+
+## Preconditions before any new material experiment
+
+- [x] Recheck the targeted runtime227 worker deadline-admission remedy in private228/build147: three distinct documents reach terrain28/28, grass123/123,209 flowers, ready water and presented avatar at native3024×1612/2×, with zero logged grounding/deadline-future failures. Evidence: service-layout-network01-UNQUALIFIED/normal-player228-postflight02. Do not infer whole-island movement, long-run reliability or performance acceptance; future comparisons must recheck their own complete populations.
+- [x] Private229: after moving the comparison camera, verify pending LOD replacement and grounding queues settle as well as the existing foreground readiness gate. All three phases passed zero pending queues/desired-LOD mismatch, stable population and completed native frames before material publication. Future runs must recheck their own current populations.
+
+## Retained canopy experiment recipe — deferred, not the next trial
+
+- [ ] Measure accepted patch population and actual `instanceRotScaleHash.y` scales from the same frozen geometry. Account for vertical-only bank shortening; neither nominal density nor UV height is sufficient.
+- [ ] Derive and validate one height/direction visibility profile against exact CPU triangle sums. Keep extinction multiplier one; no daylight-coefficient sweep.
+- [ ] In a reversible private material trial, attenuate each existing shadowed directional-light input once before its original lighting function. Preserve geometry, normals, albedo, transmission coefficients, indirect lighting, postprocessing, resolution and population.
+- [ ] Compare baseline/trial at dawn, midday and the previously failing low-moon phase. Reject if apparent improvement is merely darker grass, lost readability, flatter midday shading or stronger tip/crossing contrast.
+- [ ] Only after visual acceptance, measure actual native WebGPU cost and broader camera/movement/day-cycle behavior before promotion.
+
+Directional-light visibility alone cannot solve the known indirect low-moon contribution. Three r186 samples already-convolved environment irradiance, so a sun-direction multiplier or scalar AO factor cannot recover directional sky visibility. A coherent sky solution would incorporate visibility inside that integration. Consult the installed [Three r186 material implementation](https://github.com/mrdoob/three.js/blob/r186/src/materials/nodes/MeshSSSNodeMaterial.js), not a generic claim that all foliage is handled by its experimental transmission approximation.

@@ -52,6 +52,7 @@ import {
 import { getGrassBladeLayout } from "../GrassBladeLayout";
 import { sampleSkyCycle } from "../SkySystem";
 import { createGroundedGrassMaterial } from "../GrassGroundingGpu";
+import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
   SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
@@ -68,6 +69,8 @@ function manager(
   lighting?: ConstructorParameters<typeof GrassVisualManager>[15],
   grassColorGrade?: GrassWorkerSetup["compactGrassColorGrade"],
   geometry?: ConstructorParameters<typeof GrassVisualManager>[17],
+  vergeEvaluation?: ConstructorParameters<typeof GrassVisualManager>[18],
+  instancing?: ConstructorParameters<typeof GrassVisualManager>[19],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -109,6 +112,8 @@ function manager(
     lighting,
     undefined,
     geometry,
+    vergeEvaluation,
+    instancing,
   );
 }
 
@@ -377,6 +382,338 @@ function installedSssContribution(
     setCurrentStack(previous);
   }
 }
+
+describe("matrix-free meadow owner admission and precompilation (CPU only)", () => {
+  const options: Parameters<typeof manager> = [
+    { ...FINE_MEADOW_GRASS_VISUAL_PROFILE, roadClearance: "per-blade-v1" },
+    SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    true,
+    "fine-meadow-v1",
+    undefined,
+    "leaf-volume-v1",
+    undefined,
+    "meadow-field-v1",
+    undefined,
+    "attributes-v1",
+  ];
+
+  it("retains all three representative layouts, material recipes and disposal without matrix allocation", async () => {
+    const baselineOptions = [...options] as Parameters<typeof manager>;
+    baselineOptions[9] = undefined;
+    const baseline = manager(...baselineOptions);
+    const candidate = manager(...options);
+    const references: THREE.InstancedMesh[] = [];
+    let geometryDisposals = 0,
+      materialDisposals = 0,
+      meshDisposals = 0;
+    let borrowedDisposals = 0,
+      observed = 0;
+    const basePositions = [candidate["material"], candidate["foldedMaterial"]]
+      .filter(
+        (material): material is MeshStandardNodeMaterial => material !== null,
+      )
+      .map((material) => {
+        material.addEventListener("dispose", () => borrowedDisposals++);
+        return { material, position: material.positionNode };
+      });
+    try {
+      expect(candidate.getProfileReceipt()).toEqual(
+        baseline.getProfileReceipt(),
+      );
+      await baseline.precompileRepresentativeChunk(async (object) => {
+        if (!(object instanceof THREE.InstancedMesh))
+          throw new Error("Baseline must retain its actual instanced owner");
+        references.push(object);
+      });
+      await candidate.precompileRepresentativeChunk(async (object) => {
+        const before = references[observed++];
+        if (
+          !(object instanceof THREE.Mesh) ||
+          !(object.geometry instanceof THREE.InstancedBufferGeometry) ||
+          !(object.material instanceof MeshSSSNodeMaterial) ||
+          !(before.material instanceof MeshSSSNodeMaterial)
+        )
+          throw new Error("Expected actual matrix-free SSS representative");
+        expect(object).not.toBeInstanceOf(THREE.InstancedMesh);
+        expect("instanceMatrix" in object).toBe(false);
+        expect(Reflect.get(object, "count")).toBe(1);
+        expect(object.geometry.instanceCount).toBe(1);
+        expect(
+          object.geometry.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+        ).toBe(false);
+        expect(object.geometry.index?.array).toEqual(
+          before.geometry.index?.array,
+        );
+        const names = Object.keys(before.geometry.attributes).filter(
+          (name) => name !== INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+        );
+        expect(Object.keys(object.geometry.attributes)).toEqual(names);
+        for (const name of names) {
+          const actual = object.geometry.getAttribute(name);
+          const expected = before.geometry.getAttribute(name);
+          expect(actual.array).toEqual(expected.array);
+          expect(actual.itemSize).toBe(expected.itemSize);
+          expect(actual.count).toBe(expected.count);
+        }
+        for (const flag of [
+          "receiveShadow",
+          "castShadow",
+          "frustumCulled",
+        ] as const)
+          expect(object[flag]).toBe(before[flag]);
+        for (const flag of [
+          "transparent",
+          "depthWrite",
+          "depthTest",
+          "side",
+          "alphaTest",
+          "alphaToCoverage",
+        ] as const)
+          expect(object.material[flag]).toBe(before.material[flag]);
+        expect(object.material.userData).toEqual(before.material.userData);
+        expect(
+          Object.isFrozen(object.material.userData.fineGrassCanopyLighting),
+        ).toBe(true);
+        expect(new THREE.Raycaster().intersectObject(object)).toEqual([]);
+        object.geometry.addEventListener("dispose", () => geometryDisposals++);
+        object.material.addEventListener("dispose", () => materialDisposals++);
+        object.addEventListener("dispose", () => meshDisposals++);
+      });
+      expect(observed).toBe(3);
+      expect([geometryDisposals, materialDisposals, meshDisposals]).toEqual([
+        3, 3, 3,
+      ]);
+      expect(borrowedDisposals).toBe(0);
+      for (const { material, position } of basePositions)
+        expect(material.positionNode).toBe(position);
+      for (const geometry of candidate["lodGeometries"])
+        expect(Object.keys(geometry.attributes)).not.toContain(
+          "grassRootDeltas",
+        );
+      expect(candidate["container"].children).toHaveLength(0);
+      expect(candidate["chunks"].size).toBe(0);
+    } finally {
+      candidate.destroy();
+      baseline.destroy();
+    }
+  });
+
+  it("disposes representative resources if the real compile callback rejects", async () => {
+    const owner = manager(...options);
+    const disposed = [0, 0, 0];
+    try {
+      await expect(
+        owner.precompileRepresentativeChunk(async (object) => {
+          if (!(object instanceof THREE.Mesh) || Array.isArray(object.material))
+            throw new Error("Expected a single-material representative");
+          object.geometry.addEventListener("dispose", () => disposed[0]++);
+          object.material.addEventListener("dispose", () => disposed[1]++);
+          object.addEventListener("dispose", () => disposed[2]++);
+          throw new Error("Intentional matrix-free compile rejection");
+        }),
+      ).rejects.toThrow("Intentional matrix-free compile rejection");
+      expect(disposed).toEqual([1, 1, 1]);
+      expect(owner["container"].children).toHaveLength(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+
+  it.each([
+    null,
+    "",
+    "unknown",
+    " attributes-v1",
+    false,
+    {},
+    ["attributes-v1"],
+  ])("rejects an invalid instancing selection %j", (value) => {
+    const invalid: unknown[] = [...options];
+    invalid[9] = value;
+    expect(() => Reflect.apply(manager, undefined, invalid)).toThrow(
+      "Grass instancing",
+    );
+  });
+
+  it("requires admitted meadow-field geometry and keeps omission inert", () => {
+    const invalid: Parameters<typeof manager> = [...options];
+    invalid[7] = undefined;
+    expect(() => manager(...invalid)).toThrow("Grass instancing");
+    invalid[9] = undefined;
+    const owner = manager(...invalid);
+    try {
+      expect(owner["instancingCandidate"]).toBeUndefined();
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
+describe("explicit exact-zero grass verge owner admission (CPU only)", () => {
+  const coastal = validateWorldTerrainProfile({
+    ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    southernMeadow: {
+      schemaVersion: 1,
+      minX: 304,
+      maxX: 500,
+      minZ: 345,
+      maxZ: 535,
+      featherX: 24,
+      featherZ: 24,
+      northHeight: 26.8,
+      southHeight: 25.3,
+      crossFall: 1,
+      rollAmplitude: 0.65,
+      rollWavelength: 100,
+    },
+  });
+  const options: Parameters<typeof manager> = [
+    FINE_MEADOW_GRASS_VISUAL_PROFILE,
+    coastal,
+    true,
+    "fine-meadow-v1",
+    undefined,
+    "leaf-volume-v1",
+    "fine-meadow-green-v1",
+    "meadow-field-v1",
+    "exact-zero-v1",
+  ];
+
+  it("admits the actual graded coastal bank owner without changing geometry or profile", () => {
+    const baselineOptions = [...options] as Parameters<typeof manager>;
+    baselineOptions[8] = undefined;
+    const baseline = manager(...baselineOptions);
+    const candidate = manager(...options);
+    try {
+      expect(baseline["grassVergeEvaluation"]).toBeUndefined();
+      expect(candidate["grassVergeEvaluation"]).toBe("exact-zero-v1");
+      expect(candidate["compactMacroField"]?.coastalMeadow).toBe(true);
+      expect(candidate["compactMacroField"]?.bankVerge).toMatchObject({
+        minX: 340,
+        maxX: 357,
+        minZ: 310,
+        maxZ: 324,
+        feather: 2,
+      });
+      expect(candidate.getProfileReceipt()).toEqual(
+        baseline.getProfileReceipt(),
+      );
+      expect(candidate["chunks"].size).toBe(0);
+      for (let lod = 0; lod < 3; lod++) {
+        const before = baseline["lodGeometries"][lod];
+        const after = candidate["lodGeometries"][lod];
+        expect(after.index?.array).toEqual(before.index?.array);
+        expect(Object.keys(after.attributes)).toEqual(
+          Object.keys(before.attributes),
+        );
+        for (const name of Object.keys(before.attributes))
+          expect(after.attributes[name].array).toEqual(
+            before.attributes[name].array,
+          );
+      }
+      expect(candidate["material"].userData).toEqual(
+        baseline["material"].userData,
+      );
+    } finally {
+      candidate.destroy();
+      baseline.destroy();
+    }
+  });
+
+  it("rejects an actual coastal macro field without either authored verge", () => {
+    const withoutVerge = [...options] as Parameters<typeof manager>;
+    // A validated non-reserved sculpt profile retains the real coastal field;
+    // only the authored v6 identity receives the bank/service descriptors.
+    withoutVerge[1] = validateWorldTerrainProfile({
+      ...coastal,
+      id: "grass-verge-admission-fixture",
+    });
+    withoutVerge[8] = undefined;
+    const baseline = manager(...withoutVerge);
+    try {
+      expect(baseline["compactMacroField"]?.coastalMeadow).toBe(true);
+      expect(baseline["compactMacroField"]?.bankVerge).toBeUndefined();
+      expect(baseline["compactMacroField"]?.pondServiceGround).toBeUndefined();
+      withoutVerge[8] = "exact-zero-v1";
+      expect(() => manager(...withoutVerge)).toThrow("Grass verge evaluation");
+    } finally {
+      baseline.destroy();
+    }
+  });
+
+  it.each([
+    { name: "worker setup", index: 2, value: false, error: "Grass lighting" },
+    {
+      name: "grade",
+      index: 6,
+      value: undefined,
+      error: "Grass verge evaluation",
+    },
+    {
+      name: "coastal meadow",
+      index: 1,
+      value: SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      error: "Grass verge evaluation",
+    },
+    {
+      name: "field geometry",
+      index: 7,
+      value: undefined,
+      error: "Grass verge evaluation",
+    },
+    {
+      name: "leaf volume",
+      index: 5,
+      value: undefined,
+      error: "Grass geometry",
+    },
+    {
+      name: "fine profile",
+      index: 0,
+      value: DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+      error: "Natural tuft appearance",
+    },
+  ])("rejects explicit selection without $name", ({ index, value, error }) => {
+    const invalid: unknown[] = [...options];
+    invalid[index] = value;
+    expect(() => Reflect.apply(manager, undefined, invalid)).toThrow(error);
+  });
+
+  it.each([null, "", "unknown", " exact-zero-v1", {}, ["exact-zero-v1"]])(
+    "rejects an invalid runtime verge option %j",
+    (value) => {
+      const invalid: unknown[] = [...options];
+      invalid[8] = value;
+      expect(() => Reflect.apply(manager, undefined, invalid)).toThrow(
+        "Grass verge evaluation",
+      );
+    },
+  );
+
+  it("keeps omission inert for the existing ungraded non-coastal fine field", () => {
+    const owner = manager(
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      "fine-meadow-v1",
+      undefined,
+      "leaf-volume-v1",
+      undefined,
+      "meadow-field-v1",
+    );
+    try {
+      expect(owner["grassVergeEvaluation"]).toBeUndefined();
+      expect(owner["compactGrassColorGrade"]).toBeUndefined();
+      expect(owner["compactMacroField"]?.coastalMeadow).toBeUndefined();
+      expect(owner["material"].userData.fineGrassCanopyLighting).toBe(
+        FINE_GRASS_MEADOW_FIELD_LIGHTING,
+      );
+      expect(owner["chunks"].size).toBe(0);
+    } finally {
+      owner.destroy();
+    }
+  });
+});
 
 describe("opt-in fine canopy normals (actual graph and geometry, CPU only)", () => {
   const fine = (

@@ -260,9 +260,18 @@ export class TerrainQuadNode {
   }
 
   split(): void {
+    if (this.splitted || this.isMaxDepth) return;
+    // A reversed merge still owns its children. Keep their live geometry and
+    // pending work instead of overwriting the map with orphan replacements.
+    this.unsplitting = false;
     this.splitting = true;
     this.splitted = true;
     this.unsetReady();
+
+    if (this.children.size === 4) {
+      this.testReady();
+      return;
+    }
 
     const qSize = this.halfSize;
     const q = this.quarterSize;
@@ -311,10 +320,14 @@ export class TerrainQuadNode {
 
   unsplit(): void {
     if (!this.splitted || this.requiresMinimumSize()) return;
+    // Only one transition may commit. A retained parent can already be ready
+    // when a split reverses; do not wait for a now-unnecessary publication.
+    this.splitting = false;
     this.splitted = false;
     this.unsplitting = true;
     this.unsetReady();
     this.createFinal();
+    this.testReady();
   }
 
   createFinal(): void {

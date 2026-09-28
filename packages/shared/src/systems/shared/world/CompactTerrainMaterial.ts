@@ -139,6 +139,7 @@ type Key = `${Layer}-${Channel}` | "ground-height";
 export type CompactDirtProjection = "stochastic-v1";
 export type CompactRockProjection = "stochastic-v1";
 export type CompactRockSampling = "exact-zero-v1";
+export type CompactGroundSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
 /**
  * Candidate material microrelief, not world-space displacement. Means are from
@@ -692,13 +693,63 @@ function createCompactGroundVergeHeightScale(
     .toVar(`naturalGrass${role}HeightScale`);
 }
 
+export type GrassVergeEvaluation = "exact-zero-v1";
+
+/** Vertex-only alternative: a zero locality has exactly unit height/wind scale.
+ * Keep each field independent and construct its wear arithmetic inside the
+ * branch. Positive locality, however small, retains the original expression. */
+function createCompactGroundVergeHeightScaleExactZero(
+  world: Node<"vec3">,
+  verge: CompactTerrainBankVerge | undefined,
+  locality?: Node<"float">,
+  role: "Bank" | "PondService" = "Bank",
+): Node<"float"> {
+  if (!verge) return float(1);
+  return Fn(() => {
+    const local =
+      locality ?? createCompactGroundVergeLocality(world, verge, role);
+    const result = float(1).toVar(`naturalGrass${role}HeightScale`);
+    If(local.notEqual(0), () => {
+      result.assign(
+        mix(float(1), float(verge.heightScale), local).add(
+          createCompactGroundVergeWear(world, verge, local, role).mul(
+            verge.wornHeightScale - verge.heightScale,
+          ),
+        ),
+      );
+    });
+    return result;
+  })();
+}
+
 /** One deformation path for each of the two bounded, independently bound verges. */
 export function createCompactBankVergeHeightScale(
   world: Node<"vec3">,
   field: CompactTerrainMacroField | null,
   locality?: Node<"float">,
+  evaluation?: GrassVergeEvaluation,
 ): Node<"float"> {
+  if (evaluation !== undefined && evaluation !== "exact-zero-v1")
+    throw new Error("Invalid grass verge evaluation");
   if (!field?.coastalMeadow) return float(1);
+  if (evaluation === "exact-zero-v1") {
+    const primary = createCompactGroundVergeHeightScaleExactZero(
+      world,
+      field.bankVerge,
+      locality,
+    );
+    return field.pondServiceGround
+      ? min(
+          primary,
+          createCompactGroundVergeHeightScaleExactZero(
+            world,
+            field.pondServiceGround,
+            undefined,
+            "PondService",
+          ),
+        ).toVar("naturalGrassAuthoredHeightScale")
+      : primary;
+  }
   const primary = createCompactGroundVergeHeightScale(
     world,
     field.bankVerge,
@@ -1846,6 +1897,32 @@ export function createCompactRockAppearanceRequired(
     .or(finalWeights.y.notEqual(0).and(mineral.clamp(0, 1).notEqual(0)));
 }
 
+/** Grass appearance has no nested consumer outside its final surface share. */
+export function createCompactGrassAppearanceRequired(
+  finalWeights: Node<"vec4">,
+): Node<"bool"> {
+  return finalWeights.x.notEqual(0);
+}
+
+/** Raw soil also supplies silt-graded rock and its nested coastal soil.
+ * Deliberately conservative: retain every nonzero contributing path, without
+ * multiplying tiny weights together or introducing an epsilon cutoff.
+ */
+export function createCompactDirtAppearanceRequired(
+  finalWeights: Node<"vec4">,
+  silt: Node<"float">,
+  coastRockSoil: Node<"float">,
+): Node<"bool"> {
+  return finalWeights.y
+    .notEqual(0)
+    .or(finalWeights.w.notEqual(0))
+    .or(
+      finalWeights.z
+        .notEqual(0)
+        .and(silt.clamp(0, 1).notEqual(0).or(coastRockSoil.notEqual(0))),
+    );
+}
+
 /**
  * Ground heights remain available before final material weights are resolved.
  * Rock graph creation is deferred so its sampling and temporary assignments
@@ -1857,6 +1934,13 @@ export function createCompactTerrainLayerFactory(
   patternNoise: Node<"float"> = float(0.5),
 ): {
   createGround(): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
+  prepareGround(): {
+    heights: { grass: Node<"float">; dirt: Node<"float"> };
+    resolve(required: {
+      grassRequired: Node<"bool">;
+      dirtRequired: Node<"bool">;
+    }): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
+  };
   createRock(required?: Node<"bool">): CompactTerrainLayer;
 } {
   const controls = COMPACT_TERRAIN_MATERIAL;
@@ -1886,7 +1970,8 @@ export function createCompactTerrainLayerFactory(
         : base.sample(uv);
     };
     const ar = sample("albedo-roughness");
-    const na = sample("normal-ao");
+    let na = sample("normal-ao");
+    let grassRoughnessAlpha = ar.a;
     let albedo: Node<"vec3"> = ar.rgb;
     if (layer === "grass" && textures.grassSubstrate) {
       if (!gradients?.scale)
@@ -1900,15 +1985,23 @@ export function createCompactTerrainLayerFactory(
         projection,
       );
       // Reuse the same sRGB texture/UV owner: sampling decodes RGB to linear.
-      // Keep original packed alpha for roughness; low-frequency alpha is unused.
+      // Reuse filtered packed alpha so roughness follows the same turf footprint.
       const low = textures
         .getNode(layer, "albedo-roughness")
         .grad(broad.dx, broad.dy)
         .sample(uv)
-        .rgb.toVar(`compactGrassSubstrateLow${projection}`);
-      albedo = mix(low, ar.rgb, COMPACT_GRASS_SUBSTRATE.detailRetention).toVar(
-        `compactGrassSubstrateAlbedo${projection}`,
-      );
+        .toVar(`compactGrassSubstrateLow${projection}`);
+      albedo = mix(
+        low.rgb,
+        ar.rgb,
+        COMPACT_GRASS_SUBSTRATE.detailRetention,
+      ).toVar(`compactGrassSubstrateAlbedo${projection}`);
+      grassRoughnessAlpha = low.a;
+      // Filter the packed material signal, not its original cotangent frame.
+      na = textures
+        .getNode(layer, "normal-ao")
+        .grad(broad.dx, broad.dy)
+        .sample(uv);
     }
     const heightMap = textures.getHeightNode();
     // Each layer's height follows its own exact projection and gradients.
@@ -1927,7 +2020,7 @@ export function createCompactTerrainLayerFactory(
       albedo,
       roughness:
         layer === "grass"
-          ? createCompactDryGrassRoughness(ar.a, projection)
+          ? createCompactDryGrassRoughness(grassRoughnessAlpha, projection)
           : ar.a.max(controls.minimumRoughness),
       ao: mix(float(1), na.a, float(controls.aoStrength)),
       worldNormal:
@@ -1954,14 +2047,34 @@ export function createCompactTerrainLayerFactory(
     layer: "grass" | "dirt",
     repeats: number,
     normalStrength: number,
+    prepared?: ReturnType<typeof createCompactGroundProjections>,
+    worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
   ): CompactTerrainLayer => {
-    const p = createCompactGroundProjections(
-      vec2(positionWorld.x, positionWorld.z),
-      patternNoise,
-      repeats,
+    const p =
+      prepared ??
+      createCompactGroundProjections(
+        vec2(positionWorld.x, positionWorld.z),
+        patternNoise,
+        repeats,
+      );
+    const a = project(
+      layer,
+      p.a.uv,
+      normalStrength,
+      p.a,
+      "A",
+      undefined,
+      worldDerivatives,
     );
-    const a = project(layer, p.a.uv, normalStrength, p.a, "A");
-    const b = project(layer, p.b.uv, normalStrength, p.b, "B");
+    const b = project(
+      layer,
+      p.b.uv,
+      normalStrength,
+      p.b,
+      "B",
+      undefined,
+      worldDerivatives,
+    );
     return {
       ...(a.height && b.height
         ? { height: mix(a.height, b.height, p.weight) }
@@ -1972,13 +2085,40 @@ export function createCompactTerrainLayerFactory(
       worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
     };
   };
-  const stochasticDirt = (): CompactTerrainLayer => {
-    const p = createCompactDirtProjections(
-      vec2(positionWorld.x, positionWorld.z),
+  const stochasticDirt = (
+    prepared?: ReturnType<typeof createCompactDirtProjections>,
+    worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
+  ): CompactTerrainLayer => {
+    const p =
+      prepared ??
+      createCompactDirtProjections(vec2(positionWorld.x, positionWorld.z));
+    const a = project(
+      "dirt",
+      p.a.uv,
+      controls.dirtNormalStrength,
+      p.a,
+      "A",
+      undefined,
+      worldDerivatives,
     );
-    const a = project("dirt", p.a.uv, controls.dirtNormalStrength, p.a);
-    const b = project("dirt", p.b.uv, controls.dirtNormalStrength, p.b);
-    const c = project("dirt", p.c.uv, controls.dirtNormalStrength, p.c);
+    const b = project(
+      "dirt",
+      p.b.uv,
+      controls.dirtNormalStrength,
+      p.b,
+      "A",
+      undefined,
+      worldDerivatives,
+    );
+    const c = project(
+      "dirt",
+      p.c.uv,
+      controls.dirtNormalStrength,
+      p.c,
+      "A",
+      undefined,
+      worldDerivatives,
+    );
     return {
       ...(a.height && b.height && c.height
         ? {
@@ -2185,6 +2325,134 @@ export function createCompactTerrainLayerFactory(
             controls.dirtNormalStrength,
           ),
     }),
+    prepareGround: () => {
+      const heightMap = textures.getHeightNode();
+      if (!heightMap)
+        throw new Error(
+          "Deferred ground appearance requires admitted height layers",
+        );
+      const worldXZ = vec2(positionWorld.x, positionWorld.z);
+      const grassProjection = createCompactGroundProjections(
+        worldXZ,
+        patternNoise,
+        controls.grassRepeatsPerMeter,
+      );
+      const sampleHeight = (p: {
+        uv: Node<"vec2">;
+        dx: Node<"vec2">;
+        dy: Node<"vec2">;
+      }) => heightMap.grad(p.dx, p.dy).sample(p.uv);
+      const grassHeight = mix(
+        sampleHeight(grassProjection.a).r,
+        sampleHeight(grassProjection.b).r,
+        grassProjection.weight,
+      ).toVar("compactPreparedGrassHeight");
+      const dirtHeight = (() => {
+        if (textures.dirtProjection) {
+          const p = createCompactDirtProjections(worldXZ);
+          return sampleHeight(p.a)
+            .g.mul(p.weights.x)
+            .add(sampleHeight(p.b).g.mul(p.weights.y))
+            .add(sampleHeight(p.c).g.mul(p.weights.z));
+        }
+        const p = createCompactGroundProjections(
+          worldXZ,
+          patternNoise,
+          controls.dirtRepeatsPerMeter,
+        );
+        return mix(sampleHeight(p.a).g, sampleHeight(p.b).g, p.weight);
+      })().toVar("compactPreparedDirtHeight");
+      const appearance = (
+        layer: "grass" | "dirt",
+        required: Node<"bool">,
+      ): CompactTerrainLayer => {
+        const label = layer === "grass" ? "Grass" : "Dirt";
+        const packed = Fn(() => {
+          // Explicit world and projection gradients enter this stack BEFORE
+          // its nonuniform branch. Height sampling above is independent and
+          // retains the original projection arithmetic and texture owner.
+          const dx = positionWorld.dFdx().toVar(`compact${label}WorldDx`);
+          const dy = positionWorld.dFdy().toVar(`compact${label}WorldDy`);
+          const hoist = <T extends { dx: Node<"vec2">; dy: Node<"vec2"> }>(
+            p: T,
+            name: string,
+          ): T => ({
+            ...p,
+            dx: p.dx.toVar(`compact${label}${name}Dx`),
+            dy: p.dy.toVar(`compact${label}${name}Dy`),
+          });
+          const dual =
+            layer === "grass" || !textures.dirtProjection
+              ? createCompactGroundProjections(
+                  worldXZ,
+                  patternNoise,
+                  layer === "grass"
+                    ? controls.grassRepeatsPerMeter
+                    : controls.dirtRepeatsPerMeter,
+                  dx.xz,
+                  dy.xz,
+                )
+              : null;
+          const triple = dual
+            ? null
+            : createCompactDirtProjections(worldXZ, dx.xz, dy.xz);
+          const projectedDual = dual
+            ? { ...dual, a: hoist(dual.a, "A"), b: hoist(dual.b, "B") }
+            : undefined;
+          const projectedTriple = triple
+            ? {
+                ...triple,
+                a: hoist(triple.a, "A"),
+                b: hoist(triple.b, "B"),
+                c: hoist(triple.c, "C"),
+              }
+            : undefined;
+          const result = mat3(vec3(0), normalWorldGeometry, vec3(1)).toVar(
+            `compact${label}Appearance`,
+          );
+          If(required, () => {
+            const material = projectedTriple
+              ? stochasticDirt(projectedTriple, { dx, dy })
+              : ground(
+                  layer,
+                  layer === "grass"
+                    ? controls.grassRepeatsPerMeter
+                    : controls.dirtRepeatsPerMeter,
+                  layer === "grass" ? 1 : controls.dirtNormalStrength,
+                  projectedDual,
+                  { dx, dy },
+                );
+            result.assign(
+              mat3(
+                material.albedo,
+                material.worldNormal,
+                vec3(material.roughness, material.ao, 1),
+              ),
+            );
+          });
+          return result;
+        })().toVar(
+          `compact${label}AppearanceResult`,
+        ) as unknown as Node<"mat3"> & {
+          element(index: 0 | 1 | 2): Node<"vec3">;
+        };
+        const channels = packed.element(2);
+        return {
+          height: layer === "grass" ? grassHeight : dirtHeight,
+          albedo: packed.element(0),
+          worldNormal: packed.element(1),
+          roughness: channels.x,
+          ao: channels.y,
+        };
+      };
+      return {
+        heights: { grass: grassHeight, dirt: dirtHeight },
+        resolve: ({ grassRequired, dirtRequired }) => ({
+          grass: appearance("grass", grassRequired),
+          dirt: appearance("dirt", dirtRequired),
+        }),
+      };
+    },
     createRock: (required) => {
       if (required === undefined) return buildRock();
       const packed = Fn(() => {
@@ -2683,7 +2951,9 @@ export function blendCompactTerrainLayers(
   resolveAppearance?: (
     weights: Node<"vec4">,
     layers: Record<Layer, CompactTerrainLayer>,
-  ) => Record<Layer, CompactTerrainLayer>,
+  ) => Record<Layer, CompactTerrainLayer> & {
+    coastalGround?: CompactTerrainLayer;
+  },
 ): {
   albedo: Node<"vec3">;
   roughness: Node<"float">;
@@ -2767,7 +3037,10 @@ export function blendCompactTerrainLayers(
         pondBankComposition,
       );
     // Appearance resolution cannot feed back into the completed weight graph.
-    const appearance = resolveAppearance?.(weights, layers) ?? layers;
+    const appearance: Record<Layer, CompactTerrainLayer> & {
+      coastalGround?: CompactTerrainLayer;
+    } = resolveAppearance?.(weights, layers) ?? layers;
+    const coastalAppearance = appearance.coastalGround ?? coastalGround?.layer;
     const blendVector = (
       grass: Node<"vec3">,
       soil: Node<"vec3">,
@@ -2796,26 +3069,26 @@ export function blendCompactTerrainLayers(
         appearance.grass.albedo,
         appearance.dirt.albedo,
         appearance.rock.albedo,
-        coastalGround?.layer.albedo,
+        coastalAppearance?.albedo,
       ),
       roughness: blendScalar(
         appearance.grass.roughness,
         appearance.dirt.roughness,
         appearance.rock.roughness,
-        coastalGround?.layer.roughness,
+        coastalAppearance?.roughness,
       ),
       ao: blendScalar(
         appearance.grass.ao,
         appearance.dirt.ao,
         appearance.rock.ao,
-        coastalGround?.layer.ao,
+        coastalAppearance?.ao,
       ),
       normal: compactTerrainNormalToView(
         blendVector(
           appearance.grass.worldNormal,
           appearance.dirt.worldNormal,
           appearance.rock.worldNormal,
-          coastalGround?.layer.worldNormal,
+          coastalAppearance?.worldNormal,
         ),
       ),
     };

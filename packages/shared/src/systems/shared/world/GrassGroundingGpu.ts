@@ -8,6 +8,8 @@ import {
   uv,
   vec3,
   attribute,
+  Fn,
+  normalLocal,
 } from "three/tsl";
 import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
@@ -21,9 +23,131 @@ import {
   assertGrassMeadowAuthoredEndpoint,
   GRASS_MEADOW_AUTHORED_SHAPE,
 } from "./GrassMeadowAuthoredShape";
+import {
+  assertGrassMeadowFootprintArchEndpoint,
+  GRASS_MEADOW_FOOTPRINT_ARCH,
+} from "./GrassMeadowFootprintArch";
+import {
+  assertGrassMeadowSweptBladeEndpoint,
+  GRASS_MEADOW_SWEPT_BLADE,
+} from "./GrassMeadowSweptBlade";
 
 export const GRASS_ROOT_STORAGE_ATTRIBUTE = "grassRootDeltas";
 export const GRASS_BLADE_VISIBILITY_ATTRIBUTE = "grassBladeVisibility";
+
+/** Both chunk paths keep the same count, culling and disposal surface. The
+ * matrix-free path uses r186's ordinary Object3D disposal event. */
+export type GrassChunkRenderMesh = THREE.Mesh & {
+  boundingBox: THREE.Box3 | null;
+  boundingSphere: THREE.Sphere | null;
+};
+
+const matrixFreeGeometryCounts = new WeakMap<
+  THREE.InstancedBufferGeometry,
+  number
+>();
+const groundedMaterialOwners = new WeakMap<
+  MeshStandardNodeMaterial,
+  Readonly<{
+    base: MeshStandardNodeMaterial;
+    geometry: THREE.BufferGeometry;
+    count: number;
+    position: Node;
+    roots: THREE.BufferAttribute;
+    visibility: ReturnType<THREE.BufferGeometry["getAttribute"]> | undefined;
+  }>
+>();
+
+/** Copy the unbound template before attaching any per-instance or storage
+ * inputs. Copying after grounding would separate the material's storage owner
+ * from the attribute registered for geometry disposal. */
+export function createMatrixFreeGrassGeometry(
+  template: THREE.BufferGeometry,
+  count: number,
+): THREE.InstancedBufferGeometry {
+  if (
+    !Number.isSafeInteger(count) ||
+    count < 1 ||
+    count > 4096 ||
+    template instanceof THREE.InstancedBufferGeometry ||
+    !template.index ||
+    !template.hasAttribute("position") ||
+    !template.hasAttribute("normal") ||
+    !template.hasAttribute("uv") ||
+    Object.keys(template.morphAttributes).length !== 0 ||
+    Object.values(template.attributes).some(
+      (value) =>
+        value instanceof THREE.InstancedBufferAttribute ||
+        value instanceof StorageBufferAttribute ||
+        value instanceof THREE.InterleavedBufferAttribute,
+    )
+  )
+    throw new Error("Invalid matrix-free grass template or count");
+  const geometry = new THREE.InstancedBufferGeometry();
+  // Call the base copy explicitly: InstancedBufferGeometry.copy expects an
+  // instanced source and would otherwise copy its absent instanceCount.
+  THREE.BufferGeometry.prototype.copy.call(geometry, template);
+  geometry.instanceCount = count;
+  matrixFreeGeometryCounts.set(geometry, count);
+  return geometry;
+}
+
+/** Opt-in publication of an already grounded, exclusively owned clone. No
+ * additional material or matrix allocation; no replacement of terrain fit,
+ * analytic grass normals, wind, visibility or per-instance attributes. */
+export function createMatrixFreeGrassMesh(
+  geometry: THREE.InstancedBufferGeometry,
+  material: MeshStandardNodeMaterial,
+): GrassChunkRenderMesh {
+  const count = matrixFreeGeometryCounts.get(geometry);
+  const owner = groundedMaterialOwners.get(material);
+  if (
+    count === undefined ||
+    geometry.instanceCount !== count ||
+    !owner ||
+    owner.geometry !== geometry ||
+    owner.count !== count ||
+    owner.base === material ||
+    material.positionNode !== owner.position ||
+    geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE) !== owner.roots ||
+    geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE) !==
+      owner.visibility ||
+    geometry.hasAttribute("instanceMatrixStorage") ||
+    geometry.hasAttribute("instanceMatrix")
+  )
+    throw new Error("Invalid matrix-free grass binding ownership");
+
+  const position = owner.position as Node<"vec3">;
+  material.positionNode = Fn(() => {
+    // InstancedMesh applies inverse-transpose(identity), including normalize,
+    // before the custom position graph. Preserve that normal operation for
+    // geometric roughness while removing the identity storage matrix work.
+    normalLocal.assign(normalLocal.normalize());
+    return position;
+  }, "vec3")();
+  groundedMaterialOwners.delete(material);
+  matrixFreeGeometryCounts.delete(geometry);
+  Object.defineProperty(geometry, "instanceCount", {
+    value: count,
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  });
+  const mesh = Object.assign(new THREE.Mesh(geometry, material), {
+    boundingBox: null as THREE.Box3 | null,
+    boundingSphere: null as THREE.Sphere | null,
+  });
+  Object.defineProperty(mesh, "count", {
+    value: count,
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  });
+  // Grass placement happens in the shader. Template-space intersections are
+  // neither gameplay targets nor ground; do not raycast the undeformed mesh.
+  mesh.raycast = () => {};
+  return mesh;
+}
 
 /** Separate addressing, never a replacement for the admitted seven-vertex LOD.
  * This binds an already-certified batch; it does not certify swept terrain
@@ -74,6 +198,90 @@ export function createGroundedGrassMeadowAuthoredMaterial(
   );
 }
 
+/** Separate opt-in endpoint; topology sharing does not authorize an authored
+ * endpoint to use this arch's fit, response or provenance. */
+export const GRASS_MEADOW_FOOTPRINT_ARCH_GROUNDING = Object.freeze({
+  ...GRASS_MEADOW_AUTHORED_GROUNDING,
+  id: "meadow-footprint-arch-grounding-v1",
+  endpointId: GRASS_MEADOW_FOOTPRINT_ARCH.id,
+} as const);
+
+export function createGroundedGrassMeadowFootprintArchMaterial(
+  base: MeshStandardNodeMaterial,
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  rootDeltas: Float32Array,
+  count: number,
+  bladeVisibility?: Uint32Array,
+): MeshStandardNodeMaterial {
+  assertGrassMeadowFootprintArchEndpoint(geometry, coarseGeometry);
+  if (
+    !(base.positionNode instanceof THREE.Node) ||
+    !Number.isSafeInteger(count) ||
+    count < 1 ||
+    count > GRASS_MEADOW_FOOTPRINT_ARCH_GROUNDING.maximumBatchClumps ||
+    !(rootDeltas instanceof Float32Array) ||
+    rootDeltas.length !==
+      count *
+        GRASS_MEADOW_FOOTPRINT_ARCH_GROUNDING.bladesPerClump *
+        GRASS_MEADOW_FOOTPRINT_ARCH_GROUNDING.rootComponents ||
+    rootDeltas.some((value) => !Number.isFinite(value)) ||
+    geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)
+  )
+    throw new Error("Invalid footprint arch grounding batch");
+  return bindGroundedGrassMaterial(
+    base,
+    geometry,
+    rootDeltas,
+    count,
+    GRASS_MEADOW_FOOTPRINT_ARCH_GROUNDING,
+    "grassMeadowFootprintArchGrounding",
+    bladeVisibility,
+  );
+}
+
+/** Independent endpoint identity and validation; the shared fifteen-vertex
+ * addressing is not permission to reuse an authored or arch certificate. */
+export const GRASS_MEADOW_SWEPT_BLADE_GROUNDING = Object.freeze({
+  ...GRASS_MEADOW_AUTHORED_GROUNDING,
+  id: "meadow-swept-blade-grounding-v1",
+  endpointId: GRASS_MEADOW_SWEPT_BLADE.id,
+} as const);
+
+export function createGroundedGrassMeadowSweptBladeMaterial(
+  base: MeshStandardNodeMaterial,
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  rootDeltas: Float32Array,
+  count: number,
+  bladeVisibility?: Uint32Array,
+): MeshStandardNodeMaterial {
+  assertGrassMeadowSweptBladeEndpoint(geometry, coarseGeometry);
+  if (
+    !(base.positionNode instanceof THREE.Node) ||
+    !Number.isSafeInteger(count) ||
+    count < 1 ||
+    count > GRASS_MEADOW_SWEPT_BLADE_GROUNDING.maximumBatchClumps ||
+    !(rootDeltas instanceof Float32Array) ||
+    rootDeltas.length !==
+      count *
+        GRASS_MEADOW_SWEPT_BLADE_GROUNDING.bladesPerClump *
+        GRASS_MEADOW_SWEPT_BLADE_GROUNDING.rootComponents ||
+    rootDeltas.some((value) => !Number.isFinite(value)) ||
+    geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)
+  )
+    throw new Error("Invalid swept blade grounding batch");
+  return bindGroundedGrassMaterial(
+    base,
+    geometry,
+    rootDeltas,
+    count,
+    GRASS_MEADOW_SWEPT_BLADE_GROUNDING,
+    "grassMeadowSweptBladeGrounding",
+    bladeVisibility,
+  );
+}
+
 /** One chunk's correction binding. Shared material nodes/uniforms/maps stay
  * borrowed. Geometry owns the storage buffer's native lifetime, not material. */
 export function createGroundedGrassMaterial(
@@ -108,7 +316,12 @@ function bindGroundedGrassMaterial(
     verticesPerClump: number;
     rootComponents: number;
   }>,
-  receiptName: "grassBladeLayout" | "grassMeadowAuthoredGrounding" | undefined,
+  receiptName:
+    | "grassBladeLayout"
+    | "grassMeadowAuthoredGrounding"
+    | "grassMeadowFootprintArchGrounding"
+    | "grassMeadowSweptBladeGrounding"
+    | undefined,
   bladeVisibility?: Uint32Array,
 ): MeshStandardNodeMaterial {
   if (
@@ -161,7 +374,8 @@ function bindGroundedGrassMaterial(
   const correctedPosition = vec3(basePosition).add(
     vec3(0, mix(delta.x, delta.y, uv().x), 0),
   );
-  material.positionNode = correctedPosition;
+  let boundPosition: Node<"vec3"> = correctedPosition;
+  material.positionNode = boundPosition;
   if (bladeVisibility !== undefined) {
     const visibility = new StorageBufferAttribute(bladeVisibility, 1);
     // As with roots, explicit uint + runtime length avoids count-specific
@@ -175,10 +389,11 @@ function bindGroundedGrassMaterial(
     // Select after the borrowed deformation and root correction. Every hidden
     // vertex uses one common local anchor, including tips and both root sides;
     // its triangles are degenerate without discards or distant coordinates.
-    material.positionNode = visible.select(
+    boundPosition = visible.select(
       correctedPosition,
       attribute("instanceOffset", "vec3"),
     );
+    material.positionNode = boundPosition;
     // Geometry owns the storage allocation, but it is not a vertex input:
     // the existing instanced grass layout already uses eight vertex buffers.
     geometry.setAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE, visibility);
@@ -186,6 +401,18 @@ function bindGroundedGrassMaterial(
   // Not used as a vertex attribute in the shader. This registration lets
   // r186 Geometries dispose the actual storage allocation with the chunk.
   geometry.setAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE, buffer);
+  if (
+    geometry instanceof THREE.InstancedBufferGeometry &&
+    matrixFreeGeometryCounts.has(geometry)
+  )
+    groundedMaterialOwners.set(material, {
+      base,
+      geometry,
+      count,
+      position: boundPosition,
+      roots: buffer,
+      visibility: geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE),
+    });
   return material;
 }
 

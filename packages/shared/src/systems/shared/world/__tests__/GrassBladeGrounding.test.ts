@@ -21,7 +21,11 @@ import {
   captureGrassBankVerge,
   captureGrassGroundingFailure,
   validateGrassGroundingConsumedWork,
+  captureGrassGroundingExecution,
+  grassGroundingTimeFailure,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  GRASS_GROUNDING_MAXIMUM_LIFETIME_MS,
+  GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS,
   type GrassBladeGroundingRequest,
   type GrassBladeGroundingResult,
   type GrassGroundingRoadSegment,
@@ -35,8 +39,10 @@ import {
   FINE_MEADOW_APPEARANCE,
   FINE_GRASS_CLOSE_DETAIL,
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
+  FINE_GRASS_MEADOW_FIELD_SHAPE,
   GRASS_CONFIG,
   createClumpGeometry,
+  createPairedMeadowClumpGeometry,
 } from "../GrassVisualManager";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
@@ -65,7 +71,13 @@ import {
   generateQuadChunkDataSync,
 } from "../TerrainQuadChunkGenerator";
 import { gridGeometry } from "./terrain-grid.fixture";
-import { getGrassBladeLayout } from "../GrassBladeLayout";
+import {
+  getGrassBladeLayout,
+  isMeadowGrassBladeLayout,
+  isPairedGrassBladeLayout,
+  usesGrassBladeHeightFlex,
+  usesGrassCloseDetailLods,
+} from "../GrassBladeLayout";
 import {
   prepareGroundedGrassSteps,
   type GrassGroundingInputLease,
@@ -323,7 +335,9 @@ function appendOriginalScalarSweep(
     const b = t * (2 * 0.76 + t * (0.95 - 2 * 0.76));
     const heightFlex =
       request.geometryLayout === "fine-folded-lancet-v1" ||
-      request.geometryLayout === "fine-folded-sheath-near5-v1";
+      request.geometryLayout === "fine-folded-sheath-near5-v1" ||
+      request.geometryLayout === "fine-meadow-ribbon-v1" ||
+      request.geometryLayout === "fine-meadow-paired-near-v1";
     // Independent policy algebra; never call the production wind/cache helper.
     const fraction = b / 0.95;
     const windFactor = heightFlex
@@ -1994,6 +2008,267 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
     },
   );
 
+  it.each(
+    (["fine-meadow-ribbon-v1", "fine-meadow-paired-near-v1"] as const).flatMap(
+      (geometryLayout) =>
+        ([0, 1, 2] as const).flatMap((lod) =>
+          [false, true].map((slope) => ({ geometryLayout, lod, slope })),
+        ),
+    ),
+  )(
+    "freshly fits $geometryLayout LOD$lod on slope=$slope",
+    ({ geometryLayout, lod, slope }) => {
+      const f = analyticOwner("fine");
+      try {
+        const surface = f.makeSurface(
+          1,
+          0,
+          0,
+          32,
+          (x, z) => 20 + (slope ? 0.2 * x - 0.13 * z : 0),
+        );
+        const layout = getGrassBladeLayout(lod, geometryLayout);
+        const geometry = isPairedGrassBladeLayout(lod, geometryLayout)
+          ? createPairedMeadowClumpGeometry()
+          : createClumpGeometry(
+              layout.bladesPerClump,
+              layout.bladeSegments,
+              FINE_GRASS_MEADOW_FIELD_SHAPE,
+            );
+        f.geometries.push(geometry);
+        const data = f.dataAt(surface, [
+          [0, 0, 0.8],
+          [-9, 0, 2.4],
+          [9, 0, 5.1],
+        ]);
+        data.rotScaleHash[1] = 0.4;
+        data.rotScaleHash[4] = 1;
+        data.rotScaleHash[7] = 1.6;
+        const request: GrassBladeGroundingRequest = {
+          ...f.request(surface, data, lod),
+          geometry,
+          geometryLayout,
+          wind: { x: 0.3, z: 0.165 },
+          roadClearance: "per-blade-v1",
+        };
+        const actual = groundGrassBlades(request);
+        if (actual.status !== "ready" || !actual.sweptBounds)
+          throw new Error("Expected fresh meadow ribbon grounding");
+        expect(Array.from(actual.sourceIndices)).toEqual([0, 1, 2]);
+        expect(actual.rootDeltas.length).toBe(3 * layout.bladesPerClump * 2);
+        const expected = emptyScalarSweepBounds();
+        const sampled = sample();
+        for (let instance = 0; instance < data.count; instance++) {
+          appendOriginalScalarSweep(
+            request,
+            actual.rootDeltas,
+            instance,
+            0,
+            geometry.getAttribute("position").count,
+            1,
+            expected,
+          );
+          for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+            for (let side = 0; side < 2; side++) {
+              const point = transformedVertex(
+                data,
+                surface,
+                geometry,
+                instance,
+                blade * layout.verticesPerBlade + side,
+              );
+              point.y +=
+                actual.rootDeltas[
+                  (instance * layout.bladesPerClump + blade) * 2 + side
+                ];
+              expect(surface.sample(point.x, point.z, sampled)).toBe(true);
+              expect(Math.abs(point.y - sampled.height)).toBeLessThan(1e-6);
+            }
+          }
+        }
+        // Actual meadow vertices pass the height-scaled wind/fade envelope.
+        // Using the legacy t^1.8 wind policy would produce different bounds.
+        expect(actual.sweptBounds).toEqual(expected);
+        if (geometryLayout === "fine-meadow-paired-near-v1" && lod !== 0) {
+          const original = groundGrassBlades({
+            ...request,
+            geometryLayout: "fine-meadow-ribbon-v1",
+          });
+          expect(withoutGroundingElapsed(actual)).toEqual({
+            ...withoutGroundingElapsed(original),
+            receipt: {
+              ...withoutGroundingElapsed(original).receipt,
+              geometryLayout,
+            },
+          });
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("admits paired near slots explicitly without changing distant meadow topology or family policy", () => {
+    const candidate = "fine-meadow-paired-near-v1";
+    expect(isMeadowGrassBladeLayout(candidate)).toBe(true);
+    expect(usesGrassBladeHeightFlex(candidate)).toBe(true);
+    expect(usesGrassCloseDetailLods(candidate)).toBe(true);
+    for (const lod of [0, 1, 2] as const) {
+      const layout = getGrassBladeLayout(lod, candidate);
+      expect(isPairedGrassBladeLayout(lod, candidate)).toBe(lod === 0);
+      expect(isPairedGrassBladeLayout(lod, "fine-meadow-ribbon-v1")).toBe(
+        false,
+      );
+      expect(layout).toEqual({
+        geometryLayout: candidate,
+        lod,
+        bladesPerClump: lod === 2 ? 12 : 21,
+        bladeSegments: 2,
+        verticesPerBlade: lod === 0 ? 8 : 5,
+        verticesPerClump: [168, 105, 60][lod],
+        trianglesPerClump: [126, 63, 36][lod],
+        rootComponents: 2,
+      });
+      if (lod !== 0)
+        expect(layout).toEqual({
+          ...getGrassBladeLayout(lod, "fine-meadow-ribbon-v1"),
+          geometryLayout: candidate,
+        });
+    }
+    expect(
+      captureGrassBankVerge({
+        geometryLayout: candidate,
+        bankVerge: BANK_VERGE_HEIGHT_TRIAL,
+      }),
+    ).toEqual(BANK_VERGE_HEIGHT_TRIAL);
+  });
+
+  it.each([
+    "first-middle-u",
+    "first-middle-t",
+    "first-tip-u",
+    "first-tip-t",
+    "second-middle-u",
+    "second-middle-t",
+    "second-tip-u",
+    "second-tip-t",
+    "root-y",
+    "root-edge",
+    "first-index",
+    "second-index",
+    "implicit-layout",
+  ] as const)("rejects malformed paired near topology: %s", (kind) => {
+    const f = analyticOwner("fine");
+    const geometry = createPairedMeadowClumpGeometry();
+    f.geometries.push(geometry);
+    try {
+      const position = geometry.getAttribute("position");
+      const uv = geometry.getAttribute("uv");
+      const index = geometry.getIndex()!;
+      const request: GrassBladeGroundingRequest = {
+        ...f.request(f.makeSurface(), undefined, 0),
+        geometry,
+        geometryLayout: "fine-meadow-paired-near-v1",
+      };
+      if (kind === "root-y") position.setY(0, 0.01);
+      else if (kind === "root-edge")
+        position.setXYZ(1, position.getX(0), 0, position.getZ(0));
+      else if (kind === "first-index") index.setX(0, 1);
+      else if (kind === "second-index") index.setX(9, 8);
+      else if (kind === "implicit-layout") delete request.geometryLayout;
+      else {
+        const vertex = kind.startsWith("first")
+          ? kind.includes("middle")
+            ? 2
+            : 4
+          : kind.includes("middle")
+            ? 5
+            : 7;
+        if (kind.endsWith("-u")) uv.setX(vertex, 0.25);
+        else uv.setY(vertex, 0.75);
+      }
+      expect(() => groundGrassBlades(request)).toThrow(
+        /paired blade topology|blade root|triangle (order|layout)|vertex attributes/,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each([0, 1] as const)(
+    "clears the shared slot when only paired near branch %s reaches a road",
+    (branch) => {
+      const f = analyticOwner("fine");
+      const geometry = createPairedMeadowClumpGeometry();
+      f.geometries.push(geometry);
+      try {
+        const surface = f.makeSurface();
+        const request: GrassBladeGroundingRequest = {
+          ...f.request(surface, undefined, 0),
+          geometry,
+          geometryLayout: "fine-meadow-paired-near-v1",
+          roadClearance: "per-blade-v1",
+        };
+        const baseline = groundGrassBlades(request);
+        if (baseline.status !== "ready") throw Error(baseline.reason);
+        expect(Array.from(baseline.bladeVisibility!)).toEqual([(1 << 21) - 1]);
+        const leafVertices = [
+          [0, 1, 2, 3, 4],
+          [0, 1, 5, 6, 7],
+        ];
+        let target:
+          { slot: number; point: THREE.Vector3; other: THREE.Box3 } | undefined;
+        for (let slot = 0; slot < 21 && !target; slot++) {
+          const points = leafVertices.map((vertices) =>
+            vertices.map((local) =>
+              transformedVertex(
+                request.data,
+                surface,
+                geometry,
+                0,
+                slot * 8 + local,
+              ),
+            ),
+          );
+          const other = new THREE.Box3().setFromPoints(points[1 - branch]);
+          other.min.y = -Infinity;
+          other.max.y = Infinity;
+          for (const point of points[branch].slice(2)) {
+            if (other.distanceToPoint(point) > 1e-4) {
+              target = { slot, point, other };
+              break;
+            }
+          }
+        }
+        if (!target) throw Error("Expected a real branch-only road contact");
+        const road = {
+          startX: target.point.x,
+          endX: target.point.x,
+          startZ: target.point.z,
+          endZ: target.point.z,
+          width: 1e-5,
+          blendWidth: 0,
+        };
+        expect(independentRoadMask([target.other], [road])).toBe(1);
+        const boxes = independentBladeBoxes(request);
+        const expectedMask = independentRoadMask(boxes, [road]);
+        expect(expectedMask).toBeGreaterThan(0);
+        expect(expectedMask & (1 << target.slot)).toBe(0);
+        const actual = groundGrassBlades({ ...request, roadSegments: [road] });
+        if (actual.status !== "ready") throw Error(actual.reason);
+        expect(Array.from(actual.bladeVisibility!)).toEqual([expectedMask]);
+        expect(actual.rootDeltas).toEqual(baseline.rootDeltas);
+        expect(actual.data).toEqual(baseline.data);
+        expect(actual.receipt.bladesPerClump).toBe(21);
+        expect(actual.receipt.roadClearance?.retainedBlades).toBe(
+          maskPopulation(expectedMask),
+        );
+      } finally {
+        f.close();
+      }
+    },
+  );
+
   it.each([
     ["fine", 0],
     ["fine", -0],
@@ -2125,6 +2400,120 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
           );
         // This deliberately changes borrowed input after fitting to exercise
         // the old continuation semantics, not to approve mutated root contact.
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it.each(
+    (["blade_base_owner", "endpoint_owner"] as const).flatMap((phase) =>
+      (["x", "y", "z", "signed-x", "signed-y", "signed-z"] as const).map(
+        (change) => [phase, change] as const,
+      ),
+    ),
+  )(
+    "rereads borrowed root %s/%s after bounds without changing fitting bytes or work",
+    (phase, change) => {
+      const f = analyticOwner("fine");
+      try {
+        const surface = f.makeSurface(
+          1,
+          0,
+          0,
+          64,
+          (x, z) => 20 + 0.02 * x * x + 0.03 * z * z + 0.001 * x * z,
+        );
+        const geometry = createClumpGeometry(
+          21,
+          3,
+          FINE_GRASS_MEADOW_FIELD_SHAPE,
+        );
+        f.geometries.push(geometry);
+        const request: GrassBladeGroundingRequest = {
+          ...f.request(surface, f.dataAt(surface, [[9, 9, 0.7]]), 0),
+          geometry,
+          geometryLayout: "fine-meadow-ribbon-v1",
+        };
+        const position = geometry.getAttribute("position");
+        if (!(position instanceof THREE.BufferAttribute))
+          throw Error("Expected actual non-interleaved field geometry");
+        const layout = getGrassBladeLayout(0, request.geometryLayout);
+        // The first endpoint suspension belongs to blade zero. Changing blade
+        // one there must be observed when that blade's later fitting begins.
+        const vertex = phase === "endpoint_owner" ? layout.verticesPerBlade : 0;
+        const axis = change.endsWith("x") ? 0 : change.endsWith("y") ? 1 : 2;
+        const signed = change.startsWith("signed-");
+        if (signed) position.setComponent(vertex, axis, 0);
+        const original = position.getComponent(vertex, axis);
+        const changed = signed ? -0 : original + 0.01;
+        const version = position.version;
+        const run = (mutationPhase: string) => {
+          position.setComponent(vertex, axis, original);
+          const iterator = groundGrassBladeSteps(request);
+          let mutations = 0;
+          const output = drainPipeline(
+            (function* () {
+              for (;;) {
+                const step = iterator.next();
+                if (step.done) return step.value;
+                if (!mutations && step.value === mutationPhase) {
+                  position.setComponent(vertex, axis, changed);
+                  expect(position.version).toBe(version);
+                  if (signed)
+                    expect(
+                      Object.is(position.getComponent(vertex, axis), -0),
+                    ).toBe(true);
+                  mutations++;
+                }
+                yield step.value;
+              }
+            })(),
+          );
+          expect(mutations).toBe(1);
+          return output;
+        };
+        // This oracle changes coordinates after validation but before bounds
+        // are computed. One retained owner keeps broadphase membership identical.
+        const early = run("blade_base_bounds");
+        const late = run(phase);
+        expect(early.result.status).toBe("ready");
+        expect(late.trace).toEqual(early.trace);
+        expect(withoutGroundingElapsed(late.result)).toEqual(
+          withoutGroundingElapsed(early.result),
+        );
+        if (late.result.status !== "ready" || early.result.status !== "ready")
+          throw Error("Expected borrowed-root fitting to finish");
+        // Compare actual bytes as well as numbers, retaining signed zero.
+        const bytes = (view: Float32Array | Uint32Array) =>
+          new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+        expect(bytes(late.result.rootDeltas)).toEqual(
+          bytes(early.result.rootDeltas),
+        );
+        expect(bytes(late.result.sourceIndices)).toEqual(
+          bytes(early.result.sourceIndices),
+        );
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "groundColors",
+          "grassTints",
+          "groundNormals",
+        ] as const)
+          expect(bytes(late.result.data[key])).toEqual(
+            bytes(early.result.data[key]),
+          );
+        const expected = emptyScalarSweepBounds();
+        appendOriginalScalarSweep(
+          request,
+          early.result.rootDeltas,
+          0,
+          0,
+          position.count,
+          1,
+          expected,
+        );
+        expect(late.result.sweptBounds).toEqual(expected);
       } finally {
         f.close();
       }
@@ -5679,6 +6068,386 @@ describe("grounding local timing attribution", () => {
     } finally {
       f.close();
     }
+  });
+
+  it("continues the same real fit above the opt-in soft target without weakening the default", () => {
+    const f = analyticOwner();
+    try {
+      const request = f.request(f.makeSurface());
+      const seed = { operations: 21, activeMs: 251, maximumSliceMs: 2 };
+      expect(
+        () =>
+          new GrassGroundingContinuation(
+            groundGrassBladeSteps(request),
+            () => true,
+            seed,
+          ),
+      ).toThrow("Invalid grass grounding consumed work");
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      });
+      const job = new GrassGroundingContinuation(
+        groundGrassBladeSteps(request),
+        () => true,
+        seed,
+        execution,
+      );
+      expect(job.advance(1).status).toBe("running");
+      const firstOperations = job.operations;
+      expect(firstOperations).toBe(seed.operations + 1);
+      for (let i = 0; i < 10_000 && job.state.status === "running"; i++)
+        job.advance(64);
+      const result = job.state;
+      expect(result.status).toBe("ready");
+      if (result.status !== "ready") throw new Error(JSON.stringify(result));
+      const reference = groundGrassBlades(request);
+      expect(reference.status).toBe("ready");
+      if (reference.status !== "ready")
+        throw new Error("Expected real ground fit");
+      expect(result.result.data).toEqual(reference.data);
+      expect(result.result.rootDeltas).toEqual(reference.rootDeltas);
+      expect(result.result.sourceIndices).toEqual(reference.sourceIndices);
+      expect(result.result.sweptBounds).toEqual(reference.sweptBounds);
+      expect(result.result.dependencies).toEqual(reference.dependencies);
+      expect(job.operations).toBeGreaterThan(firstOperations);
+      expect(result.result.receipt.elapsedMs).toBe(job.activeMs);
+      expect(result.result.receipt.cost).toEqual({
+        policy: "soft-cost-finite-lifetime-v1",
+        status: "OVER_TARGET",
+        targetMs: 250,
+      });
+      expect(reference.receipt).not.toHaveProperty("cost");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("keeps opt-in operation, lifetime, input and ownership limits hard", () => {
+    const f = analyticOwner();
+    try {
+      const request = f.request(f.makeSurface());
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      })!;
+      const expired = {
+        ...execution,
+        deadlineEpochMs: performance.timeOrigin + performance.now() - 1,
+      };
+      const bounded = new GrassGroundingContinuation(
+        groundGrassBladeSteps(request),
+        () => true,
+        { operations: 1_000_000, activeMs: 251, maximumSliceMs: 2 },
+        execution,
+      );
+      expect(bounded.advance()).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(bounded.operations).toBe(1_000_000);
+      const late = new GrassGroundingContinuation(
+        groundGrassBladeSteps(request),
+        () => true,
+        { operations: 0, activeMs: 251, maximumSliceMs: 2 },
+        expired,
+      );
+      expect(late.advance()).toEqual({
+        status: "failed_budget",
+        reason: "lifetime",
+      });
+      expect(late.operations).toBe(0);
+      const failure = captureGrassGroundingFailure(late);
+      expect(failure).toMatchObject({
+        reason: "lifetime",
+        executionPolicy: execution.policy,
+        activeTargetMs: 250,
+        costStatus: "OVER_TARGET",
+        deadlineEpochMs: expired.deadlineEpochMs,
+      });
+      expect(failure).not.toHaveProperty("activeLimitMs");
+      expect(
+        grassGroundingTimeFailure(
+          251,
+          execution,
+          execution.deadlineEpochMs - performance.timeOrigin,
+        ),
+      ).toBe("lifetime");
+      expect(
+        grassGroundingTimeFailure(
+          251,
+          execution,
+          execution.deadlineEpochMs - performance.timeOrigin - 1,
+        ),
+      ).toBeNull();
+      const invalidated = new GrassGroundingContinuation(
+        groundGrassBladeSteps(request),
+        () => false,
+        undefined,
+        execution,
+      );
+      expect(invalidated.advance()).toEqual({
+        status: "cancelled",
+        reason: "invalidated",
+      });
+      const cancelled = new GrassGroundingContinuation(
+        groundGrassBladeSteps(request),
+        () => true,
+        undefined,
+        execution,
+      );
+      expect(cancelled.cancel()).toEqual({
+        status: "cancelled",
+        reason: "caller",
+      });
+      expect(cancelled.advance()).toEqual(cancelled.state);
+      const invalid = new GrassGroundingContinuation(
+        groundGrassBladeSteps({ ...request, wind: { x: NaN, z: 0 } }),
+        () => true,
+        undefined,
+        execution,
+      );
+      for (let i = 0; i < 100 && invalid.state.status === "running"; i++)
+        invalid.advance();
+      expect(invalid.state.status).toBe("failed_input");
+      expect(() =>
+        captureGrassGroundingExecution({ ...execution, policy: "unbounded" }),
+      ).toThrow();
+      expect(() =>
+        captureGrassGroundingExecution({
+          ...execution,
+          deadlineEpochMs: performance.timeOrigin + performance.now() + 10_001,
+        }),
+      ).toThrow();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("identifies invalid execution objects, prototypes and keys without accepting extra fields", () => {
+    const valid = {
+      policy: "soft-cost-finite-lifetime-v1",
+      deadlineEpochMs: 0,
+    };
+    for (const value of [null, false, 0, "policy", () => valid])
+      expect(() => captureGrassGroundingExecution(value)).toThrow(
+        "Invalid grounding execution policy [object]",
+      );
+    for (const value of [[], Object.setPrototypeOf({ ...valid }, {})])
+      expect(() => captureGrassGroundingExecution(value)).toThrow(
+        "Invalid grounding execution policy [prototype]",
+      );
+    for (const value of [
+      {},
+      { policy: valid.policy },
+      { ...valid, extra: true },
+      { ...valid, [Symbol("extra")]: true },
+      { policy: valid.policy, other: 0 },
+    ])
+      expect(() => captureGrassGroundingExecution(value)).toThrow(
+        "Invalid grounding execution policy [keys]",
+      );
+  });
+
+  it("identifies execution descriptor failures without invoking getters", () => {
+    for (const key of ["policy", "deadlineEpochMs"] as const) {
+      let reads = 0;
+      const value = {
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: 0,
+      };
+      const reason = key === "policy" ? "policy" : "deadline";
+      Object.defineProperty(value, key, {
+        get() {
+          reads++;
+          return 0;
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      expect(() => captureGrassGroundingExecution(value)).toThrow(
+        `Invalid grounding execution policy [${reason}-descriptor]`,
+      );
+      expect(reads).toBe(0);
+      Object.defineProperty(value, key, {
+        value: key === "policy" ? "soft-cost-finite-lifetime-v1" : 0,
+        enumerable: false,
+      });
+      expect(() => captureGrassGroundingExecution(value)).toThrow(
+        `Invalid grounding execution policy [${reason}-descriptor]`,
+      );
+    }
+  });
+
+  it("identifies execution value failures in the existing rejection order", () => {
+    const valid = {
+      policy: "soft-cost-finite-lifetime-v1",
+      deadlineEpochMs: 0,
+    };
+    expect(() =>
+      captureGrassGroundingExecution({ ...valid, policy: "unbounded" }),
+    ).toThrow("Invalid grounding execution policy [policy-value]");
+    for (const deadlineEpochMs of [NaN, Infinity, -Infinity, -1, "0", null])
+      expect(() =>
+        captureGrassGroundingExecution({ ...valid, deadlineEpochMs }),
+      ).toThrow("Invalid grounding execution policy [deadline-value]");
+    expect(() =>
+      captureGrassGroundingExecution({ policy: "unbounded", extra: true }),
+    ).toThrow("Invalid grounding execution policy [keys]");
+    const bothInvalid = { policy: "unbounded", deadlineEpochMs: NaN };
+    Object.defineProperty(bothInvalid, "deadlineEpochMs", {
+      enumerable: false,
+    });
+    expect(() => captureGrassGroundingExecution(bothInvalid)).toThrow(
+      "Invalid grounding execution policy [policy-value]",
+    );
+    Object.defineProperty(bothInvalid, "policy", { enumerable: false });
+    expect(() => captureGrassGroundingExecution(bothInvalid)).toThrow(
+      "Invalid grounding execution policy [policy-descriptor]",
+    );
+  });
+
+  it("reports the finite future distance from the exact execution admission clock", () => {
+    const before = performance.timeOrigin + performance.now();
+    const deadlineEpochMs = before + 20_000;
+    let message = "";
+    try {
+      captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs,
+      });
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      message = (error as Error).message;
+    }
+    const after = performance.timeOrigin + performance.now();
+    const match = message.match(
+      /^Invalid grounding execution policy \[deadline-future; aheadMs=([^\]]+)\]$/,
+    );
+    expect(match).not.toBeNull();
+    const aheadMs = Number(match![1]);
+    expect(Number.isFinite(aheadMs)).toBe(true);
+    expect(aheadMs).toBeGreaterThan(10_000);
+    expect(aheadMs).toBeGreaterThanOrEqual(deadlineEpochMs - after);
+    expect(aheadMs).toBeLessThanOrEqual(deadlineEpochMs - before);
+  });
+
+  it("allows bounded cross-realm execution admission without clamping or renewing the deadline", () => {
+    const input = {
+      policy: "soft-cost-finite-lifetime-v1" as const,
+      deadlineEpochMs:
+        performance.timeOrigin +
+        performance.now() +
+        GRASS_GROUNDING_MAXIMUM_LIFETIME_MS +
+        GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS,
+    };
+    const captured = captureGrassGroundingExecution(input, "cross-realm")!;
+    expect(
+      captured.deadlineEpochMs - (performance.timeOrigin + performance.now()),
+    ).toBeGreaterThan(GRASS_GROUNDING_MAXIMUM_LIFETIME_MS);
+    expect(captured).toEqual(input);
+    expect(captured).not.toBe(input);
+    expect(Object.isFrozen(captured)).toBe(true);
+    for (let i = 0; i < 3; i++)
+      expect(
+        captureGrassGroundingExecution(captured, "cross-realm")!
+          .deadlineEpochMs,
+      ).toBe(input.deadlineEpochMs);
+    const deadlineLocalMs = input.deadlineEpochMs - performance.timeOrigin;
+    expect(
+      grassGroundingTimeFailure(0, captured, deadlineLocalMs - 1),
+    ).toBeNull();
+    expect(grassGroundingTimeFailure(0, captured, deadlineLocalMs)).toBe(
+      "lifetime",
+    );
+    expect(grassGroundingTimeFailure(0, captured, deadlineLocalMs + 1)).toBe(
+      "lifetime",
+    );
+  });
+
+  it("keeps cross-realm execution tolerance bounded and preserves expired admission", () => {
+    expect(() =>
+      captureGrassGroundingExecution(
+        {
+          policy: "soft-cost-finite-lifetime-v1",
+          deadlineEpochMs:
+            performance.timeOrigin +
+            performance.now() +
+            GRASS_GROUNDING_MAXIMUM_LIFETIME_MS +
+            GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS +
+            100,
+        },
+        "cross-realm",
+      ),
+    ).toThrow("Invalid grounding execution policy [deadline-future;");
+    const expired = captureGrassGroundingExecution(
+      { policy: "soft-cost-finite-lifetime-v1", deadlineEpochMs: 0 },
+      "cross-realm",
+    )!;
+    expect(expired.deadlineEpochMs).toBe(0);
+    expect(grassGroundingTimeFailure(0, expired)).toBe("lifetime");
+    for (const clockScope of ["local", "cross-realm"] as const)
+      expect(() =>
+        captureGrassGroundingExecution(
+          { ...expired, clockScope: "cross-realm" },
+          clockScope,
+        ),
+      ).toThrow("Invalid grounding execution policy [keys]");
+  });
+
+  it("recaptures cross-realm execution inside a continuation without changing its lifetime", () => {
+    const fixture = analyticOwner();
+    try {
+      const steps = groundGrassBladeSteps(
+        fixture.request(fixture.makeSurface()),
+      );
+      const input = {
+        policy: "soft-cost-finite-lifetime-v1" as const,
+        deadlineEpochMs:
+          performance.timeOrigin +
+          performance.now() +
+          GRASS_GROUNDING_MAXIMUM_LIFETIME_MS +
+          GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS,
+      };
+      const job = new GrassGroundingContinuation(
+        steps,
+        () => true,
+        undefined,
+        input,
+        "cross-realm",
+      );
+      expect(
+        job.execution!.deadlineEpochMs -
+          (performance.timeOrigin + performance.now()),
+      ).toBeGreaterThan(GRASS_GROUNDING_MAXIMUM_LIFETIME_MS);
+      expect(job.execution!.deadlineEpochMs).toBe(input.deadlineEpochMs);
+      expect(job.advance(1).status).toBe("running");
+      expect(job.execution!.deadlineEpochMs).toBe(input.deadlineEpochMs);
+      job.cancel();
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("preserves omitted, plain, null-prototype and expired execution admission", () => {
+    expect(captureGrassGroundingExecution(undefined)).toBeUndefined();
+    const valid = {
+      policy: "soft-cost-finite-lifetime-v1",
+      deadlineEpochMs: performance.timeOrigin + performance.now() + 5_000,
+    };
+    for (const input of [valid, Object.setPrototypeOf({ ...valid }, null)]) {
+      const captured = captureGrassGroundingExecution(input)!;
+      expect(captured).toEqual(valid);
+      expect(captured).not.toBe(input);
+      expect(Object.isFrozen(captured)).toBe(true);
+      expect(Reflect.ownKeys(captured)).toEqual(["policy", "deadlineEpochMs"]);
+    }
+    const expired = captureGrassGroundingExecution({
+      ...valid,
+      deadlineEpochMs: 0,
+    })!;
+    expect(expired.deadlineEpochMs).toBe(0);
+    expect(grassGroundingTimeFailure(0, expired)).toBe("lifetime");
   });
 
   it("bounds clock intervals to 64 resumptions without advancing the core during observation", () => {

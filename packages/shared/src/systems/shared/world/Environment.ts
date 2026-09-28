@@ -153,7 +153,6 @@ export class Environment extends System {
   model: EnvironmentModel | null = null;
   skys: SkyHandle[] = [];
   sky: THREE.Mesh | null = null;
-  skyN: number = 0;
   bgUrl?: string;
   hdrUrl?: string;
   skyInfo!: SkyInfo;
@@ -269,7 +268,7 @@ export class Environment extends System {
     // Create ambient lighting for day/night visibility
     this.createAmbientLighting();
 
-    this.updateSky();
+    await this.updateSky();
 
     // Load initial model (non-blocking - don't let model errors break sky)
     try {
@@ -407,7 +406,7 @@ export class Environment extends System {
 
   getSky() {}
 
-  async updateSky() {
+  async updateSky(): Promise<void> {
     if (!this.isClientWithGraphics) return;
 
     // Check if stage is available
@@ -454,13 +453,8 @@ export class Environment extends System {
     const fogFar = node?._fogFar ?? base.fogFar ?? FOG_FAR;
     const fogColor = node?._fogColor ?? base.fogColor ?? "#d4c8b8";
 
-    const n = ++this.skyN;
-    // Load textures (kept for potential future use, currently SkySystem is active)
-    let _bgTexture;
-    if (bgUrl) _bgTexture = await this.world.loader?.load("texture", bgUrl);
-    let _hdrTexture;
-    if (hdrUrl) _hdrTexture = await this.world.loader?.load("hdr", hdrUrl);
-    if (n !== this.skyN) return;
+    // Legacy URLs remain metadata only. The procedural sky and its captured IBL
+    // own rendering, so unused texture downloads must not gate world startup.
 
     // When using SkySystem, completely remove the legacy sky sphere from scene
     // Just hiding it isn't enough - it can still interfere with planar reflections

@@ -8,6 +8,7 @@ import { NodeFrame, type Node } from "three/webgpu";
 import {
   NodeUpdateType,
   positionWorld,
+  positionLocal,
   positionView,
   cameraPosition,
   cameraNear,
@@ -92,6 +93,7 @@ function inspectGraph(
     nodes.add(node);
     if (
       node === positionWorld ||
+      node === positionLocal ||
       node === positionView ||
       node === cameraPosition ||
       node === output
@@ -182,7 +184,20 @@ function numeric(
     else if (method === "negate") result = child("aNode").map((v) => -v);
     else if (method === "length") result = [Math.hypot(...child("aNode"))];
     else if (method === "cos") result = child("aNode").map(Math.cos);
-    else if (method === "dot")
+    else if (method === "sin") result = child("aNode").map(Math.sin);
+    else if (method === "smoothstep") {
+      const low = child("aNode"),
+        high = child("bNode"),
+        value = child("cNode");
+      result = zip(
+        zip(value, low, (v, l) => v - l),
+        zip(high, low, (h, l) => h - l),
+        (v, span) => {
+          const t = Math.max(0, Math.min(1, v / span));
+          return t * t * (3 - 2 * t);
+        },
+      );
+    } else if (method === "dot")
       result = [pair((a, b) => a * b).reduce((a, b) => a + b, 0)];
     else if (method === "normalize") {
       const a = child("aNode"),
@@ -1103,5 +1118,566 @@ describe("WaterSystem material graph", () => {
     expect(typeof harness.oceanUniforms?.windStrength.value).toBe("number");
 
     system.destroy();
+  });
+});
+
+describe("WaterSystem conservative reflection footprint", () => {
+  const width = 1512;
+  const height = 806;
+
+  function createFootprintHarness() {
+    const h = createLakePlaneHarness();
+    const lake = h.addLake(0);
+    const camera = new THREE.OrthographicCamera(-40, 40, 30, -30, 0.1, 200);
+    camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+    camera.position.set(0, 60, 0);
+    camera.up.set(0, 0, -1);
+    camera.lookAt(0, 0, 0);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const scissor = new THREE.Vector4();
+    const compute = () =>
+      h.water["computeLakeReflectionScissor"](
+        camera,
+        plane,
+        width,
+        height,
+        scissor,
+      );
+    return { ...h, lake, camera, plane, scissor, compute };
+  }
+
+  function expectValidScissor(rect: THREE.Vector4) {
+    expect(rect.toArray().every(Number.isSafeInteger)).toBe(true);
+    expect(rect.x).toBeGreaterThanOrEqual(0);
+    expect(rect.y).toBeGreaterThanOrEqual(0);
+    expect(rect.z).toBeGreaterThan(0);
+    expect(rect.w).toBeGreaterThan(0);
+    expect(rect.x + rect.z).toBeLessThanOrEqual(width);
+    expect(rect.y + rect.w).toBeLessThanOrEqual(height);
+    expect(rect.z * rect.w).toBeLessThan(width * height);
+  }
+
+  it("defaults the opt-in off and leaves native reflection policy and resources unchanged", () => {
+    const h = createFootprintHarness();
+    try {
+      expect(h.water["reflectionFootprintEnabled"]).toBe(false);
+      const before = h.reflection.reflector.updateBefore;
+      const material = h.water.getMaterial("lake")!;
+      const position = material.positionNode;
+      const reflectionIntensity =
+        h.water.waterUniforms!.reflectionIntensity.value;
+      for (const enabled of [true, false, true, false]) {
+        h.water.setReflectionFootprintEnabled(enabled);
+        expect(h.water["reflectionFootprintEnabled"]).toBe(enabled);
+        expect(h.reflection.reflector.updateBefore).toBe(before);
+        expect(h.reflection.reflector.getUpdateBeforeType()).toBe(
+          NodeUpdateType.RENDER,
+        );
+        expect(h.reflection.reflector.resolutionScale).toBe(0.5);
+        expect(material.positionNode).toBe(position);
+        expect(h.water.waterUniforms!.reflectionIntensity.value).toBe(
+          reflectionIntensity,
+        );
+      }
+      // The pure bounds calculation does not perform renderer work, allocate
+      // a virtual camera, or claim a successfully captured reflection.
+      expect(h.compute()).toBe(true);
+      expect(h.reflection.reflector.renderTargets.size).toBe(0);
+      expect(h.reflection.reflector.virtualCameras.has(h.camera)).toBe(false);
+      expect(h.water["lastLakeReflectionOwner"]).toBeNull();
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it.each([1, 2, 16])(
+    "admits the non-mip bilinear sampler with texture anisotropy default %s unchanged",
+    (anisotropy) => {
+      const previous = THREE.Texture.DEFAULT_ANISOTROPY;
+      const h = createFootprintHarness();
+      let target: THREE.RenderTarget | undefined;
+      try {
+        THREE.Texture.DEFAULT_ANISOTROPY = anisotropy;
+        target = new THREE.RenderTarget(32, 16, {
+          type: THREE.HalfFloatType,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          generateMipmaps: false,
+        });
+        const texture = target.texture;
+        expect(texture.anisotropy).toBe(anisotropy);
+        const version = texture.version;
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(true);
+        expect(texture.anisotropy).toBe(anisotropy);
+        expect(texture.version).toBe(version);
+      } finally {
+        THREE.Texture.DEFAULT_ANISOTROPY = previous;
+        target?.dispose();
+        h.water.destroy();
+      }
+    },
+  );
+
+  it("rejects mipmapped, nearest or repeating reflection samplers", () => {
+    const h = createFootprintHarness();
+    const target = new THREE.RenderTarget(32, 16);
+    const texture = target.texture;
+    const unsupported: Array<Partial<THREE.Texture>> = [
+      { generateMipmaps: true },
+      { minFilter: THREE.NearestFilter },
+      { minFilter: THREE.LinearMipmapLinearFilter },
+      { minFilter: THREE.LinearMipmapNearestFilter },
+      { magFilter: THREE.NearestFilter },
+      { wrapS: THREE.RepeatWrapping },
+      { wrapT: THREE.MirroredRepeatWrapping },
+    ];
+    try {
+      for (const change of unsupported) {
+        Object.assign(texture, {
+          generateMipmaps: false,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
+          anisotropy: 16,
+        });
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(true);
+        Object.assign(texture, change);
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(
+          false,
+        );
+      }
+    } finally {
+      target.dispose();
+      h.water.destroy();
+    }
+  });
+
+  it("uses reflected X and top-left Y coordinates, including non-square target rounding", () => {
+    const h = createFootprintHarness();
+    try {
+      h.lake.scale.setScalar(0.4);
+      h.lake.position.set(18, 0, -14);
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      expectValidScissor(h.scissor);
+      expect(h.scissor.x + h.scissor.z).toBeLessThan(width / 2);
+      expect(h.scissor.y + h.scissor.w).toBeLessThan(height / 2);
+      const first = h.scissor.clone();
+      h.lake.position.x += 8;
+      h.lake.position.z += 6;
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      // One tenth of the camera span moves left in reflection U, down in V.
+      expect(Math.abs(h.scissor.x - first.x + width / 10)).toBeLessThanOrEqual(
+        1,
+      );
+      expect(Math.abs(h.scissor.y - first.y - height / 10)).toBeLessThanOrEqual(
+        1,
+      );
+      expect(Math.abs(h.scissor.z - first.z)).toBeLessThanOrEqual(1);
+      expect(Math.abs(h.scissor.w - first.w)).toBeLessThanOrEqual(1);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("unions every coplanar registered consumer but does not include another elevation", () => {
+    const h = createFootprintHarness();
+    try {
+      h.lake.position.x = -18;
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      const first = h.scissor.clone();
+      h.water.unregisterWaterMesh(h.lake);
+      const second = h.addLake(0);
+      second.position.x = 18;
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      const other = h.scissor.clone();
+      h.water.registerWaterMesh(h.lake);
+      expect(h.compute()).toBe(true);
+      const union = h.scissor.clone();
+      expect(union.toArray()).toEqual([
+        Math.min(first.x, other.x),
+        Math.min(first.y, other.y),
+        Math.max(first.x + first.z, other.x + other.z) -
+          Math.min(first.x, other.x),
+        Math.max(first.y + first.w, other.y + other.w) -
+          Math.min(first.y, other.y),
+      ]);
+      const elevated = h.addLake(12);
+      elevated.position.set(32, 12, -22);
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      expect(h.scissor.equals(union)).toBe(true);
+      h.plane.negate();
+      expect(h.compute()).toBe(true);
+      expect(h.scissor.equals(union)).toBe(true);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("contains actual wave-graph samples, distortion extrema and bilinear taps under transformed parents", () => {
+    const h = createFootprintHarness();
+    try {
+      const parent = new THREE.Group();
+      parent.position.set(3, 7, -5);
+      parent.rotation.set(0.18, 0.4, -0.15);
+      parent.scale.set(1.5, 0.8, 1.2);
+      h.scene.add(parent);
+      parent.add(h.lake);
+      h.lake.position.y = 2;
+      h.lake.rotation.y = 0.31;
+      h.scene.updateMatrixWorld(true);
+      expect(h.water["readLakeReflectionPlane"](h.lake, h.plane)).toBe(true);
+      const center = h.lake.getWorldPosition(new THREE.Vector3());
+      const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 250);
+      camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      camera.position.copy(center).add(new THREE.Vector3(18, 35, 45));
+      camera.lookAt(center);
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
+      const material = h.water.getMaterial("lake")!;
+      const positionNode: unknown = material.positionNode;
+      if (!(positionNode instanceof THREE.Node))
+        throw new Error("Missing lake wave graph");
+      const graph = inspectGraph(positionNode, camera);
+      const shoreNodes = [...graph.nodes].filter(
+        (node) =>
+          node.type === "AttributeNode" &&
+          Reflect.get(node, "_attributeName") === "shoreDistance",
+      );
+      expect(shoreNodes).toHaveLength(1);
+      const attribute = h.lake.geometry.getAttribute("position");
+      const indices = h.lake.geometry.getIndex()!;
+      const originalPositions = Array.from(attribute.array);
+      const points: THREE.Vector3[] = [];
+      for (let i = 0; i < attribute.count; i++)
+        points.push(new THREE.Vector3().fromBufferAttribute(attribute, i));
+      let seed = 0x732ab1;
+      const random = () => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 0x100000000;
+      };
+      // Actual triangle barycentrics, including edge vertices, not points
+      // invented outside the submitted lake geometry.
+      for (let i = 0; i < 64; i++) {
+        const triangle = Math.floor(random() * (indices.count / 3)) * 3;
+        const a = new THREE.Vector3().fromBufferAttribute(
+          attribute,
+          indices.getX(triangle),
+        );
+        const b = new THREE.Vector3().fromBufferAttribute(
+          attribute,
+          indices.getX(triangle + 1),
+        );
+        const c = new THREE.Vector3().fromBufferAttribute(
+          attribute,
+          indices.getX(triangle + 2),
+        );
+        const u = Math.sqrt(random());
+        const v = random();
+        points.push(
+          a
+            .multiplyScalar(1 - u)
+            .addScaledVector(b, u * (1 - v))
+            .addScaledVector(c, u * v),
+        );
+      }
+      const clipMatrix = new THREE.Matrix4().multiplyMatrices(
+        camera.projectionMatrix,
+        camera.matrixWorldInverse,
+      );
+      let checkedSamples = 0;
+      for (const wind of [-3, 0, 2.75]) {
+        h.water.waterUniforms!.windStrength.value = wind;
+        expect(
+          h.water["computeLakeReflectionScissor"](
+            camera,
+            h.plane,
+            width,
+            height,
+            h.scissor,
+          ),
+        ).toBe(true);
+        expectValidScissor(h.scissor);
+        for (const time of [0, 3.25, 17]) {
+          h.water.waterUniforms!.time.value = time;
+          for (let i = 0; i < points.length; i++) {
+            const local = points[i];
+            const undisplacedWorld = local
+              .clone()
+              .applyMatrix4(h.lake.matrixWorld);
+            const displaced = numeric(
+              positionNode,
+              new Map<Node, number[]>([
+                [positionLocal, local.toArray()],
+                [positionWorld, undisplacedWorld.toArray()],
+                [shoreNodes[0], [[0, 1, 10][i % 3]]],
+              ]),
+              graph.expanded,
+            );
+            expect(displaced).toHaveLength(3);
+            const clip = new THREE.Vector4(
+              displaced[0],
+              displaced[1],
+              displaced[2],
+              1,
+            )
+              .applyMatrix4(h.lake.matrixWorld)
+              .applyMatrix4(clipMatrix);
+            expect(clip.w).toBeGreaterThan(0);
+            expect(Math.abs(clip.x / clip.w)).toBeLessThan(1);
+            expect(Math.abs(clip.y / clip.w)).toBeLessThan(1);
+            for (const distortionX of [-0.015, 0, 0.015])
+              for (const distortionY of [-0.015, 0, 0.015]) {
+                const u = (1 - clip.x / clip.w) / 2 + distortionX;
+                const v = (1 - clip.y / clip.w) / 2 + distortionY;
+                const ix = Math.floor(u * width - 0.5);
+                const iy = Math.floor(v * height - 0.5);
+                for (const dx of [0, 1])
+                  for (const dy of [0, 1]) {
+                    const x = Math.min(width - 1, Math.max(0, ix + dx));
+                    const y = Math.min(height - 1, Math.max(0, iy + dy));
+                    expect(x).toBeGreaterThanOrEqual(h.scissor.x);
+                    expect(x).toBeLessThan(h.scissor.x + h.scissor.z);
+                    expect(y).toBeGreaterThanOrEqual(h.scissor.y);
+                    expect(y).toBeLessThan(h.scissor.y + h.scissor.w);
+                  }
+                checkedSamples++;
+              }
+          }
+        }
+      }
+      expect(checkedSamples).toBe(points.length * 81);
+      expect(Array.from(attribute.array)).toEqual(originalPositions);
+      expect(h.reflection.reflector.renderTargets.size).toBe(0);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("expands symmetrically for negative and positive wind and re-reads parent transforms", () => {
+    const h = createFootprintHarness();
+    try {
+      h.camera.position.set(0, 35, 45);
+      h.camera.up.set(0, 1, 0);
+      h.camera.lookAt(0, 0, 0);
+      h.camera.updateMatrixWorld(true);
+      h.water.waterUniforms!.windStrength.value = 0;
+      expect(h.compute()).toBe(true);
+      const calm = h.scissor.clone();
+      h.water.waterUniforms!.windStrength.value = 8;
+      expect(h.compute()).toBe(true);
+      const positive = h.scissor.clone();
+      expect(positive.y).toBeLessThan(calm.y);
+      expect(positive.y + positive.w).toBeGreaterThan(calm.y + calm.w);
+      h.water.waterUniforms!.windStrength.value = -8;
+      expect(h.compute()).toBe(true);
+      expect(h.scissor.equals(positive)).toBe(true);
+      const parent = new THREE.Group();
+      h.scene.add(parent);
+      parent.add(h.lake);
+      parent.position.x = 8;
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      expect(h.scissor.x).toBeLessThan(positive.x);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("falls back for an eye-plane crossing, non-finite projection and array cameras", () => {
+    const h = createFootprintHarness();
+    try {
+      const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 200);
+      camera.position.set(0, 0.1, 0);
+      camera.lookAt(0, 0.1, -1);
+      camera.updateMatrixWorld(true);
+      expect(
+        h.water["computeLakeReflectionScissor"](
+          camera,
+          h.plane,
+          width,
+          height,
+          h.scissor,
+        ),
+      ).toBe(false);
+      camera.position.set(0, 30, 40);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld(true);
+      camera.projectionMatrix.elements[0] = NaN;
+      expect(
+        h.water["computeLakeReflectionScissor"](
+          camera,
+          h.plane,
+          width,
+          height,
+          h.scissor,
+        ),
+      ).toBe(false);
+      const array = new THREE.ArrayCamera([new THREE.PerspectiveCamera()]);
+      expect(
+        h.water["computeLakeReflectionScissor"](
+          array,
+          h.plane,
+          width,
+          height,
+          h.scissor,
+        ),
+      ).toBe(false);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("falls back for invalid extents, wind, world transforms and absent consumers", () => {
+    const h = createFootprintHarness();
+    try {
+      for (const [w, t] of [
+        [0, height],
+        [width, 0],
+        [-1, height],
+        [width, 1.5],
+        [Infinity, height],
+        [width, NaN],
+      ])
+        expect(
+          h.water["computeLakeReflectionScissor"](
+            h.camera,
+            h.plane,
+            w,
+            t,
+            h.scissor,
+          ),
+        ).toBe(false);
+      const wind = h.water.waterUniforms!.windStrength.value;
+      for (const value of [NaN, Infinity, -Infinity]) {
+        h.water.waterUniforms!.windStrength.value = value;
+        expect(h.compute()).toBe(false);
+      }
+      h.water.waterUniforms!.windStrength.value = wind;
+      const matrix = h.lake.matrixWorld.clone();
+      h.lake.matrixWorld.elements[0] = Infinity;
+      expect(h.compute()).toBe(false);
+      h.lake.matrixWorld.copy(matrix).scale(new THREE.Vector3(0, 1, 1));
+      expect(h.compute()).toBe(false);
+      h.lake.matrixWorld.copy(matrix);
+      h.water.unregisterWaterMesh(h.lake);
+      expect(h.compute()).toBe(false);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("falls back for non-finite or non-unit owner planes", () => {
+    const h = createFootprintHarness();
+    try {
+      expect(h.compute()).toBe(true);
+      for (const plane of [
+        new THREE.Plane(new THREE.Vector3(NaN, 1, 0), 0),
+        new THREE.Plane(new THREE.Vector3(0, Infinity, 0), 0),
+        new THREE.Plane(new THREE.Vector3(0, 1, 0), NaN),
+        new THREE.Plane(new THREE.Vector3(0, 1, 0), Infinity),
+        new THREE.Plane(new THREE.Vector3(0, 0, 0), 0),
+        new THREE.Plane(new THREE.Vector3(0, 2, 0), 0),
+        new THREE.Plane(new THREE.Vector3(0, 0.5, 0), 0),
+      ]) {
+        h.plane.copy(plane);
+        expect(h.compute()).toBe(false);
+      }
+      h.plane.setComponents(0, 1, 0, 0);
+      expect(h.compute()).toBe(true);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("falls back for stale geometry versions, custom callbacks, morphs and replaced displacement", () => {
+    const h = createFootprintHarness();
+    try {
+      expect(h.compute()).toBe(true);
+      const position = h.lake.geometry.getAttribute("position");
+      position.needsUpdate = true;
+      expect(h.compute()).toBe(false);
+      h.water.unregisterWaterMesh(h.lake);
+      h.water.registerWaterMesh(h.lake);
+      expect(h.compute()).toBe(true);
+      const callback = h.lake.onBeforeRender;
+      h.lake.onBeforeRender = () => {
+        h.lake.position.x += 1;
+      };
+      expect(h.compute()).toBe(false);
+      expect(h.lake.position.x).toBe(0);
+      h.lake.onBeforeRender = callback;
+      h.lake.geometry.morphAttributes.position = [position.clone()];
+      h.lake.updateMorphTargets();
+      expect(h.compute()).toBe(false);
+      delete h.lake.geometry.morphAttributes.position;
+      h.lake.updateMorphTargets();
+      expect(h.compute()).toBe(true);
+      const material = h.water.getMaterial("lake")!;
+      const vertex = material.vertexNode;
+      material.vertexNode = positionLocal;
+      expect(h.compute()).toBe(false);
+      material.vertexNode = vertex;
+      expect(h.compute()).toBe(true);
+      material.positionNode = positionLocal;
+      expect(h.compute()).toBe(false);
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("falls back for real instanced, skinned and batched mesh consumers", () => {
+    const h = createFootprintHarness();
+    const material = h.water.getMaterial("lake")!;
+    const instance = new THREE.InstancedMesh(h.lake.geometry, material, 1);
+    instance.setMatrixAt(0, new THREE.Matrix4());
+    const skinned = new THREE.SkinnedMesh(h.lake.geometry, material);
+    const batched = new THREE.BatchedMesh(1, 100, 200, material);
+    const geometryId = batched.addGeometry(h.lake.geometry);
+    batched.addInstance(geometryId);
+    try {
+      for (const mesh of [instance, skinned, batched]) {
+        h.scene.add(mesh);
+        h.scene.updateMatrixWorld(true);
+        h.water.registerWaterMesh(mesh);
+        expect(h.compute()).toBe(false);
+        h.water.unregisterWaterMesh(mesh);
+        h.scene.remove(mesh);
+        expect(h.compute()).toBe(true);
+      }
+    } finally {
+      instance.dispose();
+      batched.dispose();
+      h.water.destroy();
+    }
+  });
+
+  it("uses full fallback for a full-screen or empty projected footprint and bounds edge samples", () => {
+    const h = createFootprintHarness();
+    try {
+      h.lake.position.set(38, 0, -28);
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(true);
+      expectValidScissor(h.scissor);
+      expect(h.scissor.x).toBe(0);
+      expect(h.scissor.y).toBe(0);
+      h.lake.scale.setScalar(30);
+      h.lake.position.set(0, 0, 0);
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(false);
+      h.lake.scale.setScalar(1);
+      h.lake.position.x = 200;
+      h.scene.updateMatrixWorld(true);
+      expect(h.compute()).toBe(false);
+    } finally {
+      h.water.destroy();
+    }
   });
 });

@@ -41,11 +41,13 @@ import {
   createCompactHabitatSoilNode,
   createCompactBankVergeLocality,
   createCompactBankVergeHeightScale,
+  type GrassVergeEvaluation,
 } from "./CompactTerrainMaterial";
 import type {
   GrassAppearanceCandidate,
   GrassLightingCandidate,
   GrassGeometryCandidate,
+  GrassInstancingCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -60,7 +62,11 @@ import type Node from "three/src/nodes/core/Node.js";
 import {
   createGrassMeadowRefinementResponse,
   createGrassMeadowAuthoredResponse,
+  createGrassMeadowFootprintArchResponse,
+  createGrassMeadowSweptBladeResponse,
+  createGrassMeadowRestHeightColorCoordinate,
   type GrassMeadowRefinementSample,
+  type GrassMeadowRootFrameSample,
   type GrassMeadowRefinementResponse,
 } from "./GrassMeadowRefinementGpu";
 import type { TerrainQuadNode, QuadTreeListener } from "./TerrainQuadTree";
@@ -88,6 +94,9 @@ import {
 import type { GrassGroundingWorkerPort } from "../../../utils/workers/GrassGroundingWorkerClient";
 import {
   createGroundedGrassMaterial,
+  createMatrixFreeGrassGeometry,
+  createMatrixFreeGrassMesh,
+  type GrassChunkRenderMesh,
   groundedGrassWorldBox,
   GRASS_BLADE_VISIBILITY_ATTRIBUTE,
 } from "./GrassGroundingGpu";
@@ -105,6 +114,14 @@ import {
   createMeadowAuthoredShapeBuffers,
   type GrassMeadowAuthoredBlade,
 } from "./GrassMeadowAuthoredShape";
+import {
+  createMeadowFootprintArchBuffers,
+  GRASS_MEADOW_FOOTPRINT_ARCH,
+} from "./GrassMeadowFootprintArch";
+import {
+  createMeadowSweptBladeBuffers,
+  GRASS_MEADOW_SWEPT_BLADE,
+} from "./GrassMeadowSweptBlade";
 import {
   projectGrassAnchors,
   type GrassGrounding,
@@ -387,6 +404,20 @@ export const FINE_GRASS_MEADOW_FIELD_SHAPE = Object.freeze({
   BLADE_FULL_WIDTH_HEIGHT: 0.2,
 } as const);
 
+/** Optional plant authoring, not a default profile. Three leaves share two
+ * opposed ranks around one seeded growth plane; the low/tall basal offsets
+ * differ so their independently curved ribbons do not share a whole surface.
+ * Parent fan centers, dimensions, random draws and buffer layouts stay intact.
+ */
+export const FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT = Object.freeze({
+  id: "two-ranked-v1",
+  rootComposition: "meadow-field-v1",
+  // Signed along the shared growth plane, in low/middle/tall role order.
+  basalOffsets: Object.freeze([0.01, -0.01, 0.003] as const),
+  roleBearings: Object.freeze([0, Math.PI, 0] as const),
+  growthPlane: "golden-angle-first-positional-sample",
+} as const);
+
 /** Fine-only direct-light scattering trial, not screen-space transmission.
  * The leaf-colored term is multiplied by Three's actual shadowed light color.
  * These are explicit artistic coefficients, not measured tissue properties. */
@@ -518,11 +549,19 @@ type GrassBladeShape = Pick<
   BLADE_WIDTH_FALLOFF_POWER?: number;
   /** Additional upper-leaf width; zero at the root, full gain at half height. */
   BLADE_UPPER_WIDTH_GAIN?: number;
+  BLADE_WIDTH_BEZIER_CONTROL_POINTS?: readonly [
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
   BLADE_BASE_WIDTH_FACTOR?: number;
   BLADE_FULL_WIDTH_HEIGHT?: number;
   PROGRESSIVE_ROOTS?: boolean;
   ROOT_COMPOSITION?:
     "progressive-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
+  LEAF_ARRANGEMENT?: "two-ranked-v1";
   BLADE_CONTROL_HEIGHT?: number;
   /** Quadratic control-point XZ offset as a fraction of the unchanged tip arc. */
   BLADE_CONTROL_ARC_RATIO?: number;
@@ -597,6 +636,14 @@ export function createClumpGeometry(
   onBlade?: (blade: GrassMeadowAuthoredBlade) => void,
 ): THREE.BufferGeometry {
   const meadowField = shape.ROOT_COMPOSITION === "meadow-field-v1";
+  const twoRanked = shape.LEAF_ARRANGEMENT === "two-ranked-v1";
+  if (
+    shape.LEAF_ARRANGEMENT !== undefined &&
+    (!twoRanked || !meadowField || crossSection !== undefined)
+  )
+    throw new Error(
+      "Two-ranked leaves require the unmixed meadow field ribbon",
+    );
   const meadowCanopy =
     shape.ROOT_COMPOSITION === "meadow-canopy-v1" || meadowField;
   const rootedFan =
@@ -666,6 +713,7 @@ export function createClumpGeometry(
   let ii = 0;
   let tuftHeight = 0;
   let meadowCanopyHeight = 0;
+  let tillerPlane = 0;
 
   for (let b = 0; b < N; b++) {
     // Base-two radical inverse distributes each prefix across the whole disk.
@@ -689,19 +737,28 @@ export function createClumpGeometry(
     const fanAngle =
       tuftAngle + (fanIndex / (shape.TUFT_BLADES ?? 1)) * Math.PI * 2;
     const rootedFanIndex = Math.floor(b / fanComposition.bladesPerFan);
+    const canopyRole = (b + rootedFanIndex) % fanComposition.bladesPerFan;
     const rootedFanAngle =
       rootedFanIndex * GOLDEN_ANGLE +
       ((b % fanComposition.bladesPerFan) / fanComposition.bladesPerFan) *
         Math.PI *
         2;
-    const angle = rootedFan
-      ? rootedFanAngle
-      : tuft === null
-        ? b * GOLDEN_ANGLE
-        : fanAngle;
     const rNorm = CLUMP_INNER_RATIO + (1 - CLUMP_INNER_RATIO) * Math.sqrt(t01);
     const r = rNorm * CLUMP_RADIUS;
-    const jitter = (rng() - 0.5) * 0.15 * CLUMP_RADIUS;
+    const positionalSample = rng() - 0.5;
+    const jitter = positionalSample * 0.15 * CLUMP_RADIUS;
+    if (twoRanked && b % fanComposition.bladesPerFan === 0)
+      tillerPlane =
+        rootedFanIndex * GOLDEN_ANGLE +
+        positionalSample * 2 * fanComposition.curveJitter;
+    const angle = twoRanked
+      ? tillerPlane +
+        FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.roleBearings[canopyRole]
+      : rootedFan
+        ? rootedFanAngle
+        : tuft === null
+          ? b * GOLDEN_ANGLE
+          : fanAngle;
     const tuftRadius =
       (shape.TUFT_CENTER_RADIUS ?? 0) *
       Math.sqrt(((tuft ?? 0) + 0.5) / Math.ceil(N / (shape.TUFT_BLADES ?? 1)));
@@ -724,13 +781,19 @@ export function createClumpGeometry(
       fanComposition.centerRadius * Math.sqrt(fanRadiusFraction);
     const ox = rootedFan
       ? Math.cos(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
-        Math.cos(angle) * fanComposition.rootRadius
+        (twoRanked
+          ? Math.cos(tillerPlane) *
+            FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.basalOffsets[canopyRole]
+          : Math.cos(angle) * fanComposition.rootRadius)
       : tuft === null
         ? Math.cos(angle) * r + Math.cos(angle + 1.3) * jitter
         : Math.cos(tuftAngle) * tuftRadius + Math.cos(fanAngle) * rootRadius;
     const oz = rootedFan
       ? Math.sin(rootedFanIndex * GOLDEN_ANGLE) * fanCenterRadius +
-        Math.sin(angle) * fanComposition.rootRadius
+        (twoRanked
+          ? Math.sin(tillerPlane) *
+            FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.basalOffsets[canopyRole]
+          : Math.sin(angle) * fanComposition.rootRadius)
       : tuft === null
         ? Math.sin(angle) * r + Math.sin(angle + 1.3) * jitter
         : Math.sin(tuftAngle) * tuftRadius + Math.sin(fanAngle) * rootRadius;
@@ -762,7 +825,6 @@ export function createClumpGeometry(
     const variedBladeHeight =
       (tuft === null ? variedHeight : tuftHeight) *
       (shape.TUFT_HEIGHT_FACTORS?.[fanIndex] ?? 1);
-    const canopyRole = (b + rootedFanIndex) % fanComposition.bladesPerFan;
     if (meadowCanopy && b % fanComposition.bladesPerFan === 0)
       meadowCanopyHeight = variedBladeHeight;
     const h = meadowCanopy
@@ -900,6 +962,20 @@ export function createClumpGeometry(
               shape.BLADE_FULL_WIDTH_HEIGHT ?? 0.2,
             );
       }
+      if (shape.BLADE_WIDTH_BEZIER_CONTROL_POINTS) {
+        const [a, b, c, d, e] = shape.BLADE_WIDTH_BEZIER_CONTROL_POINTS;
+        const s = 1 - t;
+        // An explicit edge envelope replaces the legacy width factors; callers
+        // without it retain their original arithmetic and rendered geometry.
+        hw =
+          w *
+          0.5 *
+          (a * s ** 4 +
+            4 * b * s ** 3 * t +
+            6 * c * s * s * t * t +
+            4 * d * s * t ** 3 +
+            e * t ** 4);
+      }
       if (folded && (i !== 0 || sheath)) hw = foldedWidth(t);
       // Keep the historical arithmetic exact when no leaning control is
       // selected. The fine candidate changes only the middle control point;
@@ -1015,7 +1091,190 @@ export function createClumpGeometry(
       configurable: false,
       writable: false,
     });
+  if (twoRanked)
+    Object.defineProperty(geo.userData, "grassLeafArrangement", {
+      // Overrides only the parent's radial roots/bearings, not its dimensions.
+      value: FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   return geo;
+}
+
+/** Source-only near-template study: two finer leaves share each original root
+ * edge and grounding slot. No live layout, material or LOD selects this factory.
+ * Summed triangle area is conserved; visible union coverage is NOT implied.
+ */
+export function createPairedMeadowClumpGeometry(
+  bladesPerClump = 21,
+  shape: GrassBladeShape = FINE_GRASS_MEADOW_FIELD_SHAPE,
+  onBlade?: (blade: GrassMeadowAuthoredBlade) => void,
+): THREE.BufferGeometry {
+  if (
+    !Number.isInteger(bladesPerClump) ||
+    bladesPerClump < 1 ||
+    bladesPerClump > 21 ||
+    shape.ROOT_COMPOSITION !== "meadow-field-v1" ||
+    !shape.PROGRESSIVE_ROOTS ||
+    shape.LEAF_ARRANGEMENT !== undefined ||
+    shape.BLADE_CONTROL_HEIGHT !== 0.76 ||
+    shape.BLADE_CONTROL_ARC_RATIO !== 0.35 ||
+    shape.BLADE_TIP_HEIGHT !== 0.95
+  )
+    throw new Error("Paired leaves require the unmixed curved meadow study");
+
+  const blades: GrassMeadowAuthoredBlade[] = [];
+  const parent = createClumpGeometry(
+    bladesPerClump,
+    3,
+    shape,
+    undefined,
+    (b) => {
+      blades.push(b);
+      onBlade?.(b);
+    },
+  );
+  try {
+    const positions = new Float32Array(bladesPerClump * 8 * 3);
+    const normals = new Float32Array(positions.length);
+    const uvs = new Float32Array(bladesPerClump * 8 * 2);
+    const indices = new Uint16Array(bladesPerClump * 18);
+    const source = parent.getAttribute("position");
+    const sourceIndex = parent.getIndex()!;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const pairIndices = [0, 1, 2, 1, 3, 2, 2, 3, 4, 0, 1, 5, 1, 6, 5, 5, 6, 7];
+
+    for (const blade of blades) {
+      const base = blade.index * 8;
+      const parentBase = blade.index * 7;
+      let parentArea = 0;
+      for (let tri = 0; tri < 5; tri++) {
+        const offset = blade.index * 15 + tri * 3;
+        a.fromBufferAttribute(source, sourceIndex.getX(offset));
+        b.fromBufferAttribute(source, sourceIndex.getX(offset + 1));
+        c.fromBufferAttribute(source, sourceIndex.getX(offset + 2));
+        parentArea += b.sub(a).cross(c.sub(a)).length() * 0.5;
+      }
+      let peakWidth = 0;
+      for (let row = 0; row < 3; row++) {
+        a.fromBufferAttribute(source, parentBase + row * 2);
+        b.fromBufferAttribute(source, parentBase + row * 2 + 1);
+        peakWidth = Math.max(peakWidth, a.distanceTo(b));
+      }
+      a.fromBufferAttribute(source, parentBase);
+      b.fromBufferAttribute(source, parentBase + 1);
+      const rootWidth = a.distanceTo(b);
+      // The actual Float32 basal edge supplies one common width axis. Its
+      // derivative normal is compatible at the shared root for both leaves.
+      const sx = (b.x - a.x) / rootWidth;
+      const sz = (b.z - a.z) / rootWidth;
+      const rootX = (a.x + b.x) * 0.5;
+      const rootZ = (a.z + b.z) * 0.5;
+      const branches = [1, 0.9].map((heightRatio, branch) => {
+        const angle = ((branch === 0 ? 1 : -1) * Math.PI) / 15;
+        const tipX =
+          blade.curveX * Math.cos(angle) - blade.curveZ * Math.sin(angle);
+        const tipZ =
+          blade.curveX * Math.sin(angle) + blade.curveZ * Math.cos(angle);
+        const controlX = 0.35 * blade.curveX * heightRatio;
+        const controlZ = 0.35 * blade.curveZ * heightRatio;
+        const height = blade.height * heightRatio;
+        const midX = 0.5 * controlX + 0.25 * tipX;
+        const midZ = 0.5 * controlZ + 0.25 * tipZ;
+        const midY = (0.5 * 0.76 + 0.25 * 0.95) * height;
+        const tipY = 0.95 * height;
+        const lowerLength = Math.hypot(midY, sz * midX - sx * midZ);
+        const upperLength = Math.hypot(
+          tipY - midY,
+          sz * (tipX - midX) - sx * (tipZ - midZ),
+        );
+        return {
+          controlX,
+          controlZ,
+          height,
+          midX,
+          midY,
+          midZ,
+          tipX,
+          tipY,
+          tipZ,
+          lowerLength,
+          upperLength,
+        };
+      });
+      // For parallel width rows, A=.5*rootWidth*L1+.5*midWidth*(L1+L2).
+      // Solve once for the pair's common middle width, not an artistic sweep.
+      const midWidth =
+        (2 * parentArea -
+          rootWidth *
+            branches.reduce((sum, leaf) => sum + leaf.lowerLength, 0)) /
+        branches.reduce(
+          (sum, leaf) => sum + leaf.lowerLength + leaf.upperLength,
+          0,
+        );
+      if (
+        !Number.isFinite(midWidth) ||
+        midWidth <= 0 ||
+        midWidth > peakWidth * 0.65
+      )
+        throw new Error("Paired leaf area cannot fit the finer-width budget");
+
+      const normal = (leaf: (typeof branches)[number], t: number) => {
+        const dx =
+          2 * ((1 - t) * leaf.controlX + t * (leaf.tipX - leaf.controlX));
+        const dz =
+          2 * ((1 - t) * leaf.controlZ + t * (leaf.tipZ - leaf.controlZ));
+        const dy = 2 * ((1 - t) * 0.76 + t * (0.95 - 0.76)) * leaf.height;
+        const nx = -sz * dy,
+          ny = sz * dx - sx * dz,
+          nz = sx * dy;
+        const length = Math.hypot(nx, ny, nz);
+        return [nx / length, ny / length, nz / length];
+      };
+      for (let side = 0; side < 2; side++) {
+        a.fromBufferAttribute(source, parentBase + side);
+        positions.set([a.x, a.y, a.z], (base + side) * 3);
+        normals.set(normal(branches[0], 0), (base + side) * 3);
+        uvs.set([side, 0], (base + side) * 2);
+      }
+      branches.forEach((leaf, branch) => {
+        const middle = base + (branch === 0 ? 2 : 5);
+        for (let side = 0; side < 2; side++) {
+          const offset = (side - 0.5) * midWidth;
+          positions.set(
+            [
+              rootX + leaf.midX + offset * sx,
+              leaf.midY,
+              rootZ + leaf.midZ + offset * sz,
+            ],
+            (middle + side) * 3,
+          );
+          normals.set(normal(leaf, 0.5), (middle + side) * 3);
+          uvs.set([side, 0.5], (middle + side) * 2);
+        }
+        positions.set(
+          [rootX + leaf.tipX, leaf.tipY, rootZ + leaf.tipZ],
+          (middle + 2) * 3,
+        );
+        normals.set(normal(leaf, 1), (middle + 2) * 3);
+        uvs.set([0.5, 1], (middle + 2) * 2);
+      });
+      pairIndices.forEach((index, i) => {
+        indices[blade.index * 18 + i] = base + index;
+      });
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    return geometry;
+  } finally {
+    parent.dispose();
+  }
 }
 
 /** Build the close-detail template without changing placement or live LODs.
@@ -1162,6 +1421,98 @@ export function createMeadowAuthoredClumpGeometry() {
   }
 }
 
+/** A separate footprint-locked endpoint; never selected by an ordinary LOD.
+ * Its coarse source is the actual selected field recipe, not a saved template. */
+export function createMeadowFootprintArchClumpGeometry() {
+  const blades: GrassMeadowAuthoredBlade[] = [];
+  const coarseGeometry = createClumpGeometry(
+    GRASS_MEADOW_REFINEMENT.bladesPerClump,
+    3,
+    FINE_GRASS_MEADOW_FIELD_SHAPE,
+    undefined,
+    (blade) => blades.push(blade),
+  );
+  let geometry: THREE.BufferGeometry | undefined;
+  try {
+    const buffers = createMeadowFootprintArchBuffers(
+      coarseGeometry,
+      blades,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(buffers.positions, 3),
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.BufferAttribute(buffers.normals, 3),
+    );
+    geometry.setAttribute("uv", new THREE.BufferAttribute(buffers.uv, 2));
+    geometry.setIndex(new THREE.BufferAttribute(buffers.indices, 1));
+    Object.defineProperty(geometry.userData, buffers.layout.metadataKey, {
+      value: buffers.recipe,
+      enumerable: true,
+    });
+    return {
+      geometry,
+      coarseGeometry,
+      coarseVertexPairs: buffers.coarseVertexPairs,
+      layout: buffers.layout,
+    };
+  } catch (error) {
+    geometry?.dispose();
+    coarseGeometry.dispose();
+    throw error;
+  }
+}
+
+/** Opt-in full-silhouette endpoint. Its canonical material UV stays on the
+ * coarse partition; fine deformation alone uses the swept curve parameter. */
+export function createMeadowSweptBladeClumpGeometry() {
+  const blades: GrassMeadowAuthoredBlade[] = [];
+  const coarseGeometry = createClumpGeometry(
+    GRASS_MEADOW_REFINEMENT.bladesPerClump,
+    3,
+    FINE_GRASS_MEADOW_FIELD_SHAPE,
+    undefined,
+    (blade) => blades.push(blade),
+  );
+  let geometry: THREE.BufferGeometry | undefined;
+  try {
+    const buffers = createMeadowSweptBladeBuffers(
+      coarseGeometry,
+      blades,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(buffers.positions, 3),
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.BufferAttribute(buffers.normals, 3),
+    );
+    geometry.setAttribute("uv", new THREE.BufferAttribute(buffers.uv, 2));
+    geometry.setIndex(new THREE.BufferAttribute(buffers.indices, 1));
+    Object.defineProperty(geometry.userData, buffers.layout.metadataKey, {
+      value: buffers.recipe,
+      enumerable: true,
+    });
+    return {
+      geometry,
+      coarseGeometry,
+      coarseVertexPairs: buffers.coarseVertexPairs,
+      layout: buffers.layout,
+    };
+  } catch (error) {
+    geometry?.dispose();
+    coarseGeometry.dispose();
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1179,7 +1530,7 @@ type GrassWorkSource = TerrainQuadNode | GrassWorkUnit;
 
 interface GrassChunk {
   nodeId: number;
-  mesh: THREE.InstancedMesh;
+  mesh: GrassChunkRenderMesh;
   box: THREE.Box3;
   lodLevel: number;
   node: TerrainQuadNode;
@@ -1382,7 +1733,8 @@ export class GrassVisualManager implements QuadTreeListener {
         geometry: THREE.BufferGeometry,
         coarseGeometry: THREE.BufferGeometry,
         weight: Node<"float">,
-        endpoint: "conforming" | "authored",
+        endpoint: "conforming" | "authored" | "footprint-arch" | "swept-blade",
+        restHeightColorWeight?: Node<"float">,
       ) => MeshStandardNodeMaterial)
     | null = null;
   private lodGeometries: THREE.BufferGeometry[];
@@ -1496,6 +1848,8 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly lightingCandidate?: GrassLightingCandidate,
     groundingWorkerSetup?: GrassGroundingWorkerSetup,
     private readonly geometryCandidate?: GrassGeometryCandidate,
+    private readonly grassVergeEvaluation?: GrassVergeEvaluation,
+    private readonly instancingCandidate?: GrassInstancingCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1578,6 +1932,16 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error(
         "Grass geometry requires the explicit leaf-volume fine meadow",
+      );
+    if (
+      instancingCandidate !== undefined &&
+      (instancingCandidate !== "attributes-v1" ||
+        !this.fineMeadow ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
+    )
+      throw new Error(
+        "Grass instancing requires the explicit leaf-volume meadow field",
       );
     const coverageField = Object.getOwnPropertyDescriptor(
       profile,
@@ -1715,6 +2079,20 @@ export class GrassVisualManager implements QuadTreeListener {
       (!this.fineMeadow || !this.compactGrassColorGrade)
     )
       throw new Error("Pond service ground requires the graded fine meadow");
+    if (
+      grassVergeEvaluation !== undefined &&
+      (grassVergeEvaluation !== "exact-zero-v1" ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id ||
+        !this.fineMeadow ||
+        !this.compactGrassColorGrade ||
+        !this.compactMacroField?.coastalMeadow ||
+        (!this.compactMacroField.bankVerge &&
+          !this.compactMacroField.pondServiceGround))
+    )
+      throw new Error(
+        "Grass verge evaluation requires the graded coastal meadow field and authored verges",
+      );
     createGrassCoastBlendOperations().assertScope(
       this.compactCoastBlend,
       this.grassEligibility,
@@ -2059,7 +2437,9 @@ export class GrassVisualManager implements QuadTreeListener {
     lod: number,
     precompileObject: (object: THREE.Object3D) => Promise<void>,
   ): Promise<void> {
-    const geo = this.lodGeometries[lod].clone();
+    const geo = this.instancingCandidate
+      ? createMatrixFreeGrassGeometry(this.lodGeometries[lod], 1)
+      : this.lodGeometries[lod].clone();
     geo.setAttribute(
       "instanceOffset",
       new THREE.InstancedBufferAttribute(new Float32Array([0, 0, 0]), 3),
@@ -2105,13 +2485,17 @@ export class GrassVisualManager implements QuadTreeListener {
         baseMaterial === this.foldedMaterial,
         this.geometryLayout,
       );
-    const mesh = createStorageInstancedMesh(geo, material, 1);
+    const mesh = this.instancingCandidate
+      ? createMatrixFreeGrassMesh(geo, material)
+      : createStorageInstancedMesh(geo, material, 1);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;
     mesh.castShadow = false;
-    mesh.setMatrixAt(0, new THREE.Matrix4());
-    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh instanceof THREE.InstancedMesh) {
+      mesh.setMatrixAt(0, new THREE.Matrix4());
+      mesh.instanceMatrix.needsUpdate = true;
+    }
 
     try {
       await precompileObject(mesh);
@@ -3045,10 +3429,12 @@ export class GrassVisualManager implements QuadTreeListener {
         "Compact grass requires complete blade grounding and provenance",
       );
 
-    const geo = this.lodGeometries[lodLevel].clone();
+    const geo = this.instancingCandidate
+      ? createMatrixFreeGrassGeometry(this.lodGeometries[lodLevel], data.count)
+      : this.lodGeometries[lodLevel].clone();
     const baseMaterial = this.materialForLod(lodLevel);
     let material = baseMaterial;
-    let mesh: THREE.InstancedMesh | null = null;
+    let mesh: GrassChunkRenderMesh | null = null;
     try {
       geo.setAttribute(
         "instanceOffset",
@@ -3097,7 +3483,9 @@ export class GrassVisualManager implements QuadTreeListener {
           configurable: false,
           value: this.habitatComposition,
         });
-      mesh = createStorageInstancedMesh(geo, material, data.count);
+      mesh = this.instancingCandidate
+        ? createMatrixFreeGrassMesh(geo, material)
+        : createStorageInstancedMesh(geo, material, data.count);
       mesh.position.set(node.centerX, 0, node.centerZ);
       // Chunk-local placement is immutable; parent/world transforms stay live.
       mesh.updateMatrix();
@@ -3133,11 +3521,13 @@ export class GrassVisualManager implements QuadTreeListener {
           : {}),
       };
 
-      const identity = new THREE.Matrix4();
-      for (let i = 0; i < data.count; i++) {
-        mesh.setMatrixAt(i, identity);
+      if (mesh instanceof THREE.InstancedMesh) {
+        const identity = new THREE.Matrix4();
+        for (let i = 0; i < data.count; i++) {
+          mesh.setMatrixAt(i, identity);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
       }
-      mesh.instanceMatrix.needsUpdate = true;
 
       const half = node.halfSize;
       const box = blades
@@ -3774,6 +4164,47 @@ export class GrassVisualManager implements QuadTreeListener {
     );
   }
 
+  /** Explicit fine/coarse deformation binding, without placement or admission.
+   * The caller must obtain fresh union grounding before publishing a mesh. */
+  createMeadowFootprintArchMaterial(
+    geometry: THREE.BufferGeometry,
+    coarseGeometry: THREE.BufferGeometry,
+    weight: Node<"float">,
+  ): MeshStandardNodeMaterial {
+    if (this.destroyed || !this.meadowDetailMaterialFactory)
+      throw new Error("Footprint arch requires a live leaf-volume field owner");
+    return this.meadowDetailMaterialFactory(
+      geometry,
+      coarseGeometry,
+      weight,
+      "footprint-arch",
+    );
+  }
+
+  /** Full-silhouette fine/coarse binding. It grants no terrain fit or live LOD
+   * admission; the caller must obtain fresh swept-union grounding first. */
+  createMeadowSweptBladeMaterial(
+    geometry: THREE.BufferGeometry,
+    coarseGeometry: THREE.BufferGeometry,
+    weight: Node<"float">,
+    restHeightColorWeight?: Node<"float">,
+  ): MeshStandardNodeMaterial {
+    if (this.destroyed || !this.meadowDetailMaterialFactory)
+      throw new Error("Swept meadow requires a live leaf-volume field owner");
+    if (
+      restHeightColorWeight !== undefined &&
+      !(restHeightColorWeight instanceof THREE.Node)
+    )
+      throw new Error("Rest-height color requires an owned scalar node");
+    return this.meadowDetailMaterialFactory(
+      geometry,
+      coarseGeometry,
+      weight,
+      "swept-blade",
+      restHeightColorWeight,
+    );
+  }
+
   private createMaterial(): MeshStandardNodeMaterial {
     const compactMeadow = this.compactMeadow;
     const appearance = this.meadowAppearance;
@@ -4049,6 +4480,7 @@ export class GrassVisualManager implements QuadTreeListener {
               worldBase.xyz,
               this.compactMacroField,
               vergeLocality,
+              this.grassVergeEvaluation,
             )
           : float(1);
       if (bankVerge)
@@ -4096,24 +4528,37 @@ export class GrassVisualManager implements QuadTreeListener {
         );
       };
       const evaluateVertex = (
-        sample: GrassMeadowRefinementSample,
+        sample: GrassMeadowRefinementSample | GrassMeadowRootFrameSample,
         label = "",
+        profile: "original" | "footprint-arch" | "swept-blade" = "original",
       ): GrassMeadowRefinementResponse => {
         const rawPosition = sample.position;
         const sourceNormal = sample.normal;
-        const t = sample.t;
+        const t =
+          profile === "swept-blade"
+            ? sin(sample.t.mul(Math.PI * 0.5))
+            : sample.t;
         // The retained graph keeps its original labels. Parent/fine response
         // evaluations must not alias named vertex temporaries or varyings.
         const named = (name: string) => (label ? name + label : name);
-        const c = appearance.BLADE_CONTROL_HEIGHT;
-        const q = appearance.BLADE_TIP_HEIGHT;
+        // A width frame alone never selects a height/wind profile. Only the
+        // explicit fine callback changes it; original coarse parents remain
+        // byte-equivalent even when sharing the same refined draw.
+        const fineProfile =
+          profile === "swept-blade"
+            ? GRASS_MEADOW_SWEPT_BLADE
+            : profile === "footprint-arch"
+              ? GRASS_MEADOW_FOOTPRINT_ARCH
+              : null;
+        const c = fineProfile?.controlHeight ?? appearance.BLADE_CONTROL_HEIGHT;
+        const q = fineProfile?.tipHeight ?? appearance.BLADE_TIP_HEIGHT;
         const curve = t.mul(2 * c).add(t.mul(t).mul(q - 2 * c));
         const curveDerivative = float(2 * c).add(t.mul(2 * (q - 2 * c)));
         // Recover uncompressed source height; bank wear and distance fade are
         // applied separately. The root denominator is guarded in both branches.
         // Scaling only the wind amplitude would leave the sparse tip interval
         // over-bent: distribute flex quadratically over actual blade height too.
-        const heightFraction = curve.div(q);
+        const heightFraction = curve.div(fineProfile?.peakHeight ?? q);
         const flexAmplitude = rawPosition.y
           .mul(scale)
           .div(curve.max(1e-5).mul(uBladeHeight))
@@ -4213,7 +4658,9 @@ export class GrassVisualManager implements QuadTreeListener {
             );
         }, "vec3")();
         const widthAxis = turnToGround(
-          vec3(sourceNormal.z, float(0), sourceNormal.x.negate()),
+          "widthAxis" in sample
+            ? sample.widthAxis
+            : vec3(sourceNormal.z, float(0), sourceNormal.x.negate()),
         );
         const width = widthAxis.div(
           pow(dot(widthAxis, widthAxis).max(1e-12), 0.5),
@@ -4350,6 +4797,7 @@ export class GrassVisualManager implements QuadTreeListener {
           coarseGeometry,
           weight,
           endpoint,
+          restHeightColorWeight,
         ) => {
           // Borrow the selected near material's existing uniforms, albedo and
           // SSS graph. Re-running createMaterial would orphan uniform owners.
@@ -4360,16 +4808,70 @@ export class GrassVisualManager implements QuadTreeListener {
               endpoint === "authored"
                 ? createGrassMeadowAuthoredResponse
                 : createGrassMeadowRefinementResponse;
-            const refined = bindResponse(
-              geometry,
-              coarseGeometry,
-              weight,
-              (sample) => evaluateVertex(sample, "Refined" + responseIndex++),
-            );
+            const coarseResponse = (sample: GrassMeadowRefinementSample) =>
+              evaluateVertex(sample, "Refined" + responseIndex++);
+            const fineResponse = (sample: GrassMeadowRootFrameSample) =>
+              evaluateVertex(
+                sample,
+                "Refined" + responseIndex++,
+                endpoint === "swept-blade" ? "swept-blade" : "footprint-arch",
+              );
+            const refined: GrassMeadowRefinementResponse & {
+              restHeight?: Node<"float">;
+            } =
+              endpoint === "swept-blade"
+                ? createGrassMeadowSweptBladeResponse(
+                    geometry,
+                    coarseGeometry,
+                    weight,
+                    coarseResponse,
+                    fineResponse,
+                    restHeightColorWeight !== undefined,
+                  )
+                : endpoint === "footprint-arch"
+                  ? createGrassMeadowFootprintArchResponse(
+                      geometry,
+                      coarseGeometry,
+                      weight,
+                      coarseResponse,
+                      fineResponse,
+                    )
+                  : bindResponse(
+                      geometry,
+                      coarseGeometry,
+                      weight,
+                      coarseResponse,
+                    );
             const detailSurface = buildSurface(refined);
             detail.positionNode = detailSurface.position;
             detail.normalNode =
               detailSurface.foldedNormal ?? detailSurface.normal;
+            if (restHeightColorWeight !== undefined) {
+              if (endpoint !== "swept-blade" || !refined.restHeight)
+                throw new Error("Rest-height color requires a swept endpoint");
+              // Canonical UV still owns geometry, wind, AO and normals. Only
+              // albedo and its direct-scattering tint use this separate scalar.
+              // The original response remains selected at geometry weight zero.
+              const colorT = createGrassMeadowRestHeightColorCoordinate(
+                refined.restHeight.toVarying("v_meadowRestHeight"),
+                uv().y,
+                weight.clamp(0, 1).mul(restHeightColorWeight.clamp(0, 1)),
+              );
+              const color = createBladeColor(colorT);
+              detail.colorNode = color.color;
+              if (detail instanceof MeshSSSNodeMaterial)
+                detail.thicknessColorNode = color.thinLeafColor;
+              Object.defineProperty(
+                detail.userData,
+                "grassMeadowColorCoordinate",
+                {
+                  enumerable: true,
+                  writable: false,
+                  configurable: false,
+                  value: "rest-height-color-v1",
+                },
+              );
+            }
             // NodeMaterial.clone JSON-copies userData, losing readonly
             // descriptors. Restore the same production recipe receipts.
             if (detail instanceof MeshSSSNodeMaterial)
@@ -4414,60 +4916,79 @@ export class GrassVisualManager implements QuadTreeListener {
       // GrassGroundingGpu. Its small cross-blade warp is not in this smooth N.
     }
 
-    mat.colorNode = Fn(() => {
-      const groundCol = attribute("instanceGroundColor", "vec3");
-      const tint = attribute("instanceGrassTint", "vec4");
-      const tintCol = tint.xyz;
-      const tintStr = tint.w;
-      const t = uv().y;
-      const tintedCol = mix(groundCol, tintCol, tintStr);
-      // Shared substrate at this actual clump base, not a changed worker tint
-      // or placement. The one extra float varying is explicit candidate cost.
-      const rootGround = habitatSoil
-        ? mix(
-            groundCol,
-            vec3(...createCompactTerrainColorOperations().getPalette().dirt),
-            habitatSoil,
-          )
-        : groundCol;
-      if (compactMeadow) {
-        // Root shading suggests tuft occlusion without an extra texture/pass.
-        // Retain the terrain palette: the previous 1.4 tip gain made distant
-        // blades look like bright wires. This is albedo, not emissive light.
-        const leafVolume =
-          this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
-        const rootBrightness = leafVolume
-          ? this.geometryLayout ===
-            FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
-            ? FINE_GRASS_MEADOW_FIELD_LIGHTING.rootBrightness
-            : FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
-          : appearance.ROOT_BRIGHTNESS;
-        const tipBrightness = leafVolume
-          ? FINE_GRASS_LEAF_VOLUME_LIGHTING.tipBrightness
-          : appearance.TIP_BRIGHTNESS;
-        const bladeCol = mix(
-          rootGround.mul(rootBrightness),
-          tintedCol.mul(
-            bankVerge && bankLocality
-              ? mix(
-                  float(tipBrightness),
-                  float(
-                    leafVolume
-                      ? bankVerge.tipBrightness *
-                          (tipBrightness / appearance.TIP_BRIGHTNESS)
-                      : bankVerge.tipBrightness,
-                  ),
-                  bankLocality,
-                )
-              : float(tipBrightness),
-          ),
-          smoothstep(
-            float(0.0),
-            float(
-              leafVolume ? FINE_GRASS_LEAF_VOLUME_LIGHTING.colorTipStart : 1,
+    const createBladeColor = (t: Node<"float">) => {
+      const color = Fn(() => {
+        const groundCol = attribute("instanceGroundColor", "vec3");
+        const tint = attribute("instanceGrassTint", "vec4");
+        const tintCol = tint.xyz;
+        const tintStr = tint.w;
+        const tintedCol = mix(groundCol, tintCol, tintStr);
+        // Shared substrate at this actual clump base, not a changed worker tint
+        // or placement. The one extra float varying is explicit candidate cost.
+        const rootGround = habitatSoil
+          ? mix(
+              groundCol,
+              vec3(...createCompactTerrainColorOperations().getPalette().dirt),
+              habitatSoil,
+            )
+          : groundCol;
+        if (compactMeadow) {
+          // Root shading suggests tuft occlusion without an extra texture/pass.
+          // Retain the terrain palette: the previous 1.4 tip gain made distant
+          // blades look like bright wires. This is albedo, not emissive light.
+          const leafVolume =
+            this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
+          const rootBrightness = leafVolume
+            ? this.geometryLayout ===
+              FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+              ? FINE_GRASS_MEADOW_FIELD_LIGHTING.rootBrightness
+              : FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
+            : appearance.ROOT_BRIGHTNESS;
+          const tipBrightness = leafVolume
+            ? FINE_GRASS_LEAF_VOLUME_LIGHTING.tipBrightness
+            : appearance.TIP_BRIGHTNESS;
+          const bladeCol = mix(
+            rootGround.mul(rootBrightness),
+            tintedCol.mul(
+              bankVerge && bankLocality
+                ? mix(
+                    float(tipBrightness),
+                    float(
+                      leafVolume
+                        ? bankVerge.tipBrightness *
+                            (tipBrightness / appearance.TIP_BRIGHTNESS)
+                        : bankVerge.tipBrightness,
+                    ),
+                    bankLocality,
+                  )
+                : float(tipBrightness),
             ),
-            t,
-          ),
+            smoothstep(
+              float(0.0),
+              float(
+                leafVolume ? FINE_GRASS_LEAF_VOLUME_LIGHTING.colorTipStart : 1,
+              ),
+              t,
+            ),
+          );
+          return compactPhysical
+            ? bladeCol
+            : applyAnimeShade(
+                bladeCol,
+                terrainNormal,
+                uSunDir,
+                this.shadeUniforms,
+              );
+        }
+        const tipCol = mix(
+          groundCol,
+          tintedCol,
+          smoothstep(float(0.0), float(1.0), t),
+        ).mul(1.4);
+        const bladeCol = mix(
+          groundCol,
+          tipCol,
+          smoothstep(float(0.0), float(1.0), t),
         );
         return compactPhysical
           ? bladeCol
@@ -4477,40 +4998,31 @@ export class GrassVisualManager implements QuadTreeListener {
               uSunDir,
               this.shadeUniforms,
             );
-      }
-      const tipCol = mix(
-        groundCol,
-        tintedCol,
-        smoothstep(float(0.0), float(1.0), t),
-      ).mul(1.4);
-      const bladeCol = mix(
-        groundCol,
-        tipCol,
-        smoothstep(float(0.0), float(1.0), t),
-      );
-      return compactPhysical
-        ? bladeCol
-        : applyAnimeShade(bladeCol, terrainNormal, uSunDir, this.shadeUniforms);
-    })();
+      })();
 
-    if (mat instanceof MeshSSSNodeMaterial) {
-      // One shared non-grazing albedo owner feeds both ordinary reflection and
-      // the thin-leaf tint. Scattering itself remains in Three's direct-light
-      // model, so zero/shadowed light cannot become an albedo or emissive lift.
-      // Preserve the previous fine albedo's upper bound, without its view gain.
-      mat.colorNode = vec3(mat.colorNode)
-        .min(vec3(1))
-        .toVar("fineGrassBladeAlbedo");
-      mat.thicknessColorNode = mat.colorNode
-        .mul(
-          smoothstep(
-            float(FINE_GRASS_THIN_LEAF_LIGHTING.rootStart),
-            float(FINE_GRASS_THIN_LEAF_LIGHTING.rootEnd),
-            uv().y,
-          ),
-        )
-        .toVar("fineGrassThinLeafColor");
-    }
+      if (mat instanceof MeshSSSNodeMaterial) {
+        // One shared non-grazing albedo owner feeds both ordinary reflection and
+        // the thin-leaf tint. Scattering itself remains in Three's direct-light
+        // model, so zero/shadowed light cannot become an albedo or emissive lift.
+        // Preserve the previous fine albedo's upper bound, without its view gain.
+        const albedo = vec3(color).min(vec3(1)).toVar("fineGrassBladeAlbedo");
+        const thinLeafColor = albedo
+          .mul(
+            smoothstep(
+              float(FINE_GRASS_THIN_LEAF_LIGHTING.rootStart),
+              float(FINE_GRASS_THIN_LEAF_LIGHTING.rootEnd),
+              t,
+            ),
+          )
+          .toVar("fineGrassThinLeafColor");
+        return { color: albedo, thinLeafColor };
+      }
+      return { color, thinLeafColor: null };
+    };
+    const bladeColor = createBladeColor(uv().y);
+    mat.colorNode = bladeColor.color;
+    if (mat instanceof MeshSSSNodeMaterial)
+      mat.thicknessColorNode = bladeColor.thinLeafColor;
 
     mat.outputNode = Fn(() => {
       return vec4(output.rgb, output.a);

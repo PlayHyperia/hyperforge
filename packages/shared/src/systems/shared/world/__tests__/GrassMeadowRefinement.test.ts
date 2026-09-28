@@ -17,6 +17,8 @@ import {
 import {
   createClumpGeometry,
   createMeadowDetailClumpGeometry,
+  createMeadowFootprintArchClumpGeometry,
+  createMeadowSweptBladeClumpGeometry,
   FINE_GRASS_MEADOW_FIELD_SHAPE,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GrassVisualManager,
@@ -86,7 +88,7 @@ function withTemplate(
 
 /** Real material owner with no world-placement requests. This is CPU graph
  * ownership evidence, not a renderer, worker or gameplay substitute. */
-function materialOwner(leafVolume = true) {
+function materialOwner(leafVolume = true, field = true) {
   const config = createTerrainWorkerConfig(
     SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
     16,
@@ -121,7 +123,7 @@ function materialOwner(leafVolume = true) {
     undefined,
     leafVolume ? "leaf-volume-v1" : undefined,
     undefined,
-    leafVolume ? "meadow-field-v1" : undefined,
+    leafVolume && field ? "meadow-field-v1" : undefined,
   );
 }
 
@@ -147,6 +149,7 @@ function containsNode(root: unknown, wanted: Node): boolean {
 function materialStages(
   geometry: THREE.BufferGeometry,
   material: THREE.Material,
+  includeColor = false,
 ) {
   for (const [name, values] of [
     ["instanceOffset", [0, 0, 0]],
@@ -204,7 +207,11 @@ function materialStages(
         throw new Error("Missing generated response flow");
       return result.code + result.result;
     };
-    const fragmentFlow = flow("fragment", "normalNode");
+    const fragmentFlow =
+      flow("fragment", "normalNode") +
+      (includeColor
+        ? flow("fragment", "colorNode") + flow("fragment", "thicknessColorNode")
+        : "");
     const vertexFlow = flow("vertex", "positionNode");
     const stages: unknown = Reflect.get(builder, "flowCode");
     if (!stages || typeof stages !== "object")
@@ -261,6 +268,201 @@ function materialStages(
 }
 
 describe("real meadow detail material ownership, not native GPU proof", () => {
+  it.each([0, 0.4, 1])(
+    "isolates rest-height color from geometry and normal response at weight %s",
+    (weight) => {
+      const owner = materialOwner();
+      const template = createMeadowSweptBladeClumpGeometry();
+      const base = owner["materialForLod"](0);
+      const alpha = uniform(weight);
+      const colorWeight = uniform(1);
+      const originalUv = Array.from(template.geometry.getAttribute("uv").array);
+      let detail: THREE.MeshStandardNodeMaterial | undefined;
+      try {
+        detail = owner.createMeadowSweptBladeMaterial(
+          template.geometry,
+          template.coarseGeometry,
+          alpha,
+          colorWeight,
+        );
+        expect(detail).toBeInstanceOf(MeshSSSNodeMaterial);
+        expect(detail.colorNode).not.toBe(base.colorNode);
+        for (const field of [
+          "aoNode",
+          "roughness",
+          "metalness",
+          "side",
+          "emissiveNode",
+        ] as const)
+          expect(detail[field]).toBe(base[field]);
+        expect(containsNode(detail.positionNode, colorWeight)).toBe(false);
+        expect(containsNode(detail.normalNode, colorWeight)).toBe(false);
+        expect(detail.userData.grassMeadowColorCoordinate).toBe(
+          "rest-height-color-v1",
+        );
+        expect(
+          Object.getOwnPropertyDescriptor(
+            detail.userData,
+            "grassMeadowColorCoordinate",
+          ),
+        ).toMatchObject({
+          writable: false,
+          configurable: false,
+        });
+        const stages = materialStages(template.geometry, detail, true);
+        expect(stages.fragment).toContain("v_meadowRestHeight");
+        expect(stages.fragment).toContain("fineGrassBladeAlbedo");
+        expect(stages.fragment).toContain("fineGrassThinLeafColor");
+        expect(stages.fragment).not.toMatch(/var<storage/);
+        expect(stages.parentFragment).toEqual([]);
+        expect(stages.parentVertex).toHaveLength(3);
+        expect(stages.vertex + stages.fragment).not.toMatch(
+          /undefined|NaN|Infinity/,
+        );
+        expect(Array.from(template.geometry.getAttribute("uv").array)).toEqual(
+          originalUv,
+        );
+        expect(base.userData.grassMeadowColorCoordinate).toBeUndefined();
+      } finally {
+        detail?.dispose();
+        template.geometry.dispose();
+        template.coarseGeometry.dispose();
+        owner.destroy();
+      }
+    },
+  );
+
+  describe.each([
+    {
+      endpoint: "footprint-arch",
+      method: "createMeadowFootprintArchMaterial",
+      createTemplate: createMeadowFootprintArchClumpGeometry,
+    },
+    {
+      endpoint: "swept-blade",
+      method: "createMeadowSweptBladeMaterial",
+      createTemplate: createMeadowSweptBladeClumpGeometry,
+    },
+  ] as const)("$endpoint material", ({ endpoint, method, createTemplate }) => {
+    it.each([0, 0.4, 1])(
+      "keeps the opt-in arch's real coarse/fine response vertex-only at weight %s",
+      (weight) => {
+        const owner = materialOwner();
+        const template = createTemplate();
+        const base = owner["materialForLod"](0);
+        const originalPosition = base.positionNode;
+        const originalNormal = base.normalNode;
+        const player = owner["playerPosUniform"]!;
+        const alpha = uniform(weight);
+        let detail: THREE.MeshStandardNodeMaterial | undefined;
+        try {
+          const coarse = materialStages(template.coarseGeometry, base);
+          detail = owner[method](
+            template.geometry,
+            template.coarseGeometry,
+            alpha,
+          );
+          expect(detail).toBeInstanceOf(MeshSSSNodeMaterial);
+          expect(detail).not.toBe(base);
+          for (const field of [
+            "colorNode",
+            "aoNode",
+            "roughness",
+            "metalness",
+            "side",
+          ] as const)
+            expect(detail[field]).toBe(base[field]);
+          expect(Reflect.get(detail, "thicknessColorNode")).toBe(
+            Reflect.get(base, "thicknessColorNode"),
+          );
+          expect(detail.userData.grassMeadowEndpoint).toBe(endpoint);
+          expect(
+            Object.getOwnPropertyDescriptor(
+              detail.userData,
+              "grassMeadowEndpoint",
+            ),
+          ).toMatchObject({
+            writable: false,
+            configurable: false,
+          });
+          expect(containsNode(detail.positionNode, player)).toBe(true);
+          expect(containsNode(detail.positionNode, alpha)).toBe(true);
+          expect(containsNode(detail.normalNode, alpha)).toBe(true);
+          const arch = materialStages(template.geometry, detail);
+          for (const stage of [coarse, arch]) {
+            expect(stage.vertex).toMatch(/naturalGrassDeformedNormal\w*\s*=/);
+            expect(stage.fragment).not.toMatch(
+              /naturalGrass(?:DeformedNormal|Displacement|HeightFlex)\w*\s*=/,
+            );
+            expect(stage.fragment).not.toMatch(/var<storage/);
+            expect(stage.fragment).toContain("v_curvedGrassNormal");
+            expect(stage.fragment).toContain("v_fineGrassWidthAxis");
+            expect(stage.fragment).toContain(
+              "naturalGrassInterpolatedLengthSq",
+            );
+            expect(stage.parentFragment).toEqual([]);
+            expect(stage.vertex + stage.fragment).not.toMatch(
+              /undefined|NaN|Infinity/,
+            );
+          }
+          expect(coarse.parentVertex).toEqual([]);
+          expect(arch.parentVertex).toHaveLength(3);
+          for (const name of arch.parentVertex) {
+            expect(arch.vertex).toContain(`var<storage, read> ${name}`);
+            expect(arch.vertex).toContain(`${name}.value[`);
+            expect(arch.fragment).not.toContain(name);
+          }
+          for (const endpoint of [0, 1, 2]) {
+            expect(arch.vertex).toContain(
+              "naturalGrassDeformedNormalRefined" + endpoint,
+            );
+            expect(arch.vertex).toContain(
+              "naturalGrassHeightFlexRefined" + endpoint,
+            );
+          }
+          expect(arch.vertex).toMatch(/vertexIndex\s*\/\s*15u/);
+          if (endpoint === "swept-blade") {
+            expect(arch.vertex).toContain("1.570796");
+            expect(coarse.vertex).not.toContain("1.570796");
+            expect(arch.fragment).not.toContain("1.570796");
+          }
+          expect(base.positionNode).toBe(originalPosition);
+          expect(base.normalNode).toBe(originalNormal);
+          expect(owner["materialForLod"](0)).toBe(base);
+        } finally {
+          detail?.dispose();
+          template.geometry.dispose();
+          template.coarseGeometry.dispose();
+          owner.destroy();
+        }
+      },
+    );
+
+    it.each(["destroyed", "non-leaf", "non-field"])(
+      "rejects an arch binding from a %s owner before storage attachment",
+      (kind) => {
+        const owner = materialOwner(kind !== "non-leaf", kind !== "non-field");
+        const template = createTemplate();
+        try {
+          if (kind === "destroyed") owner.destroy();
+          const before = { ...template.geometry.attributes };
+          expect(() =>
+            owner[method](
+              template.geometry,
+              template.coarseGeometry,
+              uniform(1),
+            ),
+          ).toThrow("live leaf-volume field owner");
+          expect(template.geometry.attributes).toEqual(before);
+        } finally {
+          template.geometry.dispose();
+          template.coarseGeometry.dispose();
+          owner.destroy();
+        }
+      },
+    );
+  });
+
   it("keeps coarse and refined normal evaluation in generated vertex response flows only", () => {
     const owner = materialOwner();
     const template = createMeadowDetailClumpGeometry();

@@ -5,7 +5,26 @@ export type FineGrassGeometryLayout =
   | "fine-linear-sweep-near4-v1"
   | "fine-folded-lancet-v1"
   | "fine-folded-sheath-near5-v1"
-  | "fine-meadow-ribbon-v1";
+  | "fine-meadow-ribbon-v1"
+  | "fine-meadow-paired-near-v1";
+
+/** Explicit meadow family; paired leaves are a near-only study, not a default. */
+export function isMeadowGrassBladeLayout(
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return (
+    geometryLayout === "fine-meadow-ribbon-v1" ||
+    geometryLayout === "fine-meadow-paired-near-v1"
+  );
+}
+
+/** Two leaves share one root pair and visibility bit only in the near tier. */
+export function isPairedGrassBladeLayout(
+  lod: number,
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return geometryLayout === "fine-meadow-paired-near-v1" && lod === 0;
+}
 
 /** Three grounded LODs, with full placement density at every distance. */
 export function usesGrassCloseDetailLods(
@@ -13,7 +32,7 @@ export function usesGrassCloseDetailLods(
 ): boolean {
   return (
     geometryLayout === "fine-folded-sheath-near5-v1" ||
-    geometryLayout === "fine-meadow-ribbon-v1"
+    isMeadowGrassBladeLayout(geometryLayout)
   );
 }
 
@@ -25,7 +44,7 @@ export function usesGrassBladeHeightFlex(
   return (
     geometryLayout === "fine-folded-lancet-v1" ||
     geometryLayout === "fine-folded-sheath-near5-v1" ||
-    geometryLayout === "fine-meadow-ribbon-v1"
+    isMeadowGrassBladeLayout(geometryLayout)
   );
 }
 
@@ -77,6 +96,12 @@ export function getGrassBladeWindFactor(
 export const FINE_GRASS_FOLDED_BLADE_INDICES = Object.freeze([
   0, 1, 7, 0, 7, 2, 1, 3, 7, 2, 7, 4, 7, 8, 4, 7, 3, 8, 3, 5, 8, 4, 8, 6, 8, 5,
   6,
+] as const);
+
+/** Shared roots 0/1, then each leaf's middle edge and tip. Slots, not physical
+ * leaves, address the unchanged root-pair storage and Uint32 visibility mask. */
+export const FINE_GRASS_PAIRED_NEAR_INDICES = Object.freeze([
+  0, 1, 2, 1, 3, 2, 2, 3, 4, 0, 1, 5, 1, 6, 5, 5, 6, 7,
 ] as const);
 
 /** Five uniform longitudinal segments, two root endpoints and one tip.
@@ -146,6 +171,12 @@ const layouts = Object.freeze({
     tier("fine-meadow-ribbon-v1", 0, 21, 3),
     tier("fine-meadow-ribbon-v1", 1, 21, 2),
     tier("fine-meadow-ribbon-v1", 2, 12, 2),
+  ]),
+  // Near-only study: middle/far retain the original unpaired ribbon budgets.
+  "fine-meadow-paired-near-v1": Object.freeze([
+    tier("fine-meadow-paired-near-v1", 0, 21, 2, 8, 6),
+    tier("fine-meadow-paired-near-v1", 1, 21, 2),
+    tier("fine-meadow-paired-near-v1", 2, 12, 2),
   ]),
 });
 
@@ -222,7 +253,8 @@ export function getGrassBladeLayout(
       geometryLayout !== "fine-linear-sweep-near4-v1" &&
       geometryLayout !== "fine-folded-lancet-v1" &&
       geometryLayout !== "fine-folded-sheath-near5-v1" &&
-      geometryLayout !== "fine-meadow-ribbon-v1")
+      geometryLayout !== "fine-meadow-ribbon-v1" &&
+      geometryLayout !== "fine-meadow-paired-near-v1")
   )
     throw new Error("Invalid grass blade layout");
   return layouts[geometryLayout ?? "ordinary-v1"][lod];

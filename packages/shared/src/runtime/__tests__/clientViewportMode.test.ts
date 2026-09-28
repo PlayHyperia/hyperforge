@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { JSDOM } from "jsdom";
+import { afterAll, describe, expect, it } from "vitest";
 import { World } from "../../core/World";
 import { DataManager } from "../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../data/world-areas";
@@ -22,12 +23,15 @@ import {
   resolveCompactDirtProjectionCandidate,
   resolveCompactRockProjectionCandidate,
   resolveCompactRockSampling,
+  resolveCompactGroundSampling,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
   resolveGrassGeometryCandidate,
+  resolveGrassVergeEvaluation,
+  resolveGrassInstancingCandidate,
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
@@ -74,37 +78,47 @@ describe("explicit local playable world preview", () => {
     ).toThrow("StreamingMode route");
   });
 
-  it("admits island art without disabling any interactive world capabilities", () => {
-    const win = previewWindow(
-      `${query}&grassAppearance=fine-meadow-v1&flowers=rooted-v1&skyAtmosphere=scattering-v1&shadowFlow=uniform-v1`,
-    );
-    expect(resolveLocalPlayerWorldPreview(win)).toBe(true);
-    expect(resolveExplicitStreamingRenderProfile(win)?.id).toBe(
-      "island-fine-meadow-720p60-v1",
-    );
-    expect(resolveGrassAppearanceCandidate(win)).toBe("fine-meadow-v1");
-    expect(resolveRootedFlowerCandidate(win)).toBe("rooted-v1");
-    expect(resolveSkyAtmosphereMode(win)).toBe("scattering-v1");
-    expect(resolveSingleMapShadowFlow(win)).toBe("uniform-v1");
-    expect(isStreamPageRoute(win)).toBe(false);
-    expect(isStreamingLikeViewport(win)).toBe(false);
-    expect(resolveClientViewportRuntimeProfile(win)).toEqual(
-      resolveClientViewportRuntimeProfile(previewWindow("")),
-    );
-    expect(resolveClientViewportRuntimeProfile(win).enableLocalPhysics).toBe(
-      true,
-    );
-    expect(shouldAdmitNetworkEntityInViewport("resource", win)).toBe(true);
-    expect(shouldAdmitNetworkEntityInViewport("npc", win)).toBe(true);
-  });
+  it.each(["http://localhost:3333/", "http://localhost:3344/"])(
+    "admits island art without disabling interactive capabilities at %s",
+    (base) => {
+      const win = previewWindow(
+        `${query}&grassAppearance=fine-meadow-v1&flowers=rooted-v1&skyAtmosphere=scattering-v1&shadowFlow=uniform-v1`,
+        base,
+      );
+      expect(resolveLocalPlayerWorldPreview(win)).toBe(true);
+      expect(resolveExplicitStreamingRenderProfile(win)?.id).toBe(
+        "island-fine-meadow-720p60-v1",
+      );
+      expect(resolveGrassAppearanceCandidate(win)).toBe("fine-meadow-v1");
+      expect(resolveRootedFlowerCandidate(win)).toBe("rooted-v1");
+      expect(resolveSkyAtmosphereMode(win)).toBe("scattering-v1");
+      expect(resolveSingleMapShadowFlow(win)).toBe("uniform-v1");
+      expect(isStreamPageRoute(win)).toBe(false);
+      expect(isStreamingLikeViewport(win)).toBe(false);
+      expect(resolveClientViewportRuntimeProfile(win)).toEqual(
+        resolveClientViewportRuntimeProfile(previewWindow("")),
+      );
+      expect(resolveClientViewportRuntimeProfile(win).enableLocalPhysics).toBe(
+        true,
+      );
+      expect(shouldAdmitNetworkEntityInViewport("resource", win)).toBe(true);
+      expect(shouldAdmitNetworkEntityInViewport("npc", win)).toBe(true);
+    },
+  );
 
   it.each([
     "http://localhost:3334/",
+    "http://localhost:3345/",
     "http://127.0.0.1:3333/",
+    "http://127.0.0.1:3344/",
     "https://localhost:3333/",
+    "https://localhost:3344/",
+    "http://localhost.example.com:3344/",
     "https://example.com/",
     "http://localhost:3333/play",
     "http://localhost:3333/stream.html",
+    "http://localhost:3344/play",
+    "http://localhost:3344/stream.html",
   ])("rejects preview outside the explicit local player route: %s", (base) => {
     expect(() =>
       resolveLocalPlayerWorldPreview(previewWindow(query, base)),
@@ -120,10 +134,12 @@ describe("explicit local playable world preview", () => {
     "worldPreview=retained-v1",
     "streamRenderProfile=island-fine-meadow-720p60-v1",
   ])("rejects conflicting or ambiguous selectors: %s", (extra) => {
-    const win = previewWindow(`${query}&${extra}`);
-    expect(() => resolveLocalPlayerWorldPreview(win)).toThrow();
-    expect(() => resolveExplicitStreamingRenderProfile(win)).toThrow();
-    expect(() => resolveClientViewportRuntimeProfile(win)).toThrow();
+    for (const base of ["http://localhost:3333/", "http://localhost:3344/"]) {
+      const win = previewWindow(`${query}&${extra}`, base);
+      expect(() => resolveLocalPlayerWorldPreview(win)).toThrow();
+      expect(() => resolveExplicitStreamingRenderProfile(win)).toThrow();
+      expect(() => resolveClientViewportRuntimeProfile(win)).toThrow();
+    }
   });
 
   it.each(["", "retained-v2", "RETAINED-V1", "%20retained-v1"])(
@@ -2614,6 +2630,562 @@ describe("explicit exact-zero rock sampling URL policy", () => {
   });
 });
 
+describe("explicit grass verge evaluation", () => {
+  const dependencies =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1";
+  const selected = "grassVerge=exact-zero-v1";
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  function visit(query: string, path = "/stream.html"): Window {
+    dom.reconfigure({ url: `http://localhost:3344${path}?${query}` });
+    return dom.window as unknown as Window;
+  }
+
+  it("does not infer the optimization or inspect unselected dependencies", () => {
+    for (const query of ["", dependencies, "grassGeometry=invalid"])
+      expect(resolveGrassVergeEvaluation(visit(query))).toBeUndefined();
+  });
+
+  it("admits streaming and retained-player views without altering quality or peer selectors", () => {
+    const peers = [
+      resolveClientViewportRuntimeProfile,
+      resolveExplicitStreamingRenderProfile,
+      resolveGrassAppearanceCandidate,
+      resolveGrassLightingCandidate,
+      resolveGrassGeometryCandidate,
+      resolveGrassCoverageTrial,
+      resolveGrassGroundingExecution,
+      resolveCompactGroundSampling,
+    ];
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/", "worldPreview=retained-v1&"],
+    ]) {
+      const baseline = visit(`${prefix}${dependencies}`, path);
+      const before = peers.map((resolve) => resolve(baseline));
+      const candidate = visit(`${prefix}${dependencies}&${selected}`, path);
+      expect(resolveGrassVergeEvaluation(candidate)).toBe("exact-zero-v1");
+      expect(peers.map((resolve) => resolve(candidate))).toEqual(before);
+    }
+  });
+
+  it("rejects unknown, empty or duplicated selections and missing dependencies", () => {
+    for (const suffix of [
+      "grassVerge=",
+      "grassVerge=true",
+      `${selected}&${selected}`,
+      `${selected}&grassVerge=invalid`,
+      `grassVerge=invalid&${selected}`,
+    ])
+      expect(() =>
+        resolveGrassVergeEvaluation(visit(`${dependencies}&${suffix}`)),
+      ).toThrow("Unknown or duplicate");
+    for (const key of [
+      "streamRenderProfile",
+      "grassAppearance",
+      "grassLighting",
+      "grassGeometry",
+    ]) {
+      const params = new URLSearchParams(dependencies);
+      params.delete(key);
+      expect(() =>
+        resolveGrassVergeEvaluation(visit(`${params}&${selected}`)),
+      ).toThrow();
+    }
+    for (const geometry of [
+      "sheath-close-v1",
+      "rooted-fan-v1",
+      "meadow-canopy-v1",
+    ])
+      expect(() =>
+        resolveGrassVergeEvaluation(
+          visit(
+            `${dependencies.replace("meadow-field-v1", geometry)}&${selected}`,
+          ),
+        ),
+      ).toThrow("explicit meadow field");
+  });
+
+  it.each([false, true])(
+    "captures selection only once, enabled=%s",
+    (enabled) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(`${dependencies}${enabled ? `&${selected}` : ""}`),
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.vergeEvaluation).toBe(
+          enabled ? "exact-zero-v1" : undefined,
+        );
+        visit(`${dependencies}&grassVerge=invalid`);
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+});
+
+describe("explicit attribute-only grass instancing", () => {
+  const dependencies =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1";
+  const selected = "grassInstancing=attributes-v1";
+  const verge = "grassVerge=exact-zero-v1";
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  function visit(query: string, path = "/stream.html"): Window {
+    dom.reconfigure({ url: `http://localhost:3344${path}?${query}` });
+    return dom.window as unknown as Window;
+  }
+
+  it("stays inert without an explicit selection, including malformed peer selectors", () => {
+    expect(resolveGrassInstancingCandidate()).toBeUndefined();
+    for (const query of [
+      "",
+      dependencies,
+      `${dependencies}&${verge}`,
+      "grassGeometry=invalid&grassVerge=invalid",
+    ])
+      expect(resolveGrassInstancingCandidate(visit(query))).toBeUndefined();
+  });
+
+  it("admits existing views without changing quality or independent verge selection", () => {
+    const peers = [
+      resolveClientViewportRuntimeProfile,
+      resolveExplicitStreamingRenderProfile,
+      resolveGrassAppearanceCandidate,
+      resolveGrassLightingCandidate,
+      resolveGrassGeometryCandidate,
+      resolveGrassVergeEvaluation,
+      resolveGrassCoverageTrial,
+      resolveGrassGroundingExecution,
+      resolveCompactGroundSampling,
+    ];
+    for (const [path, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/", "worldPreview=retained-v1&"],
+    ]) {
+      for (const suffix of ["", `&${verge}`]) {
+        const baseline = visit(`${prefix}${dependencies}${suffix}`, path);
+        const before = peers.map((resolve) => resolve(baseline));
+        const candidate = visit(
+          `${prefix}${dependencies}${suffix}&${selected}`,
+          path,
+        );
+        expect(resolveGrassInstancingCandidate(candidate)).toBe(
+          "attributes-v1",
+        );
+        expect(peers.map((resolve) => resolve(candidate))).toEqual(before);
+      }
+    }
+  });
+
+  it("rejects unknown, empty and duplicate instancing selections", () => {
+    for (const suffix of [
+      "grassInstancing=",
+      "grassInstancing=true",
+      "grassInstancing=attributes-v2",
+      `${selected}&${selected}`,
+      `${selected}&grassInstancing=invalid`,
+      `grassInstancing=invalid&${selected}`,
+    ])
+      expect(() =>
+        resolveGrassInstancingCandidate(visit(`${dependencies}&${suffix}`)),
+      ).toThrow("Unknown or duplicate");
+  });
+
+  it("requires unambiguous meadow-field, leaf-volume and fine-profile dependencies", () => {
+    for (const key of [
+      "streamRenderProfile",
+      "grassAppearance",
+      "grassLighting",
+      "grassGeometry",
+    ]) {
+      const missing = new URLSearchParams(dependencies);
+      missing.delete(key);
+      const duplicate = new URLSearchParams(dependencies);
+      duplicate.append(key, duplicate.get(key)!);
+      const invalid = new URLSearchParams(dependencies);
+      invalid.set(key, "invalid");
+      for (const query of [missing, duplicate, invalid])
+        expect(() =>
+          resolveGrassInstancingCandidate(visit(`${query}&${selected}`)),
+        ).toThrow();
+    }
+    for (const geometry of [
+      "sheath-close-v1",
+      "rooted-fan-v1",
+      "meadow-canopy-v1",
+    ])
+      expect(() =>
+        resolveGrassInstancingCandidate(
+          visit(
+            `${dependencies.replace("meadow-field-v1", geometry)}&${selected}`,
+          ),
+        ),
+      ).toThrow("explicit meadow field");
+    for (const [before, after] of [
+      ["leaf-volume-v1", "canopy-normal-v1"],
+      ["island-fine-meadow-720p60-v1", "island-meadow-720p60-v1"],
+      ["grassAppearance=fine-meadow-v1", "grassAppearance=natural-tuft-v1"],
+    ])
+      expect(() =>
+        resolveGrassInstancingCandidate(
+          visit(`${dependencies.replace(before, after)}&${selected}`),
+        ),
+      ).toThrow();
+  });
+
+  it("rejects unadmitted routes and single-cell coverage without changing their policies", () => {
+    expect(() =>
+      resolveGrassInstancingCandidate(
+        visit(`${dependencies}&${selected}`, "/"),
+      ),
+    ).toThrow();
+    for (const suffix of [
+      "embedded=true",
+      "page=stream&page=stream",
+      "grassCoverage=sixty-centimetre-cell-v1&grassCoverageCell=12,11",
+      "grassCoverageCell=12,11",
+    ])
+      expect(() =>
+        resolveGrassInstancingCandidate(
+          visit(`${dependencies}&${selected}&${suffix}`),
+        ),
+      ).toThrow();
+  });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    "freezes selection once, instancing=%s verge=%s",
+    (instancing, vergeOn) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(
+          `${dependencies}${instancing ? `&${selected}` : ""}${vergeOn ? `&${verge}` : ""}`,
+        ),
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.instancing).toBe(
+          instancing ? "attributes-v1" : undefined,
+        );
+        expect(captured.vergeEvaluation).toBe(
+          vergeOn ? "exact-zero-v1" : undefined,
+        );
+        visit(`${dependencies}&grassInstancing=invalid&grassVerge=invalid`);
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects a non-sculpted actual terrain owner before freezing selection", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit(`${dependencies}&${selected}`),
+    });
+    try {
+      expect(() => terrain["getCompactGrassColorGrade"]()).toThrow(
+        "requires the compact fine meadow",
+      );
+      expect(terrain["grassVisualSelection"]).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+
+  it("forwards the frozen instancing selection immediately after the verge argument", () => {
+    // Source ordering only; actual material/mesh ownership is covered separately.
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/resolveGrassInstancingCandidate\(\)/gu)).toHaveLength(
+      1,
+    );
+    expect(source).toMatch(
+      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*\);/u,
+    );
+  });
+});
+
+describe("explicit exact-zero ground sampling URL policy", () => {
+  const dependencies =
+    "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&rockProjection=stochastic-v1&dirtProjection=stochastic-v1&terrainBlend=height-v1&pondBlend=composition-v1&rockSampling=exact-zero-v1";
+  const selected = "groundSampling=exact-zero-v1";
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+
+  function visit(pathname: string, query: string): Window {
+    dom.reconfigure({ url: `http://localhost:3344${pathname}?${query}` });
+    Reflect.deleteProperty(dom.window, "__HYPERIA_EMBEDDED__");
+    return dom.window as unknown as Window;
+  }
+
+  it("keeps server, defaults, existing profiles and malformed unselected dependencies inert", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "window");
+    try {
+      expect(resolveCompactGroundSampling()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+    }
+    for (const pathname of ["/play", "/stream.html", "/"])
+      for (const profile of ["", ...Object.keys(STREAMING_RENDER_PROFILES)])
+        expect(
+          resolveCompactGroundSampling(
+            visit(pathname, `streamRenderProfile=${profile}`),
+          ),
+        ).toBeUndefined();
+    for (const query of [dependencies, "rockSampling=invalid", "rockSampling="])
+      expect(
+        resolveCompactGroundSampling(visit("/stream.html", query)),
+      ).toBeUndefined();
+  });
+
+  it("admits explicit streaming or retained-player dependencies without changing peer selections", () => {
+    const resolvers = [
+      resolveCompactRockSampling,
+      resolveCompactRockProjectionCandidate,
+      resolveCompactDirtProjectionCandidate,
+      resolveCompactSurfaceBlendCandidate,
+      resolveCompactPondBlendCandidate,
+      resolveCompactCoastBlend,
+      resolveGrassAppearanceCandidate,
+      resolveGrassGeometryCandidate,
+      resolveGrassLightingCandidate,
+    ];
+    for (const [pathname, prefix] of [
+      ["/stream.html", ""],
+      ["/", "page=stream&"],
+      ["/", "worldPreview=retained-v1&"],
+    ])
+      for (const coast of [
+        "",
+        "&coastBlend=detail-v1",
+        "&coastBlend=distribution-v1",
+      ]) {
+        const query = `${prefix}${dependencies}${coast}`;
+        const before = visit(pathname, query);
+        const peerSelections = resolvers.map((resolve) => resolve(before));
+        const renderProfile = resolveExplicitStreamingRenderProfile(before);
+        const viewport = resolveClientViewportRuntimeProfile(before);
+        const candidate = visit(pathname, `${query}&${selected}`);
+        expect(resolveCompactGroundSampling(candidate)).toBe("exact-zero-v1");
+        expect(resolvers.map((resolve) => resolve(candidate))).toEqual(
+          peerSelections,
+        );
+        expect(resolveExplicitStreamingRenderProfile(candidate)).toBe(
+          renderProfile,
+        );
+        expect(resolveClientViewportRuntimeProfile(candidate)).toEqual(
+          viewport,
+        );
+      }
+  });
+
+  it("rejects empty, nonexact and duplicate ground selectors", () => {
+    for (const value of [
+      "",
+      "unknown",
+      "EXACT-ZERO-V1",
+      "%20exact-zero-v1",
+      "exact-zero-v1%20",
+      "exact-zero-v1%0A",
+      "exact-zero-v1&groundSampling=exact-zero-v1",
+      "exact-zero-v1&groundSampling=",
+      "&groundSampling=exact-zero-v1",
+    ])
+      expect(() =>
+        resolveCompactGroundSampling(
+          visit("/stream.html", `${dependencies}&groundSampling=${value}`),
+        ),
+      ).toThrow("ground sampling candidate");
+  });
+
+  it("rejects missing, malformed or duplicate rock sampling and every inherited dependency", () => {
+    for (const key of [
+      "rockSampling",
+      "streamRenderProfile",
+      "grassAppearance",
+      "rockProjection",
+      "dirtProjection",
+      "terrainBlend",
+      "pondBlend",
+    ])
+      for (const mutation of ["missing", "empty", "unknown", "duplicate"]) {
+        const params = new URLSearchParams(`${dependencies}&${selected}`);
+        const value = params.get(key)!;
+        if (mutation === "missing") params.delete(key);
+        else if (mutation === "duplicate") params.append(key, value);
+        else params.set(key, mutation === "empty" ? "" : "unknown");
+        expect(() =>
+          resolveCompactGroundSampling(
+            visit("/stream.html", params.toString()),
+          ),
+        ).toThrow();
+      }
+    for (const suffix of [
+      "&coastBlend=cavity-v1",
+      "&coastBlend=",
+      "&coastBlend=unknown",
+      "&coastBlend=detail-v1&coastBlend=detail-v1",
+      "&embedded=true",
+      "&embedded=false&embedded=false",
+      "&streamFps=30",
+      "&streamFps=60&streamFps=60",
+    ])
+      expect(() =>
+        resolveCompactGroundSampling(
+          visit("/stream.html", `${dependencies}&${selected}${suffix}`),
+        ),
+      ).toThrow();
+    expect(() =>
+      resolveCompactGroundSampling(
+        visit("/play", `${dependencies}&${selected}`),
+      ),
+    ).toThrow();
+    const embedded = visit("/stream.html", `${dependencies}&${selected}`);
+    Object.assign(embedded, { __HYPERIA_EMBEDDED__: true });
+    expect(() => resolveCompactGroundSampling(embedded)).toThrow(
+      "non-embedded",
+    );
+  });
+
+  function withTerrain(
+    query: string,
+    check: (terrain: TerrainSystem) => void,
+  ): void {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+    const identity = DataManager.getWorldContentIdentity();
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("/stream.html", query),
+    });
+    try {
+      check(terrain);
+      expect(DataManager.getWorldContentIdentity()).toBe(identity);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  }
+
+  it.each([false, true])(
+    "captures absence or selection once on the real terrain owner, selected=%s",
+    (enabled) => {
+      withTerrain(
+        `${dependencies}${enabled ? `&${selected}` : ""}`,
+        (terrain) => {
+          expect(terrain["getCompactRockSampling"]()).toBe("exact-zero-v1");
+          expect(terrain["getCompactGroundSampling"]()).toBe(
+            enabled ? "exact-zero-v1" : undefined,
+          );
+          expect(terrain["compactGroundSampling"]).toBe(
+            enabled ? "exact-zero-v1" : null,
+          );
+          visit("/stream.html", `${dependencies}&groundSampling=invalid`);
+          expect(terrain["getCompactGroundSampling"]()).toBe(
+            enabled ? "exact-zero-v1" : undefined,
+          );
+          expect(terrain.getWorldTerrainProfile()).toBe(
+            SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+          );
+        },
+      );
+    },
+  );
+
+  it("rejects incompatible terrain or a rock dependency absent at owner capture", () => {
+    withTerrain(`${dependencies}&${selected}`, (terrain) => {
+      terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+      expect(() => terrain["getCompactGroundSampling"]()).toThrow(
+        "Ground sampling requires compact sculpt terrain",
+      );
+    });
+    const withoutRock = new URLSearchParams(dependencies);
+    withoutRock.delete("rockSampling");
+    withTerrain(withoutRock.toString(), (terrain) => {
+      expect(terrain["getCompactRockSampling"]()).toBeUndefined();
+      visit("/stream.html", `${dependencies}&${selected}`);
+      expect(() => terrain["getCompactGroundSampling"]()).toThrow(
+        "Ground sampling requires captured exact-zero-v1 rock sampling",
+      );
+    });
+  });
+
+  it("captures after rock admission and forwards only the cached material option", () => {
+    const source = readFileSync(
+      new URL("../../systems/shared/world/TerrainSystem.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source.match(/resolveCompactGroundSampling\(\)/gu)).toHaveLength(1);
+    const capture = source.slice(
+      source.indexOf("  private getCompactGroundSampling()"),
+      source.indexOf("  private getCompactSurfaceBlend()"),
+    );
+    expect(capture).toContain(
+      "this.compactGroundSampling = selection ?? null;",
+    );
+    expect(capture).toContain(
+      "return this.compactGroundSampling ?? undefined;",
+    );
+    expect(capture).toContain(
+      'this.getCompactRockSampling() !== "exact-zero-v1"',
+    );
+    expect(source).toContain(
+      "compactGroundSampling: this.getCompactGroundSampling(),",
+    );
+    const initialize = source.slice(
+      source.indexOf("  private async initialize():"),
+      source.indexOf("  async start():"),
+    );
+    expect(
+      initialize.indexOf("this.getCompactGroundSampling();"),
+    ).toBeGreaterThan(initialize.indexOf("this.getCompactRockSampling();"));
+    expect(initialize.indexOf("this.getCompactGroundSampling();")).toBeLessThan(
+      initialize.indexOf("this.initTerrainMaterial();"),
+    );
+  });
+});
+
 describe("explicit per-blade grass road-clearance URL policy", () => {
   const fine =
     "streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1";
@@ -2947,7 +3519,7 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,

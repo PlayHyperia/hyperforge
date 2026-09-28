@@ -42,6 +42,13 @@ type Session = {
   owners: Map<RetainedTerrainSurface, ReturnType<typeof gridGeometry>>;
   coordinator: GrassGroundingWorkerCoordinator;
   terminal: Map<number, GrassGroundingWorkerResponse>;
+  history: {
+    type: GrassGroundingWorkerResponse["type"];
+    jobId: number | null;
+    generation?: number | null;
+    state?: string;
+    reason?: string;
+  }[];
   wait: (jobId: number) => Promise<void>;
   close: () => Promise<void>;
 };
@@ -64,6 +71,7 @@ async function session(): Promise<Session> {
     return Boolean(geometry && surface.matchesGeometry(geometry));
   });
   const terminal = new Map<number, GrassGroundingWorkerResponse>();
+  const history: Session["history"] = [];
   const waiting = new Map<
     number,
     {
@@ -74,6 +82,14 @@ async function session(): Promise<Session> {
   >();
   const observe = (event: MessageEvent<unknown>) => {
     const response = event.data as GrassGroundingWorkerResponse;
+    if (history.length >= 128) history.shift();
+    history.push({
+      type: response.type,
+      jobId: response.jobId,
+      generation: response.generation,
+      ...("state" in response ? { state: response.state.status } : {}),
+      ...("reason" in response ? { reason: response.reason } : {}),
+    });
     if (response.type === "accepted" || response.jobId === null) return;
     if (terminal.size >= 100)
       throw new Error("Actual coordinator event bound exceeded");
@@ -101,6 +117,7 @@ async function session(): Promise<Session> {
     owners,
     coordinator,
     terminal,
+    history,
     wait,
     close: async () => {
       coordinator.destroy();
@@ -127,6 +144,21 @@ function start(value: Session, item: Fixture) {
     lease.getWaterSurfaceAt,
     lease.isExcludedAt,
     lease.current,
+  );
+  return { job, lease };
+}
+
+function startSoft(value: Session, item: Fixture) {
+  for (const { surface, geometry } of item.owned)
+    value.owners.set(surface, geometry);
+  const lease = sourceLease(item);
+  const job = value.coordinator.createJob(
+    item.request,
+    lease.inputs(),
+    lease.getWaterSurfaceAt,
+    lease.isExcludedAt,
+    lease.current,
+    "soft-cost-finite-lifetime-v1",
   );
   return { job, lease };
 }
@@ -461,6 +493,118 @@ afterEach(async () => {
 });
 
 describe("actual retained-terrain grounding worker coordinator", () => {
+  it("carries one opt-in lifetime through actual preparation, fitting and publication", async () => {
+    const item = fixture(),
+      value = await session();
+    const reference = expected(item),
+      { job } = startSoft(value, item);
+    expect(job.execution).toBeUndefined();
+    job.advance(1);
+    const execution = job.execution;
+    expect(execution?.policy).toBe("soft-cost-finite-lifetime-v1");
+    expect(Object.isFrozen(execution)).toBe(true);
+    await atPhase(value, job, "remapping");
+    expect(job.execution).toBe(execution);
+    const terminal = await finish(value, job);
+    expect(job.execution).toBe(execution);
+    expect(terminal.status).toBe("ready");
+    if (terminal.status !== "ready") throw new Error(JSON.stringify(terminal));
+    expect(terminal.result.receipt.cost).toEqual({
+      policy: execution!.policy,
+      status: job.activeMs >= 250 ? "OVER_TARGET" : "WITHIN_TARGET",
+      targetMs: 250,
+    });
+    expect(terminal.result.receipt.elapsedMs).toBe(job.activeMs);
+    const result = {
+      ...terminal.result,
+      receipt: { ...terminal.result.receipt },
+    };
+    delete result.receipt.cost;
+    expect(comparable(result, item)).toEqual(comparable(reference, item));
+    expect(performance.timeOrigin + performance.now()).toBeLessThan(
+      execution!.deadlineEpochMs,
+    );
+    expect(value.coordinator.activeJob).toBeNull();
+  });
+
+  it("expires suspended active work without renewing its lifetime or charging dormant queue time", async () => {
+    const item = fixture(),
+      value = await session();
+    const { job } = startSoft(value, item),
+      { job: dormant } = startSoft(value, item);
+    await atPhase(value, job, "remapping");
+    const execution = job.execution!;
+    const operations = job.operations;
+    expect(dormant.execution).toBeUndefined();
+    // Real wall-clock suspension; no fake timers, clocks, workers or methods.
+    await new Promise<void>((resolve) =>
+      setTimeout(
+        resolve,
+        Math.max(
+          0,
+          execution.deadlineEpochMs -
+            performance.timeOrigin -
+            performance.now(),
+        ) + 20,
+      ),
+    );
+    expect(job.state).toEqual({ status: "failed_budget", reason: "lifetime" });
+    expect(job.advance()).toEqual(job.state);
+    expect(job.operations).toBe(operations);
+    expect(job.execution).toBe(execution);
+    expect(dormant.state.status).toBe("running");
+    expect(dormant.execution).toBeUndefined();
+    const terminal = await finish(value, dormant);
+    expect(terminal.status).toBe("ready");
+    expect(dormant.execution!.deadlineEpochMs).toBeGreaterThan(
+      execution.deadlineEpochMs,
+    );
+    expect(value.coordinator.activeJob).toBeNull();
+  }, 20_000);
+
+  it("invalidates an opt-in job before publication when its real terrain geometry changes", async () => {
+    const item = fixture(),
+      value = await session();
+    const { job } = startSoft(value, item);
+    await atPhase(value, job, "remapping");
+    item.owned[0].geometry.getAttribute("position").needsUpdate = true;
+    expect(job.advance()).toEqual({
+      status: "cancelled",
+      reason: "invalidated",
+    });
+    expect(value.coordinator.activeJob).toBeNull();
+  });
+
+  it("keeps strict cost-failure memoization separate from opt-in reuse of the same actual surface", async () => {
+    const item = fixture(),
+      value = await session();
+    const { job: strict } = start(value, item);
+    await atPhase(value, strict, "preparing");
+    // Seed the actual admission ledger at its public historical limit. This
+    // exercises policy, not a timing measurement; no method/worker is replaced.
+    const context: unknown = Reflect.get(value.coordinator, "active");
+    if (!context || typeof context !== "object" || !("admission" in context))
+      throw new Error("Missing real admission context");
+    const admission = context.admission;
+    if (!admission || typeof admission !== "object" || !("work" in admission))
+      throw new Error("Missing real admission ledger");
+    const work = admission.work;
+    if (!work || typeof work !== "object" || !("activeMs" in work))
+      throw new Error("Missing real admission cost");
+    work.activeMs = 250;
+    expect(strict.advance()).toEqual({
+      status: "failed_budget",
+      reason: "active_cpu",
+    });
+    const { job: repeated } = start(value, item);
+    expect(await finish(value, repeated)).toEqual(strict.state);
+    expect(value.port.postCalls).toBe(0);
+    const { job: soft } = startSoft(value, item);
+    expect((await finish(value, soft)).status).toBe("ready");
+    expect(value.coordinator.receipt.preparedOwners).toBe(
+      item.request.surfaces.length,
+    );
+  });
   it.each<SameFaceCase>([
     "ordinary-lod1",
     "fine-near4",
@@ -638,7 +782,7 @@ describe("actual retained-terrain grounding worker coordinator", () => {
     const fits = [...value.terminal.values()].filter(
       (response) => response.type === "result",
     );
-    expect(fits).toHaveLength(2);
+    expect(fits, JSON.stringify(value.history)).toHaveLength(2);
     expect(fits[1].jobId).toBeGreaterThan(oldId);
     expect(fits[1].generation).toBeGreaterThan(fits[0].generation!);
   });

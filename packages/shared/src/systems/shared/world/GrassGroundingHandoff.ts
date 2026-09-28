@@ -7,9 +7,12 @@ import {
   GRASS_BLADE_GROUNDING_LIMITS,
   GRASS_BLADE_GROUNDING_JOB_LIMITS as limits,
   captureGrassBankVerge,
+  captureGrassGroundingExecution,
+  grassGroundingTimeFailure,
   validateGrassGroundingConsumedWork,
   type GrassBladeGroundingRequest,
   type GrassGroundingConsumedWork,
+  type GrassGroundingExecution,
 } from "./GrassBladeGrounding";
 import { getGrassBladeLayout } from "./GrassBladeLayout";
 import type { GrassGroundingInputLease } from "./GrassGroundingPipeline";
@@ -369,7 +372,10 @@ export function* prepareGrassGroundingHandoffSteps(
 export type GrassGroundingPreparationState =
   | { status: "running" }
   | { status: "prepared"; prepared: GrassGroundingPreparedInput }
-  | { status: "failed_budget"; reason: "operations" | "active_cpu" }
+  | {
+      status: "failed_budget";
+      reason: "operations" | "active_cpu" | "lifetime";
+    }
   | { status: "failed_input"; error: unknown }
   | { status: "cancelled"; reason: "caller" | "invalidated" };
 
@@ -377,6 +383,7 @@ export type GrassGroundingPreparationState =
  * Carry these cumulative counters into the fitting and later remap continuation;
  * reaching another execution owner does not reset the per-job allowance. */
 export class GrassGroundingPreparationContinuation {
+  private readonly execution: GrassGroundingExecution | undefined;
   private iterator: Generator<string, GrassGroundingPreparedInput, void> | null;
   private current: GrassGroundingPreparationState = { status: "running" };
   operations = 0;
@@ -390,10 +397,15 @@ export class GrassGroundingPreparationContinuation {
     steps: Generator<string, GrassGroundingPreparedInput, void>,
     private readonly isCurrent: () => boolean,
     consumedWork?: GrassGroundingConsumedWork,
+    execution?: GrassGroundingExecution,
   ) {
+    this.execution = captureGrassGroundingExecution(execution);
     this.iterator = steps;
     if (consumedWork !== undefined) {
-      const consumed = validateGrassGroundingConsumedWork(consumedWork);
+      const consumed = validateGrassGroundingConsumedWork(
+        consumedWork,
+        this.execution,
+      );
       this.operations = consumed.operations;
       this.activeMs = consumed.activeMs;
       this.maximumSliceMs = consumed.maximumSliceMs;
@@ -421,14 +433,20 @@ export class GrassGroundingPreparationContinuation {
   }
 
   private recordSlice(started: number): void {
-    this.lastSliceMs = performance.now() - started;
+    const now = performance.now();
+    this.lastSliceMs = now - started;
     this.activeMs += this.lastSliceMs;
     this.maximumSliceMs = Math.max(this.maximumSliceMs, this.lastSliceMs);
+    const failure = grassGroundingTimeFailure(
+      this.activeMs,
+      this.execution,
+      now,
+    );
     if (
-      this.activeMs >= limits.maximumActiveMs &&
+      failure &&
       (this.current.status === "running" || this.current.status === "prepared")
     )
-      this.close({ status: "failed_budget", reason: "active_cpu" });
+      this.close({ status: "failed_budget", reason: failure });
   }
 
   advance(
@@ -462,10 +480,15 @@ export class GrassGroundingPreparationContinuation {
           return this.close({ status: "failed_budget", reason: "operations" });
         if (this.lastSliceOperations % limits.clockInterval === 0) {
           const now = performance.now();
-          if (this.activeMs + now - started >= limits.maximumActiveMs)
+          const failure = grassGroundingTimeFailure(
+            this.activeMs + now - started,
+            this.execution,
+            now,
+          );
+          if (failure)
             return this.close({
               status: "failed_budget",
-              reason: "active_cpu",
+              reason: failure,
             });
           if (now >= deadline) break;
         }

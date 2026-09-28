@@ -516,18 +516,71 @@ export function* createRootedFlowerPlacementSteps(
     });
   }
   requireLiveLeases();
+  const centerX = (origin.x - 4) / 8,
+    centerZ = (origin.z - 4) / 8;
+  const roadCells: number[][] = Array.from({ length: 121 }, () => []);
+  const wideRoads: number[] = [];
+  for (let index = 0; index < roads.length; index++) {
+    yield "flower_road_index";
+    check();
+    const road = roads[index];
+    // Every Float32 candidate lies inside its 8m cell; bounds admission above
+    // proves the complete geometry/wind reach is <=1m. Keep closed contact.
+    const padding = road.width / 2 + (road.blendWidth ?? 0.5) + 1;
+    const minX = Math.max(
+        centerX - 5,
+        Math.ceil((Math.min(road.startX, road.endX) - padding) / 8) - 1,
+      ),
+      maxX = Math.min(
+        centerX + 5,
+        Math.floor((Math.max(road.startX, road.endX) + padding) / 8),
+      ),
+      minZ = Math.max(
+        centerZ - 5,
+        Math.ceil((Math.min(road.startZ, road.endZ) - padding) / 8) - 1,
+      ),
+      maxZ = Math.min(
+        centerZ + 5,
+        Math.floor((Math.max(road.startZ, road.endZ) + padding) / 8),
+      );
+    // Do not replicate island-spanning capsules into every bucket. Two sorted
+    // index lists are merged below to preserve exact original early-exit order.
+    if ((maxX - minX + 1) * (maxZ - minZ + 1) > 16) {
+      wideRoads.push(index);
+      continue;
+    }
+    for (let cx = minX; cx <= maxX; cx++)
+      for (let cz = minZ; cz <= maxZ; cz++) {
+        yield "flower_road_bucket";
+        check();
+        roadCells[(cx - centerX + 5) * 11 + cz - centerZ + 5].push(index);
+      }
+  }
   const exclusions: TerrainGridBounds[] = [];
+  const retainExclusion = (box: TerrainGridBounds): void => {
+    // Snapshot validation and complete envelope construction precede this
+    // broad phase. The full placement horizon includes every candidate's
+    // geometry/wind sweep; touching bounds stay in their original order.
+    if (
+      box.maxX < needed.minX ||
+      box.minX > needed.maxX ||
+      box.maxZ < needed.minZ ||
+      box.minZ > needed.maxZ
+    )
+      return;
+    exclusions.push(box);
+  };
   for (const zone of snapshot.zones) {
     yield "flower_zone_admission";
     check();
     if (zone.excludeGrass === false) continue;
     if (zone.grassExclusionBounds) {
-      exclusions.push({ ...zone.grassExclusionBounds });
+      retainExclusion({ ...zone.grassExclusionBounds });
       continue;
     }
     if (zone.radialPond) {
       const r = zone.radialPond.bankOuterRadius + zone.blendRadius;
-      exclusions.push({
+      retainExclusion({
         minX: zone.centerX - r,
         maxX: zone.centerX + r,
         minZ: zone.centerZ - r,
@@ -557,9 +610,9 @@ export function* createRootedFlowerPlacementSteps(
         box.minZ = Math.min(box.minZ, tile.z - zone.blendRadius);
         box.maxZ = Math.max(box.maxZ, tile.z + 1 + zone.blendRadius);
       }
-      if (box.minX <= box.maxX) exclusions.push(box);
+      if (box.minX <= box.maxX) retainExclusion(box);
     } else {
-      exclusions.push({
+      retainExclusion({
         minX: zone.centerX - zone.width / 2 - zone.blendRadius,
         maxX: zone.centerX + zone.width / 2 + zone.blendRadius,
         minZ: zone.centerZ - zone.depth / 2 - zone.blendRadius,
@@ -571,7 +624,7 @@ export function* createRootedFlowerPlacementSteps(
     yield "flower_polygon_envelope";
     check();
     // Deliberately conservative full polygon AABB, not sparse point probes.
-    exclusions.push({
+    retainExclusion({
       minX: polygon.minX,
       maxX: polygon.maxX,
       minZ: polygon.minZ,
@@ -588,8 +641,6 @@ export function* createRootedFlowerPlacementSteps(
     nz: 0,
     faceIndex: 0,
   };
-  const centerX = (origin.x - 4) / 8,
-    centerZ = (origin.z - 4) / 8;
   for (let cx = centerX - 5; cx <= centerX + 5; cx++)
     for (let cz = centerZ - 5; cz <= centerZ + 5; cz++) {
       // Broad meadow coverage with subtle regional thinning. Habitat and full
@@ -654,7 +705,16 @@ export function* createRootedFlowerPlacementSteps(
         // These complete horizontal envelopes can prove rejection without any
         // terrain residency. Do not turn known roads/water/pads into deferred work.
         let rejected = false;
-        for (const road of roads) {
+        const cellRoads = roadCells[(cx - centerX + 5) * 11 + cz - centerZ + 5];
+        let localIndex = 0,
+          wideIndex = 0;
+        while (localIndex < cellRoads.length || wideIndex < wideRoads.length) {
+          const local = cellRoads[localIndex] ?? Infinity;
+          const wide = wideRoads[wideIndex] ?? Infinity;
+          const road =
+            roads[
+              local < wide ? cellRoads[localIndex++] : wideRoads[wideIndex++]
+            ];
           yield "flower_road";
           check();
           if (

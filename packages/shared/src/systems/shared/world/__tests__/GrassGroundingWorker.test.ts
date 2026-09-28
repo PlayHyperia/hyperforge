@@ -12,6 +12,8 @@ import {
   groundGrassBladeSteps,
   GRASS_BLADE_GROUNDING_LIMITS,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  GRASS_GROUNDING_MAXIMUM_LIFETIME_MS,
+  GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS,
 } from "../GrassBladeGrounding";
 import {
   createSameFaceCase,
@@ -33,6 +35,12 @@ import {
   type RetainedTerrainSurfaceSnapshot,
 } from "../TerrainGridSurface";
 import { gridGeometry } from "./terrain-grid.fixture";
+import { getGrassBladeLayout } from "../GrassBladeLayout";
+import {
+  createClumpGeometry,
+  createPairedMeadowClumpGeometry,
+  FINE_GRASS_MEADOW_FIELD_SHAPE,
+} from "../GrassVisualManager";
 
 let bundledSource = "";
 let bundledInputs: string[] = [];
@@ -223,6 +231,130 @@ afterEach(async () => {
 });
 
 describe("actual isolated grass grounding worker", () => {
+  it.each([0, 1, 2] as const)(
+    "roundtrips paired-family LOD%s through real cold/cached fitting with one root pair and bit per slot",
+    async (lod) => {
+      const fixture = createSameFaceCase("fine-lod0");
+      const geometryLayout = "fine-meadow-paired-near-v1";
+      const tier = getGrassBladeLayout(lod, geometryLayout);
+      const geometry =
+        lod === 0
+          ? createPairedMeadowClumpGeometry()
+          : createClumpGeometry(
+              tier.bladesPerClump,
+              2,
+              FINE_GRASS_MEADOW_FIELD_SHAPE,
+            );
+      fixture.geometries.push(geometry);
+      fixture.request.geometry = geometry;
+      fixture.request.geometryLayout = geometryLayout;
+      fixture.request.lod = lod;
+      fixture.request.roadClearance = "per-blade-v1";
+      try {
+        const before = sameFaceInputHash(fixture);
+        const expected = groundGrassBlades(fixture.request);
+        expect(expected.status).toBe("ready");
+        if (expected.status !== "ready")
+          throw new Error("Expected paired fixture support");
+        expect(expected.data.count).toBe(fixture.request.data.count);
+        expect(expected.receipt.bladesPerClump).toBe([21, 21, 12][lod]);
+        expect(expected.rootDeltas).toHaveLength(
+          expected.data.count * tier.bladesPerClump * 2,
+        );
+        expect(expected.receipt.correctionBytes).toBe(
+          expected.data.count * tier.bladesPerClump * 8,
+        );
+        expect(expected.bladeVisibility).toEqual(
+          new Uint32Array(expected.data.count).fill(
+            2 ** tier.bladesPerClump - 1,
+          ),
+        );
+        for (const cached of [false, true]) {
+          const cold = workerRequest(fixture.request);
+          expect(cold.settings.geometryLayout).toBe(geometryLayout);
+          expect(cold.settings.lod).toBe(lod);
+          expect(cold.geometry.position).toEqual(
+            geometry.getAttribute("position").array,
+          );
+          expect(cold.geometry.normal).toEqual(
+            geometry.getAttribute("normal").array,
+          );
+          expect(cold.geometry.uv).toEqual(geometry.getAttribute("uv").array);
+          expect(cold.geometry.index).toEqual(geometry.index!.array);
+          expect(cold.geometry.position).toHaveLength([168, 105, 60][lod] * 3);
+          expect(cold.geometry.index).toHaveLength([126, 63, 36][lod] * 3);
+          const worker = await actualWorker();
+          const packet = cached
+            ? (await prepareCachedGrassGroundingWorkerRequest(worker, cold))
+                .request
+            : cold;
+          const response = await run(worker, packet);
+          expect(response.state.status).toBe("ready");
+          if (response.state.status !== "ready")
+            throw new Error("Paired worker fit did not complete");
+          expect(response.state.result.status).toBe("ready");
+          if (response.state.result.status !== "ready")
+            throw new Error("Paired worker geometry was not admitted");
+          expect(
+            semanticResult(response.state.result, fixture.request),
+          ).toEqual(semanticResult(expected, fixture.request));
+          expect(response.state.result.rootDeltas).toHaveLength(
+            expected.data.count * tier.bladesPerClump * 2,
+          );
+          expect(response.state.result.bladeVisibility).toHaveLength(
+            expected.data.count,
+          );
+          if (cached) expect(response.terrainRebuildWork).toBeNull();
+        }
+        expect(sameFaceInputHash(fixture)).toBe(before);
+        for (const { surface, geometry: terrain } of fixture.owned)
+          expect(surface.matchesGeometry(terrain)).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("admits a cross-realm deadline through actual preparation, fitting and release", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const worker = await actualWorker();
+      const preparation = preparePacket(workerRequest(fixture.request), 1, 1);
+      const fitting = cachedPacket(workerRequest(fixture.request), 2);
+      const execution = Object.freeze({
+        policy: "soft-cost-finite-lifetime-v1" as const,
+        deadlineEpochMs:
+          performance.timeOrigin +
+          performance.now() +
+          GRASS_GROUNDING_MAXIMUM_LIFETIME_MS +
+          GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS,
+      });
+      preparation.execution = execution;
+      fitting.execution = execution;
+      expect((await prepare(worker, preparation)).state.status).toBe(
+        "prepared",
+      );
+      expect((await run(worker, fitting)).state.status).toBe("ready");
+      worker.send({
+        type: "release_surfaces",
+        schemaVersion: 1,
+        jobId: 3,
+        generation: fitting.generation,
+        surfaceTokens: [1],
+        execution,
+      });
+      expect(await reply(worker, "surfaces_released", 3)).toMatchObject({
+        cache: { owners: 0, inputBytes: 0, derivedBytesReserved: 0 },
+      });
+      expect(preparation.execution.deadlineEpochMs).toBe(
+        execution.deadlineEpochMs,
+      );
+      expect(fitting.execution.deadlineEpochMs).toBe(execution.deadlineEpochMs);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
   it.each<SameFaceCase>([
     "ordinary-lod2",
     "refined-interiors",

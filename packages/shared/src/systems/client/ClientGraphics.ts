@@ -97,6 +97,11 @@ import {
   type GPUComputeManager,
 } from "../../utils/compute";
 import { RendererPreparationQueue } from "../../utils/rendering/RendererPreparationQueue";
+import {
+  OpaqueLoadingRenderGate,
+  type OpaqueLoadingCoverLease,
+  type OpaqueLoadingCoverStatus,
+} from "../../utils/rendering/OpaqueLoadingRenderGate";
 import type { Environment } from "../shared/world/Environment";
 import type { VegetationSystem } from "../shared/world/VegetationSystem";
 
@@ -142,11 +147,16 @@ export class ClientGraphics extends System {
   hasRendered: boolean = false;
   gpuCompute: GPUComputeManager | null = null;
   private readonly rendererPreparationQueue = new RendererPreparationQueue();
+  private readonly opaqueLoadingRenderGate: OpaqueLoadingRenderGate;
+  private pendingPrimaryCommitFrame: number | null = null;
   private static readonly PRECOMPILE_TIMEOUT_MS = 15_000;
   private static readonly RENDERER_READY_TIMEOUT_MS = 15_000;
 
   constructor(world: World) {
     super(world);
+    this.opaqueLoadingRenderGate = new OpaqueLoadingRenderGate(
+      () => this.world.frame,
+    );
   }
 
   override async init(
@@ -340,6 +350,7 @@ export class ClientGraphics extends System {
     this.width = width;
     this.height = height;
     this.aspect = this.width / this.height;
+    this.opaqueLoadingRenderGate.invalidate();
 
     // Update camera aspect ratio
     // THREE.PerspectiveCamera has aspect and updateProjectionMatrix properties
@@ -364,7 +375,21 @@ export class ClientGraphics extends System {
     this.render();
   }
 
+  /** The caller must own a mounted, fully opaque cover. New ownership replaces
+   * old ownership; ordinary clients never acquire and keep normal rendering. */
+  acquireOpaqueLoadingCover(): OpaqueLoadingCoverLease {
+    return this.opaqueLoadingRenderGate.acquire();
+  }
+
+  getOpaqueLoadingCoverStatus(): OpaqueLoadingCoverStatus {
+    return this.opaqueLoadingRenderGate.getStatus();
+  }
+
   render() {
+    // Consume commit credit before preparation/render callbacks can re-enter.
+    // Direct/resize renders and a second render in one wrapper have no credit.
+    const primaryWorldFrame = this.pendingPrimaryCommitFrame;
+    this.pendingPrimaryCommitFrame = null;
     this.world
       .getSystem<TerrainSystem>("terrain")
       ?.prepareGrassForRender(this.world.camera);
@@ -385,12 +410,21 @@ export class ClientGraphics extends System {
         this.renderer.domElement.width,
         this.renderer.domElement.height,
       );
+    // Keep primary-view scheduling, offscreen fog and all preparation above
+    // active. Only the final scene/composer submission is covered by this gate.
+    if (!this.isPrecompileIdle()) this.opaqueLoadingRenderGate.invalidate();
+    const submission = this.opaqueLoadingRenderGate.beginSubmission();
+    if (submission === null) return;
     if (!this.usePostprocessing || !this.composer) {
       this.renderer.render(this.world.stage.scene, this.world.camera);
     } else {
       this.composer.render();
     }
     this.hasRendered = true;
+    this.opaqueLoadingRenderGate.completeSubmission(
+      submission,
+      primaryWorldFrame,
+    );
   }
 
   /**
@@ -400,6 +434,7 @@ export class ClientGraphics extends System {
    * before the compiler waits on backend pipeline promises.
    */
   precompileObject(object: THREE.Object3D): Promise<void> {
+    this.opaqueLoadingRenderGate.invalidate();
     return this.rendererPreparationQueue.run(
       (startCallerDeadline) =>
         this.precompileObjectNow(object, startCallerDeadline),
@@ -416,6 +451,7 @@ export class ClientGraphics extends System {
    * await another prepareRenderer/precompileObject call inside this callback.
    */
   prepareRenderer<T>(operation: () => T | Promise<T>): Promise<T> {
+    this.opaqueLoadingRenderGate.invalidate();
     return this.rendererPreparationQueue.run(
       (startCallerDeadline) => {
         startCallerDeadline();
@@ -488,7 +524,15 @@ export class ClientGraphics extends System {
   }
 
   override commit() {
-    this.render();
+    // World.frame advances once per world tick. Direct/resize renders do not
+    // acknowledge warmup. Preserve public dispatch for existing profilers.
+    const previous = this.pendingPrimaryCommitFrame;
+    this.pendingPrimaryCommitFrame = this.world.frame;
+    try {
+      this.render();
+    } finally {
+      this.pendingPrimaryCommitFrame = previous;
+    }
   }
 
   override preTick() {
@@ -512,7 +556,23 @@ export class ClientGraphics extends System {
     depthBlur?: { value: boolean };
     depthBlurIntensity?: { value: number };
     depthBlurDistance?: { value: number };
+    shadows?: { value: string };
+    waterReflections?: { value: boolean };
   }) => {
+    if (
+      changes.dpr ||
+      changes.postprocessing ||
+      changes.bloom ||
+      changes.colorGrading ||
+      changes.colorGradingIntensity ||
+      changes.depthBlur ||
+      changes.depthBlurIntensity ||
+      changes.depthBlurDistance ||
+      changes.shadows ||
+      changes.waterReflections
+    ) {
+      this.opaqueLoadingRenderGate.invalidate();
+    }
     // dpr
     if (changes.dpr) {
       this.renderer.setPixelRatio(changes.dpr.value);
@@ -556,6 +616,7 @@ export class ClientGraphics extends System {
   };
 
   override destroy() {
+    this.opaqueLoadingRenderGate.destroy();
     // Guard against destruction before initialization
     if (this.resizer) {
       this.resizer.disconnect();

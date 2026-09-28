@@ -5,11 +5,14 @@ import {
   GrassGroundingContinuation,
   groundGrassBladeSteps,
   validateGrassGroundingConsumedWork,
+  captureGrassGroundingExecution,
+  grassGroundingTimeFailure,
   type GrassBladeGroundingRequest,
   type GrassBladeGroundingResult,
   type GrassGroundingConsumedWork,
   type GrassGroundingTiming,
   type GrassGroundingTimingSpan,
+  type GrassGroundingExecution,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
 import {
@@ -223,19 +226,23 @@ function surfaceTokens(value: unknown, allowEmpty = false): number[] {
 /** Constant-count boundary checks reserve payload BEFORE any terrain rebuild.
  * Detailed geometry/topology/constraint checks run in the real sliced core. */
 function admit(value: unknown, cached: boolean) {
-  const r = object(value, [
-    "type",
-    "schemaVersion",
-    "jobId",
-    "generation",
-    "ownSurfaceToken",
-    cached ? "surfaceTokens" : "surfaces",
-    "geometry",
-    "data",
-    "constraints",
-    "settings",
-    "consumed",
-  ]);
+  const r = object(
+    value,
+    [
+      "type",
+      "schemaVersion",
+      "jobId",
+      "generation",
+      "ownSurfaceToken",
+      cached ? "surfaceTokens" : "surfaces",
+      "geometry",
+      "data",
+      "constraints",
+      "settings",
+      "consumed",
+    ],
+    ["execution"],
+  );
   requireValue(
     r.type === (cached ? "start_cached" : "start") &&
       r.schemaVersion === 1 &&
@@ -340,7 +347,8 @@ function admit(value: unknown, cached: boolean) {
       constraints.roadSegments.length <= 4096,
     "Invalid grounding road capacity",
   );
-  validateGrassGroundingConsumedWork(r.consumed);
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  validateGrassGroundingConsumedWork(r.consumed, execution);
   const request = value as
     GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest;
   const buffers = grassGroundingWorkerInputTransfers(request);
@@ -349,7 +357,7 @@ function admit(value: unknown, cached: boolean) {
     0,
   );
   assertReservation(inputBytes, derivedBytes);
-  return { request, inputBytes, derivedBytes };
+  return { request, inputBytes, derivedBytes, execution };
 }
 
 type CachedSurface = {
@@ -395,7 +403,10 @@ type ActiveFit = ReturnType<typeof admit> & {
 type PreparationState =
   | { status: "running" }
   | { status: "prepared"; surface: RetainedTerrainSurface }
-  | { status: "failed_budget"; reason: "operations" | "active_cpu" }
+  | {
+      status: "failed_budget";
+      reason: "operations" | "active_cpu" | "lifetime";
+    }
   | { status: "failed_input"; error: unknown }
   | { status: "cancelled"; reason: "caller" | "invalidated" };
 
@@ -424,6 +435,7 @@ class PreparationTimingSpan {
 /** Surface admission has its own real result type and ledger. It never pretends
  * to be ready grass. The fitting continuation and its caps remain unchanged. */
 class SurfacePreparationContinuation {
+  private readonly execution: GrassGroundingExecution | undefined;
   private iterator: Generator<string, RetainedTerrainSurface, void> | null;
   private current: PreparationState = { status: "running" };
   private readonly peakSlice = new PreparationTimingSpan();
@@ -442,8 +454,13 @@ class SurfacePreparationContinuation {
     steps: Generator<string, RetainedTerrainSurface, void>,
     private readonly isCurrent: () => boolean,
     consumed: GrassGroundingConsumedWork,
+    execution?: GrassGroundingExecution,
   ) {
-    const admitted = validateGrassGroundingConsumedWork(consumed);
+    this.execution = captureGrassGroundingExecution(execution, "cross-realm");
+    const admitted = validateGrassGroundingConsumedWork(
+      consumed,
+      this.execution,
+    );
     this.iterator = steps;
     this.operations = admitted.operations;
     this.activeMs = admitted.activeMs;
@@ -503,11 +520,16 @@ class SurfacePreparationContinuation {
     }
     this.activeMs += sliceMs;
     this.maximumSliceMs = Math.max(this.maximumSliceMs, sliceMs);
+    const failure = grassGroundingTimeFailure(
+      this.activeMs,
+      this.execution,
+      now,
+    );
     if (
-      this.activeMs >= jobLimits.maximumActiveMs &&
+      failure &&
       (this.current.status === "running" || this.current.status === "prepared")
     )
-      this.close({ status: "failed_budget", reason: "active_cpu" });
+      this.close({ status: "failed_budget", reason: failure });
   }
 
   advance(): void {
@@ -536,8 +558,13 @@ class SurfacePreparationContinuation {
         if (sliceOperations % jobLimits.clockInterval === 0) {
           const now = performance.now();
           this.recordClockInterval(now);
-          if (this.activeMs + now - started >= jobLimits.maximumActiveMs) {
-            this.close({ status: "failed_budget", reason: "active_cpu" });
+          const failure = grassGroundingTimeFailure(
+            this.activeMs + now - started,
+            this.execution,
+            now,
+          );
+          if (failure) {
+            this.close({ status: "failed_budget", reason: failure });
             return;
           }
           if (now >= deadline) break;
@@ -983,15 +1010,19 @@ function terminal(row: Active): void {
 }
 
 function admitPreparation(value: unknown) {
-  const r = object(value, [
-    "type",
-    "schemaVersion",
-    "jobId",
-    "generation",
-    "token",
-    "snapshot",
-    "consumed",
-  ]);
+  const r = object(
+    value,
+    [
+      "type",
+      "schemaVersion",
+      "jobId",
+      "generation",
+      "token",
+      "snapshot",
+      "consumed",
+    ],
+    ["execution"],
+  );
   requireValue(
     r.type === "prepare_surface" &&
       r.schemaVersion === 1 &&
@@ -1009,7 +1040,8 @@ function admitPreparation(value: unknown) {
     "Grounding surface cache capacity exceeded",
   );
   const admitted = admitSurface(r.snapshot);
-  validateGrassGroundingConsumedWork(r.consumed);
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  validateGrassGroundingConsumedWork(r.consumed, execution);
   const request = value as GrassGroundingWorkerPrepareSurface;
   // The helper also rejects aliasing between individual snapshot fields.
   grassGroundingWorkerInputTransfers(request);
@@ -1018,17 +1050,16 @@ function admitPreparation(value: unknown) {
     request,
     inputBytes: admitted.inputBytes,
     derivedBytes: admitted.derivedBytes,
+    execution,
   };
 }
 
 function releaseSurfaces(value: unknown): void {
-  const r = object(value, [
-    "type",
-    "schemaVersion",
-    "jobId",
-    "generation",
-    "surfaceTokens",
-  ]);
+  const r = object(
+    value,
+    ["type", "schemaVersion", "jobId", "generation", "surfaceTokens"],
+    ["execution"],
+  );
   requireValue(
     r.type === "release_surfaces" &&
       r.schemaVersion === 1 &&
@@ -1037,6 +1068,16 @@ function releaseSurfaces(value: unknown): void {
     "Invalid grounding release identity",
   );
   const tokens = surfaceTokens(r.surfaceTokens, true);
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  if (execution && grassGroundingTimeFailure(0, execution)) {
+    scope.postMessage({
+      type: "rejected",
+      jobId: r.jobId,
+      generation: r.generation,
+      reason: "stale",
+    });
+    return;
+  }
   // Validate the entire command before releasing even one owner.
   for (const token of tokens)
     requireValue(surfaceCache.has(token), "Missing cached grounding surface");
@@ -1156,6 +1197,7 @@ scope.onmessage = ({ data }) => {
           rebuildSurface(admitted.request.snapshot, geometries),
           () => active === preparing,
           admitted.request.consumed,
+          admitted.execution,
         ),
       };
       lastAcceptedSurfaceToken = admitted.request.token;
@@ -1182,6 +1224,8 @@ scope.onmessage = ({ data }) => {
           }),
           () => active === fitting,
           admitted.request.consumed,
+          admitted.execution,
+          "cross-realm",
         ),
       };
       row = fitting;

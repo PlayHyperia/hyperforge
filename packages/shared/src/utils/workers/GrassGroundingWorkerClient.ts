@@ -1,7 +1,10 @@
 import {
   GRASS_BLADE_GROUNDING_JOB_LIMITS as jobLimits,
   validateGrassGroundingConsumedWork,
+  captureGrassGroundingExecution,
+  GRASS_GROUNDING_MAXIMUM_LIFETIME_MS,
   type GrassGroundingConsumedWork,
+  type GrassGroundingExecution,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
 import {
@@ -77,6 +80,7 @@ type Owner = {
   sourceRevision: string;
 };
 type Admission = {
+  execution?: GrassGroundingExecution;
   inputBytes: number;
   derivedBytesReserved: number;
   consumed: Readonly<GrassGroundingConsumedWork>;
@@ -350,6 +354,7 @@ function validateTiming(
   value: unknown,
   seed: Readonly<GrassGroundingConsumedWork>,
   consumed: Readonly<GrassGroundingConsumedWork>,
+  execution?: GrassGroundingExecution,
 ): void {
   const timing = record(value, [
     "timeBasis",
@@ -371,7 +376,11 @@ function validateTiming(
   const roundingSteps =
     consumed.operations -
     seed.operations +
-    Math.ceil(jobLimits.maximumActiveMs / jobLimits.targetSliceMs) +
+    Math.ceil(
+      (execution
+        ? GRASS_GROUNDING_MAXIMUM_LIFETIME_MS
+        : jobLimits.maximumActiveMs) / jobLimits.targetSliceMs,
+    ) +
     3;
   const relativeRoundoff = roundingSteps * Number.EPSILON;
   const localRoundoff =
@@ -471,16 +480,25 @@ export class GrassGroundingWorkerClient {
       dispatchCpuMs: 0,
       postMessageCpuMs: 0,
       receiveCpuMs: 0,
-      deadline: performance.now() + WATCHDOG_MS,
+      deadline: admitted.execution
+        ? admitted.execution.deadlineEpochMs - performance.timeOrigin
+        : performance.now() + WATCHDOG_MS,
     };
     this.slot = slot;
-    this.timer = setTimeout(() => {
-      if (this.slot === slot && !slot.settled)
-        this.fail(
-          "timeout",
-          "Grounding worker exceeded 10-second transport deadline",
-        );
-    }, WATCHDOG_MS);
+    this.timer = setTimeout(
+      () => {
+        if (this.slot === slot && !slot.settled)
+          this.fail(
+            "timeout",
+            slot.execution
+              ? "Grounding worker exceeded context lifetime"
+              : "Grounding worker exceeded 10-second transport deadline",
+          );
+      },
+      slot.execution
+        ? Math.max(0, slot.deadline - performance.now())
+        : WATCHDOG_MS,
+    );
     const postStarted = performance.now();
     let failed = false,
       error: unknown;
@@ -639,11 +657,20 @@ export class GrassGroundingWorkerClient {
       if (performance.now() >= slot.deadline) {
         this.fail(
           "timeout",
-          "Grounding worker exceeded 10-second transport deadline",
+          slot.execution
+            ? "Grounding worker exceeded context lifetime"
+            : "Grounding worker exceeded 10-second transport deadline",
         );
         return;
       }
       const response = this.validateResponse(value, slot);
+      if (slot.execution && performance.now() >= slot.deadline) {
+        this.fail(
+          "timeout",
+          "Grounding worker exceeded context lifetime during response validation",
+        );
+        return;
+      }
       if (response.type === "accepted") {
         slot.accepted = true;
         if (slot.requestType === "prepare_surface")
@@ -695,13 +722,16 @@ export class GrassGroundingWorkerClient {
               "settings",
               "consumed",
             ],
+      ["execution"],
     );
     ensure(
       r.schemaVersion === 1 &&
         integer(r.generation, Number.MAX_SAFE_INTEGER, 1),
       "Invalid grounding request generation",
     );
+    const execution = captureGrassGroundingExecution(r.execution);
     const admission: Admission = {
+      ...(execution ? { execution } : {}),
       inputBytes: 0,
       derivedBytesReserved: 0,
       consumed: ZERO_WORK,
@@ -722,7 +752,10 @@ export class GrassGroundingWorkerClient {
         );
       return admission;
     }
-    admission.consumed = validateGrassGroundingConsumedWork(r.consumed);
+    admission.consumed = validateGrassGroundingConsumedWork(
+      r.consumed,
+      execution,
+    );
     if (type === "prepare_surface") {
       ensure(
         integer(r.token, Number.MAX_SAFE_INTEGER, this.lastPreparedToken + 1) &&
@@ -984,7 +1017,7 @@ export class GrassGroundingWorkerClient {
           (status === "failed_budget" || status === "failed_input"),
         "Grounding timing is failure-only",
       );
-      validateTiming(r.timing, slot.consumed, consumed);
+      validateTiming(r.timing, slot.consumed, consumed, slot.execution);
     }
     if (status === "prepared") {
       const state = record(r.state, ["status", "token", "sourceRevision"]);
@@ -993,7 +1026,8 @@ export class GrassGroundingWorkerClient {
           slot.preparedOwner &&
           state.token === slot.tokens[0] &&
           state.sourceRevision === slot.preparedOwner.sourceRevision &&
-          consumed.activeMs < jobLimits.maximumActiveMs,
+          (slot.execution !== undefined ||
+            consumed.activeMs < jobLimits.maximumActiveMs),
         "Invalid grounding prepared owner",
       );
       const next = new Map(this.owners);
@@ -1007,6 +1041,7 @@ export class GrassGroundingWorkerClient {
         ensure(
           r.type === "result" &&
             (status !== "ready" ||
+              slot.execution !== undefined ||
               consumed.activeMs < jobLimits.maximumActiveMs),
           "Invalid grounding result state",
         );
@@ -1023,6 +1058,7 @@ export class GrassGroundingWorkerClient {
           [
             "operations",
             "active_cpu",
+            ...(slot.execution ? ["lifetime"] : []),
             ...(r.type === "result" ? ["grounding_work"] : []),
           ].includes(state.reason as string),
           "Invalid grounding budget failure",
@@ -1129,8 +1165,20 @@ export class GrassGroundingWorkerClient {
         "maxAcceptedBaseError",
         "rejected",
       ],
-      ["geometryLayout", "roadClearance"],
+      ["geometryLayout", "roadClearance", ...(slot.execution ? ["cost"] : [])],
     );
+    if (slot.execution) {
+      const cost = record(receipt.cost, ["policy", "status", "targetMs"]);
+      ensure(
+        cost.policy === slot.execution.policy &&
+          cost.targetMs === jobLimits.maximumActiveMs &&
+          cost.status ===
+            (activeMs >= jobLimits.maximumActiveMs
+              ? "OVER_TARGET"
+              : "WITHIN_TARGET"),
+        "Invalid grounding soft-cost receipt",
+      );
+    }
     for (const key of [
       "elapsedMs",
       "inputClumps",

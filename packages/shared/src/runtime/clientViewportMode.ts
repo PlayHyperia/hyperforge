@@ -4,7 +4,9 @@ import {
 } from "../utils/workers/GrassPlacementCell";
 import type {
   CompactCoastBlend,
+  CompactGroundSampling,
   CompactPondBlend,
+  GrassVergeEvaluation,
 } from "../systems/shared/world/CompactTerrainMaterial";
 import {
   deserializeWorldTerrainProfile,
@@ -135,6 +137,7 @@ export type GrassAppearanceCandidate = "natural-tuft-v1" | "fine-meadow-v1";
 export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassGeometryCandidate =
   "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
+export type GrassInstancingCandidate = "attributes-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -272,6 +275,38 @@ export function resolveGrassGeometryCandidate(
   return values[0];
 }
 
+/** Grass vertex work only; absence preserves the existing material graph. */
+export function resolveGrassVergeEvaluation(
+  win?: Window,
+): GrassVergeEvaluation | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("grassVerge") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "exact-zero-v1")
+    throw new Error("Unknown or duplicate grass verge evaluation");
+  if (resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1")
+    throw new Error(
+      "Grass verge evaluation requires the explicit meadow field",
+    );
+  return "exact-zero-v1";
+}
+
+/** Explicit attribute-only instancing; omission keeps the existing mesh path. */
+export function resolveGrassInstancingCandidate(
+  win?: Window,
+): GrassInstancingCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("grassInstancing") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "attributes-v1")
+    throw new Error("Unknown or duplicate grass instancing candidate");
+  if (resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1")
+    throw new Error("Grass instancing requires the explicit meadow field");
+  return "attributes-v1";
+}
+
 /** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
 export function resolveCompactDirtProjectionCandidate(
   win?: Window,
@@ -337,6 +372,21 @@ export function resolveCompactRockSampling(
     );
   if (resolveCompactCoastBlend(windowRef) === "cavity-v1")
     throw new Error("Rock sampling does not support cavity-v1 coast blending");
+  return "exact-zero-v1";
+}
+
+/** Opt-in ground sampling; omission never inspects or changes existing choices. */
+export function resolveCompactGroundSampling(
+  win?: Window,
+): CompactGroundSampling | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("groundSampling") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "exact-zero-v1")
+    throw new Error("Unknown or duplicate ground sampling candidate");
+  if (resolveCompactRockSampling(windowRef) !== "exact-zero-v1")
+    throw new Error("Ground sampling requires exact-zero-v1 rock sampling");
   return "exact-zero-v1";
 }
 
@@ -586,8 +636,12 @@ export function resolveLocalPlayerWorldPreview(win?: Window): boolean {
   if (selections.length !== 1 || selections[0] !== "retained-v1") {
     throw new Error("worldPreview requires exactly one retained-v1 value");
   }
+  // Keep isolated ordinary-player checks off the saved playable server.
+  const localPlayerOrigin =
+    windowRef.location.origin === "http://localhost:3333" ||
+    windowRef.location.origin === "http://localhost:3344";
   if (
-    windowRef.location.origin !== "http://localhost:3333" ||
+    !localPlayerOrigin ||
     windowRef.location.pathname !== "/" ||
     ["page", "mode", "embedded", "streamWorld"].some((key) =>
       params?.has(key),
@@ -1054,6 +1108,27 @@ export function isEmbeddedSpectatorViewport(win?: Window): boolean {
 
 export function isStreamingLikeViewport(win?: Window): boolean {
   return isStreamPageRoute(win) || isEmbeddedSpectatorViewport(win);
+}
+
+export type ZoneNavigationMode = "world-v1" | "minimap-v1" | "none";
+
+/**
+ * Keep unqualified world presentation changes opt-in. Both the scene owner
+ * and minimap use this policy so discovery cues move together; spectator
+ * layouts never acquire player navigation markers.
+ */
+export function resolveZoneNavigationMode(win?: Window): ZoneNavigationMode {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return "world-v1";
+  const selections = getSearchParams(windowRef)?.getAll("zoneNavigation") ?? [];
+  if (
+    selections.length > 1 ||
+    (selections.length === 1 && selections[0] !== "minimap-v1")
+  ) {
+    throw new Error("zoneNavigation requires exactly one minimap-v1 value");
+  }
+  if (isStreamingLikeViewport(windowRef)) return "none";
+  return selections.length === 1 ? "minimap-v1" : "world-v1";
 }
 
 export type StreamingWorldProfileId = "preparation-v1";

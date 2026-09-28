@@ -10,9 +10,11 @@ import {
 } from "../GrassBladeLayout";
 import {
   createClumpGeometry,
+  createPairedMeadowClumpGeometry,
   FINE_GRASS_MEADOW_CANOPY_SHAPE,
   FINE_GRASS_MEADOW_FIELD_COMPOSITION,
   FINE_GRASS_MEADOW_FIELD_SHAPE,
+  FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT,
   FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
 } from "../GrassVisualManager";
@@ -33,11 +35,27 @@ const WIDTHS = [0.95, 1.05, 0.8] as const;
 // These numerical contracts do not establish final artwork or performance.
 const ARCS = [0.52, 1, 0.8] as const;
 
-function make(tier: Tier) {
+type ParentBlade = Parameters<
+  NonNullable<Parameters<typeof createClumpGeometry>[4]>
+>[0];
+const PAIRED_SHAPES = [
+  { name: "raw field", shape: FINE_GRASS_MEADOW_FIELD_SHAPE },
+  {
+    name: "quartic field",
+    shape: {
+      ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+      BLADE_WIDTH_BEZIER_CONTROL_POINTS: [0.25, 2.3, 1.3, 0, 0] as const,
+    },
+  },
+] as const;
+
+function make(tier: Tier, twoRanked = false) {
   return createClumpGeometry(
     tier.blades,
     tier.segments,
-    FINE_GRASS_MEADOW_FIELD_SHAPE,
+    twoRanked
+      ? { ...FINE_GRASS_MEADOW_FIELD_SHAPE, LEAF_ARRANGEMENT: "two-ranked-v1" }
+      : FINE_GRASS_MEADOW_FIELD_SHAPE,
   );
 }
 
@@ -346,10 +364,14 @@ describe("explicit dense meadow ribbon source geometry", () => {
     },
   );
 
-  it.each(TIERS)(
-    "matches an independent smooth ribbon normal and positive triangle winding at LOD$lod",
+  it.each(
+    TIERS.flatMap((tier) =>
+      [false, true].map((twoRanked) => ({ ...tier, twoRanked })),
+    ),
+  )(
+    "matches an independent smooth ribbon normal and positive winding at LOD$lod, two-ranked=$twoRanked",
     (tier) => {
-      const geometry = make(tier);
+      const geometry = make(tier, tier.twoRanked);
       try {
         const uv = geometry.getAttribute("uv");
         for (let blade = 0; blade < tier.blades; blade++) {
@@ -421,52 +443,238 @@ describe("explicit dense meadow ribbon source geometry", () => {
     },
   );
 
-  it("retains exact root endpoints/tips at every LOD and the 21-to-12 mid/far prefix", () => {
-    const geometries = TIERS.map(make);
-    const repeat = make(TIERS[0]);
-    try {
-      for (const name of ["position", "normal", "uv"])
-        expect(repeat.getAttribute(name).array).toEqual(
-          geometries[0].getAttribute(name).array,
-        );
-      expect(repeat.index!.array).toEqual(geometries[0].index!.array);
-      for (const [i, tier] of TIERS.entries()) {
-        for (let blade = 0; blade < tier.blades; blade++) {
-          for (const [local, referenceLocal] of [
-            [0, 0],
-            [1, 1],
-            [2 * tier.segments, 6],
-          ]) {
-            for (const name of ["position", "normal"] as const)
-              expect(
-                vector(
-                  geometries[i],
-                  name,
-                  blade * tier.stride + local,
-                ).toArray(),
-              ).toEqual(
-                vector(
-                  geometries[0],
-                  name,
-                  blade * 7 + referenceLocal,
-                ).toArray(),
-              );
+  it.each([false, true])(
+    "retains exact LOD endpoints and the 21-to-12 prefix, two-ranked=%s",
+    (twoRanked) => {
+      const geometries = TIERS.map((tier) => make(tier, twoRanked));
+      const repeat = make(TIERS[0], twoRanked);
+      try {
+        for (const name of ["position", "normal", "uv"])
+          expect(repeat.getAttribute(name).array).toEqual(
+            geometries[0].getAttribute(name).array,
+          );
+        expect(repeat.index!.array).toEqual(geometries[0].index!.array);
+        for (const [i, tier] of TIERS.entries()) {
+          for (let blade = 0; blade < tier.blades; blade++) {
+            for (const [local, referenceLocal] of [
+              [0, 0],
+              [1, 1],
+              [2 * tier.segments, 6],
+            ]) {
+              for (const name of ["position", "normal"] as const)
+                expect(
+                  vector(
+                    geometries[i],
+                    name,
+                    blade * tier.stride + local,
+                  ).toArray(),
+                ).toEqual(
+                  vector(
+                    geometries[0],
+                    name,
+                    blade * 7 + referenceLocal,
+                  ).toArray(),
+                );
+            }
           }
         }
-      }
-      for (const name of ["position", "normal", "uv"]) {
-        const far = geometries[2].getAttribute(name).array;
-        expect(far).toEqual(
-          geometries[1].getAttribute(name).array.slice(0, far.length),
+        for (const name of ["position", "normal", "uv"]) {
+          const far = geometries[2].getAttribute(name).array;
+          expect(far).toEqual(
+            geometries[1].getAttribute(name).array.slice(0, far.length),
+          );
+        }
+        expect(geometries[2].index!.array).toEqual(
+          geometries[1].index!.array.slice(0, geometries[2].index!.count),
         );
+      } finally {
+        [...geometries, repeat].forEach((geometry) => geometry.dispose());
       }
-      expect(geometries[2].index!.array).toEqual(
-        geometries[1].index!.array.slice(0, geometries[2].index!.count),
+    },
+  );
+
+  it("admits the optional arrangement only for an unmixed field ribbon", () => {
+    const selected = {
+      ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+      LEAF_ARRANGEMENT: "two-ranked-v1" as const,
+    };
+    const unknown = { ...selected };
+    Reflect.set(unknown, "LEAF_ARRANGEMENT", "unknown");
+    for (const shape of [
+      unknown,
+      { ...selected, ROOT_COMPOSITION: undefined },
+      { ...selected, ROOT_COMPOSITION: "meadow-canopy-v1" as const },
+      { ...selected, ROOT_COMPOSITION: "progressive-fan-v1" as const },
+      { ...selected, PROGRESSIVE_ROOTS: false },
+      { ...selected, TUFT_BLADES: 3 },
+    ])
+      expect(() => createClumpGeometry(21, 3, shape)).toThrow();
+    expect(() =>
+      createClumpGeometry(21, 3, selected, "folded-lancet-v1"),
+    ).toThrow();
+    const geometry = make(TIERS[0], true);
+    const original = make(TIERS[0]);
+    try {
+      expect(original.userData.grassLeafArrangement).toBeUndefined();
+      expect(geometry.userData.grassRootComposition).toBe(
+        FINE_GRASS_MEADOW_FIELD_COMPOSITION,
       );
+      expect(
+        Object.getOwnPropertyDescriptor(
+          geometry.userData,
+          "grassLeafArrangement",
+        ),
+      ).toEqual({
+        value: FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+      expect(FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.basalOffsets).toEqual([
+        0.01, -0.01, 0.003,
+      ]);
+      expect(FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.roleBearings).toEqual([
+        0,
+        Math.PI,
+        0,
+      ]);
+      for (const value of [
+        FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT,
+        FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.basalOffsets,
+        FINE_GRASS_TWO_RANKED_LEAF_ARRANGEMENT.roleBearings,
+      ])
+        expect(Object.isFrozen(value)).toBe(true);
     } finally {
-      [...geometries, repeat].forEach((geometry) => geometry.dispose());
+      geometry.dispose();
+      original.dispose();
     }
   });
+
+  it.each(TIERS)(
+    "authors compact opposed ranks without changing dimensions or budget at LOD$lod",
+    (tier) => {
+      const geometry = make(tier, true),
+        original = make(tier);
+      try {
+        const position = geometry.getAttribute("position");
+        expect(position.count).toBe(tier.blades * tier.stride);
+        expect(geometry.index!.array).toEqual(original.index!.array);
+        expect(geometry.getAttribute("uv").array).toEqual(
+          original.getAttribute("uv").array,
+        );
+        for (let vertex = 0; vertex < position.count; vertex++)
+          expect(position.getY(vertex)).toBe(
+            original.getAttribute("position").getY(vertex),
+          );
+        const golden = Math.PI * (3 - Math.sqrt(5));
+        for (let plant = 0; plant < tier.blades / 3; plant++) {
+          let fraction = 0,
+            bit = 0.5,
+            n = plant + 1;
+          while (n > 0) {
+            fraction += (n % 2) * bit;
+            n = Math.floor(n / 2);
+            bit *= 0.5;
+          }
+          const center = new THREE.Vector3(
+            Math.cos(plant * golden),
+            0,
+            Math.sin(plant * golden),
+          ).multiplyScalar(0.7 * Math.sqrt(fraction));
+          const byRole = [0, 1, 2].map(
+            (role) => plant * 3 + ((role - (plant % 3) + 3) % 3),
+          );
+          const plane = root(geometry, byRole[0] * tier.stride)
+            .sub(center)
+            .normalize();
+          const lateral = new THREE.Vector3(-plane.z, 0, plane.x);
+          const turn = Math.atan2(plane.z, plane.x) - plant * golden;
+          expect(
+            Math.abs(Math.atan2(Math.sin(turn), Math.cos(turn))),
+          ).toBeLessThanOrEqual(0.12001);
+          for (const [role, blade] of byRole.entries()) {
+            const first = blade * tier.stride,
+              start = root(geometry, first);
+            const offset = start.clone().sub(center);
+            expect(start.y).toBe(0);
+            expect(offset.dot(plane)).toBeCloseTo(
+              [0.01, -0.01, 0.003][role],
+              6,
+            );
+            expect(Math.abs(offset.dot(lateral))).toBeLessThan(2e-7);
+            const arc = vector(geometry, "position", first + tier.segments * 2)
+              .sub(start)
+              .setY(0);
+            const oldArc = vector(
+              original,
+              "position",
+              first + tier.segments * 2,
+            )
+              .sub(root(original, first))
+              .setY(0);
+            expect(Math.abs(arc.length() - oldArc.length())).toBeLessThan(2e-7);
+            const direction = plane.clone().multiplyScalar(role === 1 ? -1 : 1);
+            expect(
+              arc.clone().normalize().dot(direction),
+            ).toBeGreaterThanOrEqual(Math.cos(0.12001));
+            const widthAxis = vector(geometry, "position", first + 3)
+              .sub(vector(geometry, "position", first + 2))
+              .normalize();
+            expect(Math.abs(widthAxis.dot(direction))).toBeLessThanOrEqual(
+              Math.sin(0.16001),
+            );
+            for (let row = 0; row < tier.segments; row++) {
+              const at = first + row * 2;
+              const width = vector(geometry, "position", at + 1).distanceTo(
+                vector(geometry, "position", at),
+              );
+              const previous = vector(original, "position", at + 1).distanceTo(
+                vector(original, "position", at),
+              );
+              expect(Math.abs(width - previous)).toBeLessThan(2e-7);
+            }
+          }
+          expect(
+            root(geometry, byRole[0] * tier.stride).distanceTo(
+              root(geometry, byRole[2] * tier.stride),
+            ),
+          ).toBeCloseTo(0.007, 6);
+          // The same-side basal triangles must not occupy a common plane. This
+          // rules out coincident surfaces, not every possible leaf intersection.
+          const triangle = (blade: number, local: number) =>
+            [0, 1, 2].map((corner) =>
+              vector(
+                geometry,
+                "position",
+                geometry.index!.getX(
+                  (blade * tier.triangles + local) * 3 + corner,
+                ),
+              ),
+            );
+          for (const a of [0, 1])
+            for (const b of [0, 1]) {
+              const first = triangle(byRole[0], a),
+                second = triangle(byRole[2], b);
+              const normal = first[1]
+                .clone()
+                .sub(first[0])
+                .cross(first[2].clone().sub(first[0]))
+                .normalize();
+              expect(
+                Math.max(
+                  ...second.map((point) =>
+                    Math.abs(point.clone().sub(first[0]).dot(normal)),
+                  ),
+                ),
+              ).toBeGreaterThan(1e-7);
+            }
+        }
+      } finally {
+        geometry.dispose();
+        original.dispose();
+      }
+    },
+  );
 
   it.each(TIERS)(
     "uses actual vertex heights for bounded CPU flex rather than legacy t^1.8 at LOD$lod",
@@ -517,7 +725,7 @@ describe("explicit dense meadow ribbon source geometry", () => {
   );
 
   it("accounts for denser roots and distant geometry instead of claiming a universal saving", () => {
-    const geometries = TIERS.map(make);
+    const geometries = TIERS.map((tier) => make(tier));
     try {
       // Infinite uniform-grid estimates only: real boundaries, habitat and
       // swept-road rejection change accepted populations and native work.
@@ -552,5 +760,339 @@ describe("explicit dense meadow ribbon source geometry", () => {
     } finally {
       geometries.forEach((geometry) => geometry.dispose());
     }
+  });
+});
+describe("unactivated paired meadow source prototype", () => {
+  function slotArea(
+    geometry: THREE.BufferGeometry,
+    slot: number,
+    triangleCount: number,
+  ) {
+    let area = 0;
+    for (let triangle = 0; triangle < triangleCount; triangle++) {
+      const [a, b, c] = [0, 1, 2].map((corner) =>
+        vector(
+          geometry,
+          "position",
+          geometry.index!.getX((slot * triangleCount + triangle) * 3 + corner),
+        ),
+      );
+      area += b.sub(a).cross(c.sub(a)).length() * 0.5;
+    }
+    return area;
+  }
+
+  it.each(PAIRED_SHAPES)(
+    "shares exact parent roots and seeded receipts with eight vertices/six triangles: $name",
+    ({ shape }) => {
+      const expected: ParentBlade[] = [];
+      const received: ParentBlade[] = [];
+      const parent = createClumpGeometry(21, 3, shape, undefined, (blade) =>
+        expected.push(blade),
+      );
+      const geometry = createPairedMeadowClumpGeometry(21, shape, (blade) =>
+        received.push(blade),
+      );
+      try {
+        expect(received).toEqual(expected);
+        expect(received).toHaveLength(21);
+        expect(received.every(Object.isFrozen)).toBe(true);
+        for (const name of ["position", "normal", "uv"]) {
+          const attribute = geometry.getAttribute(name);
+          expect(attribute.count).toBe(168);
+          expect(attribute.array).toBeInstanceOf(Float32Array);
+          expect(Array.from(attribute.array).every(Number.isFinite)).toBe(true);
+        }
+        expect(geometry.index!.array).toBeInstanceOf(Uint16Array);
+        expect(geometry.index!.count).toBe(378);
+        const indices = [0, 1, 2, 1, 3, 2, 2, 3, 4, 0, 1, 5, 1, 6, 5, 5, 6, 7];
+        const uv = geometry.getAttribute("uv");
+        const expectedUv = [
+          [0, 0],
+          [1, 0],
+          [0, 0.5],
+          [1, 0.5],
+          [0.5, 1],
+          [0, 0.5],
+          [1, 0.5],
+          [0.5, 1],
+        ];
+        for (let slot = 0; slot < 21; slot++) {
+          for (const local of [0, 1])
+            expect(
+              vector(geometry, "position", slot * 8 + local).toArray(),
+            ).toEqual(vector(parent, "position", slot * 7 + local).toArray());
+          expect(
+            Array.from(geometry.index!.array.slice(slot * 18, slot * 18 + 18)),
+          ).toEqual(indices.map((index) => slot * 8 + index));
+          for (let local = 0; local < 8; local++)
+            expect([
+              uv.getX(slot * 8 + local),
+              uv.getY(slot * 8 + local),
+            ]).toEqual(expectedUv[local]);
+        }
+        // Calling the prototype must not replace the live near geometry/layout.
+        expect(parent.getAttribute("position").count).toBe(147);
+        expect(parent.index!.count).toBe(315);
+        expect(getGrassBladeLayout(0, LAYOUT).verticesPerBlade).toBe(7);
+      } finally {
+        parent.dispose();
+        geometry.dispose();
+      }
+    },
+  );
+
+  it.each(PAIRED_SHAPES)(
+    "retains repeated buffers and the seeded twelve-slot source prefix: $name",
+    ({ shape }) => {
+      const full = createPairedMeadowClumpGeometry(21, shape);
+      const repeat = createPairedMeadowClumpGeometry(21, shape);
+      const prefix = createPairedMeadowClumpGeometry(12, shape);
+      try {
+        for (const name of ["position", "normal", "uv"]) {
+          expect(repeat.getAttribute(name).array).toEqual(
+            full.getAttribute(name).array,
+          );
+          const values = prefix.getAttribute(name).array;
+          expect(values).toEqual(
+            full.getAttribute(name).array.slice(0, values.length),
+          );
+        }
+        expect(repeat.index!.array).toEqual(full.index!.array);
+        expect(prefix.index!.array).toEqual(
+          full.index!.array.slice(0, prefix.index!.count),
+        );
+      } finally {
+        full.dispose();
+        repeat.dispose();
+        prefix.dispose();
+      }
+    },
+  );
+
+  it.each(PAIRED_SHAPES)(
+    "conserves each actual parent slot area without restoring broad middle faces: $name",
+    ({ shape }) => {
+      const parent = createClumpGeometry(21, 3, shape);
+      const geometry = createPairedMeadowClumpGeometry(21, shape);
+      try {
+        for (let slot = 0; slot < 21; slot++) {
+          const expected = slotArea(parent, slot, 5);
+          expect(
+            Math.abs(slotArea(geometry, slot, 6) / expected - 1),
+          ).toBeLessThan(2e-5);
+          const peak = Math.max(
+            ...[0, 2, 4].map((row) =>
+              vector(parent, "position", slot * 7 + row + 1).distanceTo(
+                vector(parent, "position", slot * 7 + row),
+              ),
+            ),
+          );
+          const widths = [2, 5].map((row) =>
+            vector(geometry, "position", slot * 8 + row + 1).distanceTo(
+              vector(geometry, "position", slot * 8 + row),
+            ),
+          );
+          for (const width of widths) {
+            expect(width).toBeGreaterThan(0);
+            expect(width).toBeLessThanOrEqual(peak * 0.65 + 2e-7);
+          }
+          expect(Math.abs(widths[0] - widths[1])).toBeLessThan(2e-7);
+          // One full-height leaf remains in every original slot; this is not
+          // another low-canopy composition or proof of projected coverage.
+          expect(vector(geometry, "position", slot * 8 + 4).y).toBe(
+            vector(parent, "position", slot * 7 + 6).y,
+          );
+        }
+      } finally {
+        parent.dispose();
+        geometry.dispose();
+      }
+    },
+  );
+
+  it.each(PAIRED_SHAPES)(
+    "follows independent quadratic derivatives with a common root tangent and positive winding: $name",
+    ({ shape }) => {
+      const blades: ParentBlade[] = [];
+      const geometry = createPairedMeadowClumpGeometry(21, shape, (blade) =>
+        blades.push(blade),
+      );
+      try {
+        for (const blade of blades) {
+          const first = blade.index * 8;
+          const start = new THREE.Vector3(blade.rootX, 0, blade.rootZ);
+          const axis = vector(geometry, "position", first + 1)
+            .sub(vector(geometry, "position", first))
+            .normalize();
+          const rootNormals: THREE.Vector3[] = [];
+          for (const [branch, lambda] of [1, 0.9].entries()) {
+            const turn = ((branch === 0 ? 1 : -1) * Math.PI) / 15;
+            const control = new THREE.Vector3(
+              blade.curveX * 0.35 * lambda,
+              blade.height * 0.76 * lambda,
+              blade.curveZ * 0.35 * lambda,
+            );
+            const tip = new THREE.Vector3(
+              blade.curveX * Math.cos(turn) - blade.curveZ * Math.sin(turn),
+              blade.height * 0.95 * lambda,
+              blade.curveX * Math.sin(turn) + blade.curveZ * Math.cos(turn),
+            );
+            for (const [local, t] of [
+              [0, 0],
+              [1, 0],
+              [branch === 0 ? 2 : 5, 0.5],
+              [branch === 0 ? 3 : 6, 0.5],
+              [branch === 0 ? 4 : 7, 1],
+            ]) {
+              const tangent = control
+                .clone()
+                .multiplyScalar(2 * (1 - 2 * t))
+                .addScaledVector(tip, 2 * t);
+              const expected = axis.clone().cross(tangent).normalize();
+              const normal = vector(geometry, "normal", first + local);
+              expect(normal.length()).toBeCloseTo(1, 6);
+              expect(normal.distanceTo(expected)).toBeLessThan(2e-6);
+              if (local === 0) rootNormals.push(expected);
+              expect(vector(geometry, "position", first + local).y).toBeCloseTo(
+                lambda * blade.height * (1.52 * t - 0.57 * t * t),
+                6,
+              );
+            }
+            const middle = root(geometry, first + (branch === 0 ? 2 : 5));
+            expect(
+              middle.distanceTo(
+                start
+                  .clone()
+                  .addScaledVector(control, 0.5)
+                  .addScaledVector(tip, 0.25),
+              ),
+            ).toBeLessThan(2e-7);
+            expect(
+              vector(
+                geometry,
+                "position",
+                first + (branch === 0 ? 4 : 7),
+              ).distanceTo(start.clone().add(tip)),
+            ).toBeLessThan(2e-7);
+          }
+          expect(rootNormals[0].distanceTo(rootNormals[1])).toBeLessThan(1e-14);
+          for (let triangle = 0; triangle < 6; triangle++) {
+            const vertices = [0, 1, 2].map((corner) =>
+              geometry.index!.getX((blade.index * 6 + triangle) * 3 + corner),
+            );
+            const [a, b, c] = vertices.map((vertex) =>
+              vector(geometry, "position", vertex),
+            );
+            const face = b.sub(a).cross(c.sub(a));
+            expect(face.length()).toBeGreaterThan(1e-8);
+            for (const vertex of vertices)
+              expect(
+                face.dot(vector(geometry, "normal", vertex)),
+              ).toBeGreaterThan(0);
+          }
+        }
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it.each(PAIRED_SHAPES)(
+    "certifies separated Float32 branch sheets above their sole common root edge: $name",
+    ({ shape }) => {
+      const geometry = createPairedMeadowClumpGeometry(21, shape);
+      try {
+        for (let slot = 0; slot < 21; slot++) {
+          const first = slot * 8;
+          const left = vector(geometry, "position", first);
+          const edge = vector(geometry, "position", first + 1).sub(left);
+          const project = (point: THREE.Vector3) =>
+            edge.x * (point.z - left.z) - edge.z * (point.x - left.x);
+          const rows = [
+            [0, 2, 4],
+            [0, 5, 7],
+          ].map((branch) =>
+            branch.map((local, row) => {
+              const a = vector(geometry, "position", first + local);
+              const b =
+                row === 2 ? a : vector(geometry, "position", first + local + 1);
+              expect(a.y).toBe(b.y);
+              return {
+                y: a.y,
+                low: Math.min(project(a), project(b)),
+                high: Math.max(project(a), project(b)),
+              };
+            }),
+          );
+          for (const branch of rows) {
+            expect(branch[0].y).toBe(0);
+            expect(Math.abs(branch[0].low)).toBe(0);
+            expect(Math.abs(branch[0].high)).toBe(0);
+            expect(branch[1].y).toBeGreaterThan(branch[0].y);
+            expect(branch[2].y).toBeGreaterThan(branch[1].y);
+          }
+          const at = (branch: (typeof rows)[number], y: number) => {
+            const row = y <= branch[1].y ? 0 : 1;
+            const from = branch[row],
+              to = branch[row + 1];
+            const t = (y - from.y) / (to.y - from.y);
+            return {
+              low: from.low + (to.low - from.low) * t,
+              high: from.high + (to.high - from.high) * t,
+            };
+          };
+          const end = Math.min(rows[0][2].y, rows[1][2].y);
+          const heights = [rows[0][1].y, rows[1][1].y, end]
+            .filter((y) => y <= end)
+            .sort((a, b) => a - b);
+          let direction = 0;
+          for (const y of heights) {
+            const a = at(rows[0], y),
+              b = at(rows[1], y);
+            // Quantized inputs are exact Float32 values; this tolerance only
+            // covers double-precision determinant/interpolation evaluation.
+            const tolerance = 32 * Number.EPSILON;
+            const current =
+              a.low - b.high > tolerance
+                ? 1
+                : b.low - a.high > tolerance
+                  ? -1
+                  : 0;
+            expect(current).not.toBe(0);
+            if (direction === 0) direction = current;
+            expect(current).toBe(direction);
+          }
+          // Interval bounds interpolate linearly between these breakpoints.
+          // Strict ordering therefore rules out every interior triangle
+          // intersection, not only sampled centerline or basal-plane overlap.
+        }
+      } finally {
+        geometry.dispose();
+      }
+    },
+  );
+
+  it("rejects mixed or non-curved shapes instead of implicitly admitting a live layout", () => {
+    for (const shape of [
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, ROOT_COMPOSITION: undefined },
+      {
+        ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+        ROOT_COMPOSITION: "meadow-canopy-v1" as const,
+      },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, PROGRESSIVE_ROOTS: false },
+      {
+        ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+        LEAF_ARRANGEMENT: "two-ranked-v1" as const,
+      },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, TUFT_BLADES: 3 },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, BLADE_CONTROL_HEIGHT: undefined },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, BLADE_CONTROL_HEIGHT: 0.5 },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, BLADE_TIP_HEIGHT: 1 },
+      { ...FINE_GRASS_MEADOW_FIELD_SHAPE, BLADE_CONTROL_ARC_RATIO: 0 },
+    ])
+      expect(() => createPairedMeadowClumpGeometry(21, shape)).toThrow();
+    for (const count of [0, -1, 1.5, 22, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => createPairedMeadowClumpGeometry(count)).toThrow();
   });
 });

@@ -15,6 +15,7 @@ import {
   groundGrassBlades,
   GRASS_BLADE_GROUNDING_LIMITS,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  captureGrassGroundingExecution,
   type GrassGroundingTiming,
 } from "../GrassBladeGrounding";
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
@@ -206,6 +207,104 @@ afterEach(async () => {
 });
 
 describe("actual grounding worker client", () => {
+  it("accepts real opt-in prepared and fitted work above250ms with one unchanged deadline", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const cold = workerRequest(fixture.request, 1, 7);
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      })!;
+      for (let i = 0; i < cold.surfaces.length; i++) {
+        const packet = preparation(cold, i);
+        packet.execution = execution;
+        packet.consumed = { operations: 1, activeMs: 251, maximumSliceMs: 2 };
+        const id = client.submit(packet);
+        const response = await settledResponse(
+          client,
+          port,
+          "surface_prepared",
+          id,
+        );
+        expect(response.state.status).toBe("prepared");
+        expect(response.work.activeMs).toBeGreaterThanOrEqual(251);
+      }
+      const packet = cachedPacket(cold);
+      packet.execution = execution;
+      packet.consumed = { operations: 1, activeMs: 251, maximumSliceMs: 2 };
+      const id = client.submit(packet);
+      const response = await settledResponse(client, port, "result", id);
+      expect(response.state.status).toBe("ready");
+      if (response.state.status !== "ready")
+        throw new Error(JSON.stringify(response));
+      expect(response.state.result.receipt.cost).toEqual({
+        policy: execution.policy,
+        status: "OVER_TARGET",
+        targetMs: 250,
+      });
+      const reference = groundGrassBlades(fixture.request);
+      const result = {
+        ...response.state.result,
+        receipt: { ...response.state.result.receipt },
+      };
+      delete result.receipt.cost;
+      expect(semanticResult(result, fixture.request)).toEqual(
+        semanticResult(reference, fixture.request),
+      );
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("rejects unknown policy and extended lifetime before transferring actual input", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      for (const execution of [
+        {
+          policy: "unbounded",
+          deadlineEpochMs: performance.timeOrigin + performance.now() + 1000,
+        },
+        {
+          policy: "soft-cost-finite-lifetime-v1",
+          deadlineEpochMs: performance.timeOrigin + performance.now() + 20_000,
+        },
+      ]) {
+        const packet = Object.assign(
+          withoutId(workerRequest(fixture.request, 1, 7)),
+          { execution },
+        );
+        expect(() =>
+          client.submit(packet as GrassGroundingClientRequest),
+        ).toThrow("Invalid grounding execution policy");
+        expect(packet.data.offsets.byteLength).toBeGreaterThan(0);
+      }
+      expect(port.postCalls).toBe(0);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("uses the original expired deadline for the real worker transport watchdog", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client } = await actualClient();
+      const packet = withoutId(workerRequest(fixture.request, 1, 7));
+      packet.execution = {
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() - 1,
+      };
+      client.submit(packet);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(client.transportFailure?.reason).toBe("timeout");
+      expect(client.terminated).toBe(true);
+      expect(client.takeSettled()?.status).toBe("failed_transport");
+    } finally {
+      fixture.dispose();
+    }
+  });
   it.each<SameFaceCase>([
     "ordinary-lod0",
     "fine-near4",

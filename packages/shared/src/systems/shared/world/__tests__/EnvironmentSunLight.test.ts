@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import { uniform } from "three/tsl";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import THREE from "../../../../extras/three/three";
@@ -11,6 +13,7 @@ import {
 import type { WorldConfigManifest } from "../../../../types/world/world-types";
 import { ClientInterface } from "../../../client/ClientInterface";
 import { ClientGraphics } from "../../../client/ClientGraphics";
+import { ClientLoader } from "../../../client/ClientLoader";
 import { csmLevels, Environment } from "../Environment";
 import { worldTerrainProfileIdentity } from "../WorldTerrainProfile";
 
@@ -234,6 +237,94 @@ describe("directional illumination independent of shadow quality", () => {
     ).toBeNull();
     expect(scene.children).toHaveLength(2);
     expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+  });
+
+  it("keeps missing legacy sky URLs as metadata without fetching them during procedural sky refresh", async () => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url ?? "");
+      response.writeHead(404, { "Content-Type": "text/plain" });
+      response.end("Missing legacy sky asset");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { world, environment, prefs, scene } = await create();
+    const loader = new ClientLoader(world);
+    world.addSystem("loader", loader);
+    const ibl = new THREE.Texture();
+    const iblNode = uniform(new THREE.Color(0.1, 0.2, 0.3));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected a real local HTTP listener");
+      }
+      const origin = `http://127.0.0.1:${address.port}`;
+      const base = {
+        bg: `${origin}/world/day2-2k.jpg`,
+        hdr: `${origin}/world/day2.hdr`,
+        sunDirection: new THREE.Vector3(-1, -2, -2).normalize(),
+        sunIntensity: 1.25,
+        sunColor: 0xffeed0,
+        fogNear: 12,
+        fogFar: 240,
+        fogColor: "#90a0b0",
+      };
+
+      // Actual HTTP and loader negative controls: these URLs fail, and no
+      // cached successful resource can make the following refresh pass.
+      for (const url of [base.bg, base.hdr]) {
+        await expect(loader.loadFile(url)).rejects.toThrow(
+          "HTTP error! status: 404",
+        );
+        expect(loader.getFile(url)).toBeUndefined();
+      }
+      expect(requests).toEqual(["/world/day2-2k.jpg", "/world/day2.hdr"]);
+      requests.length = 0;
+      await environment.init({ baseEnvironment: base });
+      scene.environment = ibl;
+      scene.environmentNode = iblNode;
+      scene.environmentIntensity = 0.75;
+      for (const shadows of ["none", "med", "none"]) {
+        prefs.shadows = shadows;
+        environment.buildSunLight();
+        await expect(environment.updateSky()).resolves.toBeUndefined();
+        expect(environment.skyInfo).toEqual({
+          bgUrl: base.bg,
+          hdrUrl: base.hdr,
+          sunDirection: base.sunDirection,
+          sunIntensity: base.sunIntensity,
+          sunColor: base.sunColor,
+          fogNear: base.fogNear,
+          fogFar: base.fogFar,
+          fogColor: base.fogColor,
+        });
+        expect(environment.lightDirection).toEqual(base.sunDirection);
+        expect(environment.sunLight?.intensity).toBe(base.sunIntensity);
+        expect(environment.sunLight?.color).toEqual(
+          new THREE.Color(base.sunColor),
+        );
+        expect(scene.fog).toEqual(
+          new THREE.Fog(base.fogColor, base.fogNear, base.fogFar),
+        );
+        expect(scene.background).toBeNull();
+        expect(scene.environment).toBe(ibl);
+        expect(scene.environmentNode).toBe(iblNode);
+        expect(scene.environmentIntensity).toBe(0.75);
+        expect(requests).toEqual([]);
+      }
+      // CPU resource ownership only; actual sky/IBL rendering remains a
+      // separate native WebGPU integration gate.
+    } finally {
+      environment.destroy();
+      world.destroy();
+      ibl.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it.each(["low", "med", "high"])(

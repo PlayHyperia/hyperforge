@@ -11,13 +11,24 @@ import {
 } from "./CompactTerrainPalette";
 import {
   GRASS_MEADOW_REFINEMENT,
+  FINE_GRASS_PAIRED_NEAR_INDICES,
   getGrassBladeLayout,
   getGrassBladeWindFactor,
   getFoldedGrassBladeIndices,
   isFoldedGrassBladeLayout,
+  isMeadowGrassBladeLayout,
+  isPairedGrassBladeLayout,
   type FineGrassGeometryLayout,
 } from "./GrassBladeLayout";
 import { assertGrassMeadowAuthoredEndpoint } from "./GrassMeadowAuthoredShape";
+import {
+  assertGrassMeadowFootprintArchEndpoint,
+  getMeadowFootprintArchWindFactor,
+} from "./GrassMeadowFootprintArch";
+import {
+  assertGrassMeadowSweptBladeEndpoint,
+  getMeadowSweptBladeWindFactor,
+} from "./GrassMeadowSweptBlade";
 import {
   RetainedTerrainSurface,
   type TerrainGridBounds,
@@ -62,7 +73,10 @@ export type GrassGroundingRoadSegment = {
  * render endpoint has fifteen vertices; seven coarse samples are also tested
  * for every blade before any exclusion or retained-region acceptance. */
 export type GrassAuthoredMeadowUnion = Readonly<{
-  kind: "meadow-authored-union-v1";
+  kind:
+    | "meadow-authored-union-v1"
+    | "meadow-footprint-arch-union-v1"
+    | "meadow-swept-blade-union-v1";
   coarseGeometry: THREE.BufferGeometry;
 }>;
 
@@ -112,7 +126,7 @@ export function captureGrassBankVerge(
     request.geometryLayout !== "fine-linear-sweep-near4-v1" &&
     request.geometryLayout !== "fine-folded-lancet-v1" &&
     request.geometryLayout !== "fine-folded-sheath-near5-v1" &&
-    request.geometryLayout !== "fine-meadow-ribbon-v1"
+    !isMeadowGrassBladeLayout(request.geometryLayout)
   )
     throw new Error("Invalid grass bank-verge descriptor");
   return captured;
@@ -129,13 +143,21 @@ export type GrassBladeGroundingDependency = {
 
 export type GrassBladeGroundingReceipt = {
   elapsedMs: number;
+  /** Opt-in fitting-ledger cost: main handoff, worker fit and publication.
+   * Cached-surface admission has its existing separate ledger. The lifetime
+   * covers both. Completion is not performance acceptance. */
+  cost?: Readonly<{
+    policy: GrassGroundingExecutionPolicy;
+    status: "WITHIN_TARGET" | "OVER_TARGET";
+    targetMs: number;
+  }>;
   inputClumps: number;
   processedClumps: number;
   retainedClumps: number;
   bladesPerClump: number;
   geometryLayout?: FineGrassGeometryLayout;
   authoredMeadow?: Readonly<{
-    kind: "meadow-authored-union-v1";
+    kind: GrassAuthoredMeadowUnion["kind"];
     authoredVerticesPerBlade: 15;
     coarseVerticesPerBlade: 7;
   }>;
@@ -217,7 +239,9 @@ function captureAuthoredMeadow(
     !keys.every((key) => key === "kind" || key === "coarseGeometry") ||
     !kind ||
     !("value" in kind) ||
-    kind.value !== "meadow-authored-union-v1" ||
+    (kind.value !== "meadow-authored-union-v1" &&
+      kind.value !== "meadow-footprint-arch-union-v1" &&
+      kind.value !== "meadow-swept-blade-union-v1") ||
     !coarse ||
     !("value" in coarse) ||
     request.lod !== 0 ||
@@ -360,7 +384,13 @@ function* validateGeometry(
 > {
   if (authoredMeadow) {
     yield "authored_meadow_endpoint";
-    assertGrassMeadowAuthoredEndpoint(geometry, authoredMeadow.coarseGeometry);
+    const assertEndpoint =
+      authoredMeadow.kind === "meadow-footprint-arch-union-v1"
+        ? assertGrassMeadowFootprintArchEndpoint
+        : authoredMeadow.kind === "meadow-swept-blade-union-v1"
+          ? assertGrassMeadowSweptBladeEndpoint
+          : assertGrassMeadowAuthoredEndpoint;
+    assertEndpoint(geometry, authoredMeadow.coarseGeometry);
     const coarse = yield* validateGeometry(
       authoredMeadow.coarseGeometry,
       lod,
@@ -395,7 +425,7 @@ function* validateGeometry(
     }
     // Validate again after the resumable stream checks. The continuation owner
     // still supplies the complete geometry/input lease through publication.
-    assertGrassMeadowAuthoredEndpoint(geometry, authoredMeadow.coarseGeometry);
+    assertEndpoint(geometry, authoredMeadow.coarseGeometry);
     return {
       blades: GRASS_MEADOW_REFINEMENT.bladesPerClump,
       verticesPerBlade: 22,
@@ -410,6 +440,7 @@ function* validateGeometry(
     trianglesPerClump,
   } = getGrassBladeLayout(lod, geometryLayout);
   const folded = isFoldedGrassBladeLayout(lod, geometryLayout);
+  const paired = isPairedGrassBladeLayout(lod, geometryLayout);
   const vertices = blades * verticesPerBlade;
   const position = geometry.getAttribute("position"),
     normal = geometry.getAttribute("normal"),
@@ -455,6 +486,32 @@ function* validateGeometry(
   for (let blade = 0; blade < blades; blade++) {
     yield "geometry_blade";
     const first = blade * verticesPerBlade;
+    if (paired) {
+      // One shared basal edge; independently validate both middle rows/tips.
+      // Never infer this topology from eight-vertex capacity alone.
+      for (let local = 0; local < 8; local++) {
+        const v = first + local;
+        const tip = local === 4 || local === 7;
+        const side = tip ? 0.5 : local < 5 ? local % 2 : (local - 5) % 2;
+        const t = local < 2 ? 0 : tip ? 1 : 0.5;
+        if (
+          uv.getX(v) !== side ||
+          uv.getY(v) !== t ||
+          (local < 2 && position.getY(v) !== 0)
+        )
+          throw new Error("Invalid grass grounding paired blade topology");
+      }
+      if (
+        Math.hypot(
+          position.getX(first) - position.getX(first + 1),
+          position.getZ(first) - position.getZ(first + 1),
+        ) <= 0
+      )
+        throw new Error("Invalid grass grounding blade root");
+      for (const value of FINE_GRASS_PAIRED_NEAR_INDICES)
+        expectIndex(first + value);
+      continue;
+    }
     for (let row = 0; row < segments; row++) {
       for (let side = 0; side < 2; side++) {
         const v = first + row * 2 + side;
@@ -524,6 +581,12 @@ export function* groundGrassBladeSteps(
   const started = performance.now();
   const { data, ownSurface, geometry, lod, wind, geometryLayout } = request;
   const authoredMeadow = captureAuthoredMeadow(request);
+  const fineMeadowWindFactor =
+    authoredMeadow?.kind === "meadow-footprint-arch-union-v1"
+      ? getMeadowFootprintArchWindFactor
+      : authoredMeadow?.kind === "meadow-swept-blade-union-v1"
+        ? getMeadowSweptBladeWindFactor
+        : null;
   const bankVerge = captureGrassBankVerge(request);
   const pondServiceGround = captureGrassBankVerge(request, "pondServiceGround");
   const bankField =
@@ -697,7 +760,7 @@ export function* groundGrassBladeSteps(
       ? {}
       : {
           authoredMeadow: Object.freeze({
-            kind: "meadow-authored-union-v1" as const,
+            kind: authoredMeadow.kind,
             authoredVerticesPerBlade: 15 as const,
             coarseVerticesPerBlade: 7 as const,
           }),
@@ -1254,12 +1317,15 @@ export function* groundGrassBladeSteps(
               bladeBounds[b] = bladeBounds[b + 2] = Infinity;
               bladeBounds[b + 1] = bladeBounds[b + 3] = -Infinity;
               for (let v = blade * verticesPerBlade; v < end; v++) {
-                const windFactor = getGrassBladeWindFactor(
-                  uv.getY(v),
-                  position.getY(v),
-                  scale,
-                  geometryLayout,
-                );
+                const windFactor =
+                  fineMeadowWindFactor && v % verticesPerBlade < 15
+                    ? fineMeadowWindFactor(uv.getY(v), position.getY(v), scale)
+                    : getGrassBladeWindFactor(
+                        uv.getY(v),
+                        position.getY(v),
+                        scale,
+                        geometryLayout,
+                      );
                 for (let fade = 0; fade < 2; fade++) {
                   take();
                   transform(v, fade, point);
@@ -1554,12 +1620,12 @@ export function* groundGrassBladeSteps(
           pz = position.getZ(v);
         const correction = deltas[d] * (1 - u) + deltas[d + 1] * u;
         const t = uv.getY(v);
-        const windFactor = getGrassBladeWindFactor(
-          t,
-          py,
-          scale,
-          geometryLayout,
-        );
+        // Only the fifteen fine samples use their explicit endpoint profile. The
+        // seven parents retain the ordinary response, including its arithmetic.
+        const windFactor =
+          fineMeadowWindFactor && v % verticesPerBlade < 15
+            ? fineMeadowWindFactor(t, py, scale)
+            : getGrassBladeWindFactor(t, py, scale, geometryLayout);
         const windAmplitudeX = wind.x,
           windAmplitudeZ = wind.z,
           windX = windAmplitudeX * bankHeightScale * windFactor,
@@ -1802,6 +1868,98 @@ export const GRASS_BLADE_GROUNDING_JOB_LIMITS = Object.freeze({
   maximumActiveMs: 250,
 });
 
+/** Explicit reliability trial. Omission retains the historical strict budget. */
+export type GrassGroundingExecutionPolicy = "soft-cost-finite-lifetime-v1";
+export const GRASS_GROUNDING_MAXIMUM_LIFETIME_MS = 10_000;
+// Admission only: native worker deadlines were observed 1.3–3.2ms beyond the
+// 10s future bound. Allow bounded cross-realm clock comparison error without
+// extending or replacing a job's deadline; local issuance remains strict.
+export const GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS = 16;
+export type GrassGroundingExecutionClockScope = "local" | "cross-realm";
+export type GrassGroundingExecution = Readonly<{
+  policy: GrassGroundingExecutionPolicy;
+  /** Shared performance epoch, so transport queueing cannot renew the deadline. */
+  deadlineEpochMs: number;
+}>;
+
+export function captureGrassGroundingExecution(
+  value: unknown,
+  clockScope: GrassGroundingExecutionClockScope = "local",
+): GrassGroundingExecution | undefined {
+  if (value === undefined) return undefined;
+  const fail = (reason: string) => {
+    throw new Error(`Invalid grounding execution policy [${reason}]`);
+  };
+  if (!value || typeof value !== "object") return fail("object");
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value)))
+    return fail("prototype");
+  const keys = Reflect.ownKeys(value);
+  const policy = Object.getOwnPropertyDescriptor(value, "policy");
+  const deadline = Object.getOwnPropertyDescriptor(value, "deadlineEpochMs");
+  if (
+    keys.length !== 2 ||
+    !keys.every((key) => key === "policy" || key === "deadlineEpochMs")
+  )
+    return fail("keys");
+  if (!policy || !("value" in policy) || !policy.enumerable)
+    return fail("policy-descriptor");
+  if (policy.value !== "soft-cost-finite-lifetime-v1")
+    return fail("policy-value");
+  if (!deadline || !("value" in deadline) || !deadline.enumerable)
+    return fail("deadline-descriptor");
+  if (
+    typeof deadline.value !== "number" ||
+    !Number.isFinite(deadline.value) ||
+    deadline.value < 0
+  )
+    return fail("deadline-value");
+  const nowEpochMs = performance.timeOrigin + performance.now();
+  const clockToleranceMs =
+    clockScope === "cross-realm"
+      ? GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS
+      : 0;
+  if (
+    deadline.value >
+    nowEpochMs + GRASS_GROUNDING_MAXIMUM_LIFETIME_MS + clockToleranceMs
+  )
+    return fail(`deadline-future; aheadMs=${deadline.value - nowEpochMs}`);
+  // An expired, otherwise valid envelope is a lifetime failure, not bad input.
+  return Object.freeze({
+    policy: policy.value,
+    deadlineEpochMs: deadline.value,
+  });
+}
+
+export function grassGroundingTimeFailure(
+  activeMs: number,
+  execution?: GrassGroundingExecution,
+  now = performance.now(),
+): "active_cpu" | "lifetime" | null {
+  if (execution)
+    return performance.timeOrigin + now >= execution.deadlineEpochMs
+      ? "lifetime"
+      : null;
+  return activeMs >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
+    ? "active_cpu"
+    : null;
+}
+
+export function recordGrassGroundingCost(
+  receipt: GrassBladeGroundingReceipt,
+  activeMs: number,
+  execution?: GrassGroundingExecution,
+): void {
+  if (execution)
+    receipt.cost = Object.freeze({
+      policy: execution.policy,
+      status:
+        activeMs >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
+          ? "OVER_TARGET"
+          : "WITHIN_TARGET",
+      targetMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+    });
+}
+
 /** Cumulative work already spent before a continuation changes execution owner. */
 export type GrassGroundingConsumedWork = {
   operations: number;
@@ -1851,6 +2009,7 @@ class GroundingTimingSpan {
  * Operation counts are integers; clock measurements retain fractional ms. */
 export function validateGrassGroundingConsumedWork(
   value: unknown,
+  execution?: GrassGroundingExecution,
 ): Readonly<GrassGroundingConsumedWork> {
   const fail = (): never => {
     throw new Error("Invalid grass grounding consumed work");
@@ -1890,7 +2049,10 @@ export function validateGrassGroundingConsumedWork(
   if (
     !Number.isSafeInteger(captured.operations) ||
     captured.operations > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations ||
-    captured.activeMs > GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs ||
+    captured.activeMs >
+      (execution
+        ? GRASS_GROUNDING_MAXIMUM_LIFETIME_MS
+        : GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs) ||
     captured.maximumSliceMs > captured.activeMs
   )
     fail();
@@ -1909,12 +2071,13 @@ export type GrassBladeGroundingJobState =
     }
   | {
       status: "failed_budget";
-      reason: "operations" | "active_cpu" | "grounding_work";
+      reason: "operations" | "active_cpu" | "grounding_work" | "lifetime";
     }
   | { status: "failed_input"; error: unknown }
   | { status: "cancelled"; reason: "caller" | "invalidated" };
 
 export class GrassGroundingContinuation {
+  readonly execution: GrassGroundingExecution | undefined;
   private iterator: ReturnType<typeof groundGrassBladeSteps> | null;
   private current: GrassBladeGroundingJobState = { status: "running" };
   private readonly peakSlice = new GroundingTimingSpan();
@@ -1938,11 +2101,14 @@ export class GrassGroundingContinuation {
     steps: Generator<string, GrassBladeGroundingResult, void>,
     private readonly isCurrent: () => boolean,
     consumedWork?: GrassGroundingConsumedWork,
+    execution?: GrassGroundingExecution,
+    clockScope: GrassGroundingExecutionClockScope = "local",
   ) {
+    this.execution = captureGrassGroundingExecution(execution, clockScope);
     const consumed =
       consumedWork === undefined
         ? undefined
-        : validateGrassGroundingConsumedWork(consumedWork);
+        : validateGrassGroundingConsumedWork(consumedWork, this.execution);
     this.iterator = steps;
     if (consumed) {
       this.operations = consumed.operations;
@@ -2021,13 +2187,26 @@ export class GrassGroundingContinuation {
     if (
       this.current.status === "ready" ||
       this.current.status === "waiting_support"
-    )
+    ) {
       this.current.result.receipt.elapsedMs = this.activeMs;
+      recordGrassGroundingCost(
+        this.current.result.receipt,
+        this.activeMs,
+        this.execution,
+      );
+    }
+    const failure = grassGroundingTimeFailure(
+      this.activeMs,
+      this.execution,
+      now,
+    );
     if (
-      this.activeMs >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs &&
-      (this.current.status === "running" || this.current.status === "ready")
+      failure &&
+      (this.current.status === "running" ||
+        this.current.status === "ready" ||
+        (this.execution && this.current.status === "waiting_support"))
     )
-      this.close({ status: "failed_budget", reason: "active_cpu" });
+      this.close({ status: "failed_budget", reason: failure });
   }
 
   advance(
@@ -2078,13 +2257,15 @@ export class GrassGroundingContinuation {
           const now = performance.now();
           this.recordClockInterval(now);
           const elapsed = now - started;
-          if (
-            this.activeMs + elapsed >=
-            GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
-          )
+          const failure = grassGroundingTimeFailure(
+            this.activeMs + elapsed,
+            this.execution,
+            now,
+          );
+          if (failure)
             return this.close({
               status: "failed_budget",
-              reason: "active_cpu",
+              reason: failure,
             });
           if (now >= deadline) break;
         }
@@ -2138,7 +2319,10 @@ export function captureGrassGroundingFailure(
     | "lastSliceMs"
     | "maximumSliceMs"
     | "lastPhase"
-  > & { readonly cumulativeMaximumSliceMs?: number },
+  > & {
+    readonly cumulativeMaximumSliceMs?: number;
+    readonly execution?: GrassGroundingExecution;
+  },
   owner?: GrassGroundingFailureOwner,
 ) {
   const state = job.state;
@@ -2169,7 +2353,17 @@ export function captureGrassGroundingFailure(
     lastSliceMs: job.lastSliceMs,
     maximumSliceMs: job.maximumSliceMs,
     lastPhase: job.lastPhase,
-    activeLimitMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+    ...(job.execution
+      ? {
+          executionPolicy: job.execution.policy,
+          activeTargetMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs,
+          costStatus:
+            job.activeMs >= GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs
+              ? "OVER_TARGET"
+              : "WITHIN_TARGET",
+          deadlineEpochMs: job.execution.deadlineEpochMs,
+        }
+      : { activeLimitMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumActiveMs }),
     targetSliceMs: GRASS_BLADE_GROUNDING_JOB_LIMITS.targetSliceMs,
     ...(owner
       ? {

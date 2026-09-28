@@ -57,9 +57,13 @@ import {
   createCompactTerrainLayers,
   createCompactTerrainLayerFactory,
   createCompactRockAppearanceRequired,
+  createCompactGrassAppearanceRequired,
+  createCompactDirtAppearanceRequired,
+  type CompactTerrainLayer,
   type CompactDirtProjection,
   type CompactRockProjection,
   type CompactRockSampling,
+  type CompactGroundSampling,
   type CompactSurfaceBlend,
   type CompactPondBlend,
   type CompactCoastBlend,
@@ -1191,6 +1195,7 @@ export function createTerrainMaterial(
     compactDirtProjection?: CompactDirtProjection;
     compactRockProjection?: CompactRockProjection;
     compactRockSampling?: CompactRockSampling;
+    compactGroundSampling?: CompactGroundSampling;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
@@ -1205,6 +1210,7 @@ export function createTerrainMaterial(
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
   compactRockSampling?: CompactRockSampling;
+  compactGroundSampling?: CompactGroundSampling;
   compactPondBlend?: CompactPondBlend;
   compactCoastBlend?: CompactCoastBlend;
   compactPondBankField?: CompactPondBankField;
@@ -1232,6 +1238,14 @@ export function createTerrainMaterial(
     throw new Error("Rock projection requires the compact PBR material");
   if (options.compactSurfaceBlend !== undefined && !options.compactPbr)
     throw new Error("Surface blending requires the compact PBR material");
+  if (options.compactGroundSampling !== undefined) {
+    if (options.compactGroundSampling !== "exact-zero-v1")
+      throw new Error("Invalid compact ground sampling");
+    if (options.compactRockSampling !== "exact-zero-v1")
+      throw new Error(
+        "Exact-zero ground sampling requires exact-zero rock sampling",
+      );
+  }
   if (options.compactRockSampling !== undefined) {
     if (options.compactRockSampling !== "exact-zero-v1")
       throw new Error("Invalid compact rock sampling");
@@ -1400,11 +1414,26 @@ export function createTerrainMaterial(
     compactTextures && options.compactRockSampling
       ? createCompactTerrainLayerFactory(compactTextures, distSq, noiseValue)
       : null;
+  const preparedGround = options.compactGroundSampling
+    ? compactLayerFactory!.prepareGround()
+    : null;
+  const groundPlaceholder = (height: Node<"float">): CompactTerrainLayer => ({
+    albedo: vec3(0),
+    roughness: float(1),
+    ao: float(1),
+    worldNormal: normalWorldGeometry,
+    height,
+  });
   const compactLayers: ReturnType<typeof createCompactTerrainLayers> | null =
     compactTextures
       ? compactLayerFactory
         ? {
-            ...compactLayerFactory.createGround(),
+            ...(preparedGround
+              ? {
+                  grass: groundPlaceholder(preparedGround.heights.grass),
+                  dirt: groundPlaceholder(preparedGround.heights.dirt),
+                }
+              : compactLayerFactory.createGround()),
             // No rock samples before final coverage is known. The resolver
             // below replaces this finite construction-only value; raw rock AO
             // stays absent so it cannot accidentally enter coverage weights.
@@ -1420,12 +1449,6 @@ export function createTerrainMaterial(
   const bankVergeLocality = macroField?.bankVerge
     ? createCompactBankVergeLocality(worldPos, macroField)
     : undefined;
-  if (compactLayers)
-    compactLayers.grass = applyCompactFineGrassSubstrateContrast(
-      compactLayers.grass,
-      grassColorGrade,
-      options.compactSurfaceBlend,
-    );
   let meadowNoise: Node<"float"> | undefined;
   if (compactLayers && (!macroField?.havenGround || macroField.coastalMeadow)) {
     // One extra sample of the existing noise texture; no new texture allocation.
@@ -1441,29 +1464,36 @@ export function createTerrainMaterial(
     meadowNoise = macroField?.coastalMeadow
       ? meadowSample.toVar("compactMeadowNoise")
       : meadowSample;
-    compactLayers.grass = applyCompactMeadowTint(
-      compactLayers.grass,
-      meadowNoise,
-      macroSurface.dry,
-      macroField?.coastalMeadow
-        ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
-        : 1,
-      grassColorGrade,
-    );
   }
-  if (compactLayers)
-    compactLayers.grass = applyCompactGrassColorGrade(
-      compactLayers.grass,
+  // Reuse the identical grade order after either unconditional sampling or
+  // deferred appearance resolution. None of these grades owns coverage.
+  const gradeCompactGrass = (layer: CompactTerrainLayer) => {
+    let grass = applyCompactFineGrassSubstrateContrast(
+      layer,
       grassColorGrade,
+      options.compactSurfaceBlend,
     );
-  if (compactLayers)
-    compactLayers.grass = applyCompactBankVergeGrassTint(
-      compactLayers.grass,
+    if (meadowNoise)
+      grass = applyCompactMeadowTint(
+        grass,
+        meadowNoise,
+        macroSurface.dry,
+        macroField?.coastalMeadow
+          ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
+          : 1,
+        grassColorGrade,
+      );
+    grass = applyCompactGrassColorGrade(grass, grassColorGrade);
+    return applyCompactBankVergeGrassTint(
+      grass,
       grassColorGrade,
       worldPos,
       macroField,
       bankVergeLocality,
     );
+  };
+  if (compactLayers && !preparedGround)
+    compactLayers.grass = gradeCompactGrass(compactLayers.grass);
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
     float(0.5),
@@ -1830,7 +1860,7 @@ export function createTerrainMaterial(
           field: macroField,
         })
       : undefined;
-  if (compactLayers && pondMargin)
+  if (compactLayers && pondMargin && !preparedGround)
     compactLayers.grass = applyCompactPondMarginGrass(
       compactLayers.grass,
       pondMargin,
@@ -1846,7 +1876,7 @@ export function createTerrainMaterial(
         field: macroField.pondBankField,
       })
     : undefined;
-  if (compactLayers && pondBankComposition)
+  if (compactLayers && pondBankComposition && !preparedGround)
     compactLayers.grass = applyCompactPondBankGrass(
       compactLayers.grass,
       pondBankComposition,
@@ -1918,17 +1948,52 @@ export function createTerrainMaterial(
     ? (
         weights: Node<"vec4">,
         layers: ReturnType<typeof createCompactTerrainLayers>,
-      ): ReturnType<typeof createCompactTerrainLayers> => {
+      ): ReturnType<typeof createCompactTerrainLayers> & {
+        coastalGround?: CompactTerrainLayer;
+      } => {
         const required = createCompactRockAppearanceRequired(
           weights,
           pondBankComposition?.mineralAppearance ?? float(0),
         );
-        const resolved = {
+        const ground = preparedGround?.resolve({
+          grassRequired: createCompactGrassAppearanceRequired(weights),
+          // Raw dirt also reaches rock through bank silt and coastal soil.
+          // Keep those dependencies even when direct dirt coverage is zero.
+          dirtRequired: createCompactDirtAppearanceRequired(
+            weights,
+            pondBankComposition?.siltAppearance ?? float(0),
+            coastRockSurface?.soil ?? float(0),
+          ),
+        });
+        const resolved: ReturnType<typeof createCompactTerrainLayers> & {
+          coastalGround?: CompactTerrainLayer;
+        } = {
           ...layers,
+          ...ground,
           rock: compactLayerFactory.createRock(required),
         };
-        // Coastal ground above intentionally retains the unmodified soil.
-        // Resolve raw rock first, then preserve the existing bank/coast order.
+        if (ground) {
+          resolved.grass = gradeCompactGrass(resolved.grass);
+          if (pondMargin)
+            resolved.grass = applyCompactPondMarginGrass(
+              resolved.grass,
+              pondMargin,
+            );
+          if (pondBankComposition)
+            resolved.grass = applyCompactPondBankGrass(
+              resolved.grass,
+              pondBankComposition,
+            );
+          // Coastal ground uses raw dirt, before bank mineral/silt grading.
+          // Return it explicitly; final coverage remains height-only.
+          if (coastalGround && coastSurface)
+            resolved.coastalGround = applyCompactCoastRock(
+              ground.dirt,
+              ground.dirt,
+              coastSurface,
+            );
+        }
+        // Resolve raw sources first, then preserve the bank/coast grade order.
         if (pondBankComposition) {
           const bankMaterials = applyCompactPondBankMaterials(
             resolved.dirt,
@@ -2273,6 +2338,7 @@ export function createTerrainMaterial(
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
     compactRockSampling?: CompactRockSampling;
+    compactGroundSampling?: CompactGroundSampling;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
     compactPondBankField?: CompactPondBankField;
@@ -2287,6 +2353,13 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (options.compactGroundSampling !== undefined)
+    Object.defineProperty(result, "compactGroundSampling", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactGroundSampling,
+    });
   if (options.compactRockSampling !== undefined)
     Object.defineProperty(result, "compactRockSampling", {
       enumerable: true,

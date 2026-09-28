@@ -2,7 +2,7 @@ import { Worker } from "node:worker_threads";
 import { readFileSync } from "node:fs";
 import { ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
-import { StorageBufferAttribute } from "three/webgpu";
+import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 
 import THREE from "../../../../extras/three/three";
@@ -546,6 +546,11 @@ async function coastalFixture(
   geometryRecipe: "current-canopy" | "historical-linear" = "current-canopy",
   coastBlend?: "distribution-v1",
   pondBlend?: "shore-contact-v1" | "composition-v1",
+  rendering?: {
+    lighting: ConstructorParameters<typeof GrassVisualManager>[15];
+    geometry: ConstructorParameters<typeof GrassVisualManager>[17];
+    instancing?: ConstructorParameters<typeof GrassVisualManager>[19];
+  },
 ) {
   await DataManager.getInstance().initialize();
   const baselineProfile = DataManager.getWorldTerrainProfile();
@@ -758,6 +763,12 @@ async function coastalFixture(
     (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
     (bounds) => visual.captureRetainedSurfaceRegion(bounds),
     "fine-meadow-v1",
+    undefined,
+    rendering?.lighting,
+    undefined,
+    rendering?.geometry,
+    undefined,
+    rendering?.instancing,
   );
   if (geometryRecipe === "historical-linear") {
     // Historical-only fixture input, installed before any generation/update.
@@ -1040,6 +1051,259 @@ function horizonFixture(initiallyFar = false, empty = false) {
 }
 
 describe("GrassVisualManager request ownership with real workers and geometry", () => {
+  it.each([0, 1, 2] as const)(
+    "keeps matrix-free production chunks equivalent through real placement, grounding, culling and retirement at LOD%s",
+    async (lod) => {
+      let ordinary: unknown;
+      for (const instancing of [undefined, "attributes-v1"] as const) {
+        const f = await coastalFixture(
+          true,
+          [350, 350],
+          false,
+          FINE_MEADOW_GRASS_VISUAL_PROFILE,
+          "current",
+          "fine-meadow-green-v1",
+          "current-canopy",
+          undefined,
+          undefined,
+          {
+            lighting: "leaf-volume-v1",
+            geometry: "meadow-field-v1",
+            instancing,
+          },
+        );
+        try {
+          const key = "gcell_v1_14_12";
+          const work = f.manager["liveWorkUnits"].get(key)!;
+          expect(work).toBeDefined();
+          // Select an actual tier via the unchanged distance policy, not a
+          // replacement desiredLod or synthetic mesh publication method.
+          f.manager["lodFocusX"] =
+            work.bounds.maxX +
+            (lod === 0
+              ? 0
+              : lod === 1
+                ? (f.manager["fineLodBoundary"](0) +
+                    f.manager["fineLodBoundary"](1)) /
+                  2
+                : f.manager["fineLodBoundary"](1) + 10);
+          f.manager["lodFocusZ"] = (work.bounds.minZ + work.bounds.maxZ) / 2;
+          expect(f.manager["desiredLod"](work)).toBe(lod);
+          const input = f.manager["createWorkerInput"](work, key, lod);
+          const worker = await actualWorker(input);
+          const fallback = f.manager["generateInstanceData"](
+            work,
+            f.manager["spacingMultiplierForLod"](lod),
+          )!;
+          expect(worker.count).toBeGreaterThan(0);
+          expectPlacementParity(fallback, worker);
+          const ticket = f.manager["createWorkerTicket"](work, key, lod, false);
+          f.manager["settleWorkerResult"](ticket, worker);
+          f.manager["processSettledWorkerResults"]();
+          const entry = f.manager["groundingJobs"].get(key)!;
+          expect(entry).toBeDefined();
+          let slices = 0;
+          while (entry.job.state.status === "running" && slices++ < 500)
+            f.manager["advanceGroundingJob"]();
+          expect(entry.job.state.status).toBe("ready");
+          if (entry.job.state.status !== "ready")
+            throw new Error("Real retained-terrain grounding must finish");
+          const ready = entry.job.state.result;
+          const chunk = f.manager["chunks"].get(key)!;
+          expect(chunk).toBeDefined();
+          const mesh = chunk.mesh;
+          const geometry = mesh.geometry;
+          const template = f.manager["lodGeometries"][lod];
+          const material = mesh.material;
+          if (!(material instanceof MeshStandardNodeMaterial))
+            throw new Error("One actual grounded material required");
+          expect(chunk.lodLevel).toBe(lod);
+          expect(mesh.count).toBe(ready.data.count);
+          expect(mesh.count).toBeGreaterThan(0);
+          expect(mesh.position.toArray()).toEqual([
+            work.node.centerX,
+            0,
+            work.node.centerZ,
+          ]);
+          expect(mesh.matrixAutoUpdate).toBe(false);
+          expect(mesh.frustumCulled).toBe(true);
+          expect([mesh.userData.clickable, mesh.userData.walkable]).toEqual([
+            false,
+            false,
+          ]);
+          expect(geometry).not.toBe(template);
+          expect(geometry.index?.array).toEqual(template.index?.array);
+          for (const name of Object.keys(template.attributes)) {
+            expect(geometry.getAttribute(name)).not.toBe(
+              template.getAttribute(name),
+            );
+            expect(geometry.getAttribute(name).array).toEqual(
+              template.getAttribute(name).array,
+            );
+          }
+          for (const [name, array] of [
+            ["instanceOffset", ready.data.offsets],
+            ["instanceRotScaleHash", ready.data.rotScaleHash],
+            ["instanceGroundNormal", ready.data.groundNormals],
+          ] as const) {
+            const attribute = geometry.getAttribute(name);
+            expect(attribute).toBeInstanceOf(THREE.InstancedBufferAttribute);
+            expect(attribute.array).toBe(array);
+            expect(attribute.count).toBe(mesh.count);
+          }
+          const roots = geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
+          expect(roots).toBeInstanceOf(StorageBufferAttribute);
+          expect(roots.array).toBe(ready.rootDeltas);
+          expect(roots.count).toBe(ready.rootDeltas.length / 2);
+          expect(material).not.toBe(f.manager["materialForLod"](lod));
+          expect(material.positionNode).toBeDefined();
+          expect(template.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+            false,
+          );
+          expect(template.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE)).toBe(
+            false,
+          );
+          if (instancing) {
+            expect(mesh).toBeInstanceOf(THREE.Mesh);
+            expect(mesh).not.toBeInstanceOf(THREE.InstancedMesh);
+            expect(mesh).not.toHaveProperty("instanceMatrix");
+            expect(geometry).toBeInstanceOf(THREE.InstancedBufferGeometry);
+            if (!(geometry instanceof THREE.InstancedBufferGeometry))
+              throw new Error("Actual instanced geometry required");
+            expect(geometry.instanceCount).toBe(mesh.count);
+            expect(
+              Object.getOwnPropertyDescriptor(mesh, "count")?.writable,
+            ).toBe(false);
+            expect(
+              geometry.hasAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+            ).toBe(false);
+            const ray = new THREE.Raycaster(
+              mesh.position.clone().add(new THREE.Vector3(0, 100, 0)),
+              new THREE.Vector3(0, -1, 0),
+            );
+            const hits: THREE.Intersection[] = [];
+            mesh.raycast(ray, hits);
+            expect(hits).toEqual([]);
+          } else {
+            expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
+            if (!(mesh instanceof THREE.InstancedMesh))
+              throw new Error("Ordinary storage-matrix mesh required");
+            expect(
+              geometry.getAttribute(INSTANCE_MATRIX_STORAGE_ATTRIBUTE),
+            ).toBe(mesh.instanceMatrix);
+            const matrix = new THREE.Matrix4();
+            for (let i = 0; i < mesh.count; i++) {
+              mesh.getMatrixAt(i, matrix);
+              expect(matrix.elements).toEqual(new THREE.Matrix4().elements);
+            }
+          }
+
+          // Compare CPU geometry/placement/material policy, not generated WGSL
+          // or native pixels. The candidate deliberately has no matrix storage.
+          const snapshot = {
+            placement: worker,
+            grounded: ready.data,
+            roots: ready.rootDeltas,
+            sourceIndices: ready.sourceIndices,
+            sweptBounds: ready.sweptBounds,
+            attributes: Object.fromEntries(
+              Object.entries(geometry.attributes)
+                .filter(([name]) => name !== INSTANCE_MATRIX_STORAGE_ATTRIBUTE)
+                .map(([name, attribute]) => [
+                  name,
+                  {
+                    itemSize: attribute.itemSize,
+                    normalized: attribute.normalized,
+                    array: Array.from(attribute.array),
+                  },
+                ]),
+            ),
+            index: Array.from(geometry.index!.array),
+            geometryMetadata: geometry.userData,
+            material: {
+              type: material.type,
+              side: material.side,
+              transparent: material.transparent,
+              depthWrite: material.depthWrite,
+              alphaTest: material.alphaTest,
+              userData: material.userData,
+            },
+            localBox: mesh.boundingBox?.clone(),
+            localSphere: mesh.boundingSphere?.clone(),
+          };
+          if (instancing) expect(snapshot).toEqual(ordinary);
+          else ordinary = snapshot;
+
+          const parent = mesh.parent!;
+          parent.position.set(12, 3, -7);
+          parent.rotation.y = 0.4;
+          parent.scale.set(1.2, 0.8, 1.1);
+          parent.updateMatrixWorld(true);
+          const transformed = chunk.box
+            .clone()
+            .translate(mesh.position.clone().negate())
+            .applyMatrix4(mesh.matrixWorld);
+          const target = transformed.getCenter(new THREE.Vector3());
+          const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
+          camera.position.copy(target).add(new THREE.Vector3(0, 30, 70));
+          camera.lookAt(target);
+          camera.updateMatrixWorld();
+          const frustum = new THREE.Frustum().setFromProjectionMatrix(
+            new THREE.Matrix4().multiplyMatrices(
+              camera.projectionMatrix,
+              camera.matrixWorldInverse,
+            ),
+            camera.coordinateSystem,
+            camera.reversedDepth,
+          );
+          expect(frustum.intersectsBox(transformed)).toBe(true);
+          expect(mesh.intersectsFrustum!(frustum)).toBe(true);
+          parent.position.x += 1000;
+          parent.updateMatrixWorld(true);
+          expect(mesh.intersectsFrustum!(frustum)).toBe(false);
+          expect(mesh.visible).toBe(true);
+          expect(mesh.boundingBox).toEqual(snapshot.localBox);
+
+          let geometryDisposals = 0,
+            materialDisposals = 0,
+            meshDisposals = 0,
+            templateDisposals = 0;
+          geometry.addEventListener("dispose", () => {
+            expect(geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+              roots,
+            );
+            geometryDisposals++;
+          });
+          material.addEventListener("dispose", () => materialDisposals++);
+          const renderOwner: THREE.Mesh = mesh;
+          renderOwner.addEventListener("dispose", () => meshDisposals++);
+          template.addEventListener("dispose", () => templateDisposals++);
+          expect(f.manager["isNodeInGrassHorizon"](work)).toBe(true);
+          f.manager.setPlayerPosition(
+            work.bounds.maxX + f.manager["maxRenderDistance"] + 1,
+            (work.bounds.minZ + work.bounds.maxZ) / 2,
+          );
+          expect(f.manager["isNodeInGrassHorizon"](work)).toBe(false);
+          f.manager["reconcileGrassHorizon"]();
+          expect(f.manager["chunks"].has(key)).toBe(false);
+          expect(f.manager["completedGrounding"].has(key)).toBe(false);
+          expect(mesh.parent).toBeNull();
+          expect([geometryDisposals, materialDisposals, meshDisposals]).toEqual(
+            [1, 1, 1],
+          );
+          expect(templateDisposals).toBe(0);
+          f.manager["retireGrassWork"](key);
+          expect([geometryDisposals, materialDisposals, meshDisposals]).toEqual(
+            [1, 1, 1],
+          );
+        } finally {
+          f.close();
+        }
+      }
+    },
+    30_000,
+  );
+
   it("keeps omitted and own-undefined road clearance byte-identical and rejects invalid options before allocation", () => {
     const omitted = fixture(undefined, { ...FINE_MEADOW_GRASS_VISUAL_PROFILE });
     const explicit = fixture(undefined, {

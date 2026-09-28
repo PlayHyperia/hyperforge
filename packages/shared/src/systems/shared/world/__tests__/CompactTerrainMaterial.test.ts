@@ -9,6 +9,8 @@ import { PNG } from "pngjs";
 import type { Browser } from "playwright";
 import THREE, {
   float,
+  mix,
+  min,
   mat4,
   cameraViewMatrix,
   normalWorldGeometry,
@@ -18,7 +20,7 @@ import THREE, {
   vec3,
   vec4,
 } from "../../../../extras/three/three";
-import type { Node } from "three/webgpu";
+import { NodeBuilder, type Node } from "three/webgpu";
 import {
   createTerrainMaterial as createRuntimeTerrainMaterial,
   TerrainShadeUniforms,
@@ -36,7 +38,10 @@ import {
   COMPACT_TERRAIN_COAST_CAVITY,
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
+  createCompactTerrainLayerFactory,
   createCompactRockAppearanceRequired,
+  createCompactGrassAppearanceRequired,
+  createCompactDirtAppearanceRequired,
   createCompactDryGrassRoughness,
   createCompactCotangentNormal,
   createCompactTerrainLayerWeights,
@@ -716,6 +721,34 @@ function graph(root: unknown): Set<Node> {
 
 // Evaluate only the concrete numeric TSL operations used by the normal frame.
 // Unknown nodes fail: this is arithmetic evidence, never a mock GPU renderer.
+const numericShaderStacks = new WeakMap<Node, Node>();
+function numericShaderStack(node: Node): Node | null {
+  const internalCall = Reflect.get(node, "isShaderCallNodeInternal") === true;
+  const shaderFunction = typeof Reflect.get(node, "jsFunc") === "function";
+  if (!internalCall && !shaderFunction) return null;
+  const cached = numericShaderStacks.get(node);
+  if (cached) return cached;
+  const call: unknown = internalCall
+    ? node
+    : Reflect.apply(Reflect.get(node, "call"), node, []);
+  if (!(call instanceof THREE.Node))
+    throw new Error("Expected actual numeric shader call");
+  const inputs: unknown = Reflect.get(call, "rawInputs");
+  if (inputs !== null && (!Array.isArray(inputs) || inputs.length !== 0))
+    throw new Error("Numeric shader evaluator only admits closed expressions");
+  // The real core builder expands Fn/If into real Stack/Assign nodes. No
+  // renderer, GPU device, generated shader or replacement builder is involved.
+  const builder = Reflect.construct(NodeBuilder, [null, null, null]);
+  const stack: unknown = Reflect.apply(
+    Reflect.get(call, "getOutputNode"),
+    call,
+    [builder],
+  );
+  if (!(stack instanceof THREE.Node) || stack.type !== "StackNode")
+    throw new Error("Expected actual numeric shader stack");
+  numericShaderStacks.set(node, stack);
+  return stack;
+}
 function vectorValue(
   node: Node,
   inputs?: ReadonlyMap<Node, readonly number[]>,
@@ -733,6 +766,27 @@ function vectorValue(
         throw new Error(`Missing node ${key}`);
       return vectorValue(value, inputs, cache);
     };
+    const shaderStack = numericShaderStack(node);
+    if (shaderStack) return vectorValue(shaderStack, inputs, cache);
+    if (node.type === "StackNode") {
+      const statements: unknown = read("nodes");
+      if (
+        !Array.isArray(statements) ||
+        statements.some((statement) => !(statement instanceof THREE.Node))
+      )
+        throw new Error("Expected actual numeric stack statements");
+      for (const statement of statements) vectorValue(statement, inputs, cache);
+      const output = read("outputNode");
+      return output === null || output === undefined ? [] : child("outputNode");
+    }
+    if (node.type === "AssignNode") {
+      const target: unknown = read("targetNode");
+      if (!(target instanceof THREE.Node) || target.type !== "VarNode")
+        throw new Error("Numeric assignment requires a concrete variable");
+      const result = child("sourceNode");
+      cache.set(target, result);
+      return result;
+    }
     const value = read("value");
     if (typeof value === "number") return [value];
     if (typeof value === "boolean") return [value ? 1 : 0];
@@ -768,7 +822,16 @@ function vectorValue(
       const condition = child("condNode");
       if (condition.length !== 1 || ![0, 1].includes(condition[0]))
         throw new Error("Expected concrete scalar TSL condition");
-      return child(condition[0] === 1 ? "ifNode" : "elseNode");
+      const selected = condition[0] === 1 ? "ifNode" : "elseNode";
+      if (selected === "elseNode" && read(selected) === null) {
+        const ifNode = read("ifNode");
+        if (
+          ifNode instanceof THREE.Node &&
+          typeof Reflect.get(ifNode, "jsFunc") === "function"
+        )
+          return [];
+      }
+      return child(selected);
     }
     if (node.type === "JoinNode")
       return (read("nodes") as Node[]).flatMap((value) =>
@@ -2869,7 +2932,12 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
               // keys; every arithmetic input, projection and channel remains.
               expect(
                 fingerprint(after, candidate) === fingerprint(before, baseline),
-              ).toBe(!(layer === "grass" && channel === "albedo"));
+              ).toBe(
+                !(
+                  layer === "grass" &&
+                  ["albedo", "roughness", "ao", "worldNormal"].includes(channel)
+                ),
+              );
             }
         } finally {
           baseline.dispose();
@@ -3015,7 +3083,7 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
     }
   });
 
-  it("retains original high-frequency reads for roughness and other channels while composing only linear RGB", () => {
+  it("coordinates turf normal AO and roughness filtering while retaining original linear RGB and height", () => {
     const owner = new CompactTerrainTextureSet(
       "/assets",
       "stochastic-v1",
@@ -3030,10 +3098,43 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
       const samples = ownedSamples([grass.albedo], owner).filter(
         (node) => Reflect.get(node, "value") === source,
       );
-      const original = ownedSamples([grass.roughness], owner).filter(
+      const low = samples.filter((node) =>
+        (Reflect.get(node, "gradNode") as Node[]).some((derivative) =>
+          [...graph(derivative)].some((part) =>
+            String(Reflect.get(part, "name") ?? "").startsWith(
+              "compactGrassSubstrateFootprint",
+            ),
+          ),
+        ),
+      );
+      const original = samples.filter((node) => !low.includes(node));
+      const roughnessSamples = ownedSamples([grass.roughness], owner).filter(
         (node) => Reflect.get(node, "value") === source,
       );
-      const low = samples.filter((node) => !original.includes(node));
+      expect(roughnessSamples).toEqual(low);
+      const normalAoSource = owner.getNode("grass", "normal-ao").value;
+      const normalSamples = ownedSamples([grass.worldNormal], owner).filter(
+        (node) => Reflect.get(node, "value") === normalAoSource,
+      );
+      const aoSamples = ownedSamples([grass.ao], owner).filter(
+        (node) => Reflect.get(node, "value") === normalAoSource,
+      );
+      expect(normalSamples).toHaveLength(2);
+      expect(aoSamples).toEqual(normalSamples);
+      expect(ownedSamples(layerRoots(layers), owner)).toHaveLength(35);
+      for (const materialSample of normalSamples) {
+        const matched = low.filter(
+          (node) =>
+            Reflect.get(node, "uvNode") ===
+            Reflect.get(materialSample, "uvNode"),
+        );
+        expect(matched).toHaveLength(1);
+        expect(Reflect.get(materialSample, "gradNode")).toEqual(
+          Reflect.get(matched[0], "gradNode"),
+        );
+        expect(Reflect.get(materialSample, "levelNode")).toBeNull();
+        expect(Reflect.get(materialSample, "biasNode")).toBeNull();
+      }
       expect(samples).toHaveLength(4);
       expect(original).toHaveLength(2);
       expect(low).toHaveLength(2);
@@ -3054,12 +3155,8 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
             expect(graph(component).has(originalDerivative)).toBe(true);
         expect(Reflect.get(sample, "levelNode")).toBeNull();
         expect(Reflect.get(sample, "biasNode")).toBeNull();
-        for (const root of [
-          grass.roughness,
-          grass.ao,
-          grass.worldNormal,
-          grass.height!,
-        ])
+        expect(graph(grass.roughness).has(sample)).toBe(true);
+        for (const root of [grass.ao, grass.worldNormal, grass.height!])
           expect(graph(root).has(sample)).toBe(false);
       }
       const contrasted = applyCompactFineGrassSubstrateContrast(
@@ -3108,7 +3205,7 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
             ),
           );
           expect(vectorValue(grass.roughness, inputs)[0]).toBeCloseTo(
-            0.85 + 0.13 * 0.41,
+            0.85 + 0.13 * lowAlpha,
             14,
           );
           for (const channel of [
@@ -3185,6 +3282,309 @@ describe("frequency-aware grass substrate (actual TSL, not hardware filtering or
           material.dispose();
         }
       }
+  });
+});
+
+describe("exact-zero ground appearance (real-node arithmetic, not native qualification)", () => {
+  it("retains every nonzero grass and direct or nested soil dependency without weight products", () => {
+    const values = [-1, -1e-30, -0, 0, 1e-30, 0.5, 1];
+    for (const grass of values) {
+      expect(
+        vectorValue(createCompactGrassAppearanceRequired(vec4(grass, 0, 0, 0))),
+      ).toEqual([grass !== 0 ? 1 : 0]);
+    }
+    for (const soil of values)
+      for (const coastal of [0, 1e-30, 1])
+        for (const rock of values)
+          for (const silt of [-1, 0, 1e-30, 0.5, 1, 2])
+            for (const nested of [0, 1e-30, 1]) {
+              const gate = createCompactDirtAppearanceRequired(
+                vec4(1, soil, rock, coastal),
+                float(silt),
+                float(nested),
+              );
+              const expected =
+                soil !== 0 ||
+                coastal !== 0 ||
+                (rock !== 0 &&
+                  (Math.max(0, Math.min(1, silt)) !== 0 || nested !== 0));
+              expect(vectorValue(gate)).toEqual([expected ? 1 : 0]);
+            }
+    for (const gate of [
+      createCompactGrassAppearanceRequired(vec4(1, 0, 0, 0)),
+      createCompactDirtAppearanceRequired(vec4(0, 0, 1, 0), float(0), float(1)),
+    ])
+      expect(
+        [...graph(gate)].some(
+          (node) =>
+            Reflect.get(node, "isTextureNode") === true ||
+            ["dFdx", "dFdy", "*"].includes(
+              String(Reflect.get(node, "method") ?? Reflect.get(node, "op")),
+            ),
+        ),
+      ).toBe(false);
+  });
+
+  it("requires admitted heights without changing the unconditional factory", () => {
+    const owner = new CompactTerrainTextureSet("/assets");
+    try {
+      const factory = createCompactTerrainLayerFactory(owner, float(16));
+      expect(factory.createGround().grass.height).toBeUndefined();
+      expect(() => factory.prepareGround()).toThrow(/admitted height layers/);
+      expect(factory.createGround().dirt.height).toBeUndefined();
+      expect(owner.getReceipt().textures).toHaveLength(6);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("keeps the exact projected height graph, source owners and shared resolved height identities", () => {
+    for (const stochastic of [false, true]) {
+      const owner = new CompactTerrainTextureSet(
+        "/assets",
+        stochastic ? "stochastic-v1" : undefined,
+        "height-v1",
+        "stochastic-v1",
+        "frequency-v1",
+      );
+      try {
+        const before = owner.getReceipt();
+        const factory = createCompactTerrainLayerFactory(
+          owner,
+          float(16),
+          float(0.43),
+        );
+        const original = factory.createGround(),
+          prepared = factory.prepareGround();
+        const keys = new Map(
+          before.textures.map((row) => [row.textureUuid, row.key]),
+        );
+        const fingerprints = new Map<Node, string>();
+        const fingerprint = (node: Node): string => {
+          const cached = fingerprints.get(node);
+          if (cached) return cached;
+          if (node.type === "VarNode")
+            return fingerprint(Reflect.get(node, "node"));
+          const value: unknown = Reflect.get(node, "value");
+          const valueFingerprint = createHash("sha256")
+            .update(
+              JSON.stringify({
+                type: node.type,
+                fields: [
+                  "op",
+                  "method",
+                  "components",
+                  "scope",
+                  "nodeType",
+                  "name",
+                ].map((key) => Reflect.get(node, key)),
+                value:
+                  value instanceof THREE.Texture
+                    ? keys.get(value.uuid)
+                    : value instanceof THREE.Vector2 ||
+                        value instanceof THREE.Vector3 ||
+                        value instanceof THREE.Vector4
+                      ? value.toArray()
+                      : typeof value === "number" || typeof value === "boolean"
+                        ? value
+                        : null,
+                children: [...node.getChildren()].map(fingerprint),
+              }),
+            )
+            .digest("hex");
+          fingerprints.set(node, valueFingerprint);
+          return valueFingerprint;
+        };
+        for (const layer of ["grass", "dirt"] as const)
+          expect(fingerprint(prepared.heights[layer])).toBe(
+            fingerprint(original[layer].height!),
+          );
+        const samples = [
+          ...new Set(
+            Object.values(prepared.heights).flatMap((root) => [...graph(root)]),
+          ),
+        ].filter(
+          (node) =>
+            Reflect.get(node, "value") instanceof THREE.Texture &&
+            Reflect.get(node, "uvNode"),
+        );
+        expect(samples).toHaveLength(stochastic ? 5 : 4);
+        for (const sample of samples) {
+          expect(Reflect.get(sample, "value")).toBe(
+            owner.getHeightNode()!.value,
+          );
+          expect(Reflect.get(sample, "gradNode")).toHaveLength(2);
+        }
+        const resolved = prepared.resolve({
+          grassRequired: createCompactGrassAppearanceRequired(vec4(1, 0, 0, 0)),
+          dirtRequired: createCompactDirtAppearanceRequired(
+            vec4(1, 0, 0, 0),
+            float(0),
+            float(0),
+          ),
+        });
+        for (const layer of ["grass", "dirt"] as const) {
+          expect(resolved[layer].height).toBe(prepared.heights[layer]);
+          const name = `compact${layer === "grass" ? "Grass" : "Dirt"}AppearanceResult`;
+          const packed = [
+            resolved[layer].albedo,
+            resolved[layer].roughness,
+            resolved[layer].ao,
+            resolved[layer].worldNormal,
+          ].map((root) =>
+            [...graph(root)].filter(
+              (node) => Reflect.get(node, "name") === name,
+            ),
+          );
+          expect(packed.map((rows) => rows.length)).toEqual([1, 1, 1, 1]);
+          expect(packed.every((rows) => rows[0] === packed[0][0])).toBe(true);
+        }
+        expect(owner.getReceipt()).toEqual(before);
+      } finally {
+        owner.dispose();
+      }
+    }
+  });
+
+  it("preserves bank, nested coast and raw coastal channels when inactive sources are replaced with finite defaults", () => {
+    const layers = {
+      grass: {
+        albedo: vec3(0.1, 0.3, 0.2),
+        roughness: float(0.95),
+        ao: float(0.83),
+        worldNormal: vec3(0.1, 1, 0).normalize(),
+        height: float(0.2),
+      },
+      dirt: {
+        albedo: vec3(0.3, 0.18, 0.12),
+        roughness: float(0.86),
+        ao: float(0.75),
+        worldNormal: vec3(-0.2, 1, 0.1).normalize(),
+        height: float(0.7),
+      },
+      rock: {
+        albedo: vec3(0.44, 0.51, 0.57),
+        roughness: float(0.7),
+        ao: float(0.64),
+        worldNormal: vec3(0.1, 1, 0.3).normalize(),
+      },
+    };
+    const fallback = {
+      albedo: vec3(0),
+      roughness: float(1),
+      ao: float(1),
+      worldNormal: vec3(0, 1, 0),
+    };
+    const frame = new Map<Node, readonly number[]>([
+      [cameraViewMatrix, new THREE.Matrix4().toArray()],
+    ]);
+    for (const soil of [0, 0.3, 1])
+      for (const rock of [0, 0.4, 1])
+        for (const coastal of [0, 1])
+          for (const mineral of [0, 0.6, 1])
+            for (const silt of [0, 0.7, 1])
+              for (const nested of [0, 0.6, 1]) {
+                const coast = { soil: float(nested), wetness: float(0.3) };
+                const bank = {
+                  soilToGrass: float(0),
+                  soilToRock: float(0),
+                  grassToSoil: float(0),
+                  grassToRock: float(0),
+                  grassShade: float(1),
+                  groundCoverWeight: float(0),
+                  groundCoverGrassShare: float(0),
+                  mineralAppearance: float(mineral),
+                  siltAppearance: float(silt),
+                };
+                const make = (gated: boolean) =>
+                  blendCompactTerrainLayers(
+                    layers,
+                    float(soil),
+                    float(rock),
+                    float(0),
+                    undefined,
+                    undefined,
+                    { coverage: float(coastal), layer: layers.dirt },
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    (weights, original) => {
+                      const rawGrass =
+                        gated &&
+                        !vectorValue(
+                          createCompactGrassAppearanceRequired(weights),
+                        )[0]
+                          ? { ...fallback, height: original.grass.height }
+                          : original.grass;
+                      const rawDirt =
+                        gated &&
+                        !vectorValue(
+                          createCompactDirtAppearanceRequired(
+                            weights,
+                            bank.siltAppearance,
+                            coast.soil,
+                          ),
+                        )[0]
+                          ? { ...fallback, height: original.dirt.height }
+                          : original.dirt;
+                      const rawCoastal = applyCompactCoastRock(
+                        rawDirt,
+                        rawDirt,
+                        coast,
+                      );
+                      const graded = applyCompactPondBankMaterials(
+                        rawDirt,
+                        original.rock,
+                        bank,
+                      );
+                      return {
+                        grass: rawGrass,
+                        dirt: graded.soil,
+                        rock: applyCompactCoastRock(
+                          graded.rock,
+                          graded.soil,
+                          coast,
+                        ),
+                        coastalGround: rawCoastal,
+                      };
+                    },
+                  );
+                const original = make(false),
+                  gated = make(true);
+                if (coastal === 1 && rock === 0) {
+                  const rawCoastal = applyCompactCoastRock(
+                    layers.dirt,
+                    layers.dirt,
+                    coast,
+                  );
+                  expect(vectorValue(gated.weights!)).toEqual([0, 0, 0, 1]);
+                  for (const key of ["albedo", "roughness", "ao"] as const)
+                    expect(vectorValue(gated[key], frame)).toEqual(
+                      vectorValue(rawCoastal[key], frame),
+                    );
+                  expect(vectorValue(gated.normal, frame)).toEqual(
+                    vectorValue(
+                      compactTerrainNormalToView(rawCoastal.worldNormal),
+                      frame,
+                    ),
+                  );
+                }
+                for (const key of [
+                  "albedo",
+                  "roughness",
+                  "ao",
+                  "normal",
+                  "weights",
+                ] as const)
+                  expect(vectorValue(gated[key]!, frame)).toEqual(
+                    vectorValue(original[key]!, frame),
+                  );
+              }
   });
 });
 
@@ -3381,6 +3781,7 @@ describe("exact-zero rock appearance (CPU arithmetic plus explicit native WGSL g
     }[];
     after: NativeFlowReceipt["before"];
     sharedPackedChannels: number;
+    sharedGroundPackedChannels: { grass?: number; dirt?: number };
     adapter: {
       vendor: string;
       architecture: string;
@@ -3396,7 +3797,7 @@ describe("exact-zero rock appearance (CPU arithmetic plus explicit native WGSL g
   // storage-only codegen, r186 texture codegen queries actual device features.
   // No supplied capability table, fake GPU object or feature override is valid.
   const nativeProbe = String.raw`
-globalThis.terrainWgslProbe = async () => {
+globalThis.terrainWgslProbe = async (groundGated = false) => {
   if (!navigator.gpu || !isSecureContext) throw new Error("Native WebGPU is required");
   const adapter = await navigator.gpu.requestAdapter({powerPreference:"high-performance"});
   if (!adapter || adapter.isFallbackAdapter || adapter.info.isFallbackAdapter || /swiftshader|llvmpipe|software/i.test(
@@ -3432,6 +3833,7 @@ globalThis.terrainWgslProbe = async () => {
     material = new THREE.MeshStandardNodeMaterial();
     const mesh = new THREE.Mesh(geometry,material);
     let sharedPackedChannels = 0;
+    const sharedGroundPackedChannels = {};
     const graph = root => {
       const nodes = new Set();
       const visit = node => {if(nodes.has(node))return;nodes.add(node);for(const child of node.getChildren())visit(child);};
@@ -3441,7 +3843,11 @@ globalThis.terrainWgslProbe = async () => {
     const makeOutput = gated => {
       const factory = gated ? createCompactTerrainLayerFactory(owner,sharedDistance,sharedPattern) : null;
       const placeholder = {albedo:vec3(0),roughness:float(1),ao:float(1),worldNormal:normalWorldGeometry};
-      const layers = factory ? {...factory.createGround(),rock:placeholder} : createCompactTerrainLayers(owner,sharedDistance,sharedPattern);
+      const prepared = factory && groundGated ? factory.prepareGround() : null;
+      const layers = factory ? {...(prepared ? {
+        grass:{...placeholder,height:prepared.heights.grass},
+        dirt:{...placeholder,height:prepared.heights.dirt},
+      } : factory.createGround()),rock:placeholder} : createCompactTerrainLayers(owner,sharedDistance,sharedPattern);
       const mineral = positionWorld.x.sin().mul(.5).add(.5).toVar("testedPondMineral");
       const silt = positionWorld.z.cos().mul(.5).add(.5).toVar("testedPondSilt");
       const appearance = original => {
@@ -3453,12 +3859,26 @@ globalThis.terrainWgslProbe = async () => {
         undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,
         (weights,original) => {
           if (!gated) return appearance(original);
+          const resolvedGround = prepared ? prepared.resolve({
+            grassRequired:createCompactGrassAppearanceRequired(weights).toVar("testedGrassAppearanceRequired"),
+            dirtRequired:createCompactDirtAppearanceRequired(weights,silt,float(0)).toVar("testedDirtAppearanceRequired"),
+          }) : null;
+          if(resolvedGround) for(const layer of ["grass","dirt"]) {
+            const actual=resolvedGround[layer];
+            const name="compact"+(layer==="grass"?"Grass":"Dirt")+"AppearanceResult";
+            const shared=[actual.albedo,actual.roughness,actual.ao,actual.worldNormal]
+              .map(root=>[...graph(root)].filter(node=>node.name===name));
+            if(shared.length!==4 || shared.some(rows=>rows.length!==1 || rows[0]!==shared[0][0]))
+              throw new Error("Ground appearance is not one shared actual packed node: "+layer);
+            if(actual.height!==prepared.heights[layer])throw new Error("Prepared height identity changed");
+            sharedGroundPackedChannels[layer]=shared.length;
+          }
           const rock = factory.createRock(createCompactRockAppearanceRequired(weights,mineral).toVar("testedRockAppearanceRequired"));
           const shared = Object.values(rock).map(root => [...graph(root)].filter(node => node.name === "compactRockAppearanceResult"));
           if(shared.length!==5 || shared.some(rows => rows.length!==1 || rows[0]!==shared[0][0]))
             throw new Error("Rock appearance is not one shared actual packed node");
           sharedPackedChannels=shared.length;
-          return appearance({...original,rock});
+          return appearance({...original,...resolvedGround,rock});
         });
       // Exercise staged channel evaluation so the shared texture owners are
       // established before normals. This focused graph does not reproduce the
@@ -3485,7 +3905,7 @@ globalThis.terrainWgslProbe = async () => {
     };
     const baseline = generate(makeOutput(false)), candidate = generate(makeOutput(true));
     if(errors.length)throw new Error(errors.join("; "));
-    return {baseline,candidate,before,after:snapshot(),sharedPackedChannels,
+    return {baseline,candidate,before,after:snapshot(),sharedPackedChannels,sharedGroundPackedChannels,
       adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,description:adapter.info.description,
         fallback:adapter.isFallbackAdapter===true || adapter.info.isFallbackAdapter===true},
       features:[...device.features].sort(),errors,nativeBackend:renderer.backend.isWebGPUBackend};
@@ -3496,7 +3916,9 @@ globalThis.terrainWgslProbe = async () => {
   }
 };`;
 
-  async function generateNative(): Promise<NativeFlowReceipt> {
+  async function generateNative(
+    groundGated = false,
+  ): Promise<NativeFlowReceipt> {
     let browser: Browser | undefined;
     let server: Server | undefined;
     const errors: string[] = [];
@@ -3511,7 +3933,7 @@ globalThis.terrainWgslProbe = async () => {
         stdin: {
           contents: `import THREE,{float,vec3,vec4,uniform,normalWorldGeometry,positionWorld,Fn} from ${JSON.stringify(threePath)};
 import {WGSLNodeBuilder} from "three/webgpu";
-import {CompactTerrainTextureSet,createCompactTerrainLayers,createCompactTerrainLayerFactory,createCompactRockAppearanceRequired,blendCompactTerrainLayers,applyCompactPondBankMaterials} from ${JSON.stringify(modulePath)};
+import {CompactTerrainTextureSet,createCompactTerrainLayers,createCompactTerrainLayerFactory,createCompactRockAppearanceRequired,createCompactGrassAppearanceRequired,createCompactDirtAppearanceRequired,blendCompactTerrainLayers,applyCompactPondBankMaterials} from ${JSON.stringify(modulePath)};
 ${nativeProbe}`,
           resolveDir: fileURLToPath(new URL(".", import.meta.url)),
           loader: "js",
@@ -3586,12 +4008,12 @@ ${nativeProbe}`,
       );
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const receipt = await Promise.race([
-        page.evaluate(async () => {
+        page.evaluate(async (useGroundGate) => {
           const actual = window as unknown as Window & {
-            terrainWgslProbe(): Promise<NativeFlowReceipt>;
+            terrainWgslProbe(groundGated: boolean): Promise<NativeFlowReceipt>;
           };
-          return actual.terrainWgslProbe();
-        }),
+          return actual.terrainWgslProbe(useGroundGate);
+        }, groundGated),
         new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(
             () =>
@@ -3827,6 +4249,112 @@ ${nativeProbe}`,
           worldDerivativeOperands,
           sharedPackedChannels: receipt.sharedPackedChannels,
           samplerStateUnchanged: true,
+        })}\n`,
+      );
+    },
+    90_000,
+  );
+  it.skipIf(process.env.HYPERIA_NATIVE_TERRAIN_WGSL !== "1")(
+    "native WebGPU defers exactly six grass and six dirt reads while retaining five unconditional heights",
+    async () => {
+      const receipt = await generateNative(true);
+      expect(receipt.sharedGroundPackedChannels).toEqual({ grass: 4, dirt: 4 });
+      const flows = [receipt.baseline, receipt.candidate].map((flow) => ({
+        ...flow,
+        textureNames: new Map(flow.textureNames),
+      }));
+      const reads = (flow: (typeof flows)[number]) =>
+        [...flow.code.matchAll(/\btextureSampleGrad\s*\(\s*(\w+)/g)].map(
+          (match) => {
+            const key = flow.textureNames.get(match[1]);
+            if (!key)
+              throw new Error(`Unowned generated ground texture ${match[1]}`);
+            return { key, offset: match.index };
+          },
+        );
+      const counts = (rows: ReturnType<typeof reads>) =>
+        Object.fromEntries(
+          [...new Set(rows.map((row) => row.key))]
+            .sort()
+            .map((key) => [key, rows.filter((row) => row.key === key).length]),
+        );
+      const oldReads = reads(flows[0]),
+        newReads = reads(flows[1]);
+      expect(counts(newReads)).toEqual(counts(oldReads));
+      expect(counts(newReads)).toEqual({
+        "grass-albedo-roughness": 4,
+        "grass-normal-ao": 2,
+        "dirt-albedo-roughness": 3,
+        "dirt-normal-ao": 3,
+        "rock-albedo-roughness": 9,
+        "rock-normal-ao": 9,
+        "ground-height": 5,
+      });
+      const regions = branches(flows[1].code);
+      const appearanceRegions = ["Grass", "Dirt", "Rock"].map((layer) => {
+        const matches = regions.filter((region) =>
+          region.condition.includes(`tested${layer}AppearanceRequired`),
+        );
+        expect(matches).toHaveLength(1);
+        const region = matches[0];
+        const inside = newReads.filter(
+          (read) => read.offset > region.start && read.offset < region.end,
+        );
+        expect(inside).toHaveLength(layer === "Rock" ? 18 : 6);
+        expect(
+          inside.every((read) =>
+            read.key.startsWith(`${layer.toLowerCase()}-`),
+          ),
+        ).toBe(true);
+        expect([
+          ...flows[1].code.matchAll(
+            new RegExp(`\\bcompact${layer}AppearanceResult\\s*=`, "g"),
+          ),
+        ]).toHaveLength(1);
+        for (const axis of ["x", "y"])
+          expect(flows[1].code).toMatch(
+            new RegExp(
+              `compact${layer}WorldD${axis}\\s*=\\s*(?:-\\s*)?dpd${axis}\\s*\\(\\s*v_positionWorld\\s*\\)`,
+            ),
+          );
+        return region;
+      });
+      for (const read of newReads.filter(
+        (read) => read.key === "ground-height",
+      ))
+        expect(
+          regions.some(
+            (region) => read.offset > region.start && read.offset < region.end,
+          ),
+        ).toBe(false);
+      for (const derivative of flows[1].code.matchAll(/\bdpd[xy]\s*\(/g))
+        expect(
+          regions.some(
+            (region) =>
+              derivative.index > region.start && derivative.index < region.end,
+          ),
+        ).toBe(false);
+      for (const flow of flows) {
+        expect(flow.code).not.toMatch(/\btextureSample(?:Bias|Level)?\s*\(/);
+        expect(flow.code + flow.result).not.toMatch(/undefined|NaN|Infinity/);
+      }
+      expect(receipt.after).toEqual(receipt.before);
+      expect(receipt.after).toHaveLength(7);
+      process.stdout.write(
+        `Native ground WGSL qualification: ${JSON.stringify({
+          scope:
+            "Actual initialized r186 generated fragment flow, not compilation, visual or performance acceptance",
+          adapter: receipt.adapter,
+          ownedSampleCounts: counts(newReads),
+          appearanceBranches: appearanceRegions.length,
+          heightSamplesOutsideBranches: 5,
+          sharedGroundPackedChannels: receipt.sharedGroundPackedChannels,
+          baselineSha256: createHash("sha256")
+            .update(flows[0].code)
+            .digest("hex"),
+          candidateSha256: createHash("sha256")
+            .update(flows[1].code)
+            .digest("hex"),
         })}\n`,
       );
     },
@@ -11362,6 +11890,274 @@ describe("candidate coastal mineral-to-meadow ground", () => {
         )
       );
     };
+
+    it("keeps exact-zero grass verge results equal to independent capsules at both fields and their edges", () => {
+      const ops = createCompactTerrainColorOperations();
+      const profile = candidateProfile();
+      const previous = ops.macroField(profile)!;
+      const combined = ops.macroField(
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        service,
+      )!;
+      const baseline = createCompactBankVergeHeightScale(
+        positionWorld,
+        combined,
+      );
+      const candidate = createCompactBankVergeHeightScale(
+        positionWorld,
+        combined,
+        undefined,
+        "exact-zero-v1",
+      );
+      const samples: Array<readonly [number, number]> = [...points];
+      for (const verge of [combined.bankVerge!, service])
+        for (const x of [
+          verge.minX - 1,
+          verge.minX,
+          verge.minX + 2 ** -12,
+          verge.minX + verge.feather,
+          verge.maxX - 2 ** -12,
+          verge.maxX,
+          verge.maxX + 1,
+        ])
+          for (const z of [
+            verge.minZ,
+            verge.minZ + 2 ** -12,
+            (verge.minZ + verge.maxZ) / 2,
+            verge.maxZ - 2 ** -12,
+            verge.maxZ,
+          ])
+            samples.push([x, z]);
+      for (const [x, z] of samples) {
+        const frame = new Map<Node, readonly number[]>([
+          [positionWorld, [x, 28.4, z]],
+        ]);
+        const expected = Math.min(
+          ops.bankVergeHeightScale(x, z, previous),
+          1 + expectedServiceWear(x, z) * (service.wornHeightScale - 1),
+        );
+        const actual = vectorValue(candidate, frame)[0];
+        expect(Number.isFinite(actual)).toBe(true);
+        expect(actual).toBe(vectorValue(baseline, frame)[0]);
+        expect(actual).toBeCloseTo(expected, 13);
+        expect(actual).toBeGreaterThanOrEqual(0.35);
+        expect(actual).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it("does not evaluate zero-locality wear, but never treats tiny positive locality as zero", () => {
+      const ops = createCompactTerrainColorOperations();
+      const field = ops.macroField(candidateProfile())!;
+      for (const locality of [0, 2 ** -30, 2 ** -20, 0.25, 1]) {
+        const local = float(locality);
+        const candidate = createCompactBankVergeHeightScale(
+          vec3(348, 28.4, 319.25),
+          field,
+          local,
+          "exact-zero-v1",
+        );
+        const cache = new Map<Node, number[]>();
+        const actual = vectorValue(candidate, undefined, cache)[0];
+        const baseline = vectorValue(
+          createCompactBankVergeHeightScale(
+            vec3(348, 28.4, 319.25),
+            field,
+            local,
+          ),
+        )[0];
+        expect(actual).toBe(baseline);
+        expect(
+          [...cache.keys()].some(
+            (node) => Reflect.get(node, "name") === "compactBankVergeWear",
+          ),
+        ).toBe(locality !== 0);
+        if (locality === 0) expect(actual).toBe(1);
+        else expect(actual).toBeLessThan(1);
+      }
+      const combined = ops.macroField(
+        candidateProfile(),
+        undefined,
+        undefined,
+        undefined,
+        service,
+      )!;
+      const cache = new Map<Node, number[]>();
+      expect(
+        vectorValue(
+          createCompactBankVergeHeightScale(
+            vec3(450, 28.4, 450),
+            combined,
+            undefined,
+            "exact-zero-v1",
+          ),
+          undefined,
+          cache,
+        ),
+      ).toEqual([1]);
+      expect(
+        [...cache.keys()].some((node) =>
+          /compact(?:Bank|PondService)VergeWear/.test(
+            String(Reflect.get(node, "name")),
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("retains a finite minimum when independently active verge fields overlap", () => {
+      const ops = createCompactTerrainColorOperations();
+      const previous = ops.macroField(candidateProfile())!;
+      // A valid overlapping appearance fixture, not a changed world layout.
+      const combined = {
+        ...previous,
+        pondServiceGround: {
+          ...previous.bankVerge!,
+          heightScale: 0.9,
+          wornHeightScale: 0.2,
+        },
+      };
+      for (const [x, z] of [
+        [348, 319.25],
+        [341, 314],
+        [339, 314],
+      ]) {
+        const world = vec3(x, 28.4, z);
+        const original = vectorValue(
+          createCompactBankVergeHeightScale(world, combined),
+        )[0];
+        const candidate = vectorValue(
+          createCompactBankVergeHeightScale(
+            world,
+            combined,
+            undefined,
+            "exact-zero-v1",
+          ),
+        )[0];
+        expect(Number.isFinite(candidate)).toBe(true);
+        expect(candidate).toBe(original);
+        expect(candidate).toBeLessThanOrEqual(
+          vectorValue(createCompactBankVergeHeightScale(world, previous))[0],
+        );
+      }
+    });
+
+    it("owns two separate exact-zero branches and leaves the default expression graph unchanged", () => {
+      const ops = createCompactTerrainColorOperations();
+      const field = ops.macroField(
+        candidateProfile(),
+        undefined,
+        undefined,
+        undefined,
+        service,
+      )!;
+      const fingerprints = new Map<Node, string>();
+      const fingerprint = (node: Node): string => {
+        const cached = fingerprints.get(node);
+        if (cached) return cached;
+        if (node.type === "VarNode")
+          return fingerprint(Reflect.get(node, "node"));
+        const value: unknown = Reflect.get(node, "value");
+        const result = createHash("sha256")
+          .update(
+            JSON.stringify({
+              type: node.type,
+              fields: ["op", "method", "components", "scope", "nodeType"].map(
+                (key) => Reflect.get(node, key),
+              ),
+              value: typeof value === "number" ? value : null,
+              children: [...node.getChildren()].map(fingerprint),
+            }),
+          )
+          .digest("hex");
+        fingerprints.set(node, result);
+        return result;
+      };
+      const legacyField = (verge: CompactTerrainBankVerge) => {
+        const single = {
+          ...field,
+          bankVerge: verge,
+          pondServiceGround: undefined,
+        };
+        const local = createCompactBankVergeLocality(positionWorld, single);
+        return mix(float(1), float(verge.heightScale), local).add(
+          createCompactBankVergeWear(positionWorld, single, local).mul(
+            verge.wornHeightScale - verge.heightScale,
+          ),
+        );
+      };
+      const legacy = min(legacyField(field.bankVerge!), legacyField(service));
+      const baseline = createCompactBankVergeHeightScale(positionWorld, field);
+      expect(fingerprint(baseline)).toBe(fingerprint(legacy));
+      expect(
+        [...graph(baseline)].some((node) => node.type === "ConditionalNode"),
+      ).toBe(false);
+      const expanded = new Set<Node>();
+      const visit = (node: Node) => {
+        if (expanded.has(node)) return;
+        expanded.add(node);
+        if (node === positionWorld) return;
+        const stack = numericShaderStack(node);
+        if (stack) {
+          visit(stack);
+          return;
+        }
+        for (const child of node.getChildren()) visit(child);
+      };
+      visit(
+        createCompactBankVergeHeightScale(
+          positionWorld,
+          field,
+          undefined,
+          "exact-zero-v1",
+        ),
+      );
+      const branches = [...expanded].filter(
+        (node) => node.type === "ConditionalNode",
+      );
+      expect(branches).toHaveLength(2);
+      for (const branch of branches) {
+        let condition: Node = Reflect.get(branch, "condNode");
+        while (condition.type === "VarNode")
+          condition = Reflect.get(condition, "node");
+        expect(Reflect.get(condition, "op")).toBe("!=");
+        expect(vectorValue(Reflect.get(condition, "bNode"))).toEqual([0]);
+        expect(Reflect.get(branch, "elseNode")).toBeNull();
+      }
+      expect(
+        [...expanded].filter((node) => node.type === "AssignNode"),
+      ).toHaveLength(2);
+    });
+
+    it("keeps absent-field identity while rejecting unsupported evaluation modes", () => {
+      const ops = createCompactTerrainColorOperations();
+      const field = ops.macroField(candidateProfile())!;
+      for (const absent of [
+        null,
+        { ...field, coastalMeadow: undefined },
+        { ...field, bankVerge: undefined },
+      ])
+        expect(
+          vectorValue(
+            createCompactBankVergeHeightScale(
+              vec3(348, 28, 319),
+              absent,
+              undefined,
+              "exact-zero-v1",
+            ),
+          ),
+        ).toEqual([1]);
+      for (const invalid of [null, false, "", "standard", "EXACT-ZERO-V1", 1])
+        expect(() =>
+          Reflect.apply(createCompactBankVergeHeightScale, undefined, [
+            vec3(348, 28, 319),
+            null,
+            undefined,
+            invalid,
+          ]),
+        ).toThrow(/Invalid grass verge evaluation/);
+    });
 
     it("matches independent pond capsules and CPU wear with exact town/outside palette and support parity", () => {
       const ops = createCompactTerrainColorOperations();

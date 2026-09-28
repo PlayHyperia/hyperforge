@@ -8,6 +8,7 @@ import THREE, {
 import type { Node } from "three/webgpu";
 import { TerrainSystem } from "./TerrainSystem";
 import { TerrainVisualManager } from "./TerrainVisualManager";
+import { generateQuadChunkDataSync } from "./TerrainQuadChunkGenerator";
 import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
 import {
   CompositeQuadTreeListener,
@@ -522,6 +523,135 @@ describe("live conforming water ownership (real CPU classes, no native/performan
     settle(owner);
     expect(disposed).toBe(staged.length);
     expect(meshes(owner)).toEqual([before]);
+  });
+
+  function expectCovered(owner: Owner) {
+    const reachable = new Set<TerrainQuadNode>();
+    const visit = (node: TerrainQuadNode) => {
+      expect(reachable.has(node)).toBe(false);
+      reachable.add(node);
+      expect(node.splitting && node.unsplitting).toBe(false);
+      expect(node.isFinal || node.children.size === 4).toBe(true);
+      for (const child of node.children.values()) {
+        expect(child.parent).toBe(node);
+        visit(child);
+      }
+    };
+    visit(owner.root);
+    expect(new Set(owner.tree["allNodes"].values())).toEqual(reachable);
+    const frontier: TerrainQuadNode[] = [];
+    const cover = (node: TerrainQuadNode) => {
+      if (owner.visual.hasInstalledChunk(node)) frontier.push(node);
+      else {
+        expect(node.children.size).toBe(4);
+        for (const child of node.children.values()) cover(child);
+      }
+    };
+    cover(owner.root);
+    expect(frontier.reduce((area, node) => area + node.size ** 2, 0)).toBe(
+      owner.root.size ** 2,
+    );
+    for (let a = 0; a < frontier.length; a++)
+      for (let b = a + 1; b < frontier.length; b++) {
+        const x = frontier[a].boundingBox,
+          y = frontier[b].boundingBox;
+        expect(
+          Math.min(x.xMax, y.xMax) <= Math.max(x.xMin, y.xMin) ||
+            Math.min(x.zMax, y.zMax) <= Math.max(x.zMin, y.zMin),
+        ).toBe(true);
+      }
+  }
+
+  it("reverses an unfinished split using its installed parent and rejects late child work", () => {
+    const owner = fixture(3200);
+    publish(owner, owner.root);
+    settle(owner);
+    const parent = owner.visual.getChunks().get(owner.root.visualChunkKey!)!;
+    owner.root.split();
+    const child = [...owner.root.children.values()][0];
+    const request = owner.visual["admitRequest"](child)!;
+    expect(request).not.toBeNull();
+    const raw = generateQuadChunkDataSync(
+      child.centerX,
+      child.centerZ,
+      child.size,
+      child.resolution,
+      terrain["buildChunkTerrainProvider"](),
+    );
+    owner.root.unsplit();
+    expect(owner.root.ready).toBe(true);
+    expect(owner.root.isFinal).toBe(true);
+    expect(owner.root.children.size).toBe(0);
+    expect(owner.visual.getChunks().get(owner.root.visualChunkKey!)).toBe(
+      parent,
+    );
+    expect(request.state).toBe("cancelled");
+    owner.visual["acceptWorkerResult"](request, raw);
+    expect(owner.visual.hasInstalledChunk(child)).toBe(false);
+    expect(owner.visual.getStats().reservedRawBytes).toBe(0);
+    expectCovered(owner);
+    settle(owner);
+  });
+
+  it("reverses an unfinished merge by reusing already-ready children and rejects late parent work", () => {
+    const owner = fixture(3200);
+    publish(owner, owner.root);
+    const children = split(owner, owner.root);
+    settle(owner);
+    const chunks = children.map((node) =>
+      owner.visual.getChunks().get(node.visualChunkKey!)!,
+    );
+    owner.root.unsplit();
+    const request = owner.visual["admitRequest"](owner.root)!;
+    expect(request).not.toBeNull();
+    const raw = generateQuadChunkDataSync(
+      owner.root.centerX,
+      owner.root.centerZ,
+      owner.root.size,
+      owner.root.resolution,
+      terrain["buildChunkTerrainProvider"](),
+    );
+    owner.root.split();
+    expect([...owner.root.children.values()]).toEqual(children);
+    expect(owner.root.ready).toBe(true);
+    expect(owner.root.isFinal).toBe(false);
+    expect(owner.root.splitting).toBe(false);
+    expect(
+      children.map((node) =>
+        owner.visual.getChunks().get(node.visualChunkKey!)!,
+      ),
+    ).toEqual(chunks);
+    expect(request.state).toBe("cancelled");
+    owner.visual["acceptWorkerResult"](request, raw);
+    expect(owner.visual.hasInstalledChunk(owner.root)).toBe(false);
+    expect(owner.visual.getStats().reservedRawBytes).toBe(0);
+    expectCovered(owner);
+    settle(owner);
+  });
+
+  it("keeps exact root coverage and registry ownership through repeated partial split and merge reversals", () => {
+    const owner = fixture(3200);
+    publish(owner, owner.root);
+    for (let turn = 0; turn < 4; turn++) {
+      owner.root.split();
+      const children = [...owner.root.children.values()];
+      publish(owner, children[0]);
+      expectCovered(owner);
+      owner.root.unsplit();
+      expect(owner.root.children.size).toBe(0);
+      expectCovered(owner);
+      const next = split(owner, owner.root);
+      settle(owner);
+      owner.root.unsplit();
+      owner.root.split();
+      expect([...owner.root.children.values()]).toEqual(next);
+      expectCovered(owner);
+      settle(owner);
+      owner.root.unsplit();
+      publish(owner, owner.root);
+      expectCovered(owner);
+      settle(owner);
+    }
   });
 
   it("gates real TerrainSystem streaming readiness until the owned water partition commits", () => {

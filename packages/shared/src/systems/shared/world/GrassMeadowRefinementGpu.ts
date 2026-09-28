@@ -1,9 +1,14 @@
 import THREE from "../../../extras/three/three";
-import { attribute, mix, storage, uv, vertexIndex } from "three/tsl";
+import { attribute, mix, storage, uint, uv, vertexIndex } from "three/tsl";
 import { StorageBufferAttribute } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
-import { GRASS_MEADOW_REFINEMENT } from "./GrassBladeLayout";
+import {
+  FINE_GRASS_HEIGHT_FLEX_RESPONSE,
+  GRASS_MEADOW_REFINEMENT,
+} from "./GrassBladeLayout";
 import { assertGrassMeadowAuthoredEndpoint } from "./GrassMeadowAuthoredShape";
+import { assertGrassMeadowFootprintArchEndpoint } from "./GrassMeadowFootprintArch";
+import { assertGrassMeadowSweptBladeEndpoint } from "./GrassMeadowSweptBlade";
 
 export type GrassMeadowRefinementSample = Readonly<{
   position: Node<"vec3">;
@@ -11,11 +16,20 @@ export type GrassMeadowRefinementSample = Readonly<{
   t: Node<"float">;
 }>;
 
+/** Positive-UV width provenance survives a horizontal height apex, unlike
+ * recovering a width bearing from the source normal's horizontal components. */
+export type GrassMeadowRootFrameSample = GrassMeadowRefinementSample &
+  Readonly<{ widthAxis: Node<"vec3"> }>;
+export type GrassMeadowFootprintArchSample = GrassMeadowRootFrameSample;
+
 export type GrassMeadowRefinementResponse = Readonly<{
   position: Node<"vec3">;
   normal: Node<"vec3">;
   width: Node<"vec3">;
 }>;
+
+export type GrassMeadowSweptBladeResponse = GrassMeadowRefinementResponse &
+  Readonly<{ restHeight?: Node<"float"> }>;
 
 export const GRASS_MEADOW_COARSE_POSITION_T_ATTRIBUTE = "meadowCoarsePositionT";
 export const GRASS_MEADOW_COARSE_NORMAL_U_ATTRIBUTE = "meadowCoarseNormalU";
@@ -123,6 +137,103 @@ export function createGrassMeadowAuthoredResponse(
   );
 }
 
+/** Explicit footprint-locked arch endpoint. Coarse parents keep their original
+ * response; only the fine callback receives the endpoint's different profile.
+ * The width bearing borrows the same coarse-position storage, not a new input.
+ * This grants no placement, clearance, publication or runtime LOD ownership. */
+export function createGrassMeadowFootprintArchResponse(
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  weight: Node<"float">,
+  evaluateCoarse: (
+    sample: GrassMeadowRefinementSample,
+  ) => GrassMeadowRefinementResponse,
+  evaluateFine: (
+    sample: GrassMeadowFootprintArchSample,
+  ) => GrassMeadowRefinementResponse,
+): GrassMeadowRefinementResponse {
+  return createMeadowEndpointResponse(
+    geometry,
+    coarseGeometry,
+    weight,
+    evaluateCoarse,
+    "footprint-arch",
+    evaluateFine,
+  );
+}
+
+/** Full-XYZ swept endpoint with canonical material UV. Coarse parents retain
+ * their original response; only the fine callback selects the swept profile. */
+export function createGrassMeadowSweptBladeResponse(
+  geometry: THREE.BufferGeometry,
+  coarseGeometry: THREE.BufferGeometry,
+  weight: Node<"float">,
+  evaluateCoarse: (
+    sample: GrassMeadowRefinementSample,
+  ) => GrassMeadowRefinementResponse,
+  evaluateFine: (
+    sample: GrassMeadowRootFrameSample,
+  ) => GrassMeadowRefinementResponse,
+  restHeightColor = false,
+): GrassMeadowSweptBladeResponse {
+  return createMeadowEndpointResponse(
+    geometry,
+    coarseGeometry,
+    weight,
+    evaluateCoarse,
+    "swept-blade",
+    evaluateFine,
+    restHeightColor,
+  );
+}
+
+/** Opt-in color/SSS coordinate, not a replacement for canonical geometry UV.
+ * Caller supplies one vertex-sourced rest-height varying and a finite admitted
+ * weight. Invert the old three-segment rendered height, not its quadratic:
+ * each saturated term is one of the three linear bands. Analytic normalized
+ * breaks approximate the per-blade Float32 source ratios (tested within 2e-7
+ * in coordinate space); this is not bit-exact physical-height reconstruction.
+ * Zero weight selects the original coordinate without arithmetic alteration.
+ * No varying or storage read is constructed here, including in fragment use.
+ */
+export function createGrassMeadowRestHeightColorCoordinate(
+  restHeightVarying: Node<"float">,
+  canonicalT: Node<"float">,
+  weight: Node<"float">,
+): Node<"float"> {
+  if (
+    ![restHeightVarying, canonicalT, weight].every(
+      (node) => node instanceof THREE.Node,
+    )
+  )
+    throw new Error("Invalid meadow rest-height color coordinate nodes");
+  const { controlHeight, tipHeight } = FINE_GRASS_HEIGHT_FLEX_RESPONSE;
+  const height = (t: number) =>
+    (t * (2 * controlHeight + t * (tipHeight - 2 * controlHeight))) / tipHeight;
+  const first = height(1 / 3);
+  const second = height(2 / 3);
+  const coordinate = restHeightVarying
+    .div(first)
+    .clamp(0, 1)
+    .add(
+      restHeightVarying
+        .sub(first)
+        .div(second - first)
+        .clamp(0, 1),
+    )
+    .add(
+      restHeightVarying
+        .sub(second)
+        .div(1 - second)
+        .clamp(0, 1),
+    )
+    .div(3);
+  const boundedWeight = weight.clamp(0, 1);
+  return boundedWeight
+    .equal(0)
+    .select(canonicalT, mix(canonicalT, coordinate, boundedWeight));
+}
+
 function createMeadowEndpointResponse(
   geometry: THREE.BufferGeometry,
   coarseGeometry: THREE.BufferGeometry,
@@ -130,14 +241,21 @@ function createMeadowEndpointResponse(
   evaluate: (
     sample: GrassMeadowRefinementSample,
   ) => GrassMeadowRefinementResponse,
-  endpoint: "conforming" | "authored",
-): GrassMeadowRefinementResponse {
+  endpoint: "conforming" | "authored" | "footprint-arch" | "swept-blade",
+  evaluateFine?: (
+    sample: GrassMeadowRootFrameSample,
+  ) => GrassMeadowRefinementResponse,
+  restHeightColor = false,
+): GrassMeadowSweptBladeResponse {
   if (
     !(geometry instanceof THREE.BufferGeometry) ||
     !(coarseGeometry instanceof THREE.BufferGeometry) ||
     geometry === coarseGeometry ||
     !(weight instanceof THREE.Node) ||
     typeof evaluate !== "function" ||
+    typeof restHeightColor !== "boolean" ||
+    ((endpoint === "footprint-arch" || endpoint === "swept-blade") &&
+      typeof evaluateFine !== "function") ||
     BINDINGS.some(
       (name) =>
         geometry.hasAttribute(name) || coarseGeometry.hasAttribute(name),
@@ -152,8 +270,19 @@ function createMeadowEndpointResponse(
   const cp = stream(coarseGeometry, "position", 3, COARSE_COUNT);
   const cn = stream(coarseGeometry, "normal", 3, COARSE_COUNT);
   const cu = stream(coarseGeometry, "uv", 2, COARSE_COUNT);
+  if (restHeightColor) {
+    for (let blade = 0; blade < R.bladesPerClump; blade++) {
+      const tip = blade * R.sourceVerticesPerBlade + 6;
+      if (!(cp[tip * 3 + 1] > 0))
+        throw new Error("Invalid meadow rest-height source tip");
+    }
+  }
   if (endpoint === "authored")
     assertGrassMeadowAuthoredEndpoint(geometry, coarseGeometry);
+  else if (endpoint === "footprint-arch")
+    assertGrassMeadowFootprintArchEndpoint(geometry, coarseGeometry);
+  else if (endpoint === "swept-blade")
+    assertGrassMeadowSweptBladeEndpoint(geometry, coarseGeometry);
   for (let b = 0; b < R.bladesPerClump; b++) {
     const c = b * R.sourceVerticesPerBlade;
     const f = b * R.verticesPerBlade;
@@ -221,11 +350,35 @@ function createMeadowEndpointResponse(
     normal: normals.element(parents.y).xyz,
     t: b.w,
   });
-  const fine = evaluate({
+  const fineSample = {
     position: attribute("position", "vec3"),
     normal: attribute("normal", "vec3"),
     t: uv().y,
-  });
+  };
+  let fine: GrassMeadowRefinementResponse;
+  let restHeight: Node<"float"> | undefined;
+  if (
+    (endpoint === "footprint-arch" || endpoint === "swept-blade") &&
+    evaluateFine
+  ) {
+    const root = vertexIndex
+      .div(uint(R.verticesPerBlade))
+      .mul(uint(R.sourceVerticesPerBlade));
+    const widthAxis = positions
+      .element(root.add(uint(1)))
+      .xyz.sub(positions.element(root).xyz)
+      .normalize();
+    fine = evaluateFine({ ...fineSample, widthAxis });
+    if (restHeightColor) {
+      // Raw, undeformed source height; same existing position storage/root
+      // addressing. Caller must contain this graph in the vertex stage.
+      restHeight = fineSample.position.y.div(
+        positions.element(root.add(uint(6))).y,
+      );
+    }
+  } else {
+    fine = evaluate(fineSample);
+  }
   for (const response of [first, second, fine]) {
     if (
       !response ||
@@ -252,6 +405,7 @@ function createMeadowEndpointResponse(
       fine.width,
       boundedWeight,
     ),
+    ...(restHeight ? { restHeight } : {}),
   };
   // No geometry mutation until validation and all callback/graph construction
   // succeed. Register for the ordinary renderer geometry-disposal lifecycle.

@@ -201,12 +201,15 @@ import {
   resolveCompactDirtProjectionCandidate,
   resolveCompactRockProjectionCandidate,
   resolveCompactRockSampling,
+  resolveCompactGroundSampling,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
   resolveGrassAppearanceCandidate,
   resolveGrassLightingCandidate,
   resolveGrassGeometryCandidate,
+  resolveGrassVergeEvaluation,
+  resolveGrassInstancingCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -450,6 +453,9 @@ export class TerrainSystem extends System {
   private compactRockSampling: ReturnType<
     typeof resolveCompactRockSampling
   > | null;
+  private compactGroundSampling: ReturnType<
+    typeof resolveCompactGroundSampling
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -465,6 +471,8 @@ export class TerrainSystem extends System {
         roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
         lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
         geometry?: ReturnType<typeof resolveGrassGeometryCandidate>;
+        vergeEvaluation?: ReturnType<typeof resolveGrassVergeEvaluation>;
+        instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -645,6 +653,7 @@ export class TerrainSystem extends System {
       compactDirtProjection: this.getCompactDirtProjection(),
       compactRockProjection: this.getCompactRockProjection(),
       compactRockSampling: this.getCompactRockSampling(),
+      compactGroundSampling: this.getCompactGroundSampling(),
       compactSurfaceBlend: this.getCompactSurfaceBlend(),
       compactPondBlend: this.getCompactPondBlend(),
       compactCoastBlend: this.getCompactCoastBlend(),
@@ -841,6 +850,25 @@ export class TerrainSystem extends System {
     return this.compactRockSampling ?? undefined;
   }
 
+  /** Capture once; the existing rock owner admits every material dependency. */
+  private getCompactGroundSampling(): ReturnType<
+    typeof resolveCompactGroundSampling
+  > {
+    if (this.compactGroundSampling === undefined) {
+      const selection = resolveCompactGroundSampling();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Ground sampling requires compact sculpt terrain");
+        if (this.getCompactRockSampling() !== "exact-zero-v1")
+          throw new Error(
+            "Ground sampling requires captured exact-zero-v1 rock sampling",
+          );
+      }
+      this.compactGroundSampling = selection ?? null;
+    }
+    return this.compactGroundSampling ?? undefined;
+  }
+
   /** Capture both absence and selection once, independently of dirt projection. */
   private getCompactSurfaceBlend(): ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
@@ -910,6 +938,8 @@ export class TerrainSystem extends System {
       const roadClearance = resolveGrassRoadClearance();
       const lighting = resolveGrassLightingCandidate();
       const geometry = resolveGrassGeometryCandidate();
+      const vergeEvaluation = resolveGrassVergeEvaluation();
+      const instancing = resolveGrassInstancingCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -926,6 +956,8 @@ export class TerrainSystem extends System {
         ...(roadClearance ? { roadClearance } : {}),
         ...(lighting ? { lighting } : {}),
         ...(geometry ? { geometry } : {}),
+        ...(vergeEvaluation ? { vergeEvaluation } : {}),
+        ...(instancing ? { instancing } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -2238,6 +2270,7 @@ export class TerrainSystem extends System {
     this.getCompactCoastBlend();
     this.getCompactGrassColorGrade();
     this.getCompactRockSampling();
+    this.getCompactGroundSampling();
 
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();
@@ -3047,6 +3080,8 @@ export class TerrainSystem extends System {
             }
           : undefined,
         grassSelection.geometry,
+        grassSelection.vergeEvaluation,
+        grassSelection.instancing,
       );
 
       if (grassSelection.flowers) {

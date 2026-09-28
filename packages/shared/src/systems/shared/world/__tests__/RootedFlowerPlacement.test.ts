@@ -4,7 +4,11 @@ import { World } from "../../../../core/World";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
 import { EntityType, ResourceType } from "../../../../types/entities";
 import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
-import type { GrassTerrainSurfaceSnapshot } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import type {
+  GrassTerrainExclusionPolygon,
+  GrassTerrainSurfaceSnapshot,
+  GrassTerrainSurfaceZone,
+} from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
 import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
 import { captureFlowerResourceClearance } from "../FlowerResourceClearance";
 import { getRootedFlowerWindBounds } from "../RootedFlowerMaterial";
@@ -12,6 +16,7 @@ import type { GrassGroundingInputLease } from "../GrassGroundingPipeline";
 import type { GrassGroundingRoadSegment } from "../GrassBladeGrounding";
 import {
   RetainedTerrainSurface,
+  type TerrainGridBounds,
   type TerrainGridSample,
 } from "../TerrainGridSurface";
 import type { RetainedTerrainRegion } from "../TerrainVisualManager";
@@ -41,6 +46,7 @@ const empty = (): GrassTerrainSurfaceSnapshot => ({
 
 function fixture(
   height: (x: number, z: number) => number = (x, z) => 10 + x * 0.01 + z * 0.02,
+  offset = 0,
 ) {
   const world = new World();
   const geometry = createRootedFlowerGeometry();
@@ -48,15 +54,20 @@ function fixture(
   const surface = new RetainedTerrainSurface(
     1,
     "flower-placement-test",
-    0,
-    0,
+    offset,
+    offset,
     128,
     5,
     terrain,
   );
   const state = { region: true, inputs: true, inputStarts: 0, inputCloses: 0 };
   const region: RetainedTerrainRegion = {
-    bounds: { minX: -100, maxX: 100, minZ: -100, maxZ: 100 },
+    bounds: {
+      minX: offset - 100,
+      maxX: offset + 100,
+      minZ: offset - 100,
+      maxZ: offset + 100,
+    },
     surfaces: [surface],
     isCurrent: () => state.region && surface.matchesGeometry(terrain),
   };
@@ -80,7 +91,7 @@ function fixture(
   const request = (
     overrides: Partial<RootedFlowerPlacementRequest> = {},
   ): RootedFlowerPlacementRequest => ({
-    origin: { x: 4, z: 4 },
+    origin: { x: offset + 4, z: offset + 4 },
     seed: 1728,
     geometry,
     region,
@@ -114,6 +125,38 @@ function rows(result: RootedFlowerPlacementResult) {
   return Array.from({ length: result.count }, (_, index) =>
     Array.from(result.matrices.slice(index * 16, index * 16 + 16)),
   );
+}
+
+function exclusionZone(
+  id: string,
+  box: TerrainGridBounds,
+): GrassTerrainSurfaceZone {
+  return {
+    id,
+    centerX: (box.minX + box.maxX) / 2,
+    centerZ: (box.minZ + box.maxZ) / 2,
+    width: box.maxX - box.minX + 2,
+    depth: box.maxZ - box.minZ + 2,
+    height: 10,
+    blendRadius: 0,
+    grassExclusionBounds: { ...box },
+  };
+}
+
+function exclusionPolygon(
+  id: string,
+  box: TerrainGridBounds,
+): GrassTerrainExclusionPolygon {
+  return {
+    id,
+    ...box,
+    vertices: [
+      { x: box.minX, z: box.minZ },
+      { x: box.maxX, z: box.minZ },
+      { x: box.maxX, z: box.maxZ },
+      { x: box.minX, z: box.maxZ },
+    ],
+  };
 }
 
 // Frozen original hash arithmetic, independent of the production helper.
@@ -755,11 +798,28 @@ describe("bounded rooted flower placement", () => {
         const actual = drain(
           f.request({ geometry, inputs: f.input(empty(), supplied) }),
         );
+        // Enumerate actual cell-box intersections, independently of the
+        // production ceil/floor indexing, including closed edge contact.
+        const relevant = ordered.map((road) => {
+          const padding = road.width / 2 + (road.blendWidth ?? 0.5) + 1;
+          const touches = (cx: number, cz: number) =>
+            cx * 8 <= Math.max(road.startX, road.endX) + padding &&
+            (cx + 1) * 8 >= Math.min(road.startX, road.endX) - padding &&
+            cz * 8 <= Math.max(road.startZ, road.endZ) + padding &&
+            (cz + 1) * 8 >= Math.min(road.startZ, road.endZ) - padding;
+          let cells = 0;
+          for (let cx = -5; cx <= 5; cx++)
+            for (let cz = -5; cz <= 5; cz++) if (touches(cx, cz)) cells++;
+          return (row: number[]) =>
+            cells > 16 ||
+            touches(Math.floor(row[12] / 8), Math.floor(row[14] / 8));
+        });
         let expectedRoadSteps = 0;
         for (const row of candidates)
-          for (const road of ordered) {
+          for (let index = 0; index < ordered.length; index++) {
+            if (!relevant[index](row)) continue;
             expectedRoadSteps++;
-            if (blocked(row, road)) break;
+            if (blocked(row, ordered[index])) break;
           }
         expect(rows(actual.result)).toEqual(expected);
         expect(actual.result.diagnostics.rejected.road).toBe(
@@ -769,8 +829,8 @@ describe("bounded rooted flower placement", () => {
           actual.phases.filter((phase) => phase === "flower_road_admission"),
         ).toHaveLength(supplied.length);
         expect(
-          actual.phases.filter((phase) => phase === "flower_road"),
-        ).toHaveLength(expectedRoadSteps);
+          actual.phases.filter((phase) => phase === "flower_road").length,
+        ).toBe(expectedRoadSteps);
       }
     },
   );
@@ -828,9 +888,175 @@ describe("bounded rooted flower placement", () => {
       actual.phases.filter((phase) => phase === "flower_road_admission"),
     ).toHaveLength(8);
     expect(
-      actual.phases.filter((phase) => phase === "flower_road"),
-    ).toHaveLength(baseline.count * 4);
+      actual.phases.filter((phase) => phase === "flower_road_index"),
+    ).toHaveLength(4);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_bucket").length,
+    ).toBeGreaterThan(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road").length,
+    ).toBeLessThanOrEqual(baseline.count * 4);
   });
+
+  it("shortlists dense local roads without changing the all-capsule layout", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request()).result;
+    const roads = Array.from({ length: 638 }, (_, index) => {
+      const x = ((index * 37) % 880) / 10 - 40;
+      const z = ((index * 53) % 880) / 10 - 40;
+      return {
+        startX: x,
+        startZ: z,
+        endX: x + 2,
+        endZ: z + 1,
+        width: 0.1,
+        blendWidth: 0.1,
+      };
+    });
+    const position = f.geometry.getAttribute("position");
+    let radius = 0;
+    for (let vertex = 0; vertex < position.count; vertex++)
+      radius = Math.max(
+        radius,
+        Math.hypot(position.getX(vertex), position.getZ(vertex)),
+      );
+    const expected = rows(baseline).filter((row) => {
+      const wind = getRootedFlowerWindBounds(
+        f.geometry.getAttribute("flowerHeight").getY(0),
+        row[5],
+      );
+      const reach =
+        radius *
+          Math.max(Math.hypot(row[0], row[2]), Math.hypot(row[8], row[10])) *
+          (1 + 2e-6) +
+        Math.hypot(wind.x, wind.z) +
+        1e-5;
+      return !roads.some((road) => {
+        const dx = road.endX - road.startX,
+          dz = road.endZ - road.startZ;
+        const t = Math.max(
+          0,
+          Math.min(
+            1,
+            ((row[12] - road.startX) * dx + (row[14] - road.startZ) * dz) /
+              (dx * dx + dz * dz),
+          ),
+        );
+        return (
+          Math.hypot(
+            row[12] - road.startX - t * dx,
+            row[14] - road.startZ - t * dz,
+          ) <=
+          road.width / 2 + road.blendWidth + reach
+        );
+      });
+    });
+    expect(expected.length).toBeGreaterThan(0);
+    expect(expected.length).toBeLessThan(baseline.count);
+    for (const ordered of [roads, [...roads].reverse()]) {
+      const actual = drain(f.request({ inputs: f.input(empty(), ordered) }));
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.road).toBe(
+        baseline.count - expected.length,
+      );
+      expect(
+        actual.phases.filter((phase) => phase === "flower_road_admission"),
+      ).toHaveLength(638);
+      expect(
+        actual.phases.filter((phase) => phase === "flower_road").length,
+      ).toBeLessThan((baseline.count * roads.length) / 10);
+      expect(actual.result.isCurrent()).toBe(true);
+    }
+  });
+
+  it("does not multiply island-spanning roads into every candidate cell", () => {
+    const f = fixture(() => 10);
+    const roads = Array.from({ length: 4096 }, () => ({
+      startX: 0,
+      startZ: 0,
+      endX: 0,
+      endZ: 0,
+      width: 1000,
+      blendWidth: 0,
+    }));
+    const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+    expect(actual.result.count).toBe(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_index"),
+    ).toHaveLength(4096);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_bucket"),
+    ).toHaveLength(0);
+    expect(actual.result.diagnostics.steps).toBeLessThan(10000);
+  });
+
+  it.each([-(2 ** 20) + 8, -80, 0, 2 ** 20 - 8])(
+    "preserves closed cell contact and all-road results at world offset %s",
+    (offset) => {
+      const f = fixture(() => 10, offset);
+      const baseline = drain(f.request()).result;
+      const roads = [
+        [7, 4],
+        [9, 4],
+        [4, 7],
+        [4, 9],
+      ].map(([x, z]) => ({
+        startX: offset + x,
+        startZ: offset + z,
+        endX: offset + x,
+        endZ: offset + z,
+        width: 0,
+        blendWidth: 0,
+      }));
+      const contact = drain(f.request({ inputs: f.input(empty(), roads) }));
+      // Each padded point touches exactly two closed 8m cells, not just one.
+      expect(
+        contact.phases.filter((phase) => phase === "flower_road_bucket"),
+      ).toHaveLength(8);
+      const first = rows(baseline)[0];
+      roads.push({
+        startX: first[12],
+        startZ: first[14],
+        endX: first[12],
+        endZ: first[14],
+        width: 0,
+        blendWidth: 0,
+      });
+      const position = f.geometry.getAttribute("position");
+      let radius = 0;
+      for (let i = 0; i < position.count; i++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(i), position.getZ(i)),
+        );
+      const expected = rows(baseline).filter((row) => {
+        const wind = getRootedFlowerWindBounds(
+          f.geometry.getAttribute("flowerHeight").getY(0),
+          row[5],
+        );
+        const reach =
+          radius *
+            Math.max(Math.hypot(row[0], row[2]), Math.hypot(row[8], row[10])) *
+            (1 + 2e-6) +
+          Math.hypot(wind.x, wind.z) +
+          1e-5;
+        return roads.every(
+          (road) =>
+            Math.hypot(row[12] - road.startX, row[14] - road.startZ) > reach,
+        );
+      });
+      expect(expected).not.toContainEqual(first);
+      const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.road).toBe(
+        baseline.count - expected.length,
+      );
+    },
+  );
 
   it("still validates distant roads and applies the raw input cap before culling", () => {
     const f = fixture(() => 10);
@@ -910,6 +1136,217 @@ describe("bounded rooted flower placement", () => {
       expect(f.region.isCurrent()).toBe(true);
     },
   );
+
+  it("validates distant zone and polygon workload once without repeating it per flower", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request());
+    const box = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const snapshot = {
+      ...empty(),
+      zones: Array.from({ length: 256 }, (_, i) =>
+        exclusionZone(`far-zone-${i}`, box),
+      ),
+      exclusionPolygons: Array.from({ length: 32 }, (_, i) =>
+        exclusionPolygon(`far-polygon-${i}`, box),
+      ),
+    };
+    const original = structuredClone(snapshot);
+    const actual = drain(f.request({ inputs: f.input(snapshot) }));
+    expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+      new Uint8Array(baseline.result.matrices.buffer),
+    );
+    expect(actual.result.diagnostics.rejected).toEqual(
+      baseline.result.diagnostics.rejected,
+    );
+    expect(snapshot).toEqual(original);
+    expect(actual.result.isCurrent()).toBe(true);
+    const exclusionSteps = actual.phases.filter(
+      (phase) => phase === "flower_exclusion",
+    ).length;
+    console.info(
+      "FLOWER_EXCLUSION_WORKLOAD",
+      JSON.stringify({
+        count: actual.result.count,
+        zones: snapshot.zones.length,
+        polygons: snapshot.exclusionPolygons.length,
+        baselineSteps: baseline.result.diagnostics.steps,
+        steps: actual.result.diagnostics.steps,
+        yieldedSteps: actual.phases.length,
+        exclusionSteps,
+        matricesByteExact: true,
+        timingClaimed: false,
+      }),
+    );
+    expect(
+      actual.phases.filter((phase) => phase === "flower_zone_admission"),
+    ).toHaveLength(256);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_polygon_envelope"),
+    ).toHaveLength(32);
+    expect(exclusionSteps).toBe(0);
+  });
+
+  it("matches the all-envelope oracle and retains exclusion order on actual flower geometry", () => {
+    const f = fixture(() => 10),
+      baseline = drain(f.request()).result;
+    const candidates = rows(baseline),
+      first = candidates[0],
+      last = candidates[candidates.length - 1];
+    const far = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const near = [first, last].map((row) => ({
+      minX: row[12] - 0.1,
+      maxX: row[12] + 0.1,
+      minZ: row[14] - 0.1,
+      maxZ: row[14] + 0.1,
+    }));
+    const position = f.geometry.getAttribute("position");
+    let radius = 0;
+    for (let i = 0; i < position.count; i++)
+      radius = Math.max(radius, Math.hypot(position.getX(i), position.getZ(i)));
+    const blocked = (row: number[], box: TerrainGridBounds) => {
+      const scale = Math.max(
+        Math.hypot(row[0], row[2]),
+        Math.hypot(row[8], row[10]),
+      );
+      const wind = getRootedFlowerWindBounds(
+        f.geometry.getAttribute("flowerHeight").getY(0),
+        row[5],
+      );
+      const reach =
+        radius * scale * (1 + 2e-6) + Math.hypot(wind.x, wind.z) + 1e-5;
+      return (
+        row[12] - reach <= box.maxX &&
+        row[12] + reach >= box.minX &&
+        row[14] - reach <= box.maxZ &&
+        row[14] + reach >= box.minZ
+      );
+    };
+    for (const ordered of [near, [...near].reverse()]) {
+      const all = [far, ...ordered, far];
+      const expected = candidates.filter(
+        (row) => !all.some((box) => blocked(row, box)),
+      );
+      expect(expected.length).toBeLessThan(candidates.length);
+      const actual = drain(
+        f.request({
+          inputs: f.input({
+            ...empty(),
+            zones: [
+              exclusionZone("far", far),
+              ...ordered.map((box, i) => exclusionZone(`near-${i}`, box)),
+            ],
+            exclusionPolygons: [exclusionPolygon("far-poly", far)],
+          }),
+        }),
+      );
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.zone).toBe(
+        candidates.length - expected.length,
+      );
+      let comparisons = 0;
+      for (const row of candidates)
+        for (const box of ordered) {
+          comparisons++;
+          if (blocked(row, box)) break;
+        }
+      expect(
+        actual.phases.filter((phase) => phase === "flower_exclusion"),
+      ).toHaveLength(comparisons);
+    }
+  });
+
+  it("keeps zone and polygon boundary contact on all four sides", () => {
+    const f = fixture(() => 10),
+      baseline = drain(f.request()).result;
+    const n = getRootedFlowerPlacementBounds(f.geometry, { x: 4, z: 4 });
+    const touching = [
+      { minX: n.minX - 1, maxX: n.minX, minZ: 3, maxZ: 5 },
+      { minX: n.maxX, maxX: n.maxX + 1, minZ: 3, maxZ: 5 },
+      { minX: 3, maxX: 5, minZ: n.minZ - 1, maxZ: n.minZ },
+      { minX: 3, maxX: 5, minZ: n.maxZ, maxZ: n.maxZ + 1 },
+    ];
+    const outside = touching.map((b, i) => ({
+      minX: b.minX + (i === 0 ? -1e-6 : i === 1 ? 1e-6 : 0),
+      maxX: b.maxX + (i === 0 ? -1e-6 : i === 1 ? 1e-6 : 0),
+      minZ: b.minZ + (i === 2 ? -1e-6 : i === 3 ? 1e-6 : 0),
+      maxZ: b.maxZ + (i === 2 ? -1e-6 : i === 3 ? 1e-6 : 0),
+    }));
+    const boxes = [...touching, ...outside];
+    const actual = drain(
+      f.request({
+        inputs: f.input({
+          ...empty(),
+          zones: boxes.map((box, i) => exclusionZone(`zone-${i}`, box)),
+          exclusionPolygons: boxes.map((box, i) =>
+            exclusionPolygon(`polygon-${i}`, box),
+          ),
+        }),
+      }),
+    );
+    expect(actual.result.matrices).toEqual(baseline.matrices);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_zone_admission"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_polygon_envelope"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_exclusion"),
+    ).toHaveLength(baseline.count * 8);
+  });
+
+  it("rejects invalid distant exclusions and raw count overflow before culling", () => {
+    const f = fixture(),
+      box = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const invalid: GrassTerrainSurfaceSnapshot[] = [
+      {
+        ...empty(),
+        zones: [{ ...exclusionZone("bad-height", box), height: NaN }],
+      },
+      {
+        ...empty(),
+        zones: [
+          {
+            ...exclusionZone("bad-mask", box),
+            tileMask: new Set(["1000,NaN"]),
+          },
+        ],
+      },
+      {
+        ...empty(),
+        exclusionPolygons: [
+          { ...exclusionPolygon("bad-bounds", box), maxX: 1002 },
+        ],
+      },
+      {
+        ...empty(),
+        exclusionPolygons: [
+          {
+            ...exclusionPolygon("bad-winding", box),
+            vertices: exclusionPolygon("x", box).vertices.reverse(),
+          },
+        ],
+      },
+      {
+        ...empty(),
+        zones: Array.from({ length: 513 }, (_, i) =>
+          exclusionZone(`zone-${i}`, box),
+        ),
+      },
+      {
+        ...empty(),
+        exclusionPolygons: Array.from({ length: 65 }, (_, i) =>
+          exclusionPolygon(`polygon-${i}`, box),
+        ),
+      },
+    ];
+    for (const snapshot of invalid)
+      expect(() => drain(f.request({ inputs: f.input(snapshot) }))).toThrow(
+        /Invalid grass terrain surface/,
+      );
+  });
 
   it("clears full road blends and polygon/water envelopes beyond the root point", () => {
     const f = fixture();

@@ -1,4 +1,5 @@
 import type {
+  GrassAuthoredMeadowUnion,
   GrassBladeGroundingDependency,
   GrassBladeGroundingResult,
 } from "./GrassBladeGrounding";
@@ -40,6 +41,18 @@ export type GrassMeadowClearanceCertificate = Readonly<{
   sweptBounds: ReadyGrounding["sweptBounds"];
   dependencies: readonly GrassBladeGroundingDependency[];
 }>;
+
+export type GrassMeadowFootprintArchClearanceCertificate = Readonly<
+  Omit<GrassMeadowClearanceCertificate, "kind"> & {
+    kind: "meadow-footprint-arch-clearance-v1";
+  }
+>;
+
+export type GrassMeadowSweptBladeClearanceCertificate = Readonly<
+  Omit<GrassMeadowClearanceCertificate, "kind"> & {
+    kind: "meadow-swept-blade-clearance-v1";
+  }
+>;
 
 function requireValue(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -120,9 +133,61 @@ export function certifyGrassMeadowClearance(
   result: GrassBladeGroundingResult,
   isCurrent: () => boolean,
 ): GrassMeadowClearanceCertificate | null {
+  return certifyMeadowClearance(
+    installed,
+    result,
+    isCurrent,
+    "meadow-authored-union-v1",
+    "meadow-authored-clearance-v1",
+  );
+}
+
+/** Explicit arch admission. A legacy authored certificate is never an arch
+ * certificate, even though both sweep fifteen fine and seven parent samples. */
+export function certifyGrassMeadowFootprintArchClearance(
+  installed: GrassMeadowInstalledBatch,
+  result: GrassBladeGroundingResult,
+  isCurrent: () => boolean,
+): GrassMeadowFootprintArchClearanceCertificate | null {
+  return certifyMeadowClearance(
+    installed,
+    result,
+    isCurrent,
+    "meadow-footprint-arch-union-v1",
+    "meadow-footprint-arch-clearance-v1",
+  );
+}
+
+/** Exact installed rows only, after this endpoint's combined fine/coarse sweep. */
+export function certifyGrassMeadowSweptBladeClearance(
+  installed: GrassMeadowInstalledBatch,
+  result: GrassBladeGroundingResult,
+  isCurrent: () => boolean,
+): GrassMeadowSweptBladeClearanceCertificate | null {
+  return certifyMeadowClearance(
+    installed,
+    result,
+    isCurrent,
+    "meadow-swept-blade-union-v1",
+    "meadow-swept-blade-clearance-v1",
+  );
+}
+
+function certifyMeadowClearance<
+  Kind extends
+    | GrassMeadowClearanceCertificate["kind"]
+    | GrassMeadowFootprintArchClearanceCertificate["kind"]
+    | GrassMeadowSweptBladeClearanceCertificate["kind"],
+>(
+  installed: GrassMeadowInstalledBatch,
+  result: GrassBladeGroundingResult,
+  isCurrent: () => boolean,
+  unionKind: GrassAuthoredMeadowUnion["kind"],
+  certificateKind: Kind,
+): (Omit<GrassMeadowClearanceCertificate, "kind"> & { kind: Kind }) | null {
   if (!isCurrent() || result.status !== "ready") return null;
   requireValue(
-    result.receipt.authoredMeadow?.kind === "meadow-authored-union-v1" &&
+    result.receipt.authoredMeadow?.kind === unionKind &&
       result.receipt.authoredMeadow.authoredVerticesPerBlade === 15 &&
       result.receipt.authoredMeadow.coarseVerticesPerBlade === 7 &&
       result.receipt.bladesPerClump === BLADES &&
@@ -197,7 +262,7 @@ export function certifyGrassMeadowClearance(
   }
   if (!isCurrent()) return null;
   return Object.freeze({
-    kind: "meadow-authored-clearance-v1",
+    kind: certificateKind,
     owner: installed.owner,
     generation: installed.generation,
     sourceIndices: sourceIndices.slice(0, accepted),

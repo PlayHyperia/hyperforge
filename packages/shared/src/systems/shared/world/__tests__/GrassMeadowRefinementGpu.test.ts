@@ -1,21 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { JSDOM } from "jsdom";
-import { float, vec3, vertexIndex } from "three/tsl";
+import { float, sin, vec3, vertexIndex } from "three/tsl";
 import { StorageBufferAttribute, WGSLNodeBuilder } from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
 import THREE from "../../../../extras/three/three";
 import {
+  createClumpGeometry,
   createMeadowDetailClumpGeometry,
   createMeadowAuthoredClumpGeometry,
+  FINE_GRASS_MEADOW_FIELD_SHAPE,
 } from "../GrassVisualManager";
+import type { GrassMeadowAuthoredBlade } from "../GrassMeadowAuthoredShape";
+import { createMeadowFootprintArchBuffers } from "../GrassMeadowFootprintArch";
+import { createMeadowSweptBladeBuffers } from "../GrassMeadowSweptBlade";
 import { GRASS_MEADOW_REFINEMENT } from "../GrassBladeLayout";
 import {
   createGrassMeadowRefinementResponse,
   createGrassMeadowAuthoredResponse,
+  createGrassMeadowFootprintArchResponse,
+  createGrassMeadowSweptBladeResponse,
+  createGrassMeadowRestHeightColorCoordinate,
   GRASS_MEADOW_COARSE_POSITION_T_ATTRIBUTE,
   GRASS_MEADOW_COARSE_NORMAL_U_ATTRIBUTE,
   GRASS_MEADOW_PARENT_PAIRS_ATTRIBUTE,
   type GrassMeadowRefinementSample,
+  type GrassMeadowFootprintArchSample,
 } from "../GrassMeadowRefinementGpu";
 
 const NAMES = [
@@ -56,6 +65,7 @@ function evaluateGraph(
   root: Node,
   geometry: THREE.BufferGeometry,
   vertex: number,
+  roundToFloat32 = false,
 ): number[] {
   const cache = new Map<Node, number[]>();
   const visit = (n: Node): number[] => {
@@ -99,7 +109,16 @@ function evaluateGraph(
       if (!Array.isArray(children)) throw new Error("Missing joined nodes");
       out = children.flatMap((v: unknown) => visit(actual(v)));
     } else if (["ConvertNode", "VarNode"].includes(n.type)) out = child("node");
-    else {
+    else if (n.type === "ConditionalNode")
+      out = child("condNode")[0] ? child("ifNode") : child("elseNode");
+    else if (read("method") === "normalize") {
+      const a = child("aNode");
+      const length = Math.hypot(...a);
+      if (!(length > 0)) throw new Error("Degenerate graph normalization");
+      out = a.map((value) => value / length);
+    } else if (read("method") === "sin") {
+      out = child("aNode").map(Math.sin);
+    } else {
       const a = child("aNode"),
         b = child("bNode");
       const c = read("cNode") instanceof THREE.Node ? child("cNode") : [0];
@@ -110,7 +129,20 @@ function evaluateGraph(
             y = b[b.length === 1 ? 0 : i],
             z = c[c.length === 1 ? 0 : i];
           if (read("op") === "+") return x + y;
+          if (read("op") === "-") return x - y;
           if (read("op") === "*") return x * y;
+          if (read("op") === "/") {
+            const isUint = (node: Node): boolean =>
+              node.type === "VarNode"
+                ? isUint(actual(Reflect.get(node, "node")))
+                : Reflect.get(node, "nodeType") === "uint";
+            const integer = [
+              actual(read("aNode")),
+              actual(read("bNode")),
+            ].every(isUint);
+            return integer ? Math.floor(x / y) : x / y;
+          }
+          if (read("op") === "==") return Number(x === y);
           if (read("method") === "mix") return x * (1 - z) + y * z;
           if (read("method") === "clamp") return Math.max(y, Math.min(z, x));
           throw new Error(
@@ -119,6 +151,7 @@ function evaluateGraph(
         },
       );
     }
+    if (roundToFloat32) out = out.map(Math.fround);
     if (out.some((v) => !Number.isFinite(v)))
       throw new Error("Nonfinite graph result");
     cache.set(n, out);
@@ -134,14 +167,17 @@ function response({ position, normal, t }: GrassMeadowRefinementSample) {
     width: vec3(t.mul(t), t.mul(t).mul(t), t),
   };
 }
-function expected(geometry: THREE.BufferGeometry, vertex: number) {
+function expected(
+  geometry: THREE.BufferGeometry,
+  vertex: number,
+  t = geometry.getAttribute("uv").getY(vertex),
+) {
   const p = new THREE.Vector3()
     .fromBufferAttribute(geometry.getAttribute("position"), vertex)
     .toArray();
   const n = new THREE.Vector3()
     .fromBufferAttribute(geometry.getAttribute("normal"), vertex)
     .toArray();
-  const t = geometry.getAttribute("uv").getY(vertex);
   return {
     position: [p[0] + t * t, p[1] + t * t * t, p[2] + t * 0.3],
     normal: [n[0] + t * t, n[1] + t * 0.2, n[2]],
@@ -596,6 +632,642 @@ describe("explicit authored meadow endpoint response", () => {
         );
       } finally {
         clone.dispose();
+      }
+    }));
+});
+
+describe.each([
+  {
+    name: "footprint-locked arch",
+    createBuffers: createMeadowFootprintArchBuffers,
+    bind: createGrassMeadowFootprintArchResponse,
+    swept: false,
+  },
+  {
+    name: "complete swept blade",
+    createBuffers: createMeadowSweptBladeBuffers,
+    bind: createGrassMeadowSweptBladeResponse,
+    swept: true,
+  },
+])("explicit $name response", ({ createBuffers, bind, swept }) => {
+  function arch(
+    action: (value: {
+      geometry: THREE.BufferGeometry;
+      coarseGeometry: THREE.BufferGeometry;
+    }) => void,
+  ) {
+    const blades: GrassMeadowAuthoredBlade[] = [];
+    const coarseGeometry = createClumpGeometry(
+      21,
+      3,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+      undefined,
+      (blade) => blades.push(blade),
+    );
+    const geometry = new THREE.BufferGeometry();
+    try {
+      const data = createBuffers(
+        coarseGeometry,
+        blades,
+        FINE_GRASS_MEADOW_FIELD_SHAPE,
+      );
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(data.positions, 3),
+      );
+      geometry.setAttribute(
+        "normal",
+        new THREE.BufferAttribute(data.normals, 3),
+      );
+      geometry.setAttribute("uv", new THREE.BufferAttribute(data.uv, 2));
+      geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+      geometry.userData[data.layout.metadataKey] = data.recipe;
+      action({ geometry, coarseGeometry });
+    } finally {
+      geometry.dispose();
+      coarseGeometry.dispose();
+    }
+  }
+
+  const fineResponse = (sample: GrassMeadowFootprintArchSample) => ({
+    ...response({
+      ...sample,
+      t: swept ? sin(sample.t.mul(Math.PI * 0.5)) : sample.t,
+    }),
+    width: sample.widthAxis,
+  });
+
+  it.each([-1, 0, 0.5, 1, 2])(
+    "separates coarse/fine evaluation with apex-safe width at weight %s",
+    (weight) =>
+      arch(({ geometry, coarseGeometry }) => {
+        let coarseCalls = 0;
+        let fineCalls = 0;
+        let widthGraph: Node | undefined;
+        const before = { ...coarseGeometry.attributes };
+        const result = bind(
+          geometry,
+          coarseGeometry,
+          float(weight),
+          (sample) => {
+            coarseCalls++;
+            expect(Object.keys(sample).sort()).toEqual([
+              "normal",
+              "position",
+              "t",
+            ]);
+            return response(sample);
+          },
+          (sample) => {
+            fineCalls++;
+            widthGraph = sample.widthAxis;
+            return fineResponse(sample);
+          },
+        );
+        expect([coarseCalls, fineCalls]).toEqual([2, 1]);
+        expect(coarseGeometry.attributes).toEqual(before);
+        expect(NAMES.map((name) => geometry.getAttribute(name).count)).toEqual([
+          147, 147, 315,
+        ]);
+        expect(
+          NAMES.reduce(
+            (sum, name) => sum + geometry.getAttribute(name).array.byteLength,
+            0,
+          ),
+        ).toBe(7224);
+        expect(Object.keys(geometry.attributes).sort()).toEqual(
+          [...NAMES, "position", "normal", "uv"].sort(),
+        );
+        const widthNodes = nodes([actual(widthGraph)]);
+        const widthStorage = widthNodes.filter((node) =>
+          Reflect.get(node, "isStorageBufferNode"),
+        );
+        expect(widthStorage).toHaveLength(1);
+        expect(Reflect.get(widthStorage[0], "value")).toBe(
+          geometry.getAttribute(NAMES[0]),
+        );
+        expect(widthNodes.some((node) => node.type === "AttributeNode")).toBe(
+          false,
+        );
+        const cp = coarseGeometry.getAttribute("position");
+        const w = Math.max(0, Math.min(1, weight));
+        for (let vertex = 0; vertex < 315; vertex++) {
+          const base = Math.floor(vertex / 15) * 7;
+          const [pa, pb] = GRASS_MEADOW_REFINEMENT.parentPairs[vertex % 15];
+          const a = expected(coarseGeometry, base + pa);
+          const b = expected(coarseGeometry, base + pb);
+          const materialT = geometry.getAttribute("uv").getY(vertex);
+          const fine = expected(
+            geometry,
+            vertex,
+            swept ? Math.sin(materialT * Math.PI * 0.5) : materialT,
+          );
+          fine.width = new THREE.Vector3()
+            .fromBufferAttribute(cp, base + 1)
+            .sub(new THREE.Vector3().fromBufferAttribute(cp, base))
+            .normalize()
+            .toArray();
+          expect(
+            Math.hypot(...evaluateGraph(actual(widthGraph), geometry, vertex)),
+          ).toBeCloseTo(1, 12);
+          for (const key of ["position", "normal", "width"] as const) {
+            const want = a[key].map(
+              (value, axis) =>
+                (value + b[key][axis]) * 0.5 * (1 - w) + fine[key][axis] * w,
+            );
+            evaluateGraph(result[key], geometry, vertex).forEach(
+              (value, axis) => expect(value).toBeCloseTo(want[axis], 12),
+            );
+          }
+        }
+        // No normalization is inserted into the interpolated normal response.
+        expect(
+          nodes([result.normal]).some(
+            (node) => Reflect.get(node, "method") === "normalize",
+          ),
+        ).toBe(false);
+      }),
+  );
+
+  it("does not silently admit the arch under either historical endpoint", () =>
+    arch(({ geometry, coarseGeometry }) => {
+      for (const bind of [
+        createGrassMeadowRefinementResponse,
+        createGrassMeadowAuthoredResponse,
+      ]) {
+        let called = false;
+        expect(() =>
+          bind(geometry, coarseGeometry, float(0), (sample) => {
+            called = true;
+            return response(sample);
+          }),
+        ).toThrow();
+        expect(called).toBe(false);
+        expect(NAMES.some((name) => geometry.hasAttribute(name))).toBe(false);
+      }
+    }));
+
+  it.each(["position", "normal", "uv", "index", "metadata", "root-span"])(
+    "rejects invalid %s before callbacks or storage attachment",
+    (field) =>
+      arch(({ geometry, coarseGeometry }) => {
+        if (field === "metadata") geometry.userData = {};
+        else if (field === "index") geometry.index!.setX(0, 1);
+        else if (field === "root-span") {
+          const p = coarseGeometry.getAttribute("position");
+          p.setXYZ(1, p.getX(0), p.getY(0), p.getZ(0));
+        } else {
+          const a = geometry.getAttribute(field);
+          a.setX(12, a.getX(12) + 0.02);
+        }
+        const before = { ...geometry.attributes };
+        let calls = 0;
+        expect(() =>
+          bind(
+            geometry,
+            coarseGeometry,
+            float(0),
+            (sample) => {
+              calls++;
+              return response(sample);
+            },
+            (sample) => {
+              calls++;
+              return fineResponse(sample);
+            },
+          ),
+        ).toThrow();
+        expect(calls).toBe(0);
+        expect(geometry.attributes).toEqual(before);
+      }),
+  );
+
+  it.each(["coarse", "fine"])(
+    "does not attach storage after a %s callback failure",
+    (where) =>
+      arch(({ geometry, coarseGeometry }) => {
+        const before = { ...geometry.attributes };
+        const failure = new Error("intentional endpoint callback failure");
+        expect(() =>
+          bind(
+            geometry,
+            coarseGeometry,
+            float(0.5),
+            (sample) => {
+              if (where === "coarse") throw failure;
+              return response(sample);
+            },
+            (sample) => {
+              if (where === "fine") throw failure;
+              return fineResponse(sample);
+            },
+          ),
+        ).toThrow(failure);
+        expect(geometry.attributes).toEqual(before);
+      }),
+  );
+
+  it("rejects absent fine evaluators and incomplete response graphs atomically", () =>
+    arch(({ geometry, coarseGeometry }) => {
+      const before = { ...geometry.attributes };
+      for (const invalid of [undefined, () => ({})]) {
+        expect(() =>
+          Reflect.apply(bind, undefined, [
+            geometry,
+            coarseGeometry,
+            float(0),
+            response,
+            invalid,
+          ]),
+        ).toThrow();
+        expect(geometry.attributes).toEqual(before);
+      }
+    }));
+
+  it("compiles the positive-UV bearing from existing vertex-stage storage", () =>
+    arch(({ geometry, coarseGeometry }) => {
+      let width: Node | undefined;
+      bind(geometry, coarseGeometry, float(1), response, (sample) => {
+        width = sample.widthAxis;
+        return fineResponse(sample);
+      });
+      const material = new THREE.MeshStandardNodeMaterial();
+      const mesh = new THREE.Mesh(geometry, material);
+      const dom = new JSDOM("<canvas></canvas>");
+      const canvas = dom.window.document.querySelector("canvas");
+      if (!canvas) throw new Error("Missing canvas constructor owner");
+      const renderer = new THREE.WebGPURenderer({ canvas });
+      try {
+        const builder = new WGSLNodeBuilder(mesh, renderer);
+        Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+        Reflect.set(builder, "shaderStage", "vertex");
+        const generate: unknown = Reflect.get(builder, "flowStagesNode");
+        if (typeof generate !== "function")
+          throw new Error("Missing native flow method");
+        const flow: unknown = generate.call(builder, actual(width), "vec3");
+        if (
+          !flow ||
+          typeof flow !== "object" ||
+          !("code" in flow) ||
+          !("result" in flow)
+        )
+          throw new Error("Invalid native flow");
+        const code = String(flow.code) + String(flow.result);
+        expect(code).toMatch(/normalize\(/);
+        expect(code).toMatch(/vertexIndex\s*\/\s*15u/);
+        expect(code).toContain("7u");
+        expect(code).toContain("NodeBuffer_");
+        expect(code).not.toMatch(
+          /normalLocal|normalView|attribute|undefined|NaN|Infinity/,
+        );
+        for (const name of NAMES) expect(code).not.toContain(name);
+      } finally {
+        renderer.dispose();
+        dom.window.close();
+        material.dispose();
+      }
+    }));
+});
+
+describe("opt-in swept rest-height color coordinate", () => {
+  function sweptFixture(
+    quartic: boolean,
+    action: (
+      geometry: THREE.BufferGeometry,
+      coarse: THREE.BufferGeometry,
+    ) => void,
+  ) {
+    const blades: GrassMeadowAuthoredBlade[] = [];
+    const shape = {
+      ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+      ...(quartic
+        ? { BLADE_WIDTH_BEZIER_CONTROL_POINTS: [0.25, 2.3, 1.3, 0, 0] as const }
+        : {}),
+    };
+    const coarse = createClumpGeometry(21, 3, shape, undefined, (blade) =>
+      blades.push(blade),
+    );
+    const geometry = new THREE.BufferGeometry();
+    try {
+      const data = createMeadowSweptBladeBuffers(coarse, blades, shape);
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(data.positions, 3),
+      );
+      geometry.setAttribute(
+        "normal",
+        new THREE.BufferAttribute(data.normals, 3),
+      );
+      geometry.setAttribute("uv", new THREE.BufferAttribute(data.uv, 2));
+      geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+      geometry.userData[data.layout.metadataKey] = data.recipe;
+      action(geometry, coarse);
+    } finally {
+      geometry.dispose();
+      coarse.dispose();
+    }
+  }
+
+  it.each([false, true])(
+    "exposes raw fine height using only the existing position storage (quartic %s)",
+    (quartic) =>
+      sweptFixture(quartic, (geometry, coarse) => {
+        const result = createGrassMeadowSweptBladeResponse(
+          geometry,
+          coarse,
+          float(0.5),
+          response,
+          response,
+          true,
+        );
+        const restHeight = actual(result.restHeight);
+        expect(NAMES.map((name) => geometry.getAttribute(name).count)).toEqual([
+          147, 147, 315,
+        ]);
+        expect(Object.keys(geometry.attributes).sort()).toEqual(
+          [...NAMES, "normal", "position", "uv"].sort(),
+        );
+        const graph = nodes([restHeight]);
+        const buffers = graph.filter((node) =>
+          Reflect.get(node, "isStorageBufferNode"),
+        );
+        expect(buffers).toHaveLength(1);
+        expect(Reflect.get(buffers[0], "value")).toBe(
+          geometry.getAttribute(NAMES[0]),
+        );
+        expect(
+          graph
+            .filter((node) => node.type === "AttributeNode")
+            .map((node) => Reflect.get(node, "_attributeName")),
+        ).toEqual(["position"]);
+        expect(graph.some((node) => node.type === "VaryingNode")).toBe(false);
+        for (let vertex = 0; vertex < 315; vertex++) {
+          const height = geometry.getAttribute("position").getY(vertex);
+          const tip = coarse
+            .getAttribute("position")
+            .getY(Math.floor(vertex / 15) * 7 + 6);
+          expect(evaluateGraph(restHeight, geometry, vertex)[0]).toBe(
+            height / tip,
+          );
+        }
+      }),
+  );
+
+  it("keeps the default and explicit-false response graph and binding layout unchanged", () =>
+    sweptFixture(true, (geometry, coarse) => {
+      const clone = geometry.clone();
+      try {
+        const implicit = createGrassMeadowSweptBladeResponse(
+          geometry,
+          coarse,
+          float(0.5),
+          response,
+          response,
+        );
+        const explicit = createGrassMeadowSweptBladeResponse(
+          clone,
+          coarse,
+          float(0.5),
+          response,
+          response,
+          false,
+        );
+        for (const result of [implicit, explicit]) {
+          expect(Object.keys(result)).toEqual(["position", "normal", "width"]);
+          expect(result.restHeight).toBeUndefined();
+        }
+        for (const name of NAMES)
+          expect(geometry.getAttribute(name).array).toEqual(
+            clone.getAttribute(name).array,
+          );
+        for (let vertex = 0; vertex < 315; vertex++)
+          for (const key of ["position", "normal", "width"] as const)
+            expect(evaluateGraph(implicit[key], geometry, vertex)).toEqual(
+              evaluateGraph(explicit[key], clone, vertex),
+            );
+        expect(
+          nodes([implicit.position, implicit.normal, implicit.width]).map(
+            (node) => node.type,
+          ),
+        ).toEqual(
+          nodes([explicit.position, explicit.normal, explicit.width]).map(
+            (node) => node.type,
+          ),
+        );
+      } finally {
+        clone.dispose();
+      }
+    }));
+
+  it.each([0, -0.01, NaN, Infinity])(
+    "rejects invalid source tip %s before callbacks or binding",
+    (tip) =>
+      sweptFixture(true, (geometry, coarse) => {
+        coarse.getAttribute("position").setY(6, tip);
+        const before = { ...geometry.attributes };
+        let calls = 0;
+        const evaluate = (sample: GrassMeadowRefinementSample) => {
+          calls++;
+          return response(sample);
+        };
+        expect(() =>
+          createGrassMeadowSweptBladeResponse(
+            geometry,
+            coarse,
+            float(1),
+            evaluate,
+            evaluate,
+            true,
+          ),
+        ).toThrow();
+        expect(calls).toBe(0);
+        expect(geometry.attributes).toEqual(before);
+      }),
+  );
+
+  it("retains the canonical coordinate exactly at zero, including negative zero", () => {
+    const geometry = new THREE.BufferGeometry();
+    try {
+      for (const t of [
+        -0,
+        0,
+        Math.fround(1 / 6),
+        Math.fround(1 / 3),
+        Math.fround(2 / 3),
+        1,
+      ]) {
+        for (const weight of [-2, -0, 0]) {
+          const canonical = float(t);
+          const node = createGrassMeadowRestHeightColorCoordinate(
+            float(0.99),
+            canonical,
+            float(weight),
+          );
+          expect(node.type).toBe("ConditionalNode");
+          expect(Reflect.get(node, "ifNode")).toBe(canonical);
+          expect(Object.is(evaluateGraph(node, geometry, 0, true)[0], t)).toBe(
+            true,
+          );
+        }
+      }
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it("is finite, bounded and monotone with exact root/tip and clamped weights", () => {
+    const geometry = new THREE.BufferGeometry();
+    try {
+      for (const weight of [-2, 0, 0.25, 0.5, 1, 3]) {
+        let previous = -1;
+        for (let sample = 0; sample <= 120; sample++) {
+          const t = sample / 120;
+          const h = 1 - (1 - Math.sin((t * Math.PI) / 2)) ** 2;
+          const node = createGrassMeadowRestHeightColorCoordinate(
+            float(h),
+            float(t),
+            float(weight),
+          );
+          const value = evaluateGraph(node, geometry, 0, true)[0];
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(previous);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(1);
+          if (sample === 0 || sample === 120) expect(value).toBe(t);
+          previous = value;
+        }
+      }
+    } finally {
+      geometry.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    "bounds the Float32 coordinate approximation against all actual coarse blades and fine barycentrics (quartic %s)",
+    (quartic) =>
+      sweptFixture(quartic, (geometry, coarse) => {
+        const position = geometry.getAttribute("position");
+        const cp = coarse.getAttribute("position");
+        const cu = coarse.getAttribute("uv");
+        const barycentrics = [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+          [0.5, 0.5, 0],
+          [0.2, 0.3, 0.5],
+          [1 / 3, 1 / 3, 1 / 3],
+        ];
+        const sat = (value: number) => Math.max(0, Math.min(1, value));
+        let maximumError = 0;
+        let samples = 0;
+        for (let blade = 0; blade < 21; blade++) {
+          const base = blade * 7;
+          const tip = cp.getY(base + 6);
+          const b1 = cp.getY(base + 2) / tip,
+            b2 = cp.getY(base + 4) / tip;
+          const u1 = cu.getY(base + 2),
+            u2 = cu.getY(base + 4);
+          for (let triangle = 0; triangle < 15; triangle++) {
+            const ids = [0, 1, 2].map((corner) =>
+              geometry.index!.getX(blade * 45 + triangle * 3 + corner),
+            );
+            for (const barycentric of barycentrics) {
+              const exactHeight = ids.reduce(
+                (sum, vertex, corner) =>
+                  sum + (position.getY(vertex) / tip) * barycentric[corner],
+                0,
+              );
+              const roundedHeight = Math.fround(
+                ids.reduce(
+                  (sum, vertex, corner) =>
+                    sum +
+                    Math.fround(position.getY(vertex) / tip) *
+                      barycentric[corner],
+                  0,
+                ),
+              );
+              const expected =
+                u1 * sat(exactHeight / b1) +
+                (u2 - u1) * sat((exactHeight - b1) / (b2 - b1)) +
+                (1 - u2) * sat((exactHeight - b2) / (1 - b2));
+              const node = createGrassMeadowRestHeightColorCoordinate(
+                float(roundedHeight),
+                float(0),
+                float(1),
+              );
+              maximumError = Math.max(
+                maximumError,
+                Math.abs(evaluateGraph(node, geometry, 0, true)[0] - expected),
+              );
+              samples++;
+            }
+          }
+        }
+        expect(samples).toBe(1890);
+        expect(maximumError).toBeGreaterThan(0);
+        expect(maximumError).toBeLessThan(2e-7);
+      }),
+  );
+
+  it("compiles the rest-height read only in the supplied vertex graph without new storage", () =>
+    sweptFixture(true, (geometry, coarse) => {
+      const result = createGrassMeadowSweptBladeResponse(
+        geometry,
+        coarse,
+        float(1),
+        response,
+        response,
+        true,
+      );
+      const material = new THREE.MeshStandardNodeMaterial();
+      const mesh = new THREE.Mesh(geometry, material);
+      const dom = new JSDOM("<canvas></canvas>");
+      const canvas = dom.window.document.querySelector("canvas");
+      if (!canvas) throw new Error("Missing canvas constructor owner");
+      const renderer = new THREE.WebGPURenderer({ canvas });
+      try {
+        const builder = new WGSLNodeBuilder(mesh, renderer);
+        Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+        Reflect.set(builder, "shaderStage", "vertex");
+        const generate: unknown = Reflect.get(builder, "flowStagesNode");
+        if (typeof generate !== "function")
+          throw new Error("Missing native flow method");
+        const flow: unknown = generate.call(
+          builder,
+          actual(result.restHeight),
+          "float",
+        );
+        if (
+          !flow ||
+          typeof flow !== "object" ||
+          !("code" in flow) ||
+          !("result" in flow)
+        )
+          throw new Error("Invalid native flow");
+        const code = String(flow.code) + String(flow.result);
+        expect(code).toMatch(/vertexIndex\s*\/\s*15u/);
+        expect(code).toContain("7u");
+        expect(code).toContain("6u");
+        expect(code).toContain("NodeBuffer_");
+        expect(code).not.toMatch(/undefined|NaN|Infinity/);
+        for (const name of NAMES) expect(code).not.toContain(name);
+        const color = createGrassMeadowRestHeightColorCoordinate(
+          float(0.5),
+          float(0.3),
+          float(1),
+        );
+        expect(
+          nodes([color]).some(
+            (node) =>
+              Reflect.get(node, "isStorageBufferNode") ||
+              node.type === "AttributeNode" ||
+              node.type === "VaryingNode",
+          ),
+        ).toBe(false);
+      } finally {
+        renderer.dispose();
+        dom.window.close();
+        material.dispose();
       }
     }));
 });

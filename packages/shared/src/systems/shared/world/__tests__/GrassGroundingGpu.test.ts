@@ -25,6 +25,8 @@ import THREE from "../../../../extras/three/three";
 import {
   createGroundedGrassMaterial,
   createGroundedGrassMeadowAuthoredMaterial,
+  createMatrixFreeGrassGeometry,
+  createMatrixFreeGrassMesh,
   GRASS_MEADOW_AUTHORED_GROUNDING,
   GRASS_BLADE_VISIBILITY_ATTRIBUTE,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
@@ -35,10 +37,13 @@ import {
 } from "../GrassTerrainProjection";
 import {
   createClumpGeometry,
+  createPairedMeadowClumpGeometry,
   createMeadowAuthoredClumpGeometry,
   FINE_GRASS_FOLDED_BLADE_SHAPE,
+  FINE_GRASS_MEADOW_FIELD_SHAPE,
   FINE_MEADOW_APPEARANCE,
 } from "../GrassVisualManager";
+import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
 
 function drain<T>(steps: Generator<string, T, void>): T {
   let step = steps.next();
@@ -117,6 +122,7 @@ function childNode(node: Node, name: string): Node {
 function groundingStageFlow(
   geometry: THREE.BufferGeometry,
   material: MeshStandardNodeMaterial,
+  object?: THREE.Mesh,
 ) {
   const dom = new JSDOM("<canvas></canvas>");
   const canvas = dom.window.document.querySelector("canvas");
@@ -124,7 +130,7 @@ function groundingStageFlow(
   const renderer = new THREE.WebGPURenderer({ canvas });
   try {
     const builder = new WGSLNodeBuilder(
-      new THREE.Mesh(geometry, material),
+      object ?? new THREE.Mesh(geometry, material),
       renderer,
     );
     Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
@@ -153,7 +159,24 @@ function groundingStageFlow(
       return result.code + result.result;
     };
     const fragment = flow("fragment", material.normalNode);
-    const vertex = flow("vertex", material.positionNode);
+    const setupPosition: unknown = Reflect.get(material, "setupPosition");
+    if (object && typeof setupPosition !== "function")
+      throw new Error("Missing actual installed material position setup");
+    const vertex = flow(
+      "vertex",
+      object
+        ? Fn((nodeBuilder) => {
+            const position: unknown = Reflect.apply(
+              setupPosition as (...args: unknown[]) => unknown,
+              material,
+              [nodeBuilder],
+            );
+            if (!(position instanceof THREE.Node))
+              throw new Error("Missing actual installed position result");
+            return new ConvertNode<"vec3">(position, "vec3");
+          }, "vec3")()
+        : material.positionNode,
+    );
     const vertexDeclarations: unknown = declarations.call(builder, "vertex");
     const fragmentDeclarations: unknown = declarations.call(
       builder,
@@ -219,6 +242,7 @@ function bindingGeometry(
 ): THREE.BufferGeometry {
   const tier = getGrassBladeLayout(lod, geometryLayout);
   const actualSheath = geometryLayout === "fine-folded-sheath-near5-v1";
+  const actualPaired = geometryLayout === "fine-meadow-paired-near-v1";
   const geometry = actualSheath
     ? createClumpGeometry(
         tier.bladesPerClump,
@@ -230,8 +254,16 @@ function bindingGeometry(
             ? "folded-lancet-v1"
             : undefined,
       )
-    : new THREE.BufferGeometry();
-  if (!actualSheath)
+    : actualPaired
+      ? lod === 0
+        ? createPairedMeadowClumpGeometry()
+        : createClumpGeometry(
+            tier.bladesPerClump,
+            tier.bladeSegments,
+            FINE_GRASS_MEADOW_FIELD_SHAPE,
+          )
+      : new THREE.BufferGeometry();
+  if (!actualSheath && !actualPaired)
     geometry.setAttribute(
       "position",
       new THREE.BufferAttribute(
@@ -250,6 +282,346 @@ function bindingGeometry(
   );
   return geometry;
 }
+
+describe("opt-in matrix-free grounded grass (real Three CPU construction)", () => {
+  function fixture(lod = 0, count = 3) {
+    const layout = "fine-meadow-ribbon-v1";
+    const tier = getGrassBladeLayout(lod, layout);
+    const template = createClumpGeometry(
+      tier.bladesPerClump,
+      tier.bladeSegments,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    const geometry = createMatrixFreeGrassGeometry(template, count);
+    const offsets = new THREE.InstancedBufferAttribute(
+      new Float32Array(count * 3),
+      3,
+    );
+    geometry.setAttribute("instanceOffset", offsets);
+    const base = new MeshStandardNodeMaterial();
+    const time = uniform(0.37);
+    const texture = new THREE.Texture();
+    base.positionNode = Fn(
+      () => attribute("position", "vec3").add(vec3(time, 0, 0)),
+      "vec3",
+    )();
+    base.normalNode = varying(
+      attribute("normal", "vec3"),
+      "matrixFreeGroundingNormal",
+    );
+    base.map = texture;
+    const roots = new Float32Array(count * tier.bladesPerClump * 2);
+    const masks = new Uint32Array(count).fill(2 ** tier.bladesPerClump - 1);
+    const material = createGroundedGrassMaterial(
+      base,
+      geometry,
+      roots,
+      count,
+      lod,
+      layout,
+      masks,
+    );
+    return {
+      tier,
+      template,
+      geometry,
+      offsets,
+      base,
+      time,
+      texture,
+      roots,
+      masks,
+      material,
+      dispose() {
+        geometry.dispose();
+        template.dispose();
+        material.dispose();
+        base.dispose();
+        texture.dispose();
+      },
+    };
+  }
+
+  it.each([0, 1, 2])(
+    "copies exact LOD %s template bytes before binding and retains the actual storage owners",
+    (lod) => {
+      const f = fixture(lod);
+      try {
+        expect(f.geometry).toBeInstanceOf(THREE.InstancedBufferGeometry);
+        expect(f.geometry.instanceCount).toBe(3);
+        expect(f.geometry.index?.array).toEqual(f.template.index?.array);
+        expect(f.geometry.index).not.toBe(f.template.index);
+        for (const name of ["position", "normal", "uv"]) {
+          const original = f.template.getAttribute(name),
+            copy = f.geometry.getAttribute(name);
+          expect(copy.array).toEqual(original.array);
+          expect(copy.array).not.toBe(original.array);
+          expect(copy.itemSize).toBe(original.itemSize);
+          expect(copy.normalized).toBe(original.normalized);
+        }
+        expect(f.template.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+          false,
+        );
+        const roots = f.geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
+        const masks = f.geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE);
+        const position = f.material.positionNode;
+        if (!(position instanceof THREE.Node))
+          throw new Error("Missing real grounded position");
+        const storageOwners: unknown[] = [];
+        position.traverse((node) => {
+          if (node.type === "StorageBufferNode")
+            storageOwners.push(Reflect.get(node, "value"));
+        });
+        expect(new Set(storageOwners)).toEqual(new Set([roots, masks]));
+        const mesh = createMatrixFreeGrassMesh(f.geometry, f.material);
+        try {
+          expect(mesh).toBeInstanceOf(THREE.Mesh);
+          expect(mesh).not.toBeInstanceOf(THREE.InstancedMesh);
+          expect(mesh.geometry).toBe(f.geometry);
+          expect(mesh.material).toBe(f.material);
+          expect(mesh.count).toBe(3);
+          expect(Reflect.has(mesh, "instanceMatrix")).toBe(false);
+          expect(Reflect.has(mesh, "instanceColor")).toBe(false);
+          expect(f.geometry.hasAttribute("instanceMatrixStorage")).toBe(false);
+          expect(f.geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+            roots,
+          );
+          expect(
+            f.geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE),
+          ).toBe(masks);
+          expect(roots.array).toBe(f.roots);
+          expect(masks.array).toBe(f.masks);
+          expect(f.geometry.getAttribute("instanceOffset")).toBe(f.offsets);
+          expect(f.material.normalNode).toBe(f.base.normalNode);
+          expect(f.material.map).toBe(f.texture);
+          expect(f.material.positionNode).not.toBe(position);
+          expect(() =>
+            createMatrixFreeGrassMesh(f.geometry, f.material),
+          ).toThrow(/ownership/);
+          expect(Reflect.set(mesh, "count", 4)).toBe(false);
+          expect(Reflect.set(f.geometry, "instanceCount", 4)).toBe(false);
+          expect(mesh.count).toBe(f.geometry.instanceCount);
+        } finally {
+          mesh.dispose();
+        }
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it.each([0, 1, 2])(
+    "preserves r186 identity-normal ordering without matrix storage for LOD %s",
+    (lod) => {
+      const f = fixture(lod);
+      const oldGeometry = f.template.clone();
+      oldGeometry.setAttribute("instanceOffset", f.offsets.clone());
+      const oldMaterial = createGroundedGrassMaterial(
+        f.base,
+        oldGeometry,
+        f.roots.slice(),
+        3,
+        lod,
+        "fine-meadow-ribbon-v1",
+        f.masks.slice(),
+      );
+      const oldMesh = createStorageInstancedMesh(oldGeometry, oldMaterial, 3);
+      const mesh = createMatrixFreeGrassMesh(f.geometry, f.material);
+      try {
+        const before = groundingStageFlow(oldGeometry, oldMaterial, oldMesh);
+        const after = groundingStageFlow(f.geometry, f.material, mesh);
+        expect(before.vertex).toContain("tsl_inverse");
+        expect(before.vertex).toContain("transpose");
+        expect(after.vertex).not.toMatch(/tsl_inverse|transpose|mat4x4<f32>/);
+        expect(
+          after.vertex.match(/normalLocal\s*=\s*normalize\( normalLocal \)/g),
+        ).toHaveLength(1);
+        const normalization = after.vertex.indexOf(
+          "normalLocal = normalize( normalLocal )",
+        );
+        expect(normalization).toBeGreaterThan(-1);
+        expect(normalization).toBeLessThan(after.vertex.indexOf("mix("));
+        expect(normalization).toBeLessThan(
+          after.vertex.lastIndexOf("positionLocal ="),
+        );
+        expect(after.vertex.match(/var<storage,\s*read>/g)).toHaveLength(2);
+        expect(before.vertex.match(/var<storage,\s*read>/g)).toHaveLength(3);
+        expect(after.vertex).toMatch(
+          new RegExp(`vertexIndex\\s*\\/\\s*${f.tier.verticesPerBlade}u`),
+        );
+        expect(after.vertex).toMatch(
+          new RegExp(`instanceIndex\\s*\\*\\s*${f.tier.bladesPerClump}u`),
+        );
+        expect(after.fragment).toBe(before.fragment);
+        expect(after.vertex + after.fragment).not.toMatch(
+          /undefined|NaN|Infinity/,
+        );
+        const normals = f.geometry.getAttribute("normal");
+        const identityNormal = new THREE.Matrix3().getNormalMatrix(
+          new THREE.Matrix4(),
+        );
+        for (let index = 0; index < normals.count; index++) {
+          const original = new THREE.Vector3().fromBufferAttribute(
+            normals,
+            index,
+          );
+          expect(
+            original.clone().applyNormalMatrix(identityNormal).toArray(),
+          ).toEqual(original.clone().normalize().toArray());
+        }
+      } finally {
+        mesh.dispose();
+        oldMesh.dispose();
+        oldMaterial.dispose();
+        oldGeometry.dispose();
+        f.dispose();
+      }
+    },
+  );
+
+  it.each([0, 1.5, 4097, NaN, Infinity])(
+    "rejects invalid count %s before allocating a copied template",
+    (count) => {
+      const template = createClumpGeometry(
+        21,
+        3,
+        FINE_GRASS_MEADOW_FIELD_SHAPE,
+      );
+      const attributes = { ...template.attributes };
+      try {
+        expect(() => createMatrixFreeGrassGeometry(template, count)).toThrow(
+          /template or count/,
+        );
+        expect(template.attributes).toEqual(attributes);
+      } finally {
+        template.dispose();
+      }
+    },
+  );
+
+  it("refuses an already-bound or instanced source instead of cloning registered storage", () => {
+    const f = fixture();
+    try {
+      expect(() => createMatrixFreeGrassGeometry(f.geometry, 3)).toThrow();
+      f.template.setAttribute(
+        GRASS_ROOT_STORAGE_ATTRIBUTE,
+        f.geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE),
+      );
+      expect(() => createMatrixFreeGrassGeometry(f.template, 3)).toThrow();
+    } finally {
+      f.template.deleteAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE);
+      f.dispose();
+    }
+  });
+
+  it.each([
+    "count",
+    "position",
+    "roots",
+    "visibility",
+    "foreign",
+    "base",
+  ] as const)(
+    "rejects %s ownership changes without publishing or changing nodes",
+    (kind) => {
+      const f = fixture();
+      const foreign = createMatrixFreeGrassGeometry(f.template, 3);
+      try {
+        if (kind === "count") f.geometry.instanceCount = 2;
+        if (kind === "position") f.material.positionNode = vec3(0);
+        if (kind === "roots")
+          f.geometry.setAttribute(
+            GRASS_ROOT_STORAGE_ATTRIBUTE,
+            new StorageBufferAttribute(f.roots.slice(), 2),
+          );
+        if (kind === "visibility")
+          f.geometry.setAttribute(
+            GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+            new StorageBufferAttribute(f.masks.slice(), 1),
+          );
+        const position = f.material.positionNode,
+          basePosition = f.base.positionNode;
+        expect(() =>
+          createMatrixFreeGrassMesh(
+            kind === "foreign" ? foreign : f.geometry,
+            kind === "base" ? f.base : f.material,
+          ),
+        ).toThrow(/ownership/);
+        expect(f.material.positionNode).toBe(position);
+        expect(f.base.positionNode).toBe(basePosition);
+      } finally {
+        foreign.dispose();
+        f.dispose();
+      }
+    },
+  );
+
+  it("keeps the one clone and borrowed inputs alive through explicit chunk disposal", () => {
+    const f = fixture();
+    const basePosition = f.base.positionNode,
+      baseNormal = f.base.normalNode;
+    const mesh = createMatrixFreeGrassMesh(f.geometry, f.material);
+    const disposals = {
+      mesh: 0,
+      geometry: 0,
+      material: 0,
+      base: 0,
+      texture: 0,
+    };
+    mesh.addEventListener("dispose", () => disposals.mesh++);
+    f.geometry.addEventListener("dispose", () => disposals.geometry++);
+    f.material.addEventListener("dispose", () => disposals.material++);
+    f.base.addEventListener("dispose", () => disposals.base++);
+    f.texture.addEventListener("dispose", () => disposals.texture++);
+    expect(mesh.material).toBe(f.material);
+    f.geometry.dispose();
+    f.material.dispose();
+    mesh.dispose();
+    expect(disposals).toEqual({
+      mesh: 1,
+      geometry: 1,
+      material: 1,
+      base: 0,
+      texture: 0,
+    });
+    expect(f.base.positionNode).toBe(basePosition);
+    expect(f.base.normalNode).toBe(baseNormal);
+    expect(f.base.map).toBe(f.texture);
+    f.template.dispose();
+    f.base.dispose();
+    f.texture.dispose();
+  });
+
+  it("never exposes undeformed template triangles as gameplay ray hits", () => {
+    const f = fixture();
+    const mesh = createMatrixFreeGrassMesh(f.geometry, f.material);
+    const triangle = new THREE.BufferGeometry().setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 0, 1, 0], 3),
+    );
+    const ray = new THREE.Raycaster(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(0, 0, -1),
+    );
+    const ordinary = new THREE.Mesh(triangle, f.base);
+    try {
+      expect(ray.intersectObject(ordinary, false)).toHaveLength(1);
+      // Exercise the same actual ray traversal with guaranteed hittable
+      // geometry: the candidate's explicit policy must not inspect it.
+      const bound = mesh.geometry;
+      mesh.geometry = triangle;
+      try {
+        expect(ray.intersectObject(mesh, false)).toEqual([]);
+      } finally {
+        mesh.geometry = bound;
+      }
+    } finally {
+      mesh.dispose();
+      triangle.dispose();
+      f.dispose();
+    }
+  });
+});
 
 describe("real Three grounding bindings and provenance (not a GPU test)", () => {
   it("admits only explicit bounded layouts, not array-derived topology", () => {
@@ -513,6 +885,15 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
         geometryLayout: "fine-folded-sheath-near5-v1" as const,
       })),
     ),
+    ...[1276, 4096].flatMap((count) =>
+      [0, 1, 2].map((lod) => ({
+        lod,
+        count,
+        blades: [21, 21, 12][lod],
+        vertices: [8, 5, 5][lod],
+        geometryLayout: "fine-meadow-paired-near-v1" as const,
+      })),
+    ),
   ])(
     "keeps LOD$lod count$count correction capacity and every boundary address exact",
     ({ lod, blades, vertices, count, geometryLayout }) => {
@@ -637,6 +1018,7 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
         "fine-linear-sweep-near4-v1",
         "fine-folded-lancet-v1",
         "fine-folded-sheath-near5-v1",
+        "fine-meadow-paired-near-v1",
       ] as const
     ).flatMap((geometryLayout) =>
       [0, 1, 2].map((lod) => ({ geometryLayout, lod })),
@@ -788,6 +1170,16 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
 
   it.each([
     {
+      geometryLayout: "fine-meadow-paired-near-v1",
+      lod: 0,
+      blades: 21,
+      segments: 2,
+      vertices: 8,
+      triangles: 6,
+      crossSection: undefined,
+      centers: [4, 7],
+    },
+    {
       geometryLayout: "fine-folded-lancet-v1",
       lod: 0,
       blades: 24,
@@ -839,12 +1231,15 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       crossSection,
       centers,
     }) => {
-      const geometry = createClumpGeometry(
-        blades,
-        segments,
-        FINE_GRASS_FOLDED_BLADE_SHAPE,
-        crossSection,
-      );
+      const geometry =
+        geometryLayout === "fine-meadow-paired-near-v1"
+          ? createPairedMeadowClumpGeometry()
+          : createClumpGeometry(
+              blades,
+              segments,
+              FINE_GRASS_FOLDED_BLADE_SHAPE,
+              crossSection,
+            );
       const base = new MeshStandardNodeMaterial();
       base.positionNode = vec3(0);
       const count = 3;
@@ -865,6 +1260,26 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
       try {
         expect(geometry.getAttribute("position").count).toBe(blades * vertices);
         expect(geometry.getIndex()?.count).toBe(blades * triangles * 3);
+        if (geometryLayout === "fine-meadow-paired-near-v1") {
+          // Forty-two physical leaves still own twenty-one root pairs/bits.
+          expect(() =>
+            createGroundedGrassMaterial(
+              base,
+              geometry,
+              new Float32Array(count * 42 * 2),
+              count,
+              lod,
+              geometryLayout,
+              masks,
+            ),
+          ).toThrow(/binding/);
+          expect(geometry.hasAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE)).toBe(
+            false,
+          );
+          expect(geometry.hasAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)).toBe(
+            false,
+          );
+        }
         // Historical/default tier descriptors must not interpret a new stride
         // or population. Equal stride alone is not a topology proof: exact
         // folded index order is validated by CPU admission, not this binder.
@@ -999,7 +1414,9 @@ describe("real Three grounding bindings and provenance (not a GPU test)", () => 
               const vertex = blade * vertices + center;
               expect(uv.getX(vertex)).toBe(0.5);
               expect(uv.getY(vertex)).toBe(
-                Math.fround((center - 2 * segments) / segments),
+                geometryLayout === "fine-meadow-paired-near-v1"
+                  ? 1
+                  : Math.fround((center - 2 * segments) / segments),
               );
               expect(scalar(mix, instance, vertex)).toBe(
                 (deltas[root * 2] + deltas[root * 2 + 1]) / 2,

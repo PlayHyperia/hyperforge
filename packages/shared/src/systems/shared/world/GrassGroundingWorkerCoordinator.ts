@@ -12,9 +12,15 @@ import {
   GRASS_BLADE_GROUNDING_JOB_LIMITS as limits,
   GRASS_BLADE_GROUNDING_LIMITS,
   GrassGroundingContinuation,
+  captureGrassGroundingExecution,
+  grassGroundingTimeFailure,
+  recordGrassGroundingCost,
+  GRASS_GROUNDING_MAXIMUM_LIFETIME_MS,
   type GrassBladeGroundingJobState,
   type GrassGroundingConsumedWork,
   type GrassGroundingTiming,
+  type GrassGroundingExecution,
+  type GrassGroundingExecutionPolicy,
 } from "./GrassBladeGrounding";
 import {
   GrassGroundingPreparationContinuation,
@@ -139,6 +145,9 @@ type Admission = {
   workerTiming?: GrassGroundingTiming;
 };
 type Context = {
+  policy: GrassGroundingExecutionPolicy | undefined;
+  execution: GrassGroundingExecution | undefined;
+  lifetimeTimer: ReturnType<typeof setTimeout> | null;
   job: GrassGroundingWorkerJob | null;
   generation: number;
   request: GrassGroundingHandoffRequest;
@@ -197,11 +206,12 @@ function addBounded(a: number, b: number): number {
 }
 function budget(
   work: GrassGroundingConsumedWork,
+  execution?: GrassGroundingExecution,
 ): GrassBladeGroundingJobState | null {
   if (work.operations >= limits.maximumOperations)
     return { status: "failed_budget", reason: "operations" };
-  if (work.activeMs >= limits.maximumActiveMs)
-    return { status: "failed_budget", reason: "active_cpu" };
+  const reason = grassGroundingTimeFailure(work.activeMs, execution);
+  if (reason) return { status: "failed_budget", reason };
   return null;
 }
 function validateSlice(maxOperations: number, sharedDeadlineMs?: number): void {
@@ -228,6 +238,11 @@ export class GrassGroundingWorkerJob {
 
   get state(): GrassBladeGroundingJobState {
     return this.context.state;
+  }
+
+  /** Read-only opt-in lifetime evidence; absent while dormant and for strict jobs. */
+  get execution(): GrassGroundingExecution | undefined {
+    return this.context.execution;
   }
   get operations(): number {
     return this.context.fit.operations;
@@ -379,12 +394,20 @@ export class GrassGroundingWorkerCoordinator {
     getWater: (x: number, z: number) => number,
     isExcluded: (x: number, z: number) => boolean,
     isCurrent: () => boolean,
+    policy?: GrassGroundingExecutionPolicy,
   ): GrassGroundingWorkerJob {
+    ensure(
+      policy === undefined || policy === "soft-cost-finite-lifetime-v1",
+      "Invalid grounding execution policy",
+    );
     ensure(
       Number.isSafeInteger(this.generation + 1),
       "Grounding generation exhausted",
     );
     const context: Context = {
+      policy,
+      execution: undefined,
+      lifetimeTimer: null,
       job: null,
       generation: ++this.generation,
       request,
@@ -429,6 +452,16 @@ export class GrassGroundingWorkerCoordinator {
     }
   }
 
+  private rememberOwnerFailure(
+    surface: RetainedTerrainSurface,
+    state: GrassBladeGroundingJobState,
+  ): void {
+    // A context's expired lifetime says nothing about this terrain owner's
+    // validity. Do not poison later jobs (including strict-policy callers).
+    if (state.status === "failed_budget" && state.reason === "lifetime") return;
+    this.failedOwners.set(surface, state);
+  }
+
   private current(context: Context): boolean {
     try {
       return (
@@ -448,6 +481,8 @@ export class GrassGroundingWorkerCoordinator {
   }
 
   private close(context: Context, state: GrassBladeGroundingJobState): void {
+    if (context.lifetimeTimer !== null) clearTimeout(context.lifetimeTimer);
+    context.lifetimeTimer = null;
     context.state = state;
     context.phase = "terminal";
     context.handoff?.cancel();
@@ -766,6 +801,7 @@ export class GrassGroundingWorkerCoordinator {
         schemaVersion: 1,
         generation: context?.generation ?? this.generation,
         surfaceTokens: owners.map((owner) => owner.token),
+        ...(context?.execution ? { execution: context.execution } : {}),
       },
       null,
       owners,
@@ -799,7 +835,14 @@ export class GrassGroundingWorkerCoordinator {
       requiredDerived = 0;
     for (const surface of surfaces) {
       const failed = this.failedOwners.get(surface);
-      if (failed) {
+      if (
+        failed &&
+        !(
+          context.execution &&
+          failed.status === "failed_budget" &&
+          (failed.reason === "active_cpu" || failed.reason === "lifetime")
+        )
+      ) {
         this.close(context, failed);
         return;
       }
@@ -918,6 +961,7 @@ export class GrassGroundingWorkerCoordinator {
         ),
         () => this.current(context),
         context.fit,
+        context.execution,
       );
       context.phase = "preparing";
     }
@@ -929,9 +973,9 @@ export class GrassGroundingWorkerCoordinator {
     deadline: number,
   ): void {
     const admission = context.admission!;
-    const failure = budget(admission.work);
+    const failure = budget(admission.work, context.execution);
     if (failure) {
-      this.failedOwners.set(admission.owner.surface, failure);
+      this.rememberOwnerFailure(admission.owner.surface, failure);
       this.close(context, failure);
       return;
     }
@@ -945,8 +989,10 @@ export class GrassGroundingWorkerCoordinator {
       if (
         context.lastSliceOperations % limits.clockInterval === 0 &&
         (performance.now() >= deadline ||
-          admission.work.activeMs + performance.now() - started >=
-            limits.maximumActiveMs)
+          grassGroundingTimeFailure(
+            admission.work.activeMs + performance.now() - started,
+            context.execution,
+          ))
       )
         break;
       const step = admission.iterator.next();
@@ -973,9 +1019,9 @@ export class GrassGroundingWorkerCoordinator {
         this.copyStep(context, maxOperations, deadline);
         return;
       }
-      const failure = budget(admission.work);
+      const failure = budget(admission.work, context.execution);
       if (failure) {
-        this.failedOwners.set(admission.owner.surface, failure);
+        this.rememberOwnerFailure(admission.owner.surface, failure);
         this.close(context, failure);
         return;
       }
@@ -989,6 +1035,7 @@ export class GrassGroundingWorkerCoordinator {
           token: admission.owner.token,
           snapshot: admission.snapshot,
           consumed: { ...admission.work },
+          ...(context.execution ? { execution: context.execution } : {}),
         },
         admission.owner,
       );
@@ -1013,7 +1060,7 @@ export class GrassGroundingWorkerCoordinator {
 
   private dispatchFit(context: Context): void {
     const prepared = context.prepared!;
-    const failure = budget(context.fit);
+    const failure = budget(context.fit, context.execution);
     if (failure) {
       this.close(context, failure);
       return;
@@ -1034,6 +1081,7 @@ export class GrassGroundingWorkerCoordinator {
       constraints: prepared.constraints,
       settings: prepared.settings,
       consumed: { ...context.fit },
+      ...(context.execution ? { execution: context.execution } : {}),
     });
     context.lastSliceOperations++;
   }
@@ -1066,8 +1114,16 @@ export class GrassGroundingWorkerCoordinator {
     if (!pending) return false;
     const settled = this.client.takeSettled();
     if (!settled) return false;
-    this.pending = null;
     const context = pending.context;
+    // The main owner is authoritative even when a valid worker response was
+    // queued before its deadline but this scheduler resumes after it.
+    if (
+      context?.execution &&
+      context.state.status === "running" &&
+      grassGroundingTimeFailure(0, context.execution)
+    )
+      this.close(context, { status: "failed_budget", reason: "lifetime" });
+    this.pending = null;
     if (pending.kind === "prepare_surface" && context?.admission) {
       const response = settled.status === "response" ? settled.response : null;
       const prepared = response?.type === "surface_prepared" ? response : null;
@@ -1111,7 +1167,7 @@ export class GrassGroundingWorkerCoordinator {
           error: new Error(response.error ?? response.reason),
         };
         if (pending.owner)
-          this.failedOwners.set(pending.owner.surface, failure);
+          this.rememberOwnerFailure(pending.owner.surface, failure);
         if (context.state.status === "running") this.close(context, failure);
         else this.releaseContext(context);
       }
@@ -1156,10 +1212,10 @@ export class GrassGroundingWorkerCoordinator {
         owner.usable =
           context.state.status === "running" &&
           this.current(context) &&
-          !budget(admission.work);
+          !budget(admission.work, context.execution);
         this.preparedOwners = addBounded(this.preparedOwners, 1);
       }
-      const failure = budget(admission.work);
+      const failure = budget(admission.work, context.execution);
       this.recordAdmission(admission.work);
       context.admission = null;
       if (context.state.status !== "running") {
@@ -1174,7 +1230,7 @@ export class GrassGroundingWorkerCoordinator {
       if (failure || state.status !== "prepared") {
         const terminal = failure ?? state;
         ensure(terminal.status !== "prepared", "Invalid admission terminal");
-        this.failedOwners.set(admission.owner.surface, terminal);
+        this.rememberOwnerFailure(admission.owner.surface, terminal);
         this.close(context, terminal);
         this.captureAdmissionFailure(context, admission);
       } else context.phase = "cache";
@@ -1214,7 +1270,7 @@ export class GrassGroundingWorkerCoordinator {
       );
       return true;
     }
-    const failure = budget(context.fit);
+    const failure = budget(context.fit, context.execution);
     if (failure) {
       this.close(context, failure);
       this.captureFittingFailure(
@@ -1244,6 +1300,7 @@ export class GrassGroundingWorkerCoordinator {
       }),
       () => this.current(context),
       context.fit,
+      context.execution,
     );
     context.prepared = null;
     context.phase = "remapping";
@@ -1290,9 +1347,35 @@ export class GrassGroundingWorkerCoordinator {
       if (!this.active) {
         if (this.pending || this.client.busy) return context.state;
         this.active = context;
+        if (context.policy && !context.execution) {
+          context.execution = captureGrassGroundingExecution({
+            policy: context.policy,
+            deadlineEpochMs:
+              performance.timeOrigin +
+              performance.now() +
+              GRASS_GROUNDING_MAXIMUM_LIFETIME_MS,
+          });
+          context.lifetimeTimer = setTimeout(() => {
+            if (this.active !== context || context.state.status !== "running")
+              return;
+            this.cancelFlight(context);
+            this.close(context, {
+              status: "failed_budget",
+              reason: "lifetime",
+            });
+          }, GRASS_GROUNDING_MAXIMUM_LIFETIME_MS);
+        }
+      }
+      if (
+        context.execution &&
+        grassGroundingTimeFailure(0, context.execution)
+      ) {
+        this.cancelFlight(context);
+        this.close(context, { status: "failed_budget", reason: "lifetime" });
+        return context.state;
       }
       if (fitting) {
-        const failure = budget(context.fit);
+        const failure = budget(context.fit, context.execution);
         if (failure) {
           this.close(context, failure);
           return context.state;
@@ -1323,7 +1406,7 @@ export class GrassGroundingWorkerCoordinator {
         this.cancelJob(context, "invalidated");
     } catch (error) {
       if (context.admission)
-        this.failedOwners.set(context.admission.owner.surface, {
+        this.rememberOwnerFailure(context.admission.owner.surface, {
           status: "failed_input",
           error,
         });
@@ -1348,14 +1431,21 @@ export class GrassGroundingWorkerCoordinator {
           if (
             finalState.status === "ready" ||
             finalState.status === "waiting_support"
-          )
+          ) {
             finalState.result.receipt.elapsedMs = context.fit.activeMs;
+            recordGrassGroundingCost(
+              finalState.result.receipt,
+              context.fit.activeMs,
+              context.execution,
+            );
+          }
           if (
             (finalState.status === "running" ||
-              finalState.status === "ready") &&
-            budget(context.fit)
+              finalState.status === "ready" ||
+              (context.execution && finalState.status === "waiting_support")) &&
+            budget(context.fit, context.execution)
           ) {
-            const failure = budget(context.fit)!;
+            const failure = budget(context.fit, context.execution)!;
             this.cancelFlight(context);
             this.close(context, failure);
           }
@@ -1376,20 +1466,20 @@ export class GrassGroundingWorkerCoordinator {
                 maximumSliceMs: elapsed,
               });
               if (
-                budget(admission.work) &&
+                budget(admission.work, context.execution) &&
                 context.state.status === "running"
               ) {
-                const failure = budget(admission.work)!;
+                const failure = budget(admission.work, context.execution)!;
                 admission.owner.usable = false;
-                this.failedOwners.set(admission.owner.surface, failure);
+                this.rememberOwnerFailure(admission.owner.surface, failure);
                 this.close(context, failure);
               }
             } else if (
-              budget(admission.work) &&
+              budget(admission.work, context.execution) &&
               context.state.status === "running"
             ) {
-              const failure = budget(admission.work)!;
-              this.failedOwners.set(admission.owner.surface, failure);
+              const failure = budget(admission.work, context.execution)!;
+              this.rememberOwnerFailure(admission.owner.surface, failure);
               this.cancelFlight(context);
               this.close(context, failure);
             }

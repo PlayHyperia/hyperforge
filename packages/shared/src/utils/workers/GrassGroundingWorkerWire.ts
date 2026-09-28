@@ -4,6 +4,7 @@ import type {
   GrassBladeGroundingResult,
   GrassGroundingConsumedWork,
   GrassGroundingTiming,
+  GrassGroundingExecution,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import type { RetainedTerrainSurfaceSnapshot } from "../../systems/shared/world/TerrainGridSurface";
 
@@ -54,6 +55,8 @@ export type GrassGroundingWorkerRequest = {
     | "workBudget"
   >;
   consumed: GrassGroundingConsumedWork;
+  /** Opt-in only; one original absolute deadline, never a per-stage renewal. */
+  execution?: GrassGroundingExecution;
 };
 
 export type GrassGroundingWorkerCancel = {
@@ -73,6 +76,7 @@ export type GrassGroundingWorkerPrepareSurface = {
   token: number;
   snapshot: RetainedTerrainSurfaceSnapshot;
   consumed: GrassGroundingConsumedWork;
+  execution?: GrassGroundingExecution;
 };
 
 export type GrassGroundingWorkerCachedRequest = Omit<
@@ -90,6 +94,7 @@ export type GrassGroundingWorkerReleaseSurfaces = {
   jobId: number;
   generation: number;
   surfaceTokens: number[];
+  execution?: GrassGroundingExecution;
 };
 
 export type GrassGroundingWorkerCacheReceipt = {
@@ -136,7 +141,7 @@ export type GrassGroundingWorkerResponse =
           }
         | {
             status: "failed_budget";
-            reason: "operations" | "active_cpu" | "grounding_work";
+            reason: "operations" | "active_cpu" | "grounding_work" | "lifetime";
           }
         | { status: "failed_input"; error: string }
         | { status: "cancelled"; reason: "caller" | "invalidated" };
@@ -159,7 +164,10 @@ export type GrassGroundingWorkerResponse =
       generation: number;
       state:
         | { status: "prepared"; token: number; sourceRevision: string }
-        | { status: "failed_budget"; reason: "operations" | "active_cpu" }
+        | {
+            status: "failed_budget";
+            reason: "operations" | "active_cpu" | "lifetime";
+          }
         | { status: "failed_input"; error: string }
         | { status: "cancelled"; reason: "caller" | "invalidated" };
       work: GrassGroundingConsumedWork;
