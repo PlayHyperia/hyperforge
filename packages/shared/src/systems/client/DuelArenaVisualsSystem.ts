@@ -5,7 +5,7 @@
  * Uses procedural Three.js geometry, InstancedMesh, and TSL shader materials:
  * - One arena plus lobby floor sharing weathered TSL limestone
  * - Stone pillar architecture at corners with TSL-animated brazier glow
- * - Continuous stone fences (fully enclosed, TSL procedural sandstone material)
+ * - Dressed-stone posts with chamfered timber rails and tapered stone caps
  * - Colored banners mounted on east/west arena fences
  * - Lobby with stone floor and corner braziers (TSL glow)
  * - Decorative border pillars at lobby corners
@@ -29,16 +29,12 @@ import {
   normalWorld,
   vec2,
   vec3,
-  vec4,
   float,
   floor as tslFloor,
   fract,
   sin,
   dot,
-  mix,
   smoothstep,
-  min as tslMin,
-  mod,
 } from "three/tsl";
 import { System } from "../shared/infrastructure/System";
 import type { World } from "../../core/World";
@@ -94,7 +90,6 @@ const PILLAR_SHAFT_SIZE = 0.35;
 const PILLAR_SHAFT_HEIGHT = 2.0;
 const PILLAR_CAPITAL_SIZE = 0.45;
 const PILLAR_CAPITAL_HEIGHT = 0.12;
-const PILLAR_STONE_COLOR = 0x908878;
 const PILLAR_TOTAL_HEIGHT =
   PILLAR_BASE_HEIGHT + PILLAR_SHAFT_HEIGHT + PILLAR_CAPITAL_HEIGHT;
 
@@ -149,65 +144,99 @@ export function createDuelFloorMaterial(
 
 // Instanced mesh counts (fence posts, rails, pillars) are derived from DuelArenaConfig at runtime.
 
+/**
+ * Closed eight-sided member, clipped inside the former box envelope. Separate
+ * face vertices keep dressed edges crisp without extra material groups. A
+ * narrower upper ring gives caps a shallow weather-shedding shoulder.
+ */
+function createChamferedArenaMember(
+  width: number,
+  height: number,
+  depth: number,
+  topScale = 1,
+): THREE.BufferGeometry {
+  if (
+    ![width, height, depth, topScale].every(Number.isFinite) ||
+    Math.min(width, height, depth, topScale) <= 0 ||
+    topScale > 1
+  ) {
+    throw new Error("Arena member dimensions must be finite and positive");
+  }
+  const x = width / 2;
+  const z = depth / 2;
+  const cut = Math.min(width, depth) * 0.16;
+  const ring: readonly (readonly [number, number])[] = [
+    [-x + cut, -z],
+    [x - cut, -z],
+    [x, -z + cut],
+    [x, z - cut],
+    [x - cut, z],
+    [-x + cut, z],
+    [-x, z - cut],
+    [-x, -z + cut],
+  ];
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const d = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  const edge = new THREE.Vector3();
+  for (let i = 0; i < ring.length; i++) {
+    const [ax, az] = ring[i];
+    const [bx, bz] = ring[(i + 1) % ring.length];
+    a.set(ax, -height / 2, az);
+    b.set(ax * topScale, height / 2, az * topScale);
+    c.set(bx, -height / 2, bz);
+    d.set(bx * topScale, height / 2, bz * topScale);
+    normal.subVectors(b, a).cross(edge.subVectors(c, a)).normalize();
+    const start = positions.length / 3;
+    for (const vertex of [a, b, c, d]) {
+      positions.push(vertex.x, vertex.y, vertex.z);
+      normals.push(normal.x, normal.y, normal.z);
+    }
+    const length = a.distanceTo(c);
+    uvs.push(0, 0, 0, height, length, 0, length, height);
+    indices.push(start, start + 1, start + 2, start + 1, start + 3, start + 2);
+  }
+  for (const upper of [false, true]) {
+    const start = positions.length / 3;
+    const scale = upper ? topScale : 1;
+    for (const [rx, rz] of ring) {
+      positions.push(rx * scale, ((upper ? 1 : -1) * height) / 2, rz * scale);
+      normals.push(0, upper ? 1 : -1, 0);
+      uvs.push(rx * scale, rz * scale);
+    }
+    for (let i = 1; i < ring.length - 1; i++) {
+      indices.push(
+        start,
+        start + (upper ? i + 1 : i),
+        start + (upper ? i : i + 1),
+      );
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 // ============================================================================
-// TSL Procedural Stone Functions
+// TSL Brazier Functions
 // ============================================================================
 
 const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
-});
-
-const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
-  const i = tslFloor(p);
-  const f = fract(p);
-  const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
-
-  const a = tslHash(i);
-  const b = tslHash(i.add(vec2(1.0, 0.0)));
-  const c = tslHash(i.add(vec2(0.0, 1.0)));
-  const d = tslHash(i.add(vec2(1.0, 1.0)));
-
-  return mix(mix(a, b, smoothF.x), mix(c, d, smoothF.x), smoothF.y);
-});
-
-/**
- * Running-bond stone block pattern for sandstone fences.
- * Returns vec4(isStone, blockId.x, blockId.y, bevel).
- */
-const sandstoneBlockPattern = Fn(([uvIn]: [Node<"vec2">]) => {
-  const blockWidth = float(0.6);
-  const blockHeight = float(0.3);
-  const mortarWidth = float(0.015);
-
-  const scaled = uvIn.div(vec2(blockWidth, blockHeight));
-  const row = tslFloor(scaled.y);
-  const rowOffset = mod(row, float(2.0)).mul(0.5);
-  const offsetUV = vec2(scaled.x.add(rowOffset), scaled.y);
-
-  const blockId = tslFloor(offsetUV);
-  const localUV = fract(offsetUV);
-
-  const mortarU = mortarWidth.div(blockWidth);
-  const mortarV = mortarWidth.div(blockHeight);
-
-  const edgeDistX = tslMin(localUV.x, float(1.0).sub(localUV.x));
-  const edgeDistY = tslMin(localUV.y, float(1.0).sub(localUV.y));
-  const bevel = smoothstep(
-    float(0.0),
-    float(0.06),
-    tslMin(edgeDistX, edgeDistY),
-  );
-
-  const isStone = smoothstep(mortarU, mortarU.add(float(0.01)), localUV.x)
-    .mul(
-      smoothstep(mortarU, mortarU.add(float(0.01)), float(1.0).sub(localUV.x)),
-    )
-    .mul(smoothstep(mortarV, mortarV.add(float(0.01)), localUV.y))
-    .mul(
-      smoothstep(mortarV, mortarV.add(float(0.01)), float(1.0).sub(localUV.y)),
-    );
-
-  return vec4(isStone, blockId.x, blockId.y, bevel);
 });
 
 // ============================================================================
@@ -234,6 +263,7 @@ export class DuelArenaVisualsSystem extends System {
 
   // Shared cached materials
   private stoneFenceMat: MeshStandardNodeMaterial | null = null;
+  private timberRailMat: MeshStandardNodeMaterial | null = null;
   private arenaFloorMat: MeshStandardNodeMaterial | null = null;
   private borderMat: MeshStandardNodeMaterial | null = null;
   private pillarStoneMat: MeshStandardNodeMaterial | null = null;
@@ -437,11 +467,13 @@ export class DuelArenaVisualsSystem extends System {
     });
     this.materials.push(this.borderMat);
 
-    this.pillarStoneMat = new MeshStandardNodeMaterial({
-      color: PILLAR_STONE_COLOR,
-      roughness: 0.85,
+    this.pillarStoneMat = this.stoneFenceMat;
+    this.timberRailMat = new MeshStandardNodeMaterial({
+      color: 0x756149,
+      roughness: 0.86,
+      metalness: 0,
     });
-    this.materials.push(this.pillarStoneMat);
+    this.materials.push(this.timberRailMat);
 
     this.brazierGlowMat = this.createBrazierGlowMaterial();
     this.materials.push(this.brazierGlowMat);
@@ -468,55 +500,13 @@ export class DuelArenaVisualsSystem extends System {
     this.materials.push(this.lobbyStandMat);
   }
 
-  /**
-   * TSL procedural sandstone block material for stone fences.
-   * GPU-computed block pattern with per-block color variation, mortar grooves,
-   * and normal-mapped raised blocks. Uses world-space UVs for seamless tiling.
-   */
+  /** Dressed stone relies on real chamfers rather than noisy micro-patterns. */
   private createStoneFenceMaterial(): MeshStandardNodeMaterial {
-    const material = new MeshStandardNodeMaterial();
-
-    material.colorNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x.add(worldPos.z), worldPos.y).mul(2.0);
-
-      const pattern = sandstoneBlockPattern(uvCoord);
-      const isStone = pattern.x;
-      const blockId = vec2(pattern.y, pattern.z);
-      const bevel = pattern.w;
-
-      const hashVal = tslHash(blockId);
-      const r = float(0.62).add(hashVal.mul(0.1));
-      const g = float(0.52).add(hashVal.mul(0.08));
-      const b = float(0.38).add(hashVal.mul(0.08));
-      const stoneColor = vec3(r, g, b);
-
-      const grain = tslNoise2D(uvCoord.mul(15.0)).mul(0.08);
-      const grainedStone = stoneColor.add(vec3(grain, grain, grain));
-
-      const mortarColor = vec3(0.35, 0.28, 0.2);
-      const baseColor = mix(mortarColor, grainedStone.mul(bevel), isStone);
-
-      return vec4(baseColor, 1.0);
-    })();
-
-    material.roughnessNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x.add(worldPos.z), worldPos.y).mul(2.0);
-
-      const pattern = sandstoneBlockPattern(uvCoord);
-      const isStone = pattern.x;
-      const blockId = vec2(pattern.y, pattern.z);
-
-      const stoneRough = float(0.72).add(
-        tslHash(blockId.add(vec2(5.0, 3.0))).mul(0.1),
-      );
-      const mortarRough = float(0.92);
-
-      return mix(mortarRough, stoneRough, isStone);
-    })();
-
-    return material;
+    return new MeshStandardNodeMaterial({
+      color: 0xaaa18d,
+      roughness: 0.9,
+      metalness: 0,
+    });
   }
 
   /**
@@ -567,7 +557,7 @@ export class DuelArenaVisualsSystem extends System {
 
   /**
    * Build all fence geometry as InstancedMesh.
-   * 288 posts + 288 caps + 36 X-rails + 36 Z-rails → 4 draw calls.
+   * Posts, caps, X-rails and Z-rails retain four batches for any arena count.
    */
   private buildFenceInstances(): void {
     const cfg = this.arenaCfg;
@@ -583,7 +573,7 @@ export class DuelArenaVisualsSystem extends System {
     const totalXRails = cfg.arenaCount * 2 * FENCE_RAIL_HEIGHTS.length;
     const totalZRails = cfg.arenaCount * 2 * FENCE_RAIL_HEIGHTS.length;
 
-    const postGeom = new THREE.BoxGeometry(
+    const postGeom = createChamferedArenaMember(
       FENCE_POST_SIZE,
       FENCE_HEIGHT,
       FENCE_POST_SIZE,
@@ -591,7 +581,7 @@ export class DuelArenaVisualsSystem extends System {
     this.geometries.push(postGeom);
 
     const capSize = FENCE_POST_SIZE + 0.06;
-    const capGeom = new THREE.BoxGeometry(capSize, 0.06, capSize);
+    const capGeom = createChamferedArenaMember(capSize, 0.06, capSize, 0.82);
     this.geometries.push(capGeom);
 
     const postsIM = new THREE.InstancedMesh(
@@ -655,16 +645,16 @@ export class DuelArenaVisualsSystem extends System {
     this.arenaGroup!.add(postsIM, capsIM);
 
     // X-axis fence rails (north/south walls)
-    const railXGeom = new THREE.BoxGeometry(
-      cfg.arenaWidth,
+    const railXGeom = createChamferedArenaMember(
       FENCE_RAIL_HEIGHT,
+      cfg.arenaWidth,
       FENCE_RAIL_DEPTH,
-    );
+    ).rotateZ(-Math.PI / 2);
     this.geometries.push(railXGeom);
 
     const railsXIM = new THREE.InstancedMesh(
       railXGeom,
-      this.stoneFenceMat!,
+      this.timberRailMat!,
       totalXRails,
     );
     railsXIM.castShadow = true;
@@ -689,16 +679,16 @@ export class DuelArenaVisualsSystem extends System {
     this.arenaGroup!.add(railsXIM);
 
     // Z-axis fence rails (west/east walls)
-    const railZGeom = new THREE.BoxGeometry(
+    const railZGeom = createChamferedArenaMember(
       FENCE_RAIL_DEPTH,
-      FENCE_RAIL_HEIGHT,
       cfg.arenaLength,
-    );
+      FENCE_RAIL_HEIGHT,
+    ).rotateX(Math.PI / 2);
     this.geometries.push(railZGeom);
 
     const railsZIM = new THREE.InstancedMesh(
       railZGeom,
-      this.stoneFenceMat!,
+      this.timberRailMat!,
       totalZRails,
     );
     railsZIM.castShadow = true;
@@ -731,20 +721,21 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     const totalPillars = cfg.arenaCount * 4 + 4; // arena corners + lobby
 
-    const baseGeom = new THREE.BoxGeometry(
+    const baseGeom = createChamferedArenaMember(
       PILLAR_BASE_SIZE,
       PILLAR_BASE_HEIGHT,
       PILLAR_BASE_SIZE,
     );
-    const shaftGeom = new THREE.BoxGeometry(
+    const shaftGeom = createChamferedArenaMember(
       PILLAR_SHAFT_SIZE,
       PILLAR_SHAFT_HEIGHT,
       PILLAR_SHAFT_SIZE,
     );
-    const capitalGeom = new THREE.BoxGeometry(
+    const capitalGeom = createChamferedArenaMember(
       PILLAR_CAPITAL_SIZE,
       PILLAR_CAPITAL_HEIGHT,
       PILLAR_CAPITAL_SIZE,
+      0.82,
     );
     this.geometries.push(baseGeom, shaftGeom, capitalGeom);
 
@@ -1677,6 +1668,7 @@ export class DuelArenaVisualsSystem extends System {
 
     this.arenaGroup = null;
     this.stoneFenceMat = null;
+    this.timberRailMat = null;
     this.arenaFloorMat = null;
     this.borderMat = null;
     this.pillarStoneMat = null;
