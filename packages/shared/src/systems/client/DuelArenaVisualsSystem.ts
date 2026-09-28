@@ -3,13 +3,12 @@
  *
  * Creates visual geometry for the duel arena without requiring external models.
  * Uses procedural Three.js geometry, InstancedMesh, and TSL shader materials:
- * - One arena plus lobby/hospital floors sharing weathered TSL limestone
+ * - One arena plus lobby floor sharing weathered TSL limestone
  * - Stone pillar architecture at corners with TSL-animated brazier glow
  * - Continuous stone fences (fully enclosed, TSL procedural sandstone material)
  * - Colored banners mounted on east/west arena fences
  * - Lobby with stone floor and corner braziers (TSL glow)
- * - Recovery court with an inset compass emblem and healing particle glow
- * - Decorative border pillars at lobby/hospital corners
+ * - Decorative border pillars at lobby corners
  *
  * Repeated architecture uses InstancedMesh. Braziers use GPU-animated emissive
  * surfaces instead of per-brazier PointLights; actual costs require measurement.
@@ -67,10 +66,6 @@ import {
   LOBBY_CENTER_Z,
   LOBBY_WIDTH,
   LOBBY_LENGTH,
-  HOSPITAL_CENTER_X,
-  HOSPITAL_CENTER_Z,
-  HOSPITAL_WIDTH,
-  HOSPITAL_LENGTH,
   ARENA_FORFEIT_PILLAR_INSET,
 } from "../../data/arena-layout";
 
@@ -388,7 +383,6 @@ export class DuelArenaVisualsSystem extends System {
     this.createArenaFloors();
     this.createArenaWallCollisions();
     this.createLobbyFloor();
-    this.createHospitalFloor();
     if (this.world.isClient) {
       if (shouldRenderArenaCenterMarker()) {
         this.createArenaCenterRings();
@@ -731,11 +725,11 @@ export class DuelArenaVisualsSystem extends System {
 
   /**
    * Build all stone pillar components as InstancedMesh.
-   * 32 pillars (24 arena corners + 4 lobby + 4 hospital) × 3 parts → 3 draw calls.
+   * Arena corners plus four lobby pillars × three parts → three draw calls.
    */
   private buildPillarInstances(): void {
     const cfg = this.arenaCfg;
-    const totalPillars = cfg.arenaCount * 4 + 8; // arena corners + lobby + hospital
+    const totalPillars = cfg.arenaCount * 4 + 4; // arena corners + lobby
 
     const baseGeom = new THREE.BoxGeometry(
       PILLAR_BASE_SIZE,
@@ -805,21 +799,6 @@ export class DuelArenaVisualsSystem extends System {
       { x: LOBBY_CENTER_X + lobbyHW, z: LOBBY_CENTER_Z - lobbyHL },
       { x: LOBBY_CENTER_X - lobbyHW, z: LOBBY_CENTER_Z + lobbyHL },
       { x: LOBBY_CENTER_X + lobbyHW, z: LOBBY_CENTER_Z + lobbyHL },
-    ]) {
-      positions.push({
-        ...c,
-        terrainY: this.getFloorGroundHeight(),
-      });
-    }
-
-    // Hospital corner pillars (4) — same inset as lobby
-    const hospHW = HOSPITAL_WIDTH / 2 - PILLAR_BASE_SIZE / 2;
-    const hospHL = HOSPITAL_LENGTH / 2 - PILLAR_BASE_SIZE / 2;
-    for (const c of [
-      { x: HOSPITAL_CENTER_X - hospHW, z: HOSPITAL_CENTER_Z - hospHL },
-      { x: HOSPITAL_CENTER_X + hospHW, z: HOSPITAL_CENTER_Z - hospHL },
-      { x: HOSPITAL_CENTER_X - hospHW, z: HOSPITAL_CENTER_Z + hospHL },
-      { x: HOSPITAL_CENTER_X + hospHW, z: HOSPITAL_CENTER_Z + hospHL },
     ]) {
       positions.push({
         ...c,
@@ -1324,90 +1303,6 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   // ============================================================================
-  // Recovery Floor & Emblem
-  // ============================================================================
-
-  private createHospitalFloor(): void {
-    const terrainY = this.getArenaBaseHeight();
-    const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
-
-    if (this.world.isClient) {
-      const geometry = new THREE.BoxGeometry(
-        HOSPITAL_WIDTH,
-        FLOOR_THICKNESS,
-        HOSPITAL_LENGTH,
-      );
-
-      const material = this.arenaFloorMat!;
-
-      const floor = new THREE.Mesh(geometry, material);
-      floor.receiveShadow = true;
-      floor.position.set(HOSPITAL_CENTER_X, floorY, HOSPITAL_CENTER_Z);
-      floor.name = "HospitalFloor";
-      floor.layers.set(2);
-      floor.layers.enable(0);
-      floor.userData = { type: "hospital-floor", walkable: true };
-
-      console.log(
-        `[DuelArenaVisualsSystem] Created hospital floor at (${HOSPITAL_CENTER_X}, ${floorY.toFixed(1)}, ${HOSPITAL_CENTER_Z}) - terrain=${terrainY.toFixed(1)}`,
-      );
-
-      this.createRecoveryEmblem(HOSPITAL_CENTER_X, HOSPITAL_CENTER_Z, floorY);
-
-      this.geometries.push(geometry);
-      this.arenaGroup!.add(floor);
-    }
-
-    this.createFloorCollision(
-      HOSPITAL_CENTER_X,
-      floorY,
-      HOSPITAL_CENTER_Z,
-      HOSPITAL_WIDTH,
-      HOSPITAL_LENGTH,
-      "hospital_floor",
-    );
-  }
-
-  private createRecoveryEmblem(x: number, z: number, floorY: number): void {
-    const topY = floorY + FLOOR_THICKNESS / 2 + 0.006;
-    const material = new MeshStandardNodeMaterial({
-      color: 0x688b86,
-      roughness: 0.86,
-      metalness: 0,
-    });
-    this.materials.push(material);
-    // A small mineral-coloured inlay, not an eight-metre emissive-looking sign.
-    // Both pieces are flat, non-colliding and use the existing floor support.
-    const ringGeometry = new THREE.RingGeometry(1.35, 1.48, 48);
-    const ring = new THREE.Mesh(ringGeometry, material);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(x, topY, z);
-    ring.name = "RecoveryInlayRing";
-    ring.receiveShadow = true;
-    const diamondGeometry = new THREE.CircleGeometry(0.9, 4);
-    const diamond = new THREE.Mesh(diamondGeometry, material);
-    diamond.rotation.x = -Math.PI / 2;
-    diamond.position.set(x, topY, z);
-    diamond.name = "RecoveryInlayDiamond";
-    diamond.receiveShadow = true;
-    this.geometries.push(ringGeometry, diamondGeometry);
-    this.arenaGroup!.add(ring, diamond);
-
-    const particleSystem = this.world.getSystem("particle") as
-      ParticleSystem | undefined;
-    if (particleSystem) {
-      const emitterId = "healing_glow_hospital";
-      particleSystem.register(emitterId, {
-        type: "glow",
-        preset: "altar",
-        position: { x, y: topY + 0.1, z },
-        color: { core: 0xffffff, mid: 0x88ccff, outer: 0x44aaff },
-      });
-      this.particleEmitterIds.push(emitterId);
-    }
-  }
-
-  // ============================================================================
   // Particle Registration
   // ============================================================================
 
@@ -1532,18 +1427,8 @@ export class DuelArenaVisualsSystem extends System {
         0.5,
       );
 
-      exclusionManager.addRectangularBlocker(
-        "duel_hospital",
-        HOSPITAL_CENTER_X,
-        HOSPITAL_CENTER_Z,
-        HOSPITAL_WIDTH + margin * 2,
-        HOSPITAL_LENGTH + margin * 2,
-        0,
-        0.5,
-      );
-
       console.log(
-        `[DuelArenaVisualsSystem] Registered ${this.arenaCfg.arenaCount + 2} grass exclusion zones (arenas + lobby + hospital)`,
+        `[DuelArenaVisualsSystem] Registered ${this.arenaCfg.arenaCount + 1} grass exclusion zones (arenas + lobby)`,
       );
     } catch (error) {
       console.warn(

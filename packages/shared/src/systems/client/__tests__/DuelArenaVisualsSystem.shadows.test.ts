@@ -8,6 +8,12 @@ import {
   getDuelArenaConfig,
   type DuelArenaConfig,
 } from "../../../data/duel-manifest";
+import {
+  LOBBY_CENTER_X,
+  LOBBY_CENTER_Z,
+  LOBBY_LENGTH,
+  LOBBY_WIDTH,
+} from "../../../data/arena-layout";
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
 import { DuelArenaVisualsSystem } from "../DuelArenaVisualsSystem";
 
@@ -20,8 +26,9 @@ type ConstructionAccess = {
   arenaFloorMat: MeshStandardNodeMaterial;
   createSharedMaterials(): void;
   createArenaFloors(): void;
-  createHospitalFloor(): void;
+  createLobbyFloor(): void;
   buildFenceInstances(): void;
+  buildPillarInstances(): void;
 };
 
 describe("Duel arena floor shadow receivers", () => {
@@ -122,15 +129,15 @@ describe("Duel arena floor shadow receivers", () => {
   it("does not alter other real arena meshes and disposes the shared floor resources once", () => {
     const { world, system, build } = construct();
     build.buildFenceInstances();
-    build.createHospitalFloor();
+    build.createLobbyFloor();
     const existing = build.arenaGroup.children.map((mesh) => ({
       mesh,
       cast: mesh.castShadow,
       receive: mesh.receiveShadow,
     }));
-    const hospital = build.arenaGroup.getObjectByName("HospitalFloor")!;
-    expect(hospital.receiveShadow).toBe(true);
-    expect(hospital.castShadow).toBe(false);
+    const lobby = build.arenaGroup.getObjectByName("LobbyFloor")!;
+    expect(lobby.receiveShadow).toBe(true);
+    expect(lobby.castShadow).toBe(false);
     const unrelated = new THREE.Object3D();
     world.stage.scene.add(unrelated);
     build.createArenaFloors();
@@ -152,36 +159,55 @@ describe("Duel arena floor shadow receivers", () => {
     expect(world.stage.scene.children).toEqual([unrelated]);
   });
 
-  it("fits a restrained two-piece mineral inlay inside the compact recovery floor", () => {
-    const { build } = construct();
-    build.createHospitalFloor();
-    const floor = build.arenaGroup.getObjectByName(
+  it("retains only arena and lobby pillar owners, with no recovery floor or inlay", () => {
+    const { build, cfg } = construct();
+    build.createArenaFloors();
+    build.createLobbyFloor();
+    build.buildPillarInstances();
+    for (const name of [
       "HospitalFloor",
-    ) as THREE.Mesh;
-    expect((floor.geometry as THREE.BoxGeometry).parameters).toMatchObject({
-      width: 12,
-      depth: 12,
-    });
-    const ring = build.arenaGroup.getObjectByName(
       "RecoveryInlayRing",
-    ) as THREE.Mesh;
-    const diamond = build.arenaGroup.getObjectByName(
       "RecoveryInlayDiamond",
-    ) as THREE.Mesh;
-    expect(ring.material).toBe(diamond.material);
-    expect((ring.material as MeshStandardNodeMaterial).roughness).toBe(0.86);
-    expect((ring.material as MeshStandardNodeMaterial).emissive.getHex()).toBe(
-      0,
+    ]) {
+      expect(build.arenaGroup.getObjectByName(name)).toBeUndefined();
+    }
+    const pillars = build.arenaGroup.children.filter(
+      (mesh): mesh is THREE.InstancedMesh =>
+        mesh instanceof THREE.InstancedMesh,
     );
-    build.arenaGroup.updateMatrixWorld(true);
-    for (const mesh of [ring, diamond]) {
-      const bounds = new THREE.Box3().setFromObject(mesh);
-      expect(bounds.max.x - bounds.min.x).toBeLessThan(3);
-      expect(bounds.max.z - bounds.min.z).toBeLessThan(3);
-      expect(bounds.min.y - (floor.position.y + 0.15)).toBeCloseTo(0.006, 7);
-      expect(mesh.castShadow).toBe(false);
-      expect(mesh.receiveShadow).toBe(true);
-      expect(mesh.userData.walkable).toBeUndefined();
+    expect(pillars).toHaveLength(3);
+    const expectedPositions: number[][] = [];
+    for (let a = 0; a < cfg.arenaCount; a++) {
+      const x = cfg.baseX + (a % cfg.columns) * (cfg.arenaWidth + cfg.arenaGap);
+      const z =
+        cfg.baseZ +
+        Math.floor(a / cfg.columns) * (cfg.arenaLength + cfg.arenaGap);
+      expectedPositions.push(
+        [x, z],
+        [x + cfg.arenaWidth, z],
+        [x, z + cfg.arenaLength],
+        [x + cfg.arenaWidth, z + cfg.arenaLength],
+      );
+    }
+    const halfWidth = LOBBY_WIDTH / 2 - 0.25;
+    const halfLength = LOBBY_LENGTH / 2 - 0.25;
+    expectedPositions.push(
+      [LOBBY_CENTER_X - halfWidth, LOBBY_CENTER_Z - halfLength],
+      [LOBBY_CENTER_X + halfWidth, LOBBY_CENTER_Z - halfLength],
+      [LOBBY_CENTER_X - halfWidth, LOBBY_CENTER_Z + halfLength],
+      [LOBBY_CENTER_X + halfWidth, LOBBY_CENTER_Z + halfLength],
+    );
+    expect(expectedPositions).toHaveLength(8);
+    const matrix = new THREE.Matrix4();
+    for (const mesh of pillars) {
+      expect(mesh.count).toBe(expectedPositions.length);
+      expect(mesh.castShadow).toBe(true);
+      expect(mesh.receiveShadow).toBe(false);
+      expect(mesh.layers.mask).toBe(1 << 1);
+      for (const [index, expected] of expectedPositions.entries()) {
+        mesh.getMatrixAt(index, matrix);
+        expect([matrix.elements[12], matrix.elements[14]]).toEqual(expected);
+      }
     }
   });
 });

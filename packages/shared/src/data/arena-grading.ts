@@ -5,10 +5,6 @@ import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import { getDuelArenaConfig, type DuelArenaConfig } from "./duel-manifest";
 import {
   DUEL_FLOOR_APRON,
-  HOSPITAL_CENTER_X,
-  HOSPITAL_CENTER_Z,
-  HOSPITAL_WIDTH,
-  HOSPITAL_LENGTH,
   LOBBY_CENTER_X,
   LOBBY_CENTER_Z,
   LOBBY_WIDTH,
@@ -283,15 +279,6 @@ export function createDuelArenaFloorZones(
       LOBBY_CENTER_Z,
       LOBBY_WIDTH,
       LOBBY_LENGTH,
-    ),
-  );
-  zones.push(
-    floor(
-      "duel_hospital_floor",
-      HOSPITAL_CENTER_X,
-      HOSPITAL_CENTER_Z,
-      HOSPITAL_WIDTH,
-      HOSPITAL_LENGTH,
     ),
   );
   return zones;

@@ -836,13 +836,18 @@ describe("body-bound fishing coverage with actual terrain and resource ownership
     ).toThrow("changes require restart");
   });
 
-  it.each(["duel_arena_floor_1", "duel_lobby_floor", "duel_hospital_floor"])(
+  it.each(["duel_arena_floor_1", "duel_lobby_floor"])(
     "never admits an explicit pond target over actual %s infrastructure",
     async (id) => {
-      const floor = createDuelArenaFloorZones(
+      const floors = createDuelArenaFloorZones(
         getDuelArenaConfig(),
         getDuelArenaGradeHeight(),
-      ).find((entry) => entry.id === id)!;
+      );
+      expect(floors.map((floor) => floor.id)).toEqual([
+        "duel_arena_floor_1",
+        "duel_lobby_floor",
+      ]);
+      const floor = floors.find((entry) => entry.id === id)!;
       expect(floor).toBeDefined();
       const f = await actualFixture({
         bodyCenter: { x: floor.centerX, z: floor.centerZ },

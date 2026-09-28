@@ -32,7 +32,9 @@ export const LOBBY_WIDTH = 18;
 export const LOBBY_LENGTH = 16;
 
 // ---------------------------------------------------------------------------
-// Recovery court (north-west of the combat ring)
+// Historical west safe-ground footprint (north-west of the combat ring).
+// Retain these coordinates for existing protection boundaries and path layout;
+// the decorative recovery floor, collision and nursing props no longer exist.
 // ---------------------------------------------------------------------------
 export const HOSPITAL_CENTER_X = 345;
 export const HOSPITAL_CENTER_Z = 376;
@@ -47,7 +49,7 @@ export const LOBBY_SPAWN_Y = 0.42;
 export const LOBBY_SPAWN_Z = 374;
 
 // ---------------------------------------------------------------------------
-// Derived: overall zone bounds (encompasses arenas + lobby + hospital + margin)
+// Derived: overall zone bounds (retains the historical safe-ground envelope)
 // ---------------------------------------------------------------------------
 const gridMaxX =
   ARENA_BASE_X + ARENA_COLUMNS * ARENA_WIDTH + (ARENA_COLUMNS - 1) * ARENA_GAP;

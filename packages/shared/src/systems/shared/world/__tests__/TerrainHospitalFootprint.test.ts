@@ -8,10 +8,15 @@ import {
   HOSPITAL_LENGTH,
 } from "../../../../data/arena-layout";
 import {
-  DUEL_ARENA_FLOOR_CENTER_OFFSET,
-  DUEL_ARENA_FLOOR_THICKNESS,
+  createDuelArenaFloorZones,
+  getDuelArenaSolidSurfaceHeight,
   getDuelArenaGradeHeight,
 } from "../../../../data/arena-grading";
+import { getDuelArenaConfig } from "../../../../data/duel-manifest";
+import {
+  PLAYER_ROOT_CLEARANCE,
+  resolvePlayerRootHeight,
+} from "../../../../utils/movement/PlayerSupport";
 import THREE from "../../../../extras/three/three";
 import {
   TerrainSystem,
@@ -25,7 +30,11 @@ import {
 
 type Point = [x: number, y: number, z: number];
 type TerrainInternals = {
-  CONFIG: { QUADTREE_SKIRT_DROP: number; QUADTREE_MIN_SIZE: number };
+  CONFIG: {
+    TILE_SIZE: number;
+    QUADTREE_SKIRT_DROP: number;
+    QUADTREE_MIN_SIZE: number;
+  };
   loadFlatZonesFromManifest(): void;
   buildChunkTerrainProvider(): FullTerrainProvider;
 };
@@ -69,19 +78,14 @@ function horizontalArea(polygon: Point[]): number {
   return Math.abs(twiceArea) / 2;
 }
 
-describe("actual compact terrain beneath the complete hospital floor", () => {
-  it("covers the whole footprint and keeps every clipped terrain triangle at least 19mm below the floor", async () => {
+describe("actual compact terrain replacing the removed recovery court", () => {
+  it("covers the whole former footprint with walkable ground and no platform or carve", async () => {
     await DataManager.getInstance().initialize();
     const terrain = new TerrainSystem(new World());
     const internals = terrain as unknown as TerrainInternals;
-    const floor = new THREE.BoxGeometry(
-      HOSPITAL_WIDTH,
-      DUEL_ARENA_FLOOR_THICKNESS,
-      HOSPITAL_LENGTH,
-    );
     try {
       // Actual admitted profile/noise/biomes, followed by the production grades.
-      // This CPU geometry regression does not certify GPU depth precision.
+      // This CPU geometry regression does not certify native movement or pixels.
       await terrain.init();
       internals.loadFlatZonesFromManifest();
       const provider = internals.buildChunkTerrainProvider();
@@ -89,19 +93,41 @@ describe("actual compact terrain beneath the complete hospital floor", () => {
       // This fixture covers final streaming leaves, not an arbitrary tile mesh.
       expect(size).toBe(internals.CONFIG.QUADTREE_MIN_SIZE);
       const resolution = STREAMING_TERRAIN_QUADTREE_RESOLUTION;
-      floor.computeBoundingBox();
-      const floorTop =
-        getDuelArenaGradeHeight() +
-        DUEL_ARENA_FLOOR_CENTER_OFFSET +
-        floor.boundingBox!.max.y;
-      const minX = HOSPITAL_CENTER_X + floor.boundingBox!.min.x;
-      const maxX = HOSPITAL_CENTER_X + floor.boundingBox!.max.x;
-      const minZ = HOSPITAL_CENTER_Z + floor.boundingBox!.min.z;
-      const maxZ = HOSPITAL_CENTER_Z + floor.boundingBox!.max.z;
+      const minX = HOSPITAL_CENTER_X - HOSPITAL_WIDTH / 2;
+      const maxX = HOSPITAL_CENTER_X + HOSPITAL_WIDTH / 2;
+      const minZ = HOSPITAL_CENTER_Z - HOSPITAL_LENGTH / 2;
+      const maxZ = HOSPITAL_CENTER_Z + HOSPITAL_LENGTH / 2;
+      expect(
+        createDuelArenaFloorZones(
+          getDuelArenaConfig(),
+          getDuelArenaGradeHeight(),
+        ).map((zone) => zone.id),
+      ).toEqual(["duel_arena_floor_1", "duel_lobby_floor"]);
+      // Exercise the actual regular-tile carve path as well as the final
+      // quadtree geometry below: no invisible hole may outlive the platform.
+      const tileX = Math.floor(HOSPITAL_CENTER_X / internals.CONFIG.TILE_SIZE);
+      const tileZ = Math.floor(HOSPITAL_CENTER_Z / internals.CONFIG.TILE_SIZE);
+      const patch = new THREE.PlaneGeometry(
+        HOSPITAL_WIDTH,
+        HOSPITAL_LENGTH,
+        12,
+        12,
+      );
+      try {
+        patch.rotateX(-Math.PI / 2);
+        patch.translate(
+          HOSPITAL_CENTER_X - tileX * internals.CONFIG.TILE_SIZE,
+          0,
+          HOSPITAL_CENTER_Z - tileZ * internals.CONFIG.TILE_SIZE,
+        );
+        const before = patch.index!.array.slice();
+        terrain["applyFlatZoneCarve"](patch, tileX, tileZ);
+        expect(patch.index!.array).toEqual(before);
+      } finally {
+        patch.dispose();
+      }
       let coveredArea = 0;
       let intersectingTriangles = 0;
-      let minimumClearance = Infinity;
-      let nearestPoint: Point | null = null;
       const measuredBounds = {
         minX: Infinity,
         maxX: -Infinity,
@@ -110,7 +136,7 @@ describe("actual compact terrain beneath the complete hospital floor", () => {
       };
 
       // Include every intersecting production leaf, even if the shared layout
-      // later moves the hospital across a chunk boundary. Skirts do not cover
+      // later moves the safe-ground footprint across a chunk boundary. Skirts do not cover
       // additional horizontal area and never rise above their boundary grid.
       for (
         let tileZ = Math.floor(minZ / size);
@@ -164,11 +190,15 @@ describe("actual compact terrain beneath the complete hospital floor", () => {
                 measuredBounds.maxX = Math.max(measuredBounds.maxX, point[0]);
                 measuredBounds.minZ = Math.min(measuredBounds.minZ, point[2]);
                 measuredBounds.maxZ = Math.max(measuredBounds.maxZ, point[2]);
-                const clearance = floorTop - point[1];
-                if (clearance < minimumClearance) {
-                  minimumClearance = clearance;
-                  nearestPoint = point;
-                }
+                expect(
+                  getDuelArenaSolidSurfaceHeight(point[0], point[2]),
+                ).toBeNull();
+                const ground = terrain.getHeightAt(point[0], point[2]);
+                expect(point[1]).toBeCloseTo(ground, 5);
+                expect(ground).toBe(getDuelArenaGradeHeight());
+                expect(
+                  resolvePlayerRootHeight(point[0], point[2], terrain),
+                ).toBeCloseTo(ground + PLAYER_ROOT_CLEARANCE, 7);
               }
             }
           } finally {
@@ -179,13 +209,7 @@ describe("actual compact terrain beneath the complete hospital floor", () => {
       expect(intersectingTriangles).toBeGreaterThan(0);
       expect(coveredArea).toBeCloseTo(HOSPITAL_WIDTH * HOSPITAL_LENGTH, 7);
       expect(measuredBounds).toEqual({ minX, maxX, minZ, maxZ });
-      expect(Number.isFinite(minimumClearance)).toBe(true);
-      expect(
-        minimumClearance,
-        `Nearest terrain vertex ${JSON.stringify(nearestPoint)}; floor top ${floorTop}`,
-      ).toBeGreaterThanOrEqual(0.019);
     } finally {
-      floor.dispose();
       terrain.destroy();
     }
   });

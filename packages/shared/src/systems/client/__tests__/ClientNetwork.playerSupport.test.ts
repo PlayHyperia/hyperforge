@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { World } from "../../../core/World";
 import { PlayerEntity } from "../../../entities/player/PlayerEntity";
 import THREE from "../../../extras/three/three";
-import { getDuelArenaGradeHeight } from "../../../data/arena-grading";
+import {
+  getDuelArenaGradeHeight,
+  getDuelArenaSolidSurfaceHeight,
+} from "../../../data/arena-grading";
 import { TerrainSystem } from "../../shared/world/TerrainSystem";
 import { TownSystem } from "../../shared/world/TownSystem";
 import type { BuildingLayoutInput } from "../../../types/world/building-collision-types";
@@ -49,21 +52,26 @@ async function fixture(x: number, z: number, serverY: number) {
 }
 
 describe("actual client player solid-surface support", () => {
-  for (const [name, x, z] of [
-    ["lobby", 385.5, 374.5],
-    ["hospital", 345.5, 376.5],
-    ["arena", 350.5, 405.5],
+  for (const [name, x, z, ordinaryGround] of [
+    ["lobby", 385.5, 374.5, false],
+    ["former court ground", 345.5, 376.5, true],
+    ["arena", 350.5, 405.5, false],
   ] as const) {
-    it(`${name}: packet, stationary facing, diagonal walking and stop use the same solid top and clearance`, async () => {
+    it(`${name}: packet, stationary facing, diagonal walking and stop use the actual surface and clearance`, async () => {
       const grade = getDuelArenaGradeHeight();
       const { terrain, network, player } = await fixture(x, z, grade + 0.5);
-      // Solid top is .27m centre + .3m thickness/2; terrain stays .4m.
-      // These explicit independent values guard the former .4/.42 disagreement.
-      const expectedRootY = grade + 0.42 + 0.01;
-      expect(terrain.getHeightAt(x, z)).toBeCloseTo(grade + 0.4, 10);
+      // Remaining floors retain their independent .42m solid top. The retired
+      // court has no solid floor and must follow actual terrain while walking.
+      const expectedRootY = () =>
+        (ordinaryGround
+          ? terrain.getHeightAt(player.position.x, player.position.z)
+          : grade + 0.42) + 0.01;
+      if (ordinaryGround)
+        expect(getDuelArenaSolidSurfaceHeight(x, z)).toBeNull();
+      else expect(terrain.getHeightAt(x, z)).toBeCloseTo(grade + 0.4, 10);
       network.lateUpdate(1 / 60);
-      expect(player.position.y).toBeCloseTo(expectedRootY, 10);
-      expect(player.node.position.y).toBeCloseTo(expectedRootY, 10);
+      expect(player.position.y).toBeCloseTo(expectedRootY(), 10);
+      expect(player.node.position.y).toBeCloseTo(expectedRootY(), 10);
       const rotation = new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(0, 1, 0),
         Math.PI / 2,
@@ -74,7 +82,7 @@ describe("actual client player solid-surface support", () => {
       });
       for (let frame = 0; frame < 20; frame++) {
         network.lateUpdate(1 / 60);
-        expect(player.position.y).toBeCloseTo(expectedRootY, 10);
+        expect(player.position.y).toBeCloseTo(expectedRootY(), 10);
       }
       network.tileInterpolator.onMovementStart(
         player.id,
@@ -87,12 +95,14 @@ describe("actual client player solid-surface support", () => {
       );
       for (let frame = 0; frame < 180; frame++) {
         network.lateUpdate(1 / 60);
-        expect(player.position.y).toBeCloseTo(expectedRootY, 10);
-        expect(player.node.position.y).toBeCloseTo(expectedRootY, 10);
+        expect(player.position.y).toBeCloseTo(expectedRootY(), 10);
+        expect(player.node.position.y).toBeCloseTo(expectedRootY(), 10);
       }
       expect(player.position.x).toBeCloseTo(x + 1, 8);
       expect(player.position.z).toBeCloseTo(z + 1, 8);
-      expect(terrain.getHeightAt(x, z)).toBeCloseTo(grade + 0.4, 10);
+      if (ordinaryGround)
+        expect(getDuelArenaSolidSurfaceHeight(x + 1, z + 1)).toBeNull();
+      else expect(terrain.getHeightAt(x, z)).toBeCloseTo(grade + 0.4, 10);
     });
   }
 

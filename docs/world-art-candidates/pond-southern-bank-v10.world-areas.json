@@ -719,7 +719,7 @@
     "arena_grounds": {
       "id": "arena_grounds",
       "name": "Arena Grounds",
-      "description": "Safe walking grounds between the arrival court, recovery court and combat ring.",
+      "description": "Safe walking grounds around the arrival court and combat ring.",
       "difficultyLevel": 0,
       "bounds": {
         "minX": 315.5,

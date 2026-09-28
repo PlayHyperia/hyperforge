@@ -6,10 +6,10 @@ import {
   getDuelArenaGradeHeight,
 } from "../../../data/arena-grading";
 import {
-  HOSPITAL_CENTER_X,
-  HOSPITAL_CENTER_Z,
-  HOSPITAL_LENGTH,
-  HOSPITAL_WIDTH,
+  LOBBY_CENTER_X,
+  LOBBY_CENTER_Z,
+  LOBBY_LENGTH,
+  LOBBY_WIDTH,
 } from "../../../data/arena-layout";
 import {
   getDuelArenaConfig,
@@ -27,7 +27,6 @@ type ConstructionAccess = {
   arenaFloorMat: MeshStandardNodeMaterial;
   createSharedMaterials(): void;
   createArenaFloors(): void;
-  createHospitalFloor(): void;
   createLobbyFloor(): void;
 };
 
@@ -44,14 +43,14 @@ function expectFloorDepth(material: MeshStandardNodeMaterial) {
 }
 
 describe("actual duel floor material depth bias", () => {
-  it("biases only actual arena/hospital floor owners without moving surfaces or changing shadow policy", () => {
+  it("biases only retained arena/lobby floors without moving surfaces or changing shadow policy", () => {
     const world = new World();
     const system = new DuelArenaVisualsSystem(world);
     const build = system as unknown as ConstructionAccess;
-    const hospitalGeometry = new THREE.BoxGeometry(
-      HOSPITAL_WIDTH,
+    const lobbyGeometry = new THREE.BoxGeometry(
+      LOBBY_WIDTH,
       DUEL_ARENA_FLOOR_THICKNESS,
-      HOSPITAL_LENGTH,
+      LOBBY_LENGTH,
     );
     try {
       build.arenaCfg = getDuelArenaConfig();
@@ -59,12 +58,11 @@ describe("actual duel floor material depth bias", () => {
       world.stage.scene.add(build.arenaGroup);
       build.createSharedMaterials();
       build.createArenaFloors();
-      build.createHospitalFloor();
+      build.createLobbyFloor();
       const floors = build.arenaGroup.children.filter(
         (mesh): mesh is THREE.Mesh =>
           mesh instanceof THREE.Mesh &&
-          (mesh.name.startsWith("ArenaFloor_") ||
-            mesh.name === "HospitalFloor"),
+          (mesh.name.startsWith("ArenaFloor_") || mesh.name === "LobbyFloor"),
       );
       expect(floors).toHaveLength(build.arenaCfg.arenaCount + 1);
       for (const floor of floors) {
@@ -80,27 +78,33 @@ describe("actual duel floor material depth bias", () => {
         if (floor.name.startsWith("ArenaFloor_")) {
           expect(floor.material).toBe(build.arenaFloorMat);
         } else {
-          expect(floor.position.x).toBe(HOSPITAL_CENTER_X);
-          expect(floor.position.z).toBe(HOSPITAL_CENTER_Z);
+          expect(floor.position.x).toBe(LOBBY_CENTER_X);
+          expect(floor.position.z).toBe(LOBBY_CENTER_Z);
           expect(floor.geometry.index!.array).toEqual(
-            hospitalGeometry.index!.array,
+            lobbyGeometry.index!.array,
           );
           for (const key of ["position", "normal", "uv"])
             expect(floor.geometry.attributes[key].array).toEqual(
-              hospitalGeometry.attributes[key].array,
+              lobbyGeometry.attributes[key].array,
             );
         }
       }
-      // The red cross is nearer geometry, not another biased floor surface.
+      for (const name of [
+        "HospitalFloor",
+        "RecoveryInlayRing",
+        "RecoveryInlayDiamond",
+      ])
+        expect(build.arenaGroup.getObjectByName(name)).toBeUndefined();
+      // The four retained lobby braziers are not biased floor surfaces.
       const nonFloors = build.arenaGroup.children.filter(
         (mesh): mesh is THREE.Mesh =>
           mesh instanceof THREE.Mesh && !floors.includes(mesh),
       );
-      expect(nonFloors).toHaveLength(2);
+      expect(nonFloors).toHaveLength(8);
       for (const mesh of nonFloors)
         expect((mesh.material as THREE.Material).polygonOffset).toBe(false);
     } finally {
-      hospitalGeometry.dispose();
+      lobbyGeometry.dispose();
       system.destroy();
       world.destroy();
     }

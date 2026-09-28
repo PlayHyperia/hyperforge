@@ -8,6 +8,7 @@ import {
   type WorldTerrainProfile,
 } from "./WorldTerrainProfile";
 import type { DuelArenaConfig } from "../../../data/duel-manifest";
+import { HOSPITAL_CENTER_X, HOSPITAL_WIDTH } from "../../../data/arena-layout";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
@@ -329,19 +330,17 @@ export function createCompactIslandPaths(
     )!;
     const direction = getCompactPondDockDirection(landing.rotation);
     const pete = pondArea.npcs.filter((row) => row.id === "fisherman_pete");
-    const hospital = floors.find((floor) => floor.id === "duel_hospital_floor");
-    if (pete.length !== 1 || !hospital)
-      throw new Error(
-        "Compact pond paths require the actual fishing guide and hospital",
-      );
+    if (pete.length !== 1)
+      throw new Error("Compact pond paths require the actual fishing guide");
     // Meet the landward apron, pass the guide's clear western side, then use
-    // the open corridor between the actual lobby and hospital. Rejoin the
-    // admitted south bank passage; no paint, mesh or navigation exemption.
+    // the existing west safe-ground passage. Its historical footprint is layout
+    // metadata, not a physical floor: removing the recovery court must not move
+    // the admitted pond-to-bank route or require a vanished platform owner.
     const corridorX =
       (lobby.centerX -
         lobby.width / 2 +
-        hospital.centerX +
-        hospital.width / 2) /
+        HOSPITAL_CENTER_X +
+        HOSPITAL_WIDTH / 2) /
       2;
     inlandPondApproach = [
       { x: landing.x - direction.x * 3.5, z: landing.z - direction.z * 3.5 },

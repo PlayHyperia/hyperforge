@@ -49,7 +49,7 @@ async function withFacilityAreas(
 }
 
 describe("admitted facility protection and actual zone-cache ownership", () => {
-  it("keeps an immutable union of the real floors and one-metre aprons, not its bounding rectangle", async () => {
+  it("keeps the immutable floor/apron and retained safe-ground union, not its bounding rectangle", async () => {
     await withFacilityAreas(() => {
       const bounds = getDuelArenaProtectionBounds();
       expect(bounds).toEqual([
@@ -94,7 +94,7 @@ describe("admitted facility protection and actual zone-cache ownership", () => {
     });
   });
 
-  it("admits challenges only on the actual lobby floor, excluding its apron, hospital and ring", async () => {
+  it("admits challenges only on the actual lobby floor, excluding its apron, retained safe ground and ring", async () => {
     await withFacilityAreas(() => {
       for (const x of [376, 385, 394])
         for (const z of [368, 376, 384])
@@ -113,7 +113,7 @@ describe("admitted facility protection and actual zone-cache ownership", () => {
     });
   });
 
-  it("uses physical facility precedence over overlapping pond and never leaks through the same two-metre cache cell", async () => {
+  it("uses admitted safety-footprint precedence over overlapping pond and never leaks through the same two-metre cache cell", async () => {
     await withFacilityAreas(async () => {
       const world = new World();
       const zone = world.register(
@@ -137,6 +137,11 @@ describe("admitted facility protection and actual zone-cache ownership", () => {
         expect(zone.getZoneProperties({ x: 390, z: 424.5 }).id).toBe(
           "haven_pond",
         );
+        expect(zone.getZoneProperties({ x: 345.5, z: 376.5 })).toMatchObject({
+          id: "duel_arena",
+          isSafe: true,
+          isPvPEnabled: false,
+        });
         for (const [x, z, id] of [
           [365, 390, "arena_grounds"],
           [400, 348.5, "arena_grounds"],
@@ -260,7 +265,7 @@ describe("streaming duel arena assignment", () => {
     }
   });
 
-  it("retains the complete hospital and lobby safe-zone footprints, not just the ring grid", () => {
+  it("retains the complete former-court and lobby safe-zone footprints, not just the ring grid", () => {
     expect(ALL_WORLD_AREAS.duel_arena.bounds).toEqual({
       minX: 316,
       maxX: 420,

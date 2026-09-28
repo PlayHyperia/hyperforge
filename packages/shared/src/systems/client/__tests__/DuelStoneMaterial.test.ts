@@ -17,7 +17,6 @@ type Construction = {
   createSharedMaterials(): void;
   createArenaFloors(): void;
   createLobbyFloor(): void;
-  createHospitalFloor(): void;
 };
 
 const numericLayoutOperations = {
@@ -106,7 +105,7 @@ describe("world-space stone layout arithmetic (not GPU or visual proof)", () => 
 });
 
 describe("actual shared campus stone owners", () => {
-  it("creates all three real floor meshes with one material and unchanged support geometry", () => {
+  it("creates only arena and lobby floors with one material and unchanged support geometry", () => {
     const world = new World();
     const system = new DuelArenaVisualsSystem(world);
     const build = system as unknown as Construction;
@@ -117,13 +116,21 @@ describe("actual shared campus stone owners", () => {
       build.createSharedMaterials();
       build.createArenaFloors();
       build.createLobbyFloor();
-      build.createHospitalFloor();
       const floors = build.arenaGroup.children.filter(
         (node): node is THREE.Mesh =>
           node instanceof THREE.Mesh &&
-          /^(ArenaFloor_|LobbyFloor$|HospitalFloor$)/.test(node.name),
+          /^(ArenaFloor_|LobbyFloor$)/.test(node.name),
       );
-      expect(floors).toHaveLength(3);
+      expect(floors.map((floor) => floor.name)).toEqual([
+        "ArenaFloor_1",
+        "LobbyFloor",
+      ]);
+      for (const name of [
+        "HospitalFloor",
+        "RecoveryInlayRing",
+        "RecoveryInlayDiamond",
+      ])
+        expect(build.arenaGroup.getObjectByName(name)).toBeUndefined();
       for (const floor of floors) {
         expect(floor.material).toBe(build.arenaFloorMat);
         expect(floor.receiveShadow).toBe(true);

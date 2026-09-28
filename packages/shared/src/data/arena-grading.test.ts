@@ -104,8 +104,7 @@ function actualFloorReceipt() {
     visuals["createSharedMaterials"]();
     visuals["createArenaFloors"]();
     visuals["createLobbyFloor"]();
-    visuals["createHospitalFloor"]();
-    const names = ["ArenaFloor_1", "LobbyFloor", "HospitalFloor"];
+    const names = ["ArenaFloor_1", "LobbyFloor"];
     const meshBounds = names.map((name) => {
       const floor = visuals["arenaGroup"]!.getObjectByName(name)!;
       expect(floor).toBeDefined();
@@ -119,7 +118,6 @@ function actualFloorReceipt() {
     ).toEqual([
       [19, 23],
       [18, 16],
-      [12, 12],
     ]);
     return {
       zones,
@@ -372,13 +370,12 @@ describe("authored shared duel arena grade", () => {
     }
   });
 
-  it("retains only the single arena, lobby and hospital floors at one common height", () => {
+  it("retains only the single arena and lobby floors at one common height", () => {
     const cfg = getDuelArenaConfig();
     const zones = createDuelArenaFloorZones(cfg, getDuelArenaGradeHeight());
     expect(zones.map((zone) => zone.id)).toEqual([
       "duel_arena_floor_1",
       "duel_lobby_floor",
-      "duel_hospital_floor",
     ]);
     expect(new Set(zones.map((zone) => zone.height)).size).toBe(1);
     for (const zone of zones) {
@@ -402,12 +399,8 @@ describe("authored shared duel arena grade", () => {
     });
     expect(
       zones.find((zone) => zone.id === "duel_hospital_floor"),
-    ).toMatchObject({
-      centerX: 345,
-      centerZ: 376,
-      width: 12,
-      depth: 12,
-    });
+    ).toBeUndefined();
+    expect(getDuelArenaSolidSurfaceHeight(345, 376)).toBeNull();
     expect(() =>
       createDuelArenaFloorZones({ ...cfg, arenaCount: 100000 }, 0),
     ).toThrow(/Invalid/);
@@ -419,10 +412,10 @@ describe("authored shared duel arena grade", () => {
     const b = actualTerrain().terrain;
     const base = getDuelArenaGradeHeight();
     const zones = createDuelArenaFloorZones(getDuelArenaConfig(), base);
-    // Five current manifest grades + eleven station pads + three floors. The
+    // Five current manifest grades + eleven station pads + two floors. The
     // lodge grass-clearance grade was added after the original 18-zone census.
-    expect(a["flatZones"].size).toBe(19);
-    expect(b["flatZones"].size).toBe(19);
+    expect(a["flatZones"].size).toBe(18);
+    expect(b["flatZones"].size).toBe(18);
     for (const terrain of [a, b]) {
       expect(
         terrain["flatZones"].get("central_haven_lodge_grass_clearance"),
@@ -484,7 +477,7 @@ describe("authored shared duel arena grade", () => {
     }
   });
 
-  it("constructs actual arena/hospital meshes at the shared platform top and does not own terrain lifetime", () => {
+  it("constructs actual arena/lobby meshes at the shared platform top and does not own terrain lifetime", () => {
     const { world, terrain } = actualTerrain();
     const visuals = new DuelArenaVisualsSystem(world);
     visuals["arenaCfg"] = getDuelArenaConfig();
@@ -496,15 +489,14 @@ describe("authored shared duel arena grade", () => {
       visuals["assertSharedArenaFloors"]();
       visuals["createSharedMaterials"]();
       visuals["createArenaFloors"]();
-      visuals["createHospitalFloor"]();
+      visuals["createLobbyFloor"]();
       const floors = visuals["arenaGroup"].children.filter(
         (object) =>
-          object.name.startsWith("ArenaFloor_") ||
-          object.name === "HospitalFloor",
+          object.name.startsWith("ArenaFloor_") || object.name === "LobbyFloor",
       );
       expect(floors.map((floor) => floor.name)).toEqual([
         "ArenaFloor_1",
-        "HospitalFloor",
+        "LobbyFloor",
       ]);
       for (const floor of floors) {
         const bounds = new THREE.Box3().setFromObject(floor);

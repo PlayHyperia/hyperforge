@@ -452,7 +452,7 @@ const protectionBounds = new WeakMap<
 const NO_PROTECTION_BOUNDS: readonly Readonly<DuelCombatArenaBounds>[] =
   Object.freeze([]);
 
-/** Physical ring/courts plus their existing terrain apron, never their convex
+/** Physical ring/lobby and retained west safe ground, never their convex
  * bounding box. Only explicitly admitted worlds opt in; old manifests retain
  * their broad-zone contract. This is not generic safe-area or PvP policy. */
 export function getDuelArenaProtectionBounds(): readonly Readonly<DuelCombatArenaBounds>[] {
@@ -503,6 +503,7 @@ export function getDuelArenaProtectionBounds(): readonly Readonly<DuelCombatAren
       LOBBY_CENTER_Z + LOBBY_LENGTH / 2,
     ),
     rectangle(
+      // Keep the established safety policy after removing the decorative court.
       HOSPITAL_CENTER_X - HOSPITAL_WIDTH / 2,
       HOSPITAL_CENTER_X + HOSPITAL_WIDTH / 2,
       HOSPITAL_CENTER_Z - HOSPITAL_LENGTH / 2,

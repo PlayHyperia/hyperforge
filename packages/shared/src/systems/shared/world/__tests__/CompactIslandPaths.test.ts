@@ -972,6 +972,13 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         expect(route.path[0]).toMatchObject({ x: 386.5, z: 424.5 });
         expect(route.path.at(-1)).toMatchObject({ x: 348, z: 321 });
         expect(route.path.length).toBeLessThanOrEqual(256);
+        // Removing the decorative court keeps the admitted west passage at
+        // exactly its existing centerline; it no longer depends on a floor.
+        expect(
+          route.path.some(
+            (point) => point.x === 363.5 && point.z > 370 && point.z < 390,
+          ),
+        ).toBe(true);
         expect(
           Math.min(
             ...route.path
@@ -989,6 +996,10 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
           getDuelArenaConfig(),
           getDuelArenaGradeHeight(),
         );
+        expect(floors.map((floor) => floor.id)).toEqual([
+          "duel_arena_floor_1",
+          "duel_lobby_floor",
+        ]);
         const pondPaths = paths.filter((path) => path.id.includes("pond-bank"));
         let dryBankChecks = 0;
         for (const path of pondPaths) {
@@ -4077,7 +4088,7 @@ describe("actual compact preparation paths and centered road mask", () => {
     });
   });
 
-  it("keeps every entire width-plus-blend segment outside water, lobby, hospital and the combat floor", async () => {
+  it("keeps every entire width-plus-blend segment outside water, lobby and the combat floor", async () => {
     await withRoads((roads) => {
       const areas = DataManager.getInstance().getAllWorldAreas();
       const floors = createDuelArenaFloorZones(
