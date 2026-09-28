@@ -12,6 +12,7 @@ import {
   GRASS_MEADOW_AUTHORED_SHAPE,
   sampleGrassMeadowAuthoredBlade,
   type GrassMeadowAuthoredBlade,
+  type GrassMeadowAuthoredSourceShape,
 } from "../GrassMeadowAuthoredShape";
 import {
   getGrassBladeWindFactor,
@@ -194,6 +195,80 @@ function projectedUnion(
 }
 
 describe("explicit authored meadow silhouette endpoint", () => {
+  it("keeps legacy width arithmetic without an envelope and copies the retained optional envelope", () => {
+    const { BLADE_WIDTH_BEZIER_CONTROL_POINTS: envelope, ...legacy } =
+      FINE_GRASS_MEADOW_FIELD_SHAPE;
+    for (const shape of [legacy, FINE_GRASS_MEADOW_FIELD_SHAPE]) {
+      const blades: GrassMeadowAuthoredBlade[] = [];
+      const coarse = createClumpGeometry(21, 3, shape, undefined, (blade) =>
+        blades.push(blade),
+      );
+      try {
+        const buffers = createMeadowAuthoredShapeBuffers(coarse, blades, shape);
+        const copied =
+          buffers.recipe.sourceShape.BLADE_WIDTH_BEZIER_CONTROL_POINTS;
+        if (shape === legacy) {
+          expect(copied).toBeUndefined();
+          for (const t of [0, 0.1, 1 / 3, 0.5, 2 / 3, 0.9]) {
+            const blade = blades[0];
+            const tapered = Math.pow(t, legacy.BLADE_TAPER_POWER);
+            const width =
+              blade.width *
+              Math.pow(
+                1 - tapered * legacy.BLADE_TAPER,
+                legacy.BLADE_WIDTH_FALLOFF_POWER,
+              ) *
+              (1 +
+                legacy.BLADE_UPPER_WIDTH_GAIN *
+                  THREE.MathUtils.smoothstep(t, 0, 0.5)) *
+              (legacy.BLADE_BASE_WIDTH_FACTOR +
+                (1 - legacy.BLADE_BASE_WIDTH_FACTOR) *
+                  THREE.MathUtils.smoothstep(
+                    t,
+                    0,
+                    legacy.BLADE_FULL_WIDTH_HEIGHT,
+                  ));
+            const left = sampleGrassMeadowAuthoredBlade(blade, t, 0, legacy);
+            const right = sampleGrassMeadowAuthoredBlade(blade, t, 1, legacy);
+            expect(
+              new THREE.Vector3(...left.position).distanceTo(
+                new THREE.Vector3(...right.position),
+              ),
+            ).toBeCloseTo(width, 14);
+          }
+        } else {
+          expect(copied).toEqual(envelope);
+          expect(copied).not.toBe(envelope);
+          expect(Object.isFrozen(copied)).toBe(true);
+        }
+      } finally {
+        coarse.dispose();
+      }
+    }
+  });
+
+  it("rejects malformed optional width envelopes before generating buffers", () =>
+    withFixture(({ coarseGeometry }, blades) => {
+      for (const invalid of [
+        [],
+        [0.25, 2.3, 1.3, 0],
+        [0.25, 2.3, 1.3, 0, 0, 0],
+        [0.25, NaN, 1.3, 0, 0],
+        [0.25, Infinity, 1.3, 0, 0],
+        [0.25, -1, 1.3, 0, 0],
+        [0, 2.3, 1.3, 0, 0],
+        null,
+      ]) {
+        const shape: GrassMeadowAuthoredSourceShape = {
+          ...FINE_GRASS_MEADOW_FIELD_SHAPE,
+        };
+        Reflect.set(shape, "BLADE_WIDTH_BEZIER_CONTROL_POINTS", invalid);
+        expect(() =>
+          createMeadowAuthoredShapeBuffers(coarseGeometry, blades, shape),
+        ).toThrow("width envelope");
+      }
+    }));
+
   it("uses deterministic actual seeded parameters without changing the old factory", () =>
     withFixture(
       ({ geometry, coarseGeometry, coarseVertexPairs, layout }, blades) => {
@@ -301,14 +376,22 @@ describe("explicit authored meadow silhouette endpoint", () => {
               FINE_GRASS_MEADOW_FIELD_SHAPE,
             );
             const sourceRow = blade.index * 13 + Math.round(t * 6) * 2;
-            expect(
-              new THREE.Vector3(...a.position).distanceTo(
-                new THREE.Vector3(...b.position),
-              ),
-            ).toBeCloseTo(
-              point(source, sourceRow).distanceTo(point(source, sourceRow + 1)),
-              7,
+            const sourceLeft = point(source, sourceRow);
+            const sourceRight = point(source, sourceRow + 1);
+            const width = new THREE.Vector3(...a.position).distanceTo(
+              new THREE.Vector3(...b.position),
             );
+            // Source endpoints are independently rounded Float32 positions;
+            // use their coordinate-scaled rounding bound, not decimal precision.
+            const roundingBound =
+              Math.hypot(
+                Math.abs(sourceLeft.x) + Math.abs(sourceRight.x),
+                Math.abs(sourceLeft.z) + Math.abs(sourceRight.z),
+              ) *
+              2 ** -23;
+            expect(
+              Math.abs(width - sourceLeft.distanceTo(sourceRight)),
+            ).toBeLessThanOrEqual(roundingBound);
             expect(Math.fround(a.position[1])).toBe(
               source.getAttribute("position").getY(sourceRow),
             );

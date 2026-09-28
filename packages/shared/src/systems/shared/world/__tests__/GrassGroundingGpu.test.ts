@@ -12,6 +12,7 @@ import {
   uniform,
   varying,
   vec3,
+  vec4,
   vertexIndex,
 } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
@@ -30,6 +31,10 @@ import {
   GRASS_MEADOW_AUTHORED_GROUNDING,
   GRASS_BLADE_VISIBILITY_ATTRIBUTE,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
+  GrassClumpInvariantCache,
+  readGrassClumpInvariant,
+  GRASS_CLUMP_CACHE_ATTRIBUTE,
+  GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
 } from "../GrassGroundingGpu";
 import {
   remapGrassGroundingSteps,
@@ -341,6 +346,281 @@ describe("opt-in matrix-free grounded grass (real Three CPU construction)", () =
       },
     };
   }
+
+  function cacheFixture() {
+    const f = fixture();
+    const rotations = new THREE.InstancedBufferAttribute(
+      new Float32Array([0.25, 1, 0.1, 1.5, 0.8, 0.2, 2.75, 1.1, 0.3]),
+      3,
+    );
+    const normals = new THREE.InstancedBufferAttribute(
+      new Float32Array([0, 1, 0, 0.6, 0.8, 0, 0, 0.8, 0.6]),
+      3,
+    );
+    f.offsets.setXYZ(0, 2, 10, 3);
+    f.offsets.setXYZ(1, -4, 11, 5);
+    f.offsets.setXYZ(2, 6, 12, -7);
+    f.geometry.setAttribute("instanceRotScaleHash", rotations);
+    f.geometry.setAttribute("instanceGroundNormal", normals);
+    const mesh = createMatrixFreeGrassMesh(f.geometry, f.material);
+    const positionNode = f.material.positionNode;
+    if (!(positionNode instanceof THREE.Node))
+      throw new Error("Actual grounded position required");
+    const position = vec3(new ConvertNode<"vec3">(positionNode, "vec3"));
+    f.material.positionNode = Fn(() =>
+      position.add(
+        readGrassClumpInvariant(0, () => vec4(2, 3, 4, 5)).xyz.add(
+          readGrassClumpInvariant(1, () => vec4(6, 7, 8, 0)).xyz,
+        ),
+      ),
+    )();
+    const cache = new GrassClumpInvariantCache(mesh, (world) =>
+      vec4(world.x.mul(0.1), world.z.mul(0.2), world.x.add(world.z), 0),
+    );
+    return {
+      ...f,
+      mesh,
+      cache,
+      rotations,
+      normals,
+      release() {
+        mesh.dispose();
+        f.dispose();
+      },
+    };
+  }
+
+  it("owns two vec4 GPU cache records without changing the source vertex layout", async () => {
+    const f = cacheFixture();
+    try {
+      expect(f.cache.snapshot()).toMatchObject({
+        ready: false,
+        preparations: 0,
+        inputBytes: 96,
+        outputBytes: 96,
+      });
+      expect(f.geometry.getAttribute(GRASS_CLUMP_CACHE_ATTRIBUTE)).toBe(
+        f.cache.output,
+      );
+      expect(f.geometry.getAttribute(GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE)).toBe(
+        f.cache.inputs,
+      );
+      expect(f.cache.compute.count).toBe(3);
+      expect(f.cache.compute.workgroupSize).toEqual([64, 1, 1]);
+      // CPU operation boundary only: asserts packing/ownership, not GPU values.
+      await f.cache.runPreparation(async () => {});
+      expect(Array.from(f.cache.inputs.array)).toEqual([
+        2,
+        3,
+        Math.fround(0.25),
+        0,
+        0,
+        1,
+        0,
+        0,
+        -4,
+        5,
+        Math.fround(1.5),
+        0,
+        Math.fround(0.6),
+        Math.fround(0.8),
+        0,
+        0,
+        6,
+        -7,
+        Math.fround(2.75),
+        0,
+        0,
+        Math.fround(0.8),
+        Math.fround(0.6),
+        0,
+      ]);
+      for (const attribute of [f.offsets, f.rotations, f.normals]) {
+        expect(attribute.itemSize).toBe(3);
+        expect(attribute.count).toBe(3);
+      }
+      expect(f.cache.snapshot().completion).toBe(
+        "ordered-submission-not-gpu-fence",
+      );
+      const flow = groundingStageFlow(f.geometry, f.material, f.mesh);
+      expect(flow.vertex).toMatch(/grassClumpInvariant0/);
+      expect(flow.vertex).toMatch(/grassClumpInvariant1/);
+      expect(flow.vertex.match(/var<storage,\s*read>/g)).toHaveLength(3);
+      expect(flow.vertex).toMatch(/if \(/);
+      expect(flow.vertex).toMatch(/else/);
+      expect(flow.attributes).not.toContain(GRASS_CLUMP_CACHE_ATTRIBUTE);
+      expect(flow.attributes).not.toContain(GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE);
+      expect(flow.vertex + flow.fragment).not.toMatch(/undefined|NaN|Infinity/);
+    } finally {
+      f.cache.retire(f.release);
+    }
+  });
+
+  it("emits the installed r186 bounded compute-stage flow with two output records and no live-time inputs", () => {
+    const f = cacheFixture();
+    const dom = new JSDOM("<canvas></canvas>");
+    const canvas = dom.window.document.querySelector("canvas");
+    if (!canvas) throw new Error("Missing constructor canvas");
+    const renderer = new THREE.WebGPURenderer({ canvas });
+    try {
+      // Actual installed builder, not a GPU or renderer replacement. This
+      // proves emitted stage flow only; complete native compilation/execution
+      // still requires an initialized GPU (including its feature discovery).
+      const builder = new WGSLNodeBuilder(new THREE.Object3D(), renderer);
+      builder.compute = f.cache.compute;
+      Reflect.set(builder, "shaderStage", "compute");
+      const generate: unknown = Reflect.get(builder, "flowStagesNode");
+      const declarations: unknown = Reflect.get(builder, "getUniforms");
+      if (typeof generate !== "function" || typeof declarations !== "function")
+        throw new Error("Missing installed compute stage methods");
+      const flow: unknown = generate.call(builder, f.cache.compute, "void");
+      const uniforms: unknown = declarations.call(builder, "compute");
+      if (
+        !flow ||
+        typeof flow !== "object" ||
+        !("code" in flow) ||
+        typeof flow.code !== "string" ||
+        typeof uniforms !== "string"
+      )
+        throw new Error("Missing actual compute stage flow");
+      const shader = uniforms + flow.code;
+      expect(shader).toMatch(/instanceIndex\s*>=\s*[^\n]+\{ return;/);
+      expect(shader).toMatch(/cos\(/);
+      expect(shader).toMatch(/sin\(/);
+      expect(shader).toMatch(/var<storage,\s*read>/);
+      expect(shader).toMatch(/var<storage,\s*read_write>/);
+      expect(shader).toMatch(/instanceIndex\s*\*\s*2u/);
+      expect(shader).not.toMatch(/time|player|undefined|NaN|Infinity/);
+    } finally {
+      f.cache.retire(f.release);
+      renderer.dispose();
+      dom.window.close();
+    }
+  });
+
+  it("falls back after parent transforms or source versions and refreshes only on a new preparation", async () => {
+    const f = cacheFixture(),
+      parent = new THREE.Group();
+    parent.add(f.mesh);
+    try {
+      await f.cache.runPreparation(async () => {});
+      expect(f.cache.isCurrent()).toBe(true);
+      parent.position.set(4, 2, -5);
+      parent.rotation.y = 0.4;
+      parent.scale.set(1.2, 0.8, 1.1);
+      parent.updateMatrixWorld(true);
+      expect(f.cache.isCurrent()).toBe(false);
+      expect(f.cache.needsPreparation()).toBe(true);
+      await f.cache.runPreparation(async () => {});
+      expect(f.cache.isCurrent()).toBe(true);
+      f.normals.needsUpdate = true;
+      expect(f.cache.isCurrent()).toBe(false);
+      await f.cache.runPreparation(async () => {});
+      expect(f.cache.isCurrent()).toBe(true);
+      expect(f.cache.snapshot().preparations).toBe(3);
+      f.geometry.setAttribute("instanceGroundNormal", f.normals.clone());
+      expect(f.cache.isCurrent()).toBe(false);
+      await f.cache.request((owner) => owner.runPreparation(async () => {}));
+      expect(f.cache.snapshot()).toMatchObject({
+        ready: false,
+        failed: true,
+        lastError: "Grass invariant source owner was replaced",
+      });
+    } finally {
+      f.cache.retire(f.release);
+    }
+  });
+
+  it("retires a queued owner before it starts without submitting or disposing twice", async () => {
+    const f = cacheFixture();
+    let releaseQueue: (() => void) | undefined,
+      operations = 0,
+      disposals = 0;
+    const gate = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+    const request = f.cache.request(async (owner) => {
+      await gate;
+      await owner.runPreparation(async () => {
+        operations++;
+      });
+    });
+    f.cache.retire(() => {
+      disposals++;
+      f.release();
+    });
+    expect(f.cache.snapshot()).toMatchObject({
+      ready: false,
+      disposed: true,
+      retired: true,
+    });
+    releaseQueue!();
+    await request;
+    f.cache.retire(() => {
+      disposals++;
+    });
+    expect([operations, disposals]).toEqual([0, 1]);
+  });
+
+  it("keeps actual-operation ownership after a caller timeout and blocks late publication", async () => {
+    const f = cacheFixture();
+    let finish: (() => void) | undefined,
+      operation: Promise<void> | undefined,
+      disposals = 0;
+    const request = f.cache.request((owner) => {
+      operation = owner.runPreparation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      return Promise.reject(new Error("caller deadline"));
+    });
+    await request;
+    expect(f.cache.snapshot()).toMatchObject({
+      running: true,
+      failed: true,
+      ready: false,
+    });
+    f.cache.retire(() => {
+      disposals++;
+      f.release();
+    });
+    expect(disposals).toBe(0);
+    finish!();
+    await operation;
+    expect(f.cache.snapshot()).toMatchObject({
+      running: false,
+      retired: true,
+      disposed: true,
+      ready: false,
+      preparations: 0,
+    });
+    expect(disposals).toBe(1);
+  });
+
+  it("never publishes a cache prepared against a superseded parent matrix", async () => {
+    const f = cacheFixture(),
+      parent = new THREE.Group();
+    parent.add(f.mesh);
+    let finish: (() => void) | undefined;
+    try {
+      const operation = f.cache.runPreparation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      parent.position.x = 17;
+      parent.updateMatrixWorld(true);
+      finish!();
+      await operation;
+      expect(f.cache.isCurrent()).toBe(false);
+      expect(f.cache.needsPreparation()).toBe(true);
+    } finally {
+      f.cache.retire(f.release);
+    }
+  });
 
   it.each([0, 1, 2])(
     "copies exact LOD %s template bytes before binding and retains the actual storage owners",

@@ -12,6 +12,7 @@ import {
   MeshSSSNodeMaterial,
   MeshStandardNodeMaterial,
   NodeBuilder,
+  StorageBufferAttribute,
   type Node,
 } from "three/webgpu";
 import {
@@ -40,6 +41,8 @@ import {
   FINE_GRASS_LEAF_VOLUME_LIGHTING,
   FINE_GRASS_FOLDED_BLADE_LIGHTING,
   FINE_GRASS_MEADOW_FIELD_LIGHTING,
+  FINE_GRASS_MEADOW_FIELD_COMPOSITION,
+  FINE_GRASS_MEADOW_FIELD_SHAPE,
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   GRASS_CONFIG,
   GrassVisualManager,
@@ -49,9 +52,16 @@ import {
   type GrassVisualProfile,
   type GrassWorkerSetup,
 } from "../GrassVisualManager";
-import { getGrassBladeLayout } from "../GrassBladeLayout";
+import {
+  getGrassBladeLayout,
+  isMeadowGrassBladeLayout,
+} from "../GrassBladeLayout";
 import { sampleSkyCycle } from "../SkySystem";
-import { createGroundedGrassMaterial } from "../GrassGroundingGpu";
+import {
+  createGroundedGrassMaterial,
+  GRASS_CLUMP_CACHE_ATTRIBUTE,
+  GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+} from "../GrassGroundingGpu";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
@@ -447,7 +457,23 @@ describe("matrix-free meadow owner admission and precompilation (CPU only)", () 
         const names = Object.keys(before.geometry.attributes).filter(
           (name) => name !== INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
         );
-        expect(Object.keys(object.geometry.attributes)).toEqual(names);
+        expect(Object.keys(object.geometry.attributes)).toEqual([
+          ...names,
+          GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+          GRASS_CLUMP_CACHE_ATTRIBUTE,
+        ]);
+        for (const name of [
+          GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+          GRASS_CLUMP_CACHE_ATTRIBUTE,
+        ]) {
+          const storage = object.geometry.getAttribute(name);
+          expect(storage).toBeInstanceOf(StorageBufferAttribute);
+          expect(storage.itemSize).toBe(4);
+          expect(storage.count).toBe(2);
+          // No preparation callback/GPU was provided: the representative
+          // retains its live fallback and never claims initialized cache data.
+          expect(Array.from(storage.array)).toEqual(Array(8).fill(0));
+        }
         for (const name of names) {
           const actual = object.geometry.getAttribute(name);
           const expected = before.geometry.getAttribute(name);
@@ -1067,6 +1093,78 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
       grassColorGrade,
       geometry,
     );
+
+  it("converges the field-only recipe to retained build158 without selecting private paired leaves", () => {
+    const digest = (array: ArrayBufferView) =>
+      createHash("sha256")
+        .update(Buffer.from(array.buffer, array.byteOffset, array.byteLength))
+        .digest("hex");
+    // Independently generated from build158's embedded source, SHA256
+    // 3b2f1e1a105112ac71829f60f92e428aa0b5f26dbd55e4169bfabe20172c6003.
+    // These are retained bytes, not a new artistic or performance baseline.
+    const retained = [
+      [
+        147,
+        315,
+        "69ffff45f8dbf6459f86152f31bab45b0dc7e6b30b982dd1e4ead07395d55129",
+        "59484f0334e148627c8ecff16f6fe381cdfcc4a817ec47b165f76d9aa02c4231",
+        "9c0b66bd156512fd35a0828f562df10dfb778856a0712c0d81e9498cf1f165c1",
+        "465f0f9e2e9b78c1d3fcba84a5b3d9023b4df0e83a001036315cac066c52dbc2",
+      ],
+      [
+        105,
+        189,
+        "3e89cb101649b53073311eab902ee9375b139c39b425559040a9fc4ad8fc6398",
+        "46e6d601274cf8bf0dc8850675579ab4c7d45645a40d2c6c426ac2866c5f5d35",
+        "fef2ccda33a771af7dbe67840955a6370adb0b65da5514b4e9b202067fd6162a",
+        "a84f77d998c3c2965f571ef349035e1c0e4c51a844f11a9180262a4290c3a9f1",
+      ],
+      [
+        60,
+        108,
+        "bb538b08bcc193789280fec9759946098e7461dcb3f70f61888734394ac65fb1",
+        "0ccab8814ff9a6473dd8485faed39a8b388456ee34cf8053cbb9ad5aa254a36f",
+        "3151b5917b93984ac88c1b99647ac2a751caaba476e95228a95a3717bd841b33",
+        "d7054c3ebc02228dec288e98823c302ac0c0491d75fa01a5a99805531c2e6851",
+      ],
+    ] as const;
+    expect(FINE_GRASS_MEADOW_FIELD_COMPOSITION.heightFactors).toEqual([
+      0.46, 0.72, 0.86,
+    ]);
+    expect(
+      FINE_GRASS_MEADOW_FIELD_SHAPE.BLADE_WIDTH_BEZIER_CONTROL_POINTS,
+    ).toEqual([0.25, 2.3, 1.3, 0, 0]);
+    expect(
+      Object.isFrozen(
+        FINE_GRASS_MEADOW_FIELD_SHAPE.BLADE_WIDTH_BEZIER_CONTROL_POINTS,
+      ),
+    ).toBe(true);
+    expect(FINE_GRASS_MEADOW_FIELD_LIGHTING.upperWeight).toBe(0.45);
+    expect(FINE_GRASS_LEAF_VOLUME_LIGHTING.upperWeight).toBe(1);
+    expect(FINE_MEADOW_APPEARANCE).not.toHaveProperty(
+      "BLADE_WIDTH_BEZIER_CONTROL_POINTS",
+    );
+    expect(isMeadowGrassBladeLayout("fine-meadow-paired-near-v1")).toBe(true);
+    expect(isMeadowGrassBladeLayout("fine-folded-sheath-near5-v1")).toBe(false);
+    const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
+    try {
+      expect(owner["geometryLayout"]).toBe("fine-meadow-ribbon-v1");
+      for (const [lod, geometry] of owner["lodGeometries"].entries()) {
+        const [vertices, indices, position, normal, uv, index] = retained[lod];
+        expect(geometry.attributes.position.count).toBe(vertices);
+        expect(geometry.index!.count).toBe(indices);
+        expect(digest(geometry.attributes.position.array)).toBe(position);
+        expect(digest(geometry.attributes.normal.array)).toBe(normal);
+        expect(digest(geometry.attributes.uv.array)).toBe(uv);
+        expect(digest(geometry.index!.array)).toBe(index);
+        expect(
+          owner["materialForLod"](lod).userData.fineGrassCanopyLighting,
+        ).toBe(FINE_GRASS_MEADOW_FIELD_LIGHTING);
+      }
+    } finally {
+      owner.destroy();
+    }
+  });
 
   it("borrows field material nodes for an explicit authored endpoint without installing it", () => {
     const owner = fine("leaf-volume-v1", undefined, "meadow-field-v1");
@@ -2650,6 +2748,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
         const geometry = owner["lodGeometries"][lod];
         expect(material.userData.fineGrassCanopyLighting).toEqual({
           ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
+          upperWeight: 0.45,
           rootBrightness: 0.78,
           foldTangent: Math.tan(Math.PI / 10),
           normalSource: "geometry-ribbon-relief",
@@ -2707,7 +2806,7 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
                 .fromArray(input.instanceGroundNormal)
                 .lerp(
                   relieved.clone().multiplyScalar(face),
-                  0.2 + 0.8 * smooth(0.1, 0.65, t),
+                  0.2 + 0.25 * smooth(0.1, 0.65, t),
                 )
                 .normalize()
                 .transformDirection(
@@ -2720,10 +2819,10 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
             }
           }
         }
-        // Valid interpolated cancellation and parallel transverse input must be
-        // finite; the guard is exercised in the actual graph, not a mock shader.
+        // Degenerate and parallel transverse input must remain finite. The field
+        // blend stays below cancellation; generic leaf-volume tests cover it.
         const input = inputsAt(geometry, 2);
-        const crossing = 0.1 + 0.55 * (0.5 - Math.sin(Math.asin(0.25) / 3));
+        const transition = 0.35;
         for (const normal of [
           [0, 0, 0],
           [0, 1, 0],
@@ -2736,14 +2835,14 @@ describe("opt-in fine leaf volume (actual graph/geometry, not native rendering)"
               [0, 0.65, 1],
               [0.5, 0.65, 1],
               [1, 0.65, 1],
-              [0, crossing, -1],
-              [0.5, crossing, -1],
-              [1, crossing, -1],
-              [0.5, crossing - 1e-4, -1],
-              [0.5, crossing + 1e-4, -1],
-              [0, crossing, 1],
-              [0.5, crossing, 1],
-              [1, crossing, 1],
+              [0, transition, -1],
+              [0.5, transition, -1],
+              [1, transition, -1],
+              [0.5, transition - 1e-4, -1],
+              [0.5, transition + 1e-4, -1],
+              [0, transition, 1],
+              [0.5, transition, 1],
+              [1, transition, 1],
             ]) {
               input.uv = [u, t];
               input._frontFacing = [face === 1 ? 1 : 0];

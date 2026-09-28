@@ -24,6 +24,7 @@ import {
 } from "../GrassBladeGrounding";
 import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
 import { GrassGroundingWorkerJob } from "../GrassGroundingWorkerCoordinator";
+import type { GrassChunkRenderMesh } from "../GrassGroundingGpu";
 import { gridGeometry } from "./terrain-grid.fixture";
 import {
   createCompactTerrainColorOperations,
@@ -945,6 +946,11 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(original.finish()).toBe(1);
       await candidate.queue();
       candidate.owner["processSettledWorkerResults"]();
+      const groundingJob = candidate.owner["groundingJobs"].get(
+        candidate.work.key,
+      )!.job;
+      if (!(groundingJob instanceof GrassGroundingWorkerJob))
+        throw new Error("Actual manager worker job required");
       let uploads = 0;
       const deadline = performance.now() + 10_000;
       while (
@@ -960,6 +966,10 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       }
       expect(uploads).toBe(1);
       const before = original.owner["chunks"].get(original.work.key)!.mesh;
+      expect(groundingJob.execution?.policy).toBe(
+        "soft-cost-finite-lifetime-v1",
+      );
+      expect(Object.isFrozen(groundingJob.execution)).toBe(true);
       const after = candidate.owner["chunks"].get(candidate.work.key)!.mesh;
       expect(after.count).toBe(before.count);
       expect(Object.keys(after.geometry.attributes).sort()).toEqual(
@@ -1377,7 +1387,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         f.owner.setPlayerPosition(312.5, 287.5);
       }
       for (const lod of [0, 1]) {
-        const chunks: THREE.InstancedMesh[] = [];
+        const chunks: GrassChunkRenderMesh[] = [];
         for (const f of [worker, fallback]) {
           const work = f.owner["liveWorkUnits"].get("gcell_v1_12_11")!;
           f.owner["lodFocusX"] = lod ? 380 : 312.5;
@@ -1763,6 +1773,13 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         }
         const a = baseline.owner["chunks"].get(baseline.work.key)!.mesh;
         const b = graded.owner["chunks"].get(graded.work.key)!.mesh;
+        if (
+          !(a instanceof THREE.InstancedMesh) ||
+          !(b instanceof THREE.InstancedMesh)
+        )
+          throw new Error(
+            "Default grass fixtures must publish instance-matrix meshes",
+          );
         expect(a.count).toBe(b.count);
         expect(a.count).toBeGreaterThan(0);
         expect(a.boundingBox).toEqual(b.boundingBox);
@@ -3463,6 +3480,10 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.owner["processSettledWorkerResults"]();
       expect(f.finish()).toBe(1);
       const original = f.owner["chunks"].get(f.work.key)!.mesh;
+      if (!(original instanceof THREE.InstancedMesh))
+        throw new Error(
+          "Default grass fixture must publish an instance-matrix mesh",
+        );
       check(original);
       let disposed = 0;
       original.geometry.addEventListener("dispose", () => {
@@ -3482,22 +3503,27 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.owner["processSettledWorkerResults"]();
       expect(f.finish()).toBe(1);
       const replacement = f.owner["chunks"].get(f.work.key)!;
+      const replacementMesh = replacement.mesh;
+      if (!(replacementMesh instanceof THREE.InstancedMesh))
+        throw new Error(
+          "Default grass LOD replacement must retain instance matrices",
+        );
       expect(replacement.lodLevel).toBe(1);
       expect(replacement.mesh).not.toBe(original);
       expect(original.parent).toBeNull();
       expect(disposed).toBe(1);
-      check(replacement.mesh);
-      expect(replacement.mesh.instanceMatrix).not.toBe(original.instanceMatrix);
-      expect(replacement.mesh.instanceMatrix.array).not.toBe(
+      check(replacementMesh);
+      expect(replacementMesh.instanceMatrix).not.toBe(original.instanceMatrix);
+      expect(replacementMesh.instanceMatrix.array).not.toBe(
         original.instanceMatrix.array,
       );
       let replacementDisposals = 0;
-      replacement.mesh.geometry.addEventListener("dispose", () => {
+      replacementMesh.geometry.addEventListener("dispose", () => {
         expect(
-          replacement.mesh.geometry.getAttribute(
+          replacementMesh.geometry.getAttribute(
             INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
           ),
-        ).toBe(replacement.mesh.instanceMatrix);
+        ).toBe(replacementMesh.instanceMatrix);
         replacementDisposals++;
       });
       f.owner["retireGrassWork"](f.work.key);

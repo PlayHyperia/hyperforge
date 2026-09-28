@@ -3083,6 +3083,8 @@ export class TerrainSystem extends System {
         grassSelection.vergeEvaluation,
         grassSelection.instancing,
       );
+      if (grassSelection.instancing)
+        this.registerGrassClumpInvariantPreparation(this.grassVisualManager);
 
       if (grassSelection.flowers) {
         if (!grassWorkerSetup.prepareGroundingInputs)
@@ -3120,6 +3122,32 @@ export class TerrainSystem extends System {
       "[TerrainSystem] Quad-tree LOD visual manager initialized " +
         `(minSize=${this.CONFIG.QUADTREE_MIN_SIZE}, maxDepth=${this.CONFIG.QUADTREE_MAX_DEPTH}, ` +
         `resolution=${quadTreeResolution}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
+    );
+  }
+
+  /** Ordinary players do not run the streaming-only representative warmup.
+   * Both routes still prepare selected caches through the same graphics queue. */
+  private registerGrassClumpInvariantPreparation(
+    manager: GrassVisualManager,
+  ): void {
+    const graphics = this.world.graphics;
+    if (!graphics) throw new Error("Grass preparation requires graphics");
+    manager.setClumpInvariantPreparation((cache) =>
+      graphics.prepareRenderer(() => {
+        if (
+          this.destroyed ||
+          this.grassVisualManager !== manager ||
+          this.world.graphics !== graphics
+        )
+          throw new Error(
+            "Terrain owner retired before grass invariant preparation",
+          );
+        return cache.prepare(
+          graphics.renderer,
+          this.world.camera,
+          this.world.stage.scene,
+        );
+      }),
     );
   }
 

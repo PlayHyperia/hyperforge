@@ -33,6 +33,13 @@ export type GrassMeadowAuthoredSourceShape = Readonly<{
   BLADE_UPPER_WIDTH_GAIN: number;
   BLADE_BASE_WIDTH_FACTOR: number;
   BLADE_FULL_WIDTH_HEIGHT: number;
+  BLADE_WIDTH_BEZIER_CONTROL_POINTS?: readonly [
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
 }>;
 
 type Recipe = Readonly<{
@@ -114,6 +121,15 @@ function recipeCopy(
       sourceShape.BLADE_FULL_WIDTH_HEIGHT <= 1,
     "Invalid authored meadow dimensions",
   );
+  const widthEnvelope = sourceShape.BLADE_WIDTH_BEZIER_CONTROL_POINTS;
+  requireValue(
+    widthEnvelope === undefined ||
+      (Array.isArray(widthEnvelope) &&
+        widthEnvelope.length === 5 &&
+        widthEnvelope.every((value) => Number.isFinite(value) && value >= 0) &&
+        widthEnvelope[0] > 0),
+    "Invalid authored meadow width envelope",
+  );
   const copied = Array.from(blades, (blade, index) => {
     requireValue(
       !!blade &&
@@ -128,7 +144,20 @@ function recipeCopy(
   return Object.freeze({
     id: R.id,
     blades: Object.freeze(copied),
-    sourceShape: Object.freeze({ ...sourceShape }),
+    sourceShape: Object.freeze({
+      ...sourceShape,
+      ...(widthEnvelope
+        ? {
+            BLADE_WIDTH_BEZIER_CONTROL_POINTS: Object.freeze([
+              widthEnvelope[0],
+              widthEnvelope[1],
+              widthEnvelope[2],
+              widthEnvelope[3],
+              widthEnvelope[4],
+            ] as const),
+          }
+        : {}),
+    }),
   });
 }
 
@@ -137,6 +166,20 @@ function halfWidth(
   t: number,
   shape: GrassMeadowAuthoredSourceShape,
 ) {
+  if (shape.BLADE_WIDTH_BEZIER_CONTROL_POINTS) {
+    const [a, b, c, d, e] = shape.BLADE_WIDTH_BEZIER_CONTROL_POINTS;
+    const s = 1 - t;
+    // Match the source generator's replacement envelope and arithmetic exactly.
+    return (
+      blade.width *
+      0.5 *
+      (a * s ** 4 +
+        4 * b * s ** 3 * t +
+        6 * c * s * s * t * t +
+        4 * d * s * t ** 3 +
+        e * t ** 4)
+    );
+  }
   const tapered =
     shape.BLADE_TAPER_POWER === 1 ? t : Math.pow(t, shape.BLADE_TAPER_POWER);
   let width = blade.width * 0.5 * (1 - tapered * shape.BLADE_TAPER);

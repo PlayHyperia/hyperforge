@@ -96,12 +96,17 @@ import {
   createGroundedGrassMaterial,
   createMatrixFreeGrassGeometry,
   createMatrixFreeGrassMesh,
+  GrassClumpInvariantCache,
+  readGrassClumpInvariant,
+  type GrassClumpFieldFactory,
+  type GrassClumpInvariantPreparation,
   type GrassChunkRenderMesh,
   groundedGrassWorldBox,
   GRASS_BLADE_VISIBILITY_ATTRIBUTE,
 } from "./GrassGroundingGpu";
 import {
   getGrassBladeLayout,
+  isMeadowGrassBladeLayout,
   isFoldedGrassBladeLayout,
   usesGrassBladeHeightFlex,
   usesGrassCloseDetailLods,
@@ -387,7 +392,7 @@ export const FINE_GRASS_MEADOW_FIELD_COMPOSITION = Object.freeze({
   clumpSpacing: 0.5,
   // Give each plant a lower, outward-reaching leaf without widening the
   // middle/tall silhouette or adding plants. Refit the full swept footprint.
-  heightFactors: Object.freeze([0.52, 0.84, 1] as const),
+  heightFactors: Object.freeze([0.46, 0.72, 0.86] as const),
   widthFactors: Object.freeze([0.95, 1.05, 0.8] as const),
   arcFactors: Object.freeze([0.52, 1, 0.8] as const),
 } as const);
@@ -398,6 +403,11 @@ export const FINE_GRASS_MEADOW_FIELD_SHAPE = Object.freeze({
   ROOT_COMPOSITION: "meadow-field-v1",
   BLADE_WIDTH_RATIO: 0.028,
   BLADE_ARC_RATIO: 0.4,
+  // Complete field-only edge envelope: move area below the upper silhouette.
+  // Controls replace, rather than multiply, the historical sheath and gain.
+  BLADE_WIDTH_BEZIER_CONTROL_POINTS: Object.freeze([
+    0.25, 2.3, 1.3, 0, 0,
+  ] as const),
   // A narrow basal sheath avoids broad rectangular feet. The full upper
   // ribbon width is unchanged; this is not a reduction in plant population.
   BLADE_BASE_WIDTH_FACTOR: 0.25,
@@ -490,6 +500,7 @@ export const FINE_GRASS_MEADOW_FIELD_LIGHTING = Object.freeze({
   ...FINE_GRASS_LEAF_VOLUME_LIGHTING,
   // Reduce authored blade/ground contrast without lifting actual shadow or AO.
   rootBrightness: 0.78,
+  upperWeight: 0.45,
   foldTangent: Math.tan((18 * Math.PI) / 180),
   normalSource: "geometry-ribbon-relief",
   geometryLayout: FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT,
@@ -505,21 +516,20 @@ function publishFineGrassCanopyLighting(
     enumerable: true,
     configurable: false,
     writable: false,
-    value:
-      geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
-        ? FINE_GRASS_MEADOW_FIELD_LIGHTING
-        : folded
-          ? geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
-            ? FINE_GRASS_SHEATH_BLADE_LIGHTING
-            : FINE_GRASS_FOLDED_BLADE_LIGHTING
-          : candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
-            ? FINE_GRASS_LEAF_VOLUME_LIGHTING
-            : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
+    value: isMeadowGrassBladeLayout(geometryLayout)
+      ? FINE_GRASS_MEADOW_FIELD_LIGHTING
+      : folded
+        ? geometryLayout === FINE_GRASS_CLOSE_DETAIL.geometryLayout
+          ? FINE_GRASS_SHEATH_BLADE_LIGHTING
+          : FINE_GRASS_FOLDED_BLADE_LIGHTING
+        : candidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
+          ? FINE_GRASS_LEAF_VOLUME_LIGHTING
+          : FINE_GRASS_CANOPY_NORMAL_LIGHTING,
   });
 }
 
 function fineGrassThinLeafLighting(geometryLayout?: FineGrassGeometryLayout) {
-  return geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+  return isMeadowGrassBladeLayout(geometryLayout)
     ? FINE_GRASS_MEADOW_FIELD_THIN_LEAF_LIGHTING
     : FINE_GRASS_THIN_LEAF_LIGHTING;
 }
@@ -1725,6 +1735,14 @@ export class GrassVisualManager implements QuadTreeListener {
   private playerPosUniform: ReturnType<typeof uniform<THREE.Vector3>>;
   private waterThreshold: number;
   private chunks = new Map<string, GrassChunk>();
+  private readonly clumpInvariantCaches = new Map<
+    GrassChunkRenderMesh,
+    GrassClumpInvariantCache
+  >();
+  private clumpFieldFactory: GrassClumpFieldFactory | null = null;
+  private clumpInvariantPreparation: GrassClumpInvariantPreparation | null =
+    null;
+  private clumpInvariantPreparationPending = false;
   private material: MeshStandardNodeMaterial;
   private foldedMaterial: MeshStandardNodeMaterial | null = null;
   private foldedBladeNormalNode: MeshStandardNodeMaterial["normalNode"] = null;
@@ -2415,10 +2433,31 @@ export class GrassVisualManager implements QuadTreeListener {
     };
   }
 
+  /** Register renderer ownership independently of optional streaming warmup.
+   * Registration never submits work; ordinary updates retain the single-flight
+   * queue and each cache retains its own publication/retirement lifetime. */
+  setClumpInvariantPreparation(prepare: GrassClumpInvariantPreparation): void {
+    if (this.destroyed)
+      throw new Error(
+        "Grass destroyed before invariant preparation registration",
+      );
+    if (!this.instancingCandidate) return;
+    if (
+      typeof prepare !== "function" ||
+      (this.clumpInvariantPreparation &&
+        this.clumpInvariantPreparation !== prepare)
+    )
+      throw new Error("Grass invariant preparation owner cannot be replaced");
+    this.clumpInvariantPreparation = prepare;
+  }
+
   /** Compile the production instanced-grass vertex layout before it is visible. */
   async precompileRepresentativeChunk(
     precompileObject: (object: THREE.Object3D) => Promise<void>,
+    prepareClumpInvariants?: GrassClumpInvariantPreparation,
   ): Promise<void> {
+    if (prepareClumpInvariants)
+      this.setClumpInvariantPreparation(prepareClumpInvariants);
     const tiers = usesGrassCloseDetailLods(this.geometryLayout)
       ? [0, 1, 2]
       : [this.minimumLodLevel];
@@ -2497,13 +2536,72 @@ export class GrassVisualManager implements QuadTreeListener {
       mesh.instanceMatrix.needsUpdate = true;
     }
 
-    try {
-      await precompileObject(mesh);
-    } finally {
+    const cache =
+      this.instancingCandidate && this.clumpFieldFactory
+        ? new GrassClumpInvariantCache(mesh, this.clumpFieldFactory)
+        : null;
+    const release = () => {
       geo.dispose();
       if (material !== baseMaterial) material.dispose();
       mesh.dispose();
+    };
+    try {
+      if (cache && this.clumpInvariantPreparation) {
+        await cache.request(this.clumpInvariantPreparation);
+        if (!cache.snapshot().ready)
+          throw new Error("Grass invariant representative preparation failed");
+      } else {
+        await precompileObject(mesh);
+      }
+    } finally {
+      if (cache) cache.retire(release);
+      else release();
     }
+  }
+
+  /** At most one cache request is handed to the existing graphics queue at a
+   * time. Publication remains the original graph until its own owner is ready.
+   * Parent changes are observed on the ordinary update, never by dispatching
+   * compute from a primary/reflection/shadow callback. */
+  private prepareNextClumpInvariants(): void {
+    if (
+      !this.clumpInvariantPreparation ||
+      this.clumpInvariantPreparationPending
+    )
+      return;
+    for (const cache of this.clumpInvariantCaches.values()) {
+      cache.mesh.updateWorldMatrix(true, false);
+      if (!cache.needsPreparation()) continue;
+      this.clumpInvariantPreparationPending = true;
+      void cache.request(this.clumpInvariantPreparation).finally(() => {
+        this.clumpInvariantPreparationPending = false;
+      });
+      break;
+    }
+  }
+
+  getClumpInvariantCacheStatus() {
+    const owners = [...this.clumpInvariantCaches.values()].map((cache) =>
+      cache.snapshot(),
+    );
+    return {
+      selected: !!this.instancingCandidate,
+      owners: owners.length,
+      ready: owners.filter((owner) => owner.ready).length,
+      failed: owners.filter((owner) => owner.failed).length,
+      pending: this.clumpInvariantPreparationPending,
+      inputBytes: owners.reduce((sum, owner) => sum + owner.inputBytes, 0),
+      outputBytes: owners.reduce((sum, owner) => sum + owner.outputBytes, 0),
+      preparations: owners.reduce((sum, owner) => sum + owner.preparations, 0),
+      preparationMs: owners.reduce(
+        (sum, owner) => sum + owner.preparationMs,
+        0,
+      ),
+      errors: owners
+        .flatMap((owner) => (owner.lastError ? [owner.lastError] : []))
+        .slice(0, 4),
+      completion: "ordered-submission-not-gpu-fence",
+    };
   }
 
   /** Snapshot only at the primary ClientGraphics render boundary. Never perform
@@ -2565,6 +2663,7 @@ export class GrassVisualManager implements QuadTreeListener {
       ? this.primaryViewZ
       : (camera?.matrixWorld.elements[14] ?? playerZ);
     if (this.fineMeadow) this.container.updateWorldMatrix(true, false);
+    this.prepareNextClumpInvariants();
     this.playerPosUniform.value.set(playerX, 0, playerZ);
     this.reconcileGrassHorizon();
     this.cancelObsoleteLodWork();
@@ -2717,13 +2816,19 @@ export class GrassVisualManager implements QuadTreeListener {
     const chunk = this.chunks.get(key);
     if (chunk) {
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
-      if (
-        chunk.mesh.material !== this.material &&
-        chunk.mesh.material !== this.foldedMaterial
-      )
-        chunk.mesh.material.dispose();
-      chunk.mesh.dispose();
+      const release = () => {
+        chunk.mesh.geometry.dispose();
+        if (
+          chunk.mesh.material !== this.material &&
+          chunk.mesh.material !== this.foldedMaterial
+        )
+          chunk.mesh.material.dispose();
+        chunk.mesh.dispose();
+      };
+      const cache = this.clumpInvariantCaches.get(chunk.mesh);
+      this.clumpInvariantCaches.delete(chunk.mesh);
+      if (cache) cache.retire(release);
+      else release();
       this.chunks.delete(key);
     }
   }
@@ -2825,6 +2930,7 @@ export class GrassVisualManager implements QuadTreeListener {
               this.getWaterSurfaceAt,
               this.isInFlatZone,
               isCurrent,
+              "soft-cost-finite-lifetime-v1",
             )
           : new GrassGroundingContinuation(steps(), isCurrent),
     };
@@ -3551,6 +3657,12 @@ export class GrassVisualManager implements QuadTreeListener {
           renderedBounds.copy(localBounds).applyMatrix4(mesh.matrixWorld),
         );
 
+      if (this.instancingCandidate && this.clumpFieldFactory)
+        this.clumpInvariantCaches.set(
+          mesh,
+          new GrassClumpInvariantCache(mesh, this.clumpFieldFactory),
+        );
+
       this.container.add(mesh);
       this.chunks.set(key, {
         nodeId: node.id,
@@ -3562,9 +3674,15 @@ export class GrassVisualManager implements QuadTreeListener {
       });
     } catch (error) {
       mesh?.removeFromParent();
-      geo.dispose();
-      if (material !== baseMaterial) material.dispose();
-      mesh?.dispose();
+      const release = () => {
+        geo.dispose();
+        if (material !== baseMaterial) material.dispose();
+        mesh?.dispose();
+      };
+      const cache = mesh ? this.clumpInvariantCaches.get(mesh) : null;
+      if (mesh) this.clumpInvariantCaches.delete(mesh);
+      if (cache) cache.retire(release);
+      else release();
       throw error;
     }
   }
@@ -4121,7 +4239,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
   private materialForLod(lod: number): MeshStandardNodeMaterial {
     return (isFoldedGrassBladeLayout(lod, this.geometryLayout) ||
-      this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT) &&
+      isMeadowGrassBladeLayout(this.geometryLayout)) &&
       this.foldedMaterial
       ? this.foldedMaterial
       : this.material;
@@ -4471,11 +4589,46 @@ export class GrassVisualManager implements QuadTreeListener {
       const worldBase = modelWorldMatrix
         .mul(vec4(offset.x, float(0), offset.z, float(1)))
         .toVar("naturalGrassWorldBase");
-      const vergeLocality = bankVerge
-        ? createCompactBankVergeLocality(worldBase.xyz, this.compactMacroField)
-        : float(0);
-      const bankHeightScale =
-        bankVerge || this.compactMacroField?.pondServiceGround
+      // The exact same TSL factories serve the live fallback and the one-time
+      // per-clump compute. Only the existing attribute-only candidate owns the
+      // cache; time, wind, distance fade and lighting remain per-render work.
+      const clumpFields: GrassClumpFieldFactory = (world) => {
+        const locality = bankVerge
+          ? createCompactBankVergeLocality(world, this.compactMacroField)
+          : float(0);
+        const height =
+          bankVerge || this.compactMacroField?.pondServiceGround
+            ? createCompactBankVergeHeightScale(
+                world,
+                this.compactMacroField,
+                locality,
+                this.grassVergeEvaluation,
+              )
+            : float(1);
+        const soil = this.habitatComposition
+          ? createCompactHabitatSoilNode(
+              world.x,
+              world.z,
+              this.habitatComposition,
+            )
+          : float(0);
+        return vec4(height, locality, soil, 0);
+      };
+      if (this.instancingCandidate) this.clumpFieldFactory = clumpFields;
+      const cachedFields = this.instancingCandidate
+        ? readGrassClumpInvariant(1, () => clumpFields(worldBase.xyz))
+        : null;
+      const vergeLocality = cachedFields
+        ? cachedFields.y
+        : bankVerge
+          ? createCompactBankVergeLocality(
+              worldBase.xyz,
+              this.compactMacroField,
+            )
+          : float(0);
+      const bankHeightScale = cachedFields
+        ? cachedFields.x
+        : bankVerge || this.compactMacroField?.pondServiceGround
           ? createCompactBankVergeHeightScale(
               worldBase.xyz,
               this.compactMacroField,
@@ -4486,10 +4639,14 @@ export class GrassVisualManager implements QuadTreeListener {
       if (bankVerge)
         bankLocality = vergeLocality.toVarying("v_naturalGrassBankLocality");
       if (this.habitatComposition)
-        habitatSoil = createCompactHabitatSoilNode(
-          worldBase.x,
-          worldBase.z,
-          this.habitatComposition,
+        habitatSoil = (
+          cachedFields
+            ? cachedFields.z
+            : createCompactHabitatSoilNode(
+                worldBase.x,
+                worldBase.z,
+                this.habitatComposition,
+              )
         ).toVarying("v_naturalGrassHabitatSoil");
       const toPlayer = sub(
         vec3(worldBase.x, float(0), worldBase.z),
@@ -4505,13 +4662,28 @@ export class GrassVisualManager implements QuadTreeListener {
       ).toVar("naturalGrassFade");
       const wt = time.mul(uWindSpeed);
       const heightFlex = usesGrassBladeHeightFlex(this.geometryLayout);
-      const cosR = cos(rsh.x);
-      const sinR = sin(rsh.x);
       const nx = terrainNormal.x;
       const ny = terrainNormal.y;
       const nz = terrainNormal.z;
-      const invOnePlusNy = float(1).div(ny.add(1));
-      const cross = nx.mul(nz).mul(invOnePlusNy).negate();
+      const cachedBasis = this.instancingCandidate
+        ? readGrassClumpInvariant(0, () => {
+            const inverse = float(1).div(ny.add(1));
+            return vec4(
+              cos(rsh.x),
+              sin(rsh.x),
+              inverse,
+              nx.mul(nz).mul(inverse).negate(),
+            );
+          })
+        : null;
+      const cosR = cachedBasis ? cachedBasis.x : cos(rsh.x);
+      const sinR = cachedBasis ? cachedBasis.y : sin(rsh.x);
+      const invOnePlusNy = cachedBasis
+        ? cachedBasis.z
+        : float(1).div(ny.add(1));
+      const cross = cachedBasis
+        ? cachedBasis.w
+        : nx.mul(nz).mul(invOnePlusNy).negate();
       const turnToGround = (v: ReturnType<typeof vec3>) => {
         const x = v.x.mul(cosR).sub(v.z.mul(sinR));
         const z = v.x.mul(sinR).add(v.z.mul(cosR));
@@ -4687,8 +4859,7 @@ export class GrassVisualManager implements QuadTreeListener {
           );
         const leafVolume =
           this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
-        const meadowField =
-          this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT;
+        const meadowField = isMeadowGrassBladeLayout(this.geometryLayout);
         const lightingRecipe = leafVolume
           ? meadowField
             ? FINE_GRASS_MEADOW_FIELD_LIGHTING
@@ -4789,7 +4960,7 @@ export class GrassVisualManager implements QuadTreeListener {
         this.foldedBladeNormalNode = surface.foldedNormal;
 
       if (
-        this.geometryLayout === FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT &&
+        isMeadowGrassBladeLayout(this.geometryLayout) &&
         this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id
       ) {
         this.meadowDetailMaterialFactory = (
@@ -4939,8 +5110,7 @@ export class GrassVisualManager implements QuadTreeListener {
           const leafVolume =
             this.lightingCandidate === FINE_GRASS_LEAF_VOLUME_LIGHTING.id;
           const rootBrightness = leafVolume
-            ? this.geometryLayout ===
-              FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+            ? isMeadowGrassBladeLayout(this.geometryLayout)
               ? FINE_GRASS_MEADOW_FIELD_LIGHTING.rootBrightness
               : FINE_GRASS_LEAF_VOLUME_LIGHTING.rootBrightness
             : appearance.ROOT_BRIGHTNESS;

@@ -46,7 +46,7 @@ import THREE, {
   cameraFar,
 } from "../../../extras/three/three";
 import type { Node, NodeBuilder, NodeFrame, UniformNode } from "three/webgpu";
-import { NodeUpdateType, select, positionView, exp2 } from "three/tsl";
+import { NodeUpdateType, select, positionView, exp2, fwidth } from "three/tsl";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
@@ -110,6 +110,7 @@ const WATER = {
   // are art controls, not spectral absorption or a full scattering solution.
   QUIET_HALF_TRANSMITTANCE_METRES: 3,
   QUIET_DEEP_TINT: [0.02, 0.085, 0.095] as const,
+  QUIET_REFRACTIVE_INDEX: 1.333,
 
   // Foam
   FOAM_SHORE_DISTANCE: 2.5,
@@ -1462,12 +1463,24 @@ export class WaterSystem {
       );
     })();
 
-    // OUTPUT: Same pattern as tree shader — pbrOut = output, replace RGB, keep pbrOut.a
+    // OUTPUT: Ordinary lakes retain PBR alpha; the quiet pond composes surface
+    // radiance and transmitted background with its own straight-alpha coverage.
     material.outputNode = Fn(() => {
       const pbrOut = output;
       const wp = positionWorld;
       const shoreDist = gpuShoreDist;
       const wUV = vec2(wp.x, wp.z);
+      // Append this derivative to the unconditional fragment stack, before any
+      // pond selection. Reuse the existing depth sample; nonpositive gaps have
+      // no coverage, with a one-pixel feather at opaque shore/foreground edges.
+      const pondDepthPixelWidth = fwidth(axisDepthGap).toVar(
+        "compactPondDepthPixelWidth",
+      );
+      const pondCoverage = smoothstep(
+        float(0),
+        max(pondDepthPixelWidth, float(0.001)),
+        axisDepthGap,
+      ).toVar("compactPondCoverage");
 
       // --- Cosine gradient water colour ---
       const colorDepth = pow(
@@ -1525,8 +1538,8 @@ export class WaterSystem {
       );
       // A constant source tint lets the real bottom, through transmittance,
       // supply shallow colour. Only the compact pond bypasses the historical
-      // camera-distance/cosine tint; all lighting and reflection terms below
-      // remain unchanged. Framebuffer alpha is neutral, not RGB absorption.
+      // camera-distance/cosine tint. Framebuffer transmission is neutral,
+      // not wavelength-dependent absorption or screen-space refraction.
       const pondBodyColor = vec3(...WATER.QUIET_DEEP_TINT).toVar(
         "compactPondBodyColor",
       );
@@ -1739,22 +1752,42 @@ export class WaterSystem {
       const pondReflectionSample = reflectionSample.toVar(
         "compactPondReflectionSample",
       );
-      const pondAlbedo = add(
-        mix(
-          diffusePart,
-          mul(
-            add(vec3(0.1, 0.1, 0.1), mul(pondReflectionSample, float(0.9))),
-            reflectionIntensity,
-          ),
-          reflectance,
-        ),
-        mul(pondDirect, reflectance),
-      ).toVar("compactPondLegacyAlbedo");
-      color = select(
-        quietPond.greaterThan(0),
-        mix(pondAlbedo, waterColor, float(0.8)),
-        color,
-      ).toVar("lakeSelectedLegacyLighting");
+      // Air/water dielectric Fresnel, independent of optical thickness and of
+      // whether this draw owns a valid planar capture. Retain ordinary water's
+      // historical art Fresnel above; this split belongs only to the quiet pond.
+      const pondF0 =
+        ((WATER.QUIET_REFRACTIVE_INDEX - 1) /
+          (WATER.QUIET_REFRACTIVE_INDEX + 1)) **
+        2;
+      const pondFresnel = float(pondF0)
+        .add(float(1 - pondF0).mul(float(1).sub(pondNdotV.clamp(0, 1)).pow(5)))
+        .toVar("compactPondFresnel");
+      const pondOpacity = float(1)
+        .sub(float(1).sub(pondFresnel).mul(pondTransmittance))
+        .toVar("compactPondCompositeOpacity");
+      const pondReflectionWeight = reflectionIntensity
+        .clamp(0, 1)
+        .toVar("compactPondCaptureWeight");
+      const composePond = (
+        body: Node<"vec3">,
+        ambient: Node<"vec3">,
+        direct: Node<"vec3">,
+      ): Node<"vec3"> => {
+        // Missing/disabled captures use the existing ambient approximation, not
+        // stale planar radiance or black. This is not a new environment map.
+        const reflected = mix(
+          ambient,
+          pondReflectionSample,
+          pondReflectionWeight,
+        );
+        const premultiplied = body
+          .mul(float(1).sub(pondFresnel))
+          .mul(float(1).sub(pondTransmittance))
+          .add(reflected.add(direct).mul(pondFresnel));
+        // NormalBlending is straight alpha. Dividing here makes the framebuffer
+        // receive P + (1-A)*destination, rather than attenuating reflection by T.
+        return premultiplied.div(pondOpacity.max(0.000001));
+      };
 
       // Foam
       color = mix(
@@ -1770,6 +1803,24 @@ export class WaterSystem {
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));
       const nightDim = mix(float(NIGHT.BRIGHTNESS), float(1.0), dayFactor);
       color = mul(color, nightDim);
+      const pondLegacyBody = applySunShade(
+        mix(diffusePart, waterColor, float(0.8)),
+        uDayIntensity,
+        uShadeColor.rgb,
+      ).mul(nightDim);
+      const pondLegacyAmbient = applySunShade(
+        vec3(0.1, 0.1, 0.1),
+        uDayIntensity,
+        uShadeColor.rgb,
+      ).mul(nightDim);
+      const pondLegacySource = composePond(
+        pondLegacyBody,
+        pondLegacyAmbient,
+        applySunShade(pondDirect, uDayIntensity, uShadeColor.rgb).mul(nightDim),
+      ).toVar("compactPondLegacySource");
+      color = select(quietPond.greaterThan(0), pondLegacySource, color).toVar(
+        "lakeSelectedLegacyLighting",
+      );
 
       // Opt-in custom radiometry: light the dominant depth/scatter contribution,
       // not merely the old small white Phong term. Reuse existing normal samples.
@@ -1825,28 +1876,18 @@ export class WaterSystem {
         .mul(pondDay)
         .mul(pondFront)
         .toVar("compactPondWorldDirectLight");
-      const pondWorldAlbedo = add(
+      const pondWorldSource = composePond(
         mix(
           add(
             mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
             worldScatter,
           ),
-          mul(
-            add(
-              mul(illumination.fillRadiance(), float(0.1)),
-              mul(pondReflectionSample, float(0.9)),
-            ),
-            reflectionIntensity,
-          ),
-          reflectance,
+          worldDiffuse,
+          float(0.8),
         ),
-        mul(pondWorldDirect, reflectance),
-      ).toVar("compactPondWorldAlbedo");
-      worldColor = select(
-        quietPond.greaterThan(0),
-        mix(pondWorldAlbedo, worldDiffuse, float(0.8)),
-        worldColor,
-      ).toVar("lakeSelectedWorldLighting");
+        illumination.fillRadiance(),
+        pondWorldDirect,
+      ).toVar("compactPondWorldSource");
       worldColor = mix(
         worldColor,
         illumination.diffuse(
@@ -1855,6 +1896,11 @@ export class WaterSystem {
         ),
         foamOpacity,
       );
+      worldColor = select(
+        quietPond.greaterThan(0),
+        pondWorldSource,
+        worldColor,
+      ).toVar("lakeSelectedWorldLighting");
       color = illumination.select(color, worldColor);
 
       // --- Fog ---
@@ -1866,7 +1912,14 @@ export class WaterSystem {
         fogDistSq,
       );
       const foggedColor = mix(color, fogTexNode.rgb, fogFactor);
-      const foggedAlpha = mix(pbrOut.a, float(1.0), fogFactor);
+      // The opaque destination is already fogged. Fogging straight source RGB
+      // with the same factor composes correctly; increasing its alpha to one
+      // would apply fog twice to the transmitted background.
+      const foggedAlpha = select(
+        quietPond.greaterThan(0),
+        pondCoverage.mul(pondOpacity),
+        mix(pbrOut.a, float(1.0), fogFactor),
+      );
 
       return vec4(foggedColor, foggedAlpha);
     })();

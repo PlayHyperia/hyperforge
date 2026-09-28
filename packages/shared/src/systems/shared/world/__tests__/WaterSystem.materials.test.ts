@@ -178,6 +178,7 @@ function numeric(
     else if (op === "*") result = pair((a, b) => a * b);
     else if (op === "/") result = pair((a, b) => a / b);
     else if (op === ">") result = pair((a, b) => Number(a > b));
+    else if (op === "<=") result = pair((a, b) => Number(a <= b));
     else if (method === "max") result = pair(Math.max);
     else if (method === "pow") result = pair(Math.pow);
     else if (method === "exp2") result = child("aNode").map((v) => 2 ** v);
@@ -562,61 +563,126 @@ describe("WaterSystem material graph", () => {
     }
   });
 
-  it("retains full reflection contribution without counting the pond highlight twice", () => {
+  it("composes pond surface and transmitted background with actual straight-alpha output", () => {
     const h = pondLightingHarness();
     try {
       h.water.getQuietPondUniform()!.value = 1;
-      for (const lane of ["Legacy", "World"]) {
-        const albedo = h.graph.named(`compactPond${lane}Albedo`);
-        const reflectionMix = unwrap(nodeChild(unwrap(albedo), "aNode"));
-        const selected = unwrap(h.graph.named(`lakeSelected${lane}Lighting`));
-        const pondColor = unwrap(nodeChild(selected, "ifNode"));
-        h.inputs.set(nodeChild(reflectionMix, "aNode"), [0, 0, 0]);
-        h.inputs.set(nodeChild(pondColor, "bNode"), [0, 0, 0]);
-        h.uniforms.illumination.fillColor.value.setRGB(
-          Math.PI,
-          Math.PI,
-          Math.PI,
+      expect(h.material.blending).toBe(THREE.NormalBlending);
+      expect(h.material.premultipliedAlpha).toBe(false);
+      const final = [...h.graph.nodes].find((node) => {
+        const children: unknown = Reflect.get(node, "nodes");
+        return (
+          node.type === "JoinNode" &&
+          Array.isArray(children) &&
+          children.length === 2 &&
+          unwrap(children[1]).type === "ConditionalNode"
         );
-        for (const cosine of [1, 0.5]) {
-          const x = Math.sqrt(1 - cosine * cosine);
-          h.uniforms.sunDirection.value.set(x, cosine, 0);
-          h.uniforms.illumination.keyDirection.value.copy(
-            h.uniforms.sunDirection.value,
-          );
-          h.inputs.set(h.view, [-x, cosine, 0]);
-          const fresnel = 0.3 + 0.7 * (1 - cosine) ** 5;
-          for (const intensity of [0, 0.4])
-            for (const captured of [0, 1])
-              for (const sample of [0, 1]) {
-                h.uniforms.reflectionIntensity.value = intensity;
+      });
+      expect(final).toBeDefined();
+      const rgb = (Reflect.get(final!, "nodes") as Node[])[0];
+      h.inputs.set(nodeChild(unwrap(rgb), "cNode"), [0]);
+      h.inputs.set(nodeChild(unwrap(rgb), "bNode"), [0.2, 0.3, 0.4]);
+      h.inputs.set(h.graph.named("lakeAxisDepthGap"), [1]);
+      h.inputs.set(h.graph.named("compactPondDepthPixelWidth"), [0.01]);
+      h.uniforms.illumination.fillColor.value.setRGB(Math.PI, Math.PI, Math.PI);
+      const background = [0.35, 0.22, 0.13],
+        sample = [0.9, 0.7, 0.4];
+      h.inputs.set(h.graph.named("compactPondReflectionSample"), sample);
+      const f0 = ((1.333 - 1) / (1.333 + 1)) ** 2;
+      for (const worldLane of [false, true]) {
+        h.uniforms.illumination.blend.value = worldLane ? 1 : 0;
+        for (const cosine of [1, 0.5, 1e-6, 0]) {
+          h.inputs.set(h.view, [Math.sqrt(1 - cosine ** 2), cosine, 0]);
+          const fresnel = f0 + (1 - f0) * (1 - cosine) ** 5;
+          for (const transmission of [0, 2 ** -10, 0.5, 1]) {
+            h.inputs.set(h.graph.named("compactPondTransmittance"), [
+              transmission,
+            ]);
+            for (const enabled of [false, true]) {
+              h.water.setReflectionsEnabled(enabled);
+              for (const captured of [0, 1]) {
                 h.water["lakeReflectionPlaneUniform"]!.value = captured;
-                h.inputs.set(h.graph.named("compactPondReflectionSample"), [
-                  sample,
-                  sample,
-                  sample,
-                ]);
-                const expected =
-                  0.2 *
-                  fresnel *
-                  ((0.1 + 0.9 * sample) * intensity * captured + 5 * cosine);
-                for (const channel of numeric(
-                  h.graph.named(`lakeSelected${lane}Lighting`),
-                  h.inputs,
-                ))
-                  expect(channel).toBeCloseTo(expected, 12);
+                const captureWeight = enabled ? 0.4 * captured : 0;
+                const opacity = 1 - (1 - fresnel) * transmission;
+                const rgba = numeric(final!, h.inputs, h.graph.expanded);
+                expect(rgba[3]).toBeCloseTo(opacity, 12);
+                for (let channel = 0; channel < 3; channel++) {
+                  const tint = [0.02, 0.085, 0.095][channel];
+                  const litTint = tint * (1 + 1 / Math.PI);
+                  const body = worldLane
+                    ? litTint * (0.8 + 0.2 * (0.15 + cosine))
+                    : 0.03 + tint * (0.8 + 0.2 * cosine);
+                  const ambient = worldLane ? 1 : 0.1;
+                  const reflection =
+                    ambient * (1 - captureWeight) +
+                    sample[channel] * captureWeight;
+                  const direct = cosine > 0 ? 5 * cosine ** 100 : 0;
+                  const expected =
+                    (1 - fresnel) * (1 - transmission) * body +
+                    fresnel * (reflection + direct) +
+                    (1 - opacity) * background[channel];
+                  // Installed r186 NormalBlending: source RGB * source alpha +
+                  // destination RGB * (1-source alpha), not source RGB alone.
+                  const blended =
+                    rgba[channel] * rgba[3] +
+                    background[channel] * (1 - rgba[3]);
+                  expect(blended).toBeCloseTo(expected, 11);
+                }
+                expect(rgba.every(Number.isFinite)).toBe(true);
+                // A perfectly clear body still reflects; disabled/missing
+                // planar captures use ambient rather than black at grazing.
+                if (transmission === 1) expect(rgba[3]).toBeGreaterThan(0);
+                if (cosine === 0 && !enabled)
+                  expect(rgba[0]).toBeGreaterThan(0);
               }
+            }
+          }
         }
-        h.uniforms.sunDirection.value.set(0, 1, 0);
-        h.uniforms.illumination.keyDirection.value.set(0, 1, 0);
-        h.inputs.set(h.view, [0, 1, 0]);
       }
     } finally {
       h.water.destroy();
     }
   });
 
-  it("owns pond lighting per draw without leaking into ordinary water or displacement and retains fog alpha", () => {
+  it("zeros uncovered pond pixels and feathers depth contact in an unconditional fragment stack", () => {
+    const h = pondLightingHarness();
+    try {
+      const coverage = h.graph.named("compactPondCoverage");
+      const derivative = h.graph.named("compactPondDepthPixelWidth");
+      const root = [...h.graph.nodes].find(
+        (node) =>
+          node.type === "StackNode" &&
+          (Reflect.get(node, "nodes") as Node[]).includes(derivative),
+      );
+      expect(root).toBeDefined();
+      const stack = Reflect.get(root!, "nodes") as Node[];
+      // VarNode.toStack() appends these before output's conditional selections;
+      // constructing the JS node outside Fn would not establish uniform flow.
+      expect(stack).toContain(coverage);
+      expect(stack.indexOf(derivative)).toBeLessThan(stack.indexOf(coverage));
+      const final = unwrap(nodeChild(root!, "outputNode"));
+      expect(final.type).toBe("JoinNode");
+      expect(inspectGraph(final).nodes.has(coverage)).toBe(true);
+      expect(Reflect.get(unwrap(derivative), "method")).toBe("fwidth");
+      for (const pixelWidth of [0, 1e-6, 0.01, 0.5]) {
+        h.inputs.set(derivative, [pixelWidth]);
+        for (const gap of [-2, -1e-8, 0, 0.0005, 0.005, 0.25, 1]) {
+          h.inputs.set(h.graph.named("lakeAxisDepthGap"), [gap]);
+          const t = Math.max(0, Math.min(1, gap / Math.max(pixelWidth, 0.001)));
+          const expected = t * t * (3 - 2 * t);
+          expect(numeric(coverage, h.inputs, h.graph.expanded)[0]).toBeCloseTo(
+            expected,
+            12,
+          );
+          if (gap <= 0) expect(expected).toBe(0);
+        }
+      }
+    } finally {
+      h.water.destroy();
+    }
+  });
+
+  it("owns pond lighting per draw without leaking into ordinary water or displacement and composes fog once", () => {
     const h = pondLightingHarness();
     try {
       const quiet = h.water.getQuietPondUniform()!;
@@ -632,7 +698,7 @@ describe("WaterSystem material graph", () => {
         expect(
           ordinary.has(h.graph.named(`compactPond${lane}DirectLight`)),
         ).toBe(false);
-        expect(ordinary.has(h.graph.named(`compactPond${lane}Albedo`))).toBe(
+        expect(ordinary.has(h.graph.named(`compactPond${lane}Source`))).toBe(
           false,
         );
         const sentinel = [0.11, 0.22, 0.33];
@@ -662,35 +728,64 @@ describe("WaterSystem material graph", () => {
         h.material.side,
         h.material.fog,
       ]).toEqual([true, true, THREE.DoubleSide, false]);
-      // The final vec4 still fogs RGB and alpha with one shared factor. The
-      // pond contribution is upstream of that mix, never added after full fog.
+      // Ordinary water retains its original fog-to-opaque expression. Compact
+      // pond fogs straight RGB only, over an already equally fogged destination.
       const final = [...h.graph.nodes].find((n) => {
         const children: unknown = Reflect.get(n, "nodes");
         return (
           n.type === "JoinNode" &&
           Array.isArray(children) &&
           children.length === 2 &&
-          children.every(
-            (c: Node) => Reflect.get(unwrap(c), "method") === "mix",
-          )
+          Reflect.get(unwrap(children[0]), "method") === "mix" &&
+          unwrap(children[1]).type === "ConditionalNode"
         );
       });
       expect(final).toBeDefined();
       const [rgb, alpha] = Reflect.get(final!, "nodes") as Node[];
       const factor = nodeChild(unwrap(rgb), "cNode");
-      expect(nodeChild(unwrap(alpha), "cNode")).toBe(factor);
+      const ordinaryAlpha = nodeChild(unwrap(alpha), "elseNode");
+      expect(nodeChild(unwrap(ordinaryAlpha), "cNode")).toBe(factor);
       expect(
-        inspectGraph(nodeChild(unwrap(alpha), "aNode")).nodes.has(quiet),
+        inspectGraph(nodeChild(unwrap(ordinaryAlpha), "aNode")).nodes.has(
+          quiet,
+        ),
       ).toBe(false);
       const fogInputs = new Map<Node, number[]>([
         [nodeChild(unwrap(rgb), "aNode"), [10, 20, 30]],
         [nodeChild(unwrap(rgb), "bNode"), [0.2, 0.3, 0.4]],
-        [nodeChild(unwrap(alpha), "aNode"), [0.37]],
+        [nodeChild(unwrap(ordinaryAlpha), "aNode"), [0.37]],
         [factor, [1]],
       ]);
       expect(numeric(final!, fogInputs)).toEqual([0.2, 0.3, 0.4, 1]);
       fogInputs.set(factor, [0]);
       expect(numeric(final!, fogInputs)).toEqual([10, 20, 30, 0.37]);
+      quiet.value = 1;
+      const source = [0.4, 0.7, 0.2],
+        destination = [0.2, 0.3, 0.8],
+        fog = [0.15, 0.2, 0.25];
+      fogInputs.set(nodeChild(unwrap(rgb), "aNode"), source);
+      fogInputs.set(nodeChild(unwrap(rgb), "bNode"), fog);
+      for (const coverage of [0, 0.5, 1]) {
+        fogInputs.set(h.graph.named("compactPondCoverage"), [coverage]);
+        fogInputs.set(h.graph.named("compactPondCompositeOpacity"), [0.37]);
+        for (const fogFactor of [0, 0.2, 0.8, 1]) {
+          fogInputs.set(factor, [fogFactor]);
+          const rgba = numeric(final!, fogInputs);
+          const a = coverage * 0.37;
+          expect(rgba[3]).toBe(a);
+          for (let channel = 0; channel < 3; channel++) {
+            const foggedDestination =
+              destination[channel] * (1 - fogFactor) + fog[channel] * fogFactor;
+            const actual = rgba[channel] * a + foggedDestination * (1 - a);
+            const unfogged =
+              source[channel] * a + destination[channel] * (1 - a);
+            expect(actual).toBeCloseTo(
+              unfogged * (1 - fogFactor) + fog[channel] * fogFactor,
+              12,
+            );
+          }
+        }
+      }
     } finally {
       h.water.destroy();
     }

@@ -4,9 +4,15 @@ import { ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
+import {
+  GRASS_CLUMP_CACHE_ATTRIBUTE,
+  GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+} from "../GrassGroundingGpu";
 
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
+import { ClientGraphics } from "../../../client/ClientGraphics";
+import { isStreamingLikeViewport } from "../../../../runtime/clientViewportMode";
 import { DataManager } from "../../../../data/DataManager";
 import { stationDataProvider } from "../../../../data/StationDataProvider";
 import {
@@ -817,6 +823,7 @@ async function coastalFixture(
   return {
     manager,
     terrain,
+    world,
     roads,
     observed,
     setup,
@@ -1164,6 +1171,67 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
             false,
           );
           if (instancing) {
+            const cache = f.manager["clumpInvariantCaches"].get(mesh)!;
+            expect(cache).toBeDefined();
+            expect(cache.snapshot()).toMatchObject({
+              ready: false,
+              preparations: 0,
+              inputBytes: mesh.count * 32,
+              outputBytes: mesh.count * 32,
+            });
+            // Register without streaming representative warmup. The real
+            // graphics queue is blocked by a CPU operation, never a fake GPU.
+            const graphics = new ClientGraphics(f.world);
+            let releaseQueue!: () => void;
+            const blocker = graphics.prepareRenderer(
+              () =>
+                new Promise<void>((resolve) => {
+                  releaseQueue = resolve;
+                }),
+            );
+            await Promise.resolve();
+            let requests = 0;
+            const prepare = (owner: typeof cache) => {
+              requests++;
+              return graphics.prepareRenderer(() =>
+                owner.runPreparation(async () => {}),
+              );
+            };
+            expect(isStreamingLikeViewport()).toBe(false);
+            f.manager.setClumpInvariantPreparation(prepare);
+            f.manager.setClumpInvariantPreparation(prepare);
+            expect(requests).toBe(0);
+            expect(() =>
+              f.manager.setClumpInvariantPreparation(async () => {}),
+            ).toThrow("cannot be replaced");
+            for (let i = 0; i < 3; i++)
+              f.manager["prepareNextClumpInvariants"]();
+            await Promise.resolve();
+            expect(requests).toBe(1);
+            expect(f.manager.getClumpInvariantCacheStatus()).toMatchObject({
+              pending: true,
+              ready: 0,
+            });
+            expect(cache.snapshot()).toMatchObject({
+              queued: true,
+              running: false,
+            });
+            releaseQueue();
+            await blocker;
+            await graphics["rendererPreparationQueue"]["tail"];
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+            expect(f.manager.getClumpInvariantCacheStatus()).toMatchObject({
+              pending: false,
+              ready: 1,
+              preparations: 1,
+            });
+            expect(graphics.isPrecompileIdle()).toBe(true);
+            expect(geometry.getAttribute(GRASS_CLUMP_CACHE_ATTRIBUTE)).toBe(
+              cache.output,
+            );
+            expect(
+              geometry.getAttribute(GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE),
+            ).toBe(cache.inputs);
             expect(mesh).toBeInstanceOf(THREE.Mesh);
             expect(mesh).not.toBeInstanceOf(THREE.InstancedMesh);
             expect(mesh).not.toHaveProperty("instanceMatrix");
@@ -1185,6 +1253,10 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
             mesh.raycast(ray, hits);
             expect(hits).toEqual([]);
           } else {
+            expect(f.manager.getClumpInvariantCacheStatus().owners).toBe(0);
+            expect(geometry.hasAttribute(GRASS_CLUMP_CACHE_ATTRIBUTE)).toBe(
+              false,
+            );
             expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
             if (!(mesh instanceof THREE.InstancedMesh))
               throw new Error("Ordinary storage-matrix mesh required");
@@ -1208,7 +1280,14 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
             sweptBounds: ready.sweptBounds,
             attributes: Object.fromEntries(
               Object.entries(geometry.attributes)
-                .filter(([name]) => name !== INSTANCE_MATRIX_STORAGE_ATTRIBUTE)
+                .filter(
+                  ([name]) =>
+                    ![
+                      INSTANCE_MATRIX_STORAGE_ATTRIBUTE,
+                      GRASS_CLUMP_CACHE_ATTRIBUTE,
+                      GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+                    ].includes(name),
+                )
                 .map(([name, attribute]) => [
                   name,
                   {
@@ -1278,6 +1357,17 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           const renderOwner: THREE.Mesh = mesh;
           renderOwner.addEventListener("dispose", () => meshDisposals++);
           template.addEventListener("dispose", () => templateDisposals++);
+          const cache = f.manager["clumpInvariantCaches"].get(mesh);
+          let finishPreparation: (() => void) | undefined;
+          // A real cache/geometry owner with a deferred CPU operation tests
+          // retirement ordering; this does not stand in for GPU execution.
+          const preparation = cache?.runPreparation(
+            () =>
+              new Promise<void>((resolve) => {
+                finishPreparation = resolve;
+              }),
+          );
+          if (cache) expect(cache.snapshot().running).toBe(true);
           expect(f.manager["isNodeInGrassHorizon"](work)).toBe(true);
           f.manager.setPlayerPosition(
             work.bounds.maxX + f.manager["maxRenderDistance"] + 1,
@@ -1288,6 +1378,25 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           expect(f.manager["chunks"].has(key)).toBe(false);
           expect(f.manager["completedGrounding"].has(key)).toBe(false);
           expect(mesh.parent).toBeNull();
+          if (cache) {
+            expect([
+              geometryDisposals,
+              materialDisposals,
+              meshDisposals,
+            ]).toEqual([0, 0, 0]);
+            expect(cache.snapshot()).toMatchObject({
+              retired: true,
+              ready: false,
+              disposed: false,
+            });
+            finishPreparation!();
+            await preparation;
+            expect(cache.snapshot()).toMatchObject({
+              retired: true,
+              ready: false,
+              disposed: true,
+            });
+          }
           expect([geometryDisposals, materialDisposals, meshDisposals]).toEqual(
             [1, 1, 1],
           );
@@ -1298,11 +1407,75 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           );
         } finally {
           f.close();
+          expect(() =>
+            f.manager.setClumpInvariantPreparation(async () => {}),
+          ).toThrow("destroyed");
         }
       }
     },
     30_000,
   );
+
+  it("registers ordinary Terrain ownership without warming and rejects a retired owner inside the real graphics queue", async () => {
+    const f = await coastalFixture(
+      true,
+      [350, 350],
+      false,
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      "current",
+      "fine-meadow-green-v1",
+      "current-canopy",
+      undefined,
+      undefined,
+      {
+        lighting: "leaf-volume-v1",
+        geometry: "meadow-field-v1",
+        instancing: "attributes-v1",
+      },
+    );
+    let releaseQueue: (() => void) | undefined;
+    let blocker: Promise<void> | undefined;
+    try {
+      expect(isStreamingLikeViewport()).toBe(false);
+      const graphics = f.world.register("graphics", ClientGraphics);
+      if (!(graphics instanceof ClientGraphics))
+        throw new Error("Expected the registered graphics owner");
+      f.terrain["grassVisualManager"] = f.manager;
+      f.terrain["registerGrassClumpInvariantPreparation"](f.manager);
+      expect(typeof f.manager["clumpInvariantPreparation"]).toBe("function");
+      expect(graphics.isPrecompileIdle()).toBe(true);
+      expect(f.manager.getClumpInvariantCacheStatus().preparations).toBe(0);
+      blocker = graphics.prepareRenderer(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseQueue = resolve;
+          }),
+      );
+      await Promise.resolve();
+      const compilation = f.manager.precompileRepresentativeChunk(async () => {
+        throw new Error(
+          "Selected representative must use registered preparation",
+        );
+      });
+      const rejected = expect(compilation).rejects.toThrow(
+        "invariant representative preparation failed",
+      );
+      await Promise.resolve();
+      expect(graphics["rendererPreparationQueue"].pendingCount).toBe(2);
+      // Retire the Terrain->grass association while the actual queue is blocked.
+      // With no renderer initialized, reaching GPU preparation would be a bug.
+      f.terrain["grassVisualManager"] = null;
+      releaseQueue!();
+      await blocker;
+      await rejected;
+      expect(graphics.isPrecompileIdle()).toBe(true);
+      expect(graphics.renderer).toBeUndefined();
+    } finally {
+      releaseQueue?.();
+      await blocker;
+      f.close();
+    }
+  });
 
   it("keeps omitted and own-undefined road clearance byte-identical and rejects invalid options before allocation", () => {
     const omitted = fixture(undefined, { ...FINE_MEADOW_GRASS_VISUAL_PROFILE });
