@@ -17,11 +17,16 @@ import {
   uniform,
   If,
 } from "three/tsl";
-import { MeshStandardNodeMaterial, StorageBufferAttribute } from "three/webgpu";
+import {
+  IndirectStorageBufferAttribute,
+  MeshStandardNodeMaterial,
+  StorageBufferAttribute,
+} from "three/webgpu";
 import type Node from "three/src/nodes/core/Node.js";
 import type ComputeNode from "three/src/nodes/gpgpu/ComputeNode.js";
 import type Renderer from "three/src/renderers/common/Renderer.js";
 import type { GrassBladeGroundingResult } from "./GrassBladeGrounding";
+import { validateGrassGroundingDiagnosticSubcells } from "../../../utils/workers/GrassGroundingWorkerWire";
 import {
   getGrassBladeLayout,
   GRASS_MEADOW_REFINEMENT,
@@ -44,6 +49,7 @@ export const GRASS_ROOT_STORAGE_ATTRIBUTE = "grassRootDeltas";
 export const GRASS_BLADE_VISIBILITY_ATTRIBUTE = "grassBladeVisibility";
 export const GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE = "grassClumpInvariantInputs";
 export const GRASS_CLUMP_CACHE_ATTRIBUTE = "grassClumpInvariants";
+export const GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE = "grassAdaptiveIndirect";
 const CLUMP_SOURCE_ATTRIBUTES = [
   "instanceOffset",
   "instanceRotScaleHash",
@@ -725,6 +731,13 @@ export function groundedGrassWorldBox(
     b.minZ > b.maxZ
   )
     throw new Error("Invalid accepted grass bounds");
+  return paddedGrassBounds(b);
+}
+
+type ReadyGrass = Extract<GrassBladeGroundingResult, { status: "ready" }>;
+type GrassBounds = NonNullable<ReadyGrass["sweptBounds"]>;
+
+function paddedGrassBounds(b: GrassBounds): THREE.Box3 {
   const padding = Math.max(
     0.001,
     ...Object.values(b).map((value) => Math.abs(value) * 2 ** -20),
@@ -733,4 +746,494 @@ export function groundedGrassWorldBox(
     new THREE.Vector3(b.minX, b.minY, b.minZ),
     new THREE.Vector3(b.maxX, b.maxY, b.maxZ),
   ).expandByScalar(padding);
+}
+
+export type AdaptiveGrassQuadrant = Readonly<{
+  x: number;
+  z: number;
+  start: number;
+  count: number;
+  bounds: Readonly<GrassBounds>;
+}>;
+
+/** Render copies only. Original fitting evidence remains in accepted order;
+ * renderOrder maps each new instance back to that order. */
+export type AdaptiveGrassRenderData = Readonly<{
+  data: ReadyGrass["data"];
+  rootDeltas: Float32Array;
+  bladeVisibility?: Uint32Array;
+  renderOrder: Uint32Array;
+  renderSourceIndices: Uint32Array;
+  origin: Readonly<{ x: number; z: number }>;
+  quadrants: readonly AdaptiveGrassQuadrant[];
+}>;
+
+/** One bounded publication-time permutation, never a grounding retry or a
+ * per-camera upload. Stable within each occupied world-grid 12.5m quadrant. */
+export function prepareAdaptiveGrassRenderData(
+  result: ReadyGrass,
+  origin: Readonly<{ x: number; z: number }>,
+): AdaptiveGrassRenderData {
+  const { data, rootDeltas, sourceIndices, bladeVisibility } = result;
+  const count = data.count,
+    blades = result.receipt.bladesPerClump;
+  validateGrassGroundingDiagnosticSubcells(
+    result.diagnosticSubcells,
+    "world-grid-6.25m-v1",
+    count,
+    result.sweptBounds,
+  );
+  if (
+    !Number.isFinite(origin.x) ||
+    !Number.isFinite(origin.z) ||
+    !Number.isSafeInteger(count) ||
+    count < 1 ||
+    count > 4096 ||
+    !Number.isSafeInteger(blades) ||
+    blades < 1 ||
+    blades > 32 ||
+    rootDeltas.length !== count * blades * 2 ||
+    sourceIndices.length !== count ||
+    (bladeVisibility !== undefined && bladeVisibility.length !== count)
+  )
+    throw new Error("Invalid adaptive grass render data");
+  const streams = [
+    ["offsets", 3],
+    ["rotScaleHash", 3],
+    ["groundColors", 3],
+    ["grassTints", 4],
+    ["groundNormals", 3],
+  ] as const;
+  for (const [name, stride] of streams)
+    if (
+      !(data[name] instanceof Float32Array) ||
+      data[name].length !== count * stride
+    )
+      throw new Error("Invalid adaptive grass instance stream");
+  const cells = result.diagnosticSubcells!.cells;
+  const fineCounts = new Map(cells.map((cell) => [`${cell.x},${cell.z}`, 0]));
+  const bins = new Map<
+    string,
+    { x: number; z: number; indices: number[]; bounds: GrassBounds }
+  >();
+  for (const cell of cells) {
+    const x = Math.floor(cell.x / 2) + 0,
+      z = Math.floor(cell.z / 2) + 0;
+    const key = `${x},${z}`,
+      existing = bins.get(key);
+    if (!existing)
+      bins.set(key, { x, z, indices: [], bounds: { ...cell.bounds } });
+    else {
+      const a = existing.bounds,
+        b = cell.bounds;
+      a.minX = Math.min(a.minX, b.minX);
+      a.maxX = Math.max(a.maxX, b.maxX);
+      a.minY = Math.min(a.minY, b.minY);
+      a.maxY = Math.max(a.maxY, b.maxY);
+      a.minZ = Math.min(a.minZ, b.minZ);
+      a.maxZ = Math.max(a.maxZ, b.maxZ);
+    }
+  }
+  if (bins.size > 4)
+    throw new Error("Adaptive grass requires at most four quadrants");
+  for (let i = 0; i < count; i++) {
+    const x = Math.floor((origin.x + data.offsets[i * 3]) / 6.25) + 0;
+    const z = Math.floor((origin.z + data.offsets[i * 3 + 2]) / 6.25) + 0;
+    const key = `${x},${z}`,
+      previous = fineCounts.get(key);
+    if (previous === undefined)
+      throw new Error("Adaptive grass anchor/grid mismatch");
+    fineCounts.set(key, previous + 1);
+    bins
+      .get(`${Math.floor(x / 2) + 0},${Math.floor(z / 2) + 0}`)!
+      .indices.push(i);
+  }
+  if (
+    cells.some((cell) => fineCounts.get(`${cell.x},${cell.z}`) !== cell.count)
+  )
+    throw new Error("Adaptive grass subcell count mismatch");
+  const order = new Uint32Array(count),
+    quadrants: AdaptiveGrassQuadrant[] = [];
+  let start = 0;
+  for (const bin of [...bins.values()].sort((a, b) => a.x - b.x || a.z - b.z)) {
+    order.set(bin.indices, start);
+    quadrants.push(
+      Object.freeze({
+        x: bin.x,
+        z: bin.z,
+        start,
+        count: bin.indices.length,
+        bounds: Object.freeze(bin.bounds),
+      }),
+    );
+    start += bin.indices.length;
+  }
+  const permute = (input: Float32Array, stride: number) => {
+    const output = new Float32Array(input.length);
+    for (let i = 0; i < count; i++)
+      output.set(
+        input.subarray(order[i] * stride, (order[i] + 1) * stride),
+        i * stride,
+      );
+    return output;
+  };
+  const renderData = { ...data };
+  for (const [name, stride] of streams)
+    renderData[name] = permute(data[name], stride);
+  return Object.freeze({
+    data: renderData,
+    rootDeltas: permute(rootDeltas, blades * 2),
+    ...(bladeVisibility
+      ? { bladeVisibility: Uint32Array.from(order, (i) => bladeVisibility[i]) }
+      : {}),
+    renderOrder: order,
+    renderSourceIndices: Uint32Array.from(order, (i) => sourceIndices[i]),
+    origin: Object.freeze({ ...origin }),
+    quadrants: Object.freeze(quadrants),
+  });
+}
+
+/** Query only an initialized real renderer. Unsupported devices keep the
+ * original direct chunk and original instance order, not zero firstInstance. */
+export function supportsAdaptiveGrassDraw(renderer: Renderer): boolean {
+  return (
+    renderer.initialized &&
+    renderer.coordinateSystem === THREE.WebGPUCoordinateSystem &&
+    renderer.hasFeature("indirect-first-instance")
+  );
+}
+
+/** CPU-owned immutable command table and bounded camera selection. The public
+ * factory feature-gates production installation; direct construction also lets
+ * real Three CPU tests exercise lifecycle without fabricating a GPU device. */
+export class AdaptiveGrassDrawOwner {
+  readonly indirect: IndirectStorageBufferAttribute;
+  private readonly offsets: number[][];
+  private readonly localBounds: THREE.Box3[];
+  private readonly matrix = new THREE.Matrix4();
+  private readonly box = new THREE.Box3();
+  private readonly frustum = new THREE.Frustum();
+  private readonly stack: {
+    indirect: IndirectStorageBufferAttribute | null;
+    offset: number | number[];
+  }[] = [];
+  private readonly before: THREE.Mesh["onBeforeRender"];
+  private readonly after: THREE.Mesh["onAfterRender"];
+  private readonly oldBefore: THREE.Mesh["onBeforeRender"];
+  private readonly oldAfter: THREE.Mesh["onAfterRender"];
+  private readonly geometry: THREE.BufferGeometry;
+  private readonly index: THREE.BufferAttribute;
+  private readonly indexVersion: number;
+  private readonly indexCount: number;
+  private readonly material: MeshStandardNodeMaterial;
+  private readonly materialVersion: number;
+  private readonly positionNode: MeshStandardNodeMaterial["positionNode"];
+  private readonly attributes: readonly {
+    name: string;
+    attribute: THREE.BufferAttribute;
+    version: number;
+  }[];
+  private readonly color: THREE.InterleavedBufferAttribute;
+  private readonly tint: THREE.InterleavedBufferAttribute;
+  private readonly colorBuffer: THREE.InstancedInterleavedBuffer;
+  private readonly colorArray: Float32Array;
+  private readonly colorVersion: number;
+  private disposed = false;
+
+  constructor(
+    readonly mesh: GrassChunkRenderMesh,
+    readonly prepared: AdaptiveGrassRenderData,
+    private readonly renderer: Renderer,
+    private readonly onTouched: (owner: AdaptiveGrassDrawOwner) => void,
+  ) {
+    const geometry = mesh.geometry,
+      index = geometry.getIndex();
+    if (
+      !index ||
+      geometry.indirect !== null ||
+      geometry.groups.length ||
+      geometry.drawRange.start !== 0 ||
+      geometry.drawRange.count !== Infinity ||
+      mesh.count !== prepared.data.count ||
+      !(mesh.material instanceof MeshStandardNodeMaterial) ||
+      geometry.hasAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)
+    )
+      throw new Error("Invalid adaptive grass draw owner");
+    const streams = [
+      ["instanceOffset", prepared.data.offsets],
+      ["instanceRotScaleHash", prepared.data.rotScaleHash],
+      ["instanceGroundNormal", prepared.data.groundNormals],
+      [GRASS_ROOT_STORAGE_ATTRIBUTE, prepared.rootDeltas],
+      ...(prepared.bladeVisibility
+        ? [
+            [
+              GRASS_BLADE_VISIBILITY_ATTRIBUTE,
+              prepared.bladeVisibility,
+            ] as const,
+          ]
+        : []),
+    ] as const;
+    this.attributes = streams.map(([name, array]) => {
+      const attribute = geometry.getAttribute(name);
+      if (
+        !(attribute instanceof THREE.BufferAttribute) ||
+        attribute.array !== array
+      )
+        throw new Error("Adaptive grass requires corresponding render streams");
+      return { name, attribute, version: attribute.version };
+    });
+    const color = geometry.getAttribute("instanceGroundColor"),
+      tint = geometry.getAttribute("instanceGrassTint");
+    if (
+      !(color instanceof THREE.InterleavedBufferAttribute) ||
+      !(tint instanceof THREE.InterleavedBufferAttribute) ||
+      color.data !== tint.data ||
+      !(color.data instanceof THREE.InstancedInterleavedBuffer) ||
+      !(color.data.array instanceof Float32Array) ||
+      color.data.stride !== 7 ||
+      color.data.meshPerAttribute !== 1 ||
+      color.count !== prepared.data.count ||
+      color.itemSize !== 3 ||
+      color.offset !== 0 ||
+      color.normalized ||
+      tint.itemSize !== 4 ||
+      tint.offset !== 3 ||
+      tint.normalized
+    )
+      throw new Error(
+        "Adaptive grass requires the production color/tint interleave",
+      );
+    for (let i = 0; i < prepared.data.count; i++) {
+      for (let j = 0; j < 3; j++)
+        if (
+          !Object.is(
+            color.data.array[i * 7 + j],
+            prepared.data.groundColors[i * 3 + j],
+          )
+        )
+          throw new Error("Adaptive grass color order mismatch");
+      for (let j = 0; j < 4; j++)
+        if (
+          !Object.is(
+            color.data.array[i * 7 + 3 + j],
+            prepared.data.grassTints[i * 4 + j],
+          )
+        )
+          throw new Error("Adaptive grass tint order mismatch");
+    }
+    this.color = color;
+    this.tint = tint;
+    this.colorBuffer = color.data;
+    this.colorArray = color.data.array;
+    this.colorVersion = color.data.version;
+    // The production storage-instanced owner uses newly created identity
+    // matrices. Reject a different matrix transform rather than omit it from
+    // the bounds/permutation contract.
+    if (mesh instanceof THREE.InstancedMesh) {
+      const identity = new THREE.Matrix4(),
+        matrix = new THREE.Matrix4();
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.getMatrixAt(i, matrix);
+        if (!matrix.equals(identity))
+          throw new Error("Adaptive grass requires identity instance matrices");
+      }
+      this.attributes = [
+        ...this.attributes,
+        {
+          name: "instanceMatrixStorage",
+          attribute: mesh.instanceMatrix,
+          version: mesh.instanceMatrix.version,
+        },
+      ];
+    }
+    this.geometry = geometry;
+    this.index = index;
+    this.indexVersion = index.version;
+    this.indexCount = index.count;
+    this.material = mesh.material;
+    this.materialVersion = mesh.material.version;
+    this.positionNode = mesh.material.positionNode;
+    const records = new Uint32Array((prepared.quadrants.length + 1) * 5);
+    records.set([index.count, prepared.data.count, 0, 0, 0]);
+    prepared.quadrants.forEach((quadrant, i) => {
+      records.set(
+        [index.count, quadrant.count, 0, 0, quadrant.start],
+        (i + 1) * 5,
+      );
+    });
+    this.indirect = new IndirectStorageBufferAttribute(records, 5);
+    // r186 only releases indirect GPU storage via registered geometry attrs.
+    geometry.setAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE, this.indirect);
+    geometry.setIndirect(this.indirect, 0);
+    const all = (1 << prepared.quadrants.length) - 1;
+    this.offsets = Array.from({ length: all + 1 }, (_, mask) =>
+      mask === all
+        ? [0]
+        : prepared.quadrants.flatMap((_, i) =>
+            mask & (1 << i) ? [(i + 1) * 20] : [],
+          ),
+    );
+    this.offsets.forEach(Object.freeze);
+    this.localBounds = prepared.quadrants.map((q) =>
+      paddedGrassBounds(q.bounds).translate(
+        new THREE.Vector3(-prepared.origin.x, 0, -prepared.origin.z),
+      ),
+    );
+    this.oldBefore = mesh.onBeforeRender;
+    this.oldAfter = mesh.onAfterRender;
+    this.before = (...args) => {
+      this.stack.push({
+        indirect: geometry.indirect,
+        offset: geometry.indirectOffset,
+      });
+      try {
+        this.onTouched(this);
+        this.oldBefore.apply(mesh, args);
+        const selection =
+          Object.is(args[0], renderer) &&
+          mesh.frustumCulled &&
+          supportsAdaptiveGrassDraw(renderer)
+            ? this.selectCamera(args[2])
+            : this.hasCurrentDrawInputs()
+              ? 0
+              : null;
+        geometry.setIndirect(
+          selection === null ? null : this.indirect,
+          selection ?? 0,
+        );
+      } catch (error) {
+        this.resetAfterRender();
+        throw error;
+      }
+    };
+    this.after = (...args) => {
+      try {
+        this.oldAfter.apply(mesh, args);
+      } finally {
+        const previous = this.stack.pop();
+        if (!this.hasCurrentDrawInputs()) geometry.setIndirect(null, 0);
+        else if (previous)
+          geometry.setIndirect(previous.indirect, previous.offset);
+        else this.resetAfterRender();
+      }
+    };
+    mesh.onBeforeRender = this.before;
+    mesh.onAfterRender = this.after;
+  }
+
+  /** Uses the renderer's already-updated actual camera, including oblique and
+   * reversed WebGPU projections. No cached primary-camera visibility. */
+  private hasCurrentDrawInputs(): boolean {
+    return !(
+      this.disposed ||
+      this.mesh.geometry !== this.geometry ||
+      this.mesh.material !== this.material ||
+      this.material.version !== this.materialVersion ||
+      this.material.positionNode !== this.positionNode ||
+      this.geometry.getIndex() !== this.index ||
+      this.index.version !== this.indexVersion ||
+      this.index.count !== this.indexCount ||
+      this.mesh.count !== this.prepared.data.count ||
+      this.geometry.drawRange.start !== 0 ||
+      this.geometry.drawRange.count !== Infinity ||
+      this.geometry.groups.length !== 0 ||
+      this.geometry.getAttribute("instanceGroundColor") !== this.color ||
+      this.geometry.getAttribute("instanceGrassTint") !== this.tint ||
+      this.color.data !== this.colorBuffer ||
+      this.tint.data !== this.colorBuffer ||
+      this.colorBuffer.array !== this.colorArray ||
+      this.colorBuffer.version !== this.colorVersion ||
+      this.attributes.some(
+        ({ name, attribute, version }) =>
+          this.geometry.getAttribute(name) !== attribute ||
+          attribute.version !== version,
+      )
+    );
+  }
+
+  selectCamera(camera: THREE.Camera): number | number[] | null {
+    // An old immutable full record is NOT a fallback for changed index/count
+    // streams. Null selects the renderer's ordinary current direct draw.
+    if (!this.hasCurrentDrawInputs()) return null;
+    if (
+      camera.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+      camera instanceof THREE.ArrayCamera ||
+      !this.mesh.matrixWorld.elements.every(Number.isFinite) ||
+      this.mesh.matrixWorld.determinant() === 0
+    )
+      return 0;
+    this.matrix.multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse,
+    );
+    if (!this.matrix.elements.every(Number.isFinite)) return 0;
+    this.frustum.setFromProjectionMatrix(
+      this.matrix,
+      camera.coordinateSystem,
+      camera.reversedDepth,
+    );
+    if (
+      this.frustum.planes.some(
+        (p) =>
+          !Number.isFinite(p.constant) ||
+          !Number.isFinite(p.normal.x) ||
+          !Number.isFinite(p.normal.y) ||
+          !Number.isFinite(p.normal.z),
+      )
+    )
+      return 0;
+    let mask = 0;
+    for (let i = 0; i < this.localBounds.length; i++) {
+      this.box.copy(this.localBounds[i]).applyMatrix4(this.mesh.matrixWorld);
+      if (
+        !Number.isFinite(this.box.min.x) ||
+        !Number.isFinite(this.box.min.y) ||
+        !Number.isFinite(this.box.min.z) ||
+        !Number.isFinite(this.box.max.x) ||
+        !Number.isFinite(this.box.max.y) ||
+        !Number.isFinite(this.box.max.z) ||
+        this.box.isEmpty()
+      )
+        return 0;
+      if (this.frustum.intersectsBox(this.box)) mask |= 1 << i;
+    }
+    return this.offsets[mask];
+  }
+
+  /** r186 object.onAfterRender is not a finally. Called by the existing outer
+   * render/precompile finally and before retiring a touched chunk. */
+  resetAfterRender(): void {
+    this.stack.length = 0;
+    if (
+      this.geometry.indirect === this.indirect ||
+      this.geometry.indirect === null
+    )
+      this.geometry.setIndirect(
+        this.hasCurrentDrawInputs() ? this.indirect : null,
+        0,
+      );
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.resetAfterRender();
+    if (this.mesh.onBeforeRender === this.before)
+      this.mesh.onBeforeRender = this.oldBefore;
+    if (this.mesh.onAfterRender === this.after)
+      this.mesh.onAfterRender = this.oldAfter;
+    // Keep the attribute registered until the normal geometry.dispose event.
+    // This owner does not dispose borrowed geometry/materials or GPU resources.
+  }
+}
+
+export function createAdaptiveGrassDrawOwner(
+  mesh: GrassChunkRenderMesh,
+  prepared: AdaptiveGrassRenderData,
+  renderer: Renderer,
+  onTouched: (owner: AdaptiveGrassDrawOwner) => void,
+): AdaptiveGrassDrawOwner | null {
+  return supportsAdaptiveGrassDraw(renderer)
+    ? new AdaptiveGrassDrawOwner(mesh, prepared, renderer, onTouched)
+    : null;
 }

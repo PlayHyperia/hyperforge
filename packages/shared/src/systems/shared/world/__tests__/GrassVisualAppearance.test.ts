@@ -81,6 +81,7 @@ function manager(
   geometry?: ConstructorParameters<typeof GrassVisualManager>[17],
   vergeEvaluation?: ConstructorParameters<typeof GrassVisualManager>[18],
   instancing?: ConstructorParameters<typeof GrassVisualManager>[19],
+  submission?: ConstructorParameters<typeof GrassVisualManager>[20],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -124,6 +125,7 @@ function manager(
     geometry,
     vergeEvaluation,
     instancing,
+    submission,
   );
 }
 
@@ -569,6 +571,65 @@ describe("matrix-free meadow owner admission and precompilation (CPU only)", () 
     const owner = manager(...invalid);
     try {
       expect(owner["instancingCandidate"]).toBeUndefined();
+    } finally {
+      owner.destroy();
+    }
+  });
+});
+
+describe("adaptive grass submission constructor admission (CPU only)", () => {
+  it.each([null, "", "other", false, {}, ["adaptive-ranges-v1"]])(
+    "rejects malformed submission selection %j before allocating owners",
+    (value) => {
+      const args: unknown[] = [
+        FINE_MEADOW_GRASS_VISUAL_PROFILE,
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        true,
+        "fine-meadow-v1",
+        undefined,
+        "leaf-volume-v1",
+        undefined,
+        "meadow-field-v1",
+        undefined,
+        undefined,
+        value,
+      ];
+      expect(() => Reflect.apply(manager, undefined, args)).toThrow(
+        "Adaptive grass submission",
+      );
+    },
+  );
+  it("requires the real grounding-worker owner, never silently changing execution", () => {
+    expect(() =>
+      manager(
+        FINE_MEADOW_GRASS_VISUAL_PROFILE,
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        true,
+        "fine-meadow-v1",
+        undefined,
+        "leaf-volume-v1",
+        undefined,
+        "meadow-field-v1",
+        undefined,
+        undefined,
+        "adaptive-ranges-v1",
+      ),
+    ).toThrow("worker-backed meadow ribbon");
+    const owner = manager(
+      FINE_MEADOW_GRASS_VISUAL_PROFILE,
+      SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      true,
+      "fine-meadow-v1",
+      undefined,
+      "leaf-volume-v1",
+      undefined,
+      "meadow-field-v1",
+    );
+    try {
+      expect(owner["submissionCandidate"]).toBeUndefined();
+      expect(owner["diagnosticSubcells"]).toBeUndefined();
+      expect(owner["adaptiveGrassOwners"].size).toBe(0);
+      expect(() => owner.finishGrassForRender()).not.toThrow();
     } finally {
       owner.destroy();
     }

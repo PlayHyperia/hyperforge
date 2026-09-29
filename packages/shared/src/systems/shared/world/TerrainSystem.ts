@@ -210,6 +210,7 @@ import {
   resolveGrassGeometryCandidate,
   resolveGrassVergeEvaluation,
   resolveGrassInstancingCandidate,
+  resolveGrassSubmissionCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -473,6 +474,7 @@ export class TerrainSystem extends System {
         geometry?: ReturnType<typeof resolveGrassGeometryCandidate>;
         vergeEvaluation?: ReturnType<typeof resolveGrassVergeEvaluation>;
         instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
+        submission?: ReturnType<typeof resolveGrassSubmissionCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -940,6 +942,7 @@ export class TerrainSystem extends System {
       const geometry = resolveGrassGeometryCandidate();
       const vergeEvaluation = resolveGrassVergeEvaluation();
       const instancing = resolveGrassInstancingCandidate();
+      const submission = resolveGrassSubmissionCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -958,6 +961,7 @@ export class TerrainSystem extends System {
         ...(geometry ? { geometry } : {}),
         ...(vergeEvaluation ? { vergeEvaluation } : {}),
         ...(instancing ? { instancing } : {}),
+        ...(submission ? { submission } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3082,7 +3086,12 @@ export class TerrainSystem extends System {
         grassSelection.geometry,
         grassSelection.vergeEvaluation,
         grassSelection.instancing,
+        grassSelection.submission,
       );
+      if (grassSelection.submission && this.world.graphics)
+        this.grassVisualManager.setAdaptiveGrassRenderer(
+          this.world.graphics.renderer,
+        );
       this.grassVisualManager.setReflectionGrassCuller(
         this.waterSystem.intersectsReflectionGrassBounds,
       );
@@ -9928,6 +9937,11 @@ export class TerrainSystem extends System {
   public prepareGrassForRender(camera: THREE.Camera): void {
     this.grassVisualManager?.capturePrimaryView(camera);
     this.rootedFlowerVisualManager?.prepareForRender(camera);
+  }
+
+  /** Restore only adaptive owners touched by this render or precompile scope. */
+  public finishGrassForRender(): void {
+    this.grassVisualManager?.finishGrassForRender();
   }
 
   public getTileSize(): number {

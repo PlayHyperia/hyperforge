@@ -415,10 +415,15 @@ export class ClientGraphics extends System {
     if (!this.isPrecompileIdle()) this.opaqueLoadingRenderGate.invalidate();
     const submission = this.opaqueLoadingRenderGate.beginSubmission();
     if (submission === null) return;
-    if (!this.usePostprocessing || !this.composer) {
-      this.renderer.render(this.world.stage.scene, this.world.camera);
-    } else {
-      this.composer.render();
+    try {
+      if (!this.usePostprocessing || !this.composer) {
+        this.renderer.render(this.world.stage.scene, this.world.camera);
+      } else {
+        this.composer.render();
+      }
+    } finally {
+      // Three does not guarantee onAfterRender after a failed object draw.
+      this.world.getSystem<TerrainSystem>("terrain")?.finishGrassForRender();
     }
     this.hasRendered = true;
     this.opaqueLoadingRenderGate.completeSubmission(
@@ -517,6 +522,8 @@ export class ClientGraphics extends System {
       for (const state of frustumStates) {
         state.object.frustumCulled = state.value;
       }
+      // compileAsync traverses object render callbacks before it returns.
+      this.world.getSystem<TerrainSystem>("terrain")?.finishGrassForRender();
     }
 
     startCallerDeadline();

@@ -35,7 +35,14 @@ import {
   readGrassClumpInvariant,
   GRASS_CLUMP_CACHE_ATTRIBUTE,
   GRASS_CLUMP_CACHE_INPUT_ATTRIBUTE,
+  AdaptiveGrassDrawOwner,
+  prepareAdaptiveGrassRenderData,
+  createAdaptiveGrassDrawOwner,
+  supportsAdaptiveGrassDraw,
+  GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE,
 } from "../GrassGroundingGpu";
+import { groundGrassBlades } from "../GrassBladeGrounding";
+import { createSameFaceCase } from "./fixtures/GrassBladeGroundingSameFaceCases";
 import {
   remapGrassGroundingSteps,
   type GrassGrounding,
@@ -55,6 +62,628 @@ function drain<T>(steps: Generator<string, T, void>): T {
   while (!step.done) step = steps.next();
   return step.value;
 }
+
+describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
+  function fixture(lod: 0 | 1 | 2 = 0, partialRoad = false) {
+    const f = createSameFaceCase("fine-dense-plane");
+    const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+    const template = createClumpGeometry(
+      layout.bladesPerClump,
+      layout.bladeSegments,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    const points = [
+      [6, 6],
+      [-6, -6],
+      [6, -6],
+      [-6, 6],
+      [7, 7],
+      [-7, -7],
+    ];
+    const data = {
+      count: points.length,
+      offsets: new Float32Array(
+        points.flatMap(([x, z]) => [x, 20 + x * 0.12 - z * 0.07, z]),
+      ),
+      rotScaleHash: new Float32Array(
+        points.flatMap((_, i) => [i * 0.7, 0.8 + i * 0.05, i / 10]),
+      ),
+      groundColors: new Float32Array(
+        points.flatMap((_, i) => [i / 20, 0.3, 0.2]),
+      ),
+      grassTints: new Float32Array(
+        points.flatMap((_, i) => [1, 0.9, 0.8, i / 10]),
+      ),
+      groundNormals: new Float32Array(
+        points.flatMap(() =>
+          new THREE.Vector3(-0.12, 1, 0.07).normalize().toArray(),
+        ),
+      ),
+    };
+    const result = groundGrassBlades({
+      ...f.request,
+      lod,
+      data,
+      geometry: template,
+      geometryLayout: "fine-meadow-ribbon-v1",
+      roadClearance: "per-blade-v1",
+      diagnosticSubcells: "world-grid-6.25m-v1",
+      ...(partialRoad
+        ? {
+            roadSegments: [
+              {
+                startX: 6.5,
+                endX: 6.5,
+                startZ: -20,
+                endZ: 20,
+                width: 0.25,
+                blendWidth: 0,
+              },
+            ],
+          }
+        : {}),
+    });
+    if (result.status !== "ready" || result.data.count !== points.length)
+      throw new Error("Expected real accepted adaptive fixture");
+    const prepared = prepareAdaptiveGrassRenderData(result, { x: 0, z: 0 });
+    const geometry = template.clone();
+    for (const [name, values, stride] of [
+      ["instanceOffset", prepared.data.offsets, 3],
+      ["instanceRotScaleHash", prepared.data.rotScaleHash, 3],
+      ["instanceGroundNormal", prepared.data.groundNormals, 3],
+    ] as const)
+      geometry.setAttribute(
+        name,
+        new THREE.InstancedBufferAttribute(values, stride),
+      );
+    const colors = new Float32Array(data.count * 7);
+    for (let i = 0; i < data.count; i++) {
+      colors.set(prepared.data.groundColors.subarray(i * 3, i * 3 + 3), i * 7);
+      colors.set(
+        prepared.data.grassTints.subarray(i * 4, i * 4 + 4),
+        i * 7 + 3,
+      );
+    }
+    const colorBuffer = new THREE.InstancedInterleavedBuffer(colors, 7);
+    geometry.setAttribute(
+      "instanceGroundColor",
+      new THREE.InterleavedBufferAttribute(colorBuffer, 3, 0),
+    );
+    geometry.setAttribute(
+      "instanceGrassTint",
+      new THREE.InterleavedBufferAttribute(colorBuffer, 4, 3),
+    );
+    const base = new MeshStandardNodeMaterial();
+    base.positionNode = attribute("position", "vec3").add(
+      attribute("instanceOffset", "vec3"),
+    );
+    const material = createGroundedGrassMaterial(
+      base,
+      geometry,
+      prepared.rootDeltas,
+      data.count,
+      lod,
+      "fine-meadow-ribbon-v1",
+      prepared.bladeVisibility,
+    );
+    const mesh = createStorageInstancedMesh(geometry, material, data.count);
+    mesh.updateMatrixWorld(true);
+    const dom = new JSDOM("<!doctype html><canvas></canvas>");
+    const canvas = dom.window.document.querySelector("canvas")!;
+    const renderer = new THREE.WebGPURenderer({ canvas });
+    const touched = new Set<AdaptiveGrassDrawOwner>();
+    let owner: AdaptiveGrassDrawOwner | undefined;
+    return {
+      f,
+      result,
+      prepared,
+      geometry,
+      mesh,
+      material,
+      renderer,
+      touched,
+      install() {
+        owner = new AdaptiveGrassDrawOwner(mesh, prepared, renderer, (value) =>
+          touched.add(value),
+        );
+        return owner;
+      },
+      close() {
+        owner?.dispose();
+        geometry.dispose();
+        material.dispose();
+        base.dispose();
+        template.dispose();
+        renderer.dispose();
+        dom.window.close();
+        f.dispose();
+      },
+    };
+  }
+  function camera(left = -20, right = 20, bottom = -20, top = 20) {
+    const value = new THREE.OrthographicCamera(
+      left,
+      right,
+      top,
+      bottom,
+      0.1,
+      100,
+    );
+    value.coordinateSystem = THREE.WebGPUCoordinateSystem;
+    value.position.set(0, 60, 0);
+    value.up.set(0, 0, -1);
+    value.lookAt(0, 20, 0);
+    value.updateProjectionMatrix();
+    value.updateMatrixWorld(true);
+    return value;
+  }
+  const bytes = (array: ArrayBufferView) =>
+    Buffer.from(array.buffer, array.byteOffset, array.byteLength).toString(
+      "hex",
+    );
+
+  it.each([0, 1, 2] as const)(
+    "LOD%s stable permutation preserves every attribute/root/mask byte and original provenance",
+    (lod) => {
+      const f = fixture(lod);
+      try {
+        const { result, prepared } = f;
+        const before = {
+          data: Object.fromEntries(
+            Object.entries(result.data)
+              .filter(([, v]) => typeof v !== "number")
+              .map(([k, v]) => [k, bytes(v as Float32Array)]),
+          ),
+          roots: bytes(result.rootDeltas),
+          mask: bytes(result.bladeVisibility!),
+          source: bytes(result.sourceIndices),
+        };
+        expect(Array.from(prepared.renderOrder)).toEqual([1, 5, 3, 2, 0, 4]);
+        expect(
+          prepared.quadrants.map(({ x, z, start, count }) => [
+            x,
+            z,
+            start,
+            count,
+          ]),
+        ).toEqual([
+          [-1, -1, 0, 2],
+          [-1, 0, 2, 1],
+          [0, -1, 3, 1],
+          [0, 0, 4, 2],
+        ]);
+        for (const [name, stride] of [
+          ["offsets", 3],
+          ["rotScaleHash", 3],
+          ["groundColors", 3],
+          ["grassTints", 4],
+          ["groundNormals", 3],
+        ] as const)
+          for (let i = 0; i < result.data.count; i++) {
+            const old = prepared.renderOrder[i];
+            expect(
+              bytes(prepared.data[name].subarray(i * stride, (i + 1) * stride)),
+            ).toBe(
+              bytes(
+                result.data[name].subarray(old * stride, (old + 1) * stride),
+              ),
+            );
+          }
+        const stride = result.receipt.bladesPerClump * 2;
+        expect(result.rootDeltas.some((value) => value !== 0)).toBe(true);
+        for (let i = 0; i < result.data.count; i++) {
+          const old = prepared.renderOrder[i];
+          expect(
+            bytes(prepared.rootDeltas.subarray(i * stride, (i + 1) * stride)),
+          ).toBe(
+            bytes(result.rootDeltas.subarray(old * stride, (old + 1) * stride)),
+          );
+          expect(prepared.bladeVisibility![i]).toBe(
+            result.bladeVisibility![old],
+          );
+          expect(prepared.renderSourceIndices[i]).toBe(
+            result.sourceIndices[old],
+          );
+        }
+        prepareAdaptiveGrassRenderData(result, { x: 0, z: 0 });
+        expect(bytes(result.rootDeltas)).toBe(before.roots);
+        expect(bytes(result.bladeVisibility!)).toBe(before.mask);
+        expect(bytes(result.sourceIndices)).toBe(before.source);
+        for (const [name, value] of Object.entries(result.data))
+          if (typeof value !== "number")
+            expect(bytes(value)).toBe(before.data[name]);
+        const owner = f.install(),
+          indexCount = f.geometry.index!.count;
+        expect(Array.from(owner.indirect.array)).toEqual([
+          indexCount,
+          6,
+          0,
+          0,
+          0,
+          indexCount,
+          2,
+          0,
+          0,
+          0,
+          indexCount,
+          1,
+          0,
+          0,
+          2,
+          indexCount,
+          1,
+          0,
+          0,
+          3,
+          indexCount,
+          2,
+          0,
+          0,
+          4,
+        ]);
+        expect(owner.indirect.array.byteLength).toBe(100);
+        expect(f.geometry.getAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)).toBe(
+          owner.indirect,
+        );
+        expect(
+          f.geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE).array,
+        ).toBe(prepared.rootDeltas);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("rejects absent or mismatched accepted metadata rather than inventing bounds", () => {
+    const f = fixture();
+    try {
+      expect(() =>
+        prepareAdaptiveGrassRenderData(
+          { ...f.result, diagnosticSubcells: undefined },
+          { x: 0, z: 0 },
+        ),
+      ).toThrow();
+      expect(() =>
+        prepareAdaptiveGrassRenderData(f.result, { x: 100, z: 0 }),
+      ).toThrow("anchor/grid mismatch");
+      expect(() =>
+        prepareAdaptiveGrassRenderData(
+          { ...f.result, rootDeltas: f.result.rootDeltas.subarray(2) },
+          { x: 0, z: 0 },
+        ),
+      ).toThrow();
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each([0, 1, 2] as const)(
+    "LOD%s retains actual partial-road masks in reordered instanceIndex addresses",
+    (lod) => {
+      const f = fixture(lod, true);
+      try {
+        const full = 2 ** f.result.receipt.bladesPerClump - 1;
+        expect(f.result.bladeVisibility!.some((mask) => mask !== full)).toBe(
+          true,
+        );
+        expect(f.result.bladeVisibility!.every((mask) => mask > 0)).toBe(true);
+        for (let i = 0; i < f.prepared.data.count; i++)
+          expect(f.prepared.bladeVisibility![i]).toBe(
+            f.result.bladeVisibility![f.prepared.renderOrder[i]],
+          );
+        const owner = f.install();
+        for (const q of f.prepared.quadrants) {
+          const first = owner.indirect.getComponent(
+            f.prepared.quadrants.indexOf(q) + 1,
+            4,
+          );
+          for (let j = 0; j < q.count; j++) {
+            const address = first + j;
+            expect(
+              f.geometry
+                .getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE)
+                .getX(address),
+            ).toBe(f.result.bladeVisibility![f.prepared.renderOrder[address]]);
+          }
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("uninitialized actual WebGPU renderer keeps the direct/default geometry untouched", () => {
+    const f = fixture();
+    try {
+      expect(f.renderer.initialized).toBe(false);
+      expect(supportsAdaptiveGrassDraw(f.renderer)).toBe(false);
+      const before = f.mesh.onBeforeRender;
+      expect(
+        createAdaptiveGrassDrawOwner(f.mesh, f.prepared, f.renderer, () => {
+          throw Error("not touched");
+        }),
+      ).toBeNull();
+      expect(f.mesh.onBeforeRender).toBe(before);
+      expect(f.geometry.indirect).toBeNull();
+      expect(f.geometry.hasAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)).toBe(
+        false,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("selects full, partial and empty immutable ranges from the actual current camera", () => {
+    const f = fixture();
+    try {
+      const owner = f.install(),
+        original = bytes(owner.indirect.array);
+      expect(owner.selectCamera(camera())).toEqual([0]);
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
+      expect(owner.selectCamera(camera(1, 20))).toEqual([60, 80]);
+      expect(owner.selectCamera(camera(30, 40))).toEqual([]);
+      const held = owner.selectCamera(camera(-20, -1));
+      expect(owner.selectCamera(camera(-20, -1))).toBe(held);
+      expect(bytes(owner.indirect.array)).toBe(original);
+      expect(owner.indirect.version).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("uses transformed wind-swept bounds and current WebGPU reversed/oblique projections", () => {
+    const f = fixture();
+    try {
+      const owner = f.install(),
+        parent = new THREE.Group();
+      parent.add(f.mesh);
+      parent.position.set(100, 0, -70);
+      parent.rotation.y = Math.PI / 2;
+      parent.scale.set(2, 1.3, 0.75);
+      parent.updateMatrixWorld(true);
+      const view = camera();
+      view.position.add(new THREE.Vector3(100, 0, -70));
+      view.updateMatrixWorld(true);
+      expect(owner.selectCamera(view)).toEqual([0]);
+      const reversedRenderer = new THREE.WebGPURenderer({
+        canvas: f.renderer.domElement,
+        reversedDepthBuffer: true,
+      });
+      try {
+        const updateCamera: unknown = Reflect.get(
+          reversedRenderer,
+          "_updateCamera",
+        );
+        if (typeof updateCamera !== "function")
+          throw Error("Missing r186 camera update");
+        Reflect.apply(updateCamera, reversedRenderer, [view, false]);
+        expect(view.reversedDepth).toBe(true);
+      } finally {
+        reversedRenderer.dispose();
+      }
+      expect(owner.selectCamera(view)).toEqual([0]);
+      // Actual oblique projection matrix, not an FOV/AABB approximation.
+      view.projectionMatrix.elements[8] += 0.15;
+      const frustum = new THREE.Frustum().setFromProjectionMatrix(
+        new THREE.Matrix4().multiplyMatrices(
+          view.projectionMatrix,
+          view.matrixWorldInverse,
+        ),
+        view.coordinateSystem,
+        view.reversedDepth,
+      );
+      const expected = f.prepared.quadrants.flatMap((q, i) => {
+        const b = q.bounds,
+          pad = Math.max(
+            0.001,
+            ...Object.values(b).map((n) => Math.abs(n) * 2 ** -20),
+          );
+        const box = new THREE.Box3(
+          new THREE.Vector3(b.minX, b.minY, b.minZ),
+          new THREE.Vector3(b.maxX, b.maxY, b.maxZ),
+        )
+          .expandByScalar(pad)
+          .applyMatrix4(f.mesh.matrixWorld);
+        return frustum.intersectsBox(box) ? [(i + 1) * 20] : [];
+      });
+      expect(owner.selectCamera(view)).toEqual(
+        expected.length === 4 ? [0] : expected,
+      );
+      view.projectionMatrix.elements[0] = NaN;
+      expect(owner.selectCamera(view)).toBe(0);
+      expect(owner.selectCamera(new THREE.ArrayCamera())).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("uses a perspective off-axis camera independently from the primary view", () => {
+    const f = fixture();
+    try {
+      const owner = f.install();
+      const mirror = new THREE.PerspectiveCamera(30, 2, 0.1, 100);
+      mirror.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      mirror.position.set(0, 60, 0);
+      mirror.up.set(0, 0, -1);
+      mirror.lookAt(0, 20, 0);
+      mirror.setViewOffset(200, 100, 0, 0, 100, 100);
+      mirror.updateMatrixWorld(true);
+      expect(owner.selectCamera(mirror)).toEqual([20, 40]);
+      // Oblique near-plane row, as used by planar reflection cameras.
+      mirror.projectionMatrix.elements[2] = 0.02;
+      mirror.projectionMatrix.elements[6] = -0.01;
+      expect(owner.selectCamera(mirror)).toEqual([20, 40]);
+      expect(owner.selectCamera(camera())).toEqual([0]);
+      mirror.setViewOffset(200, 100, 100, 0, 100, 100);
+      expect(owner.selectCamera(mirror)).toEqual([60, 80]);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("nested callbacks, precompile and exception reset restore full range without disposing borrowed resources", () => {
+    const f = fixture();
+    try {
+      const scene = new THREE.Scene(),
+        view = camera(),
+        order: string[] = [];
+      let owner: AdaptiveGrassDrawOwner;
+      let nested = false,
+        fail = false;
+      f.mesh.onBeforeRender = (...args) => {
+        order.push("before");
+        if (fail) throw Error("original callback failure");
+        if (!nested) {
+          nested = true;
+          Reflect.apply(f.mesh.onBeforeRender, f.mesh, args);
+          Reflect.apply(f.mesh.onAfterRender, f.mesh, args);
+        }
+      };
+      f.mesh.onAfterRender = () => {
+        order.push("after");
+      };
+      const before = f.mesh.onBeforeRender,
+        after = f.mesh.onAfterRender;
+      owner = f.install();
+      const args = [f.renderer, scene, view, f.geometry, f.material, null];
+      f.geometry.indirectOffset = [40];
+      Reflect.apply(f.mesh.onBeforeRender, f.mesh, args);
+      expect(f.geometry.indirectOffset).toBe(0); // Real uninitialized device: full fallback.
+      Reflect.apply(f.mesh.onAfterRender, f.mesh, args);
+      expect(f.geometry.indirectOffset).toEqual([40]);
+      expect(order).toEqual(["before", "before", "after", "after"]);
+      expect(f.touched.has(owner)).toBe(true);
+      owner.resetAfterRender();
+      expect(f.geometry.indirectOffset).toBe(0);
+      f.mesh.frustumCulled = false;
+      Reflect.apply(f.mesh.onBeforeRender, f.mesh, args);
+      expect(f.geometry.indirectOffset).toBe(0);
+      owner.resetAfterRender(); // compile or draw throwing before onAfterRender.
+      fail = true;
+      expect(() => Reflect.apply(f.mesh.onBeforeRender, f.mesh, args)).toThrow(
+        "original callback failure",
+      );
+      expect(f.geometry.indirectOffset).toBe(0);
+      let geometryDisposals = 0,
+        materialDisposals = 0;
+      f.geometry.addEventListener("dispose", () => {
+        geometryDisposals++;
+        expect(f.geometry.getAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)).toBe(
+          owner.indirect,
+        );
+      });
+      f.material.addEventListener("dispose", () => materialDisposals++);
+      owner.dispose();
+      owner.dispose();
+      expect(f.mesh.onBeforeRender).toBe(before);
+      expect(f.mesh.onAfterRender).toBe(after);
+      expect(geometryDisposals).toBe(0);
+      expect(materialDisposals).toBe(0);
+      expect(owner.selectCamera(view)).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("invalidated render inputs fall back full and foreign callback replacements survive disposal", () => {
+    const f = fixture();
+    try {
+      const owner = f.install();
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
+      f.geometry.getAttribute("instanceOffset").needsUpdate = true;
+      expect(owner.selectCamera(camera(-20, -1))).toBeNull();
+      const foreign = () => {};
+      f.mesh.onBeforeRender = foreign;
+      owner.dispose();
+      expect(f.mesh.onBeforeRender).toBe(foreign);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("after-callback failure restores the outer range, and changing the packed color buffer falls back full", () => {
+    const f = fixture();
+    try {
+      f.mesh.onAfterRender = () => {
+        throw Error("after callback failure");
+      };
+      const owner = f.install(),
+        args = [
+          f.renderer,
+          new THREE.Scene(),
+          camera(),
+          f.geometry,
+          f.material,
+          null,
+        ];
+      f.geometry.indirectOffset = [40];
+      Reflect.apply(f.mesh.onBeforeRender, f.mesh, args);
+      expect(() => Reflect.apply(f.mesh.onAfterRender, f.mesh, args)).toThrow(
+        "after callback failure",
+      );
+      expect(f.geometry.indirectOffset).toEqual([40]);
+      owner.resetAfterRender();
+      const color = f.geometry.getAttribute("instanceGroundColor");
+      if (!(color instanceof THREE.InterleavedBufferAttribute))
+        throw Error("Expected actual production interleave");
+      color.data.needsUpdate = true;
+      expect(owner.selectCamera(camera(-20, -1))).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each(["index", "count"] as const)(
+    "changed %s uses the current direct draw, never stale immutable full commands",
+    (change) => {
+      const f = fixture();
+      try {
+        const owner = f.install(),
+          commands = bytes(owner.indirect.array);
+        if (change === "index") f.geometry.setIndex([0, 1, 2]);
+        else f.mesh.count = 2;
+        const args = [
+          f.renderer,
+          new THREE.Scene(),
+          camera(),
+          f.geometry,
+          f.material,
+          null,
+        ];
+        expect(owner.selectCamera(camera())).toBeNull();
+        Reflect.apply(f.mesh.onBeforeRender, f.mesh, args);
+        expect(f.geometry.indirect).toBeNull();
+        Reflect.apply(f.mesh.onAfterRender, f.mesh, args);
+        expect(f.geometry.indirect).toBeNull();
+        owner.resetAfterRender();
+        expect(f.geometry.indirect).toBeNull();
+        expect(bytes(owner.indirect.array)).toBe(commands);
+        expect(
+          change === "index" ? f.geometry.index!.count : f.mesh.count,
+        ).toBe(change === "index" ? 3 : 2);
+        expect(f.geometry.getAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)).toBe(
+          owner.indirect,
+        );
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("a replaced deformation graph falls back to the direct owner", () => {
+    const f = fixture();
+    try {
+      const owner = f.install();
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
+      f.material.positionNode = attribute("position", "vec3");
+      expect(owner.selectCamera(camera(-20, -1))).toBeNull();
+      owner.resetAfterRender();
+      expect(f.geometry.indirect).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+});
 
 /** Inspect the actual constructed TSL address. Integer division mirrors the
  * uint operands here; this deliberately does not claim native GPU execution. */

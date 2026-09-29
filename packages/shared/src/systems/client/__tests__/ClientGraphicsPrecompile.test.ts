@@ -64,12 +64,14 @@ describe("ClientGraphics renderer preparation", () => {
     );
     const arm = compile.indexOf("startCallerDeadline();", invoke);
     const settle = compile.indexOf("await compilation;", invoke);
+    const restoreGrass = compile.indexOf("?.finishGrassForRender();", invoke);
     expect(compile).toContain("ClientGraphics.RENDERER_READY_TIMEOUT_MS");
     expect(compile.slice(invoke, restoreVisibility)).toContain("finally");
     expect(invoke).toBeGreaterThan(0);
     expect(restoreVisibility).toBeGreaterThan(invoke);
     expect(restoreFrustum).toBeGreaterThan(restoreVisibility);
-    expect(arm).toBeGreaterThan(restoreFrustum);
+    expect(restoreGrass).toBeGreaterThan(restoreFrustum);
+    expect(arm).toBeGreaterThan(restoreGrass);
     expect(settle).toBeGreaterThan(arm);
     expect(compile).not.toContain("Promise.race");
     const entrypoints = source.slice(
@@ -83,5 +85,32 @@ describe("ClientGraphics renderer preparation", () => {
     expect(source).toContain(
       "return this.rendererPreparationQueue.pendingCount === 0",
     );
+  });
+
+  it("retains grass range cleanup inside the actual scene submission finally", () => {
+    // Wiring guard only: native WebGPU still verifies callback failure and
+    // nested reflection restoration. Do not substitute a pretend renderer.
+    const source = readFileSync(
+      new URL("../ClientGraphics.ts", import.meta.url),
+      "utf8",
+    );
+    const render = source.slice(
+      source.indexOf("  render() {"),
+      source.indexOf("  precompileObject(object:"),
+    );
+    const scene = render.indexOf("this.renderer.render(");
+    const composer = render.indexOf("this.composer.render();");
+    const cleanup = render.indexOf("?.finishGrassForRender();");
+    const acknowledge = render.indexOf("this.hasRendered = true;");
+    expect(scene).toBeGreaterThan(0);
+    expect(composer).toBeGreaterThan(scene);
+    expect(cleanup).toBeGreaterThan(composer);
+    expect(render.slice(composer, cleanup)).toContain("finally");
+    expect(acknowledge).toBeGreaterThan(cleanup);
+    // The independent shadow candidate must not prevent range cleanup if its
+    // own release throws; the normal committed renderer has no such owner.
+    const shadow = render.indexOf("endShadowScope?.();");
+    if (shadow !== -1)
+      expect(render.slice(shadow, cleanup)).toContain("finally");
   });
 });

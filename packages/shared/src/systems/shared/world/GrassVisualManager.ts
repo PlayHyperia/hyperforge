@@ -48,6 +48,7 @@ import type {
   GrassLightingCandidate,
   GrassGeometryCandidate,
   GrassInstancingCandidate,
+  GrassSubmissionCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -59,6 +60,7 @@ import {
 import { MeshSSSNodeMaterial, MeshStandardNodeMaterial } from "three/webgpu";
 import { faceDirection } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
+import type Renderer from "three/src/renderers/common/Renderer.js";
 import {
   createGrassMeadowRefinementResponse,
   createGrassMeadowAuthoredResponse,
@@ -96,6 +98,9 @@ import {
   createGroundedGrassMaterial,
   createMatrixFreeGrassGeometry,
   createMatrixFreeGrassMesh,
+  supportsAdaptiveGrassDraw,
+  prepareAdaptiveGrassRenderData,
+  createAdaptiveGrassDrawOwner,
   GrassClumpInvariantCache,
   readGrassClumpInvariant,
   type GrassClumpFieldFactory,
@@ -1795,6 +1800,14 @@ export class GrassVisualManager implements QuadTreeListener {
   private readonly coverageTrial: GrassPlacementCoverageTrial | undefined;
   private readonly roadClearance: "per-blade-v1" | undefined;
   private readonly diagnosticSubcells: "world-grid-6.25m-v1" | undefined;
+  private adaptiveGrassRenderer: Renderer | null = null;
+  private readonly adaptiveGrassOwners = new Map<
+    GrassChunkRenderMesh,
+    NonNullable<ReturnType<typeof createAdaptiveGrassDrawOwner>>
+  >();
+  private readonly touchedAdaptiveGrassOwners = new Set<
+    NonNullable<ReturnType<typeof createAdaptiveGrassDrawOwner>>
+  >();
   private readonly placementOperations = createGrassPlacementCellOperations();
   private readonly nodeWorkUnits = new Map<
     TerrainQuadNode,
@@ -1883,6 +1896,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly geometryCandidate?: GrassGeometryCandidate,
     private readonly grassVergeEvaluation?: GrassVergeEvaluation,
     private readonly instancingCandidate?: GrassInstancingCandidate,
+    private readonly submissionCandidate?: GrassSubmissionCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1976,6 +1990,18 @@ export class GrassVisualManager implements QuadTreeListener {
       throw new Error(
         "Grass instancing requires the explicit leaf-volume meadow field",
       );
+    if (
+      submissionCandidate !== undefined &&
+      (submissionCandidate !== "adaptive-ranges-v1" ||
+        !this.fineMeadow ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id ||
+        groundingWorkerSetup?.mode !== "worker-v1" ||
+        instancingCandidate !== undefined)
+    )
+      throw new Error(
+        "Adaptive grass submission requires the retained worker-backed meadow ribbon",
+      );
     const coverageField = Object.getOwnPropertyDescriptor(
       profile,
       "coverageTrial",
@@ -2024,7 +2050,9 @@ export class GrassVisualManager implements QuadTreeListener {
           subcellField.value !== "world-grid-6.25m-v1"))
     )
       throw new Error("Invalid grass visual diagnostic subcell mode");
-    this.diagnosticSubcells = subcellField?.value;
+    this.diagnosticSubcells =
+      subcellField?.value ??
+      (submissionCandidate ? "world-grid-6.25m-v1" : undefined);
     if (this.diagnosticSubcells && !this.fineMeadow)
       throw new Error("Grass subcell census requires the explicit fine meadow");
     this.compactGrassColorGrade =
@@ -2307,6 +2335,45 @@ export class GrassVisualManager implements QuadTreeListener {
   }
 
   // -- Public API -----------------------------------------------------------
+
+  /** Exact renderer owner, registered before this manager publishes any work. */
+  setAdaptiveGrassRenderer(renderer: Renderer): void {
+    if (
+      this.destroyed ||
+      !this.submissionCandidate ||
+      this.adaptiveGrassRenderer ||
+      this.chunks.size ||
+      this.groundingJobs.size ||
+      this.workerInflight.size
+    )
+      throw new Error("Invalid adaptive grass renderer registration");
+    this.adaptiveGrassRenderer = renderer;
+  }
+
+  /** No whole-population traversal; callbacks register only touched owners. */
+  finishGrassForRender(): void {
+    if (!this.touchedAdaptiveGrassOwners.size) return;
+    let failure: unknown;
+    let failed = false;
+    for (const owner of this.touchedAdaptiveGrassOwners) {
+      try {
+        owner.resetAfterRender();
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+    this.touchedAdaptiveGrassOwners.clear();
+    if (failed) throw failure;
+  }
+
+  private retireAdaptiveGrassOwner(mesh: GrassChunkRenderMesh): void {
+    const owner = this.adaptiveGrassOwners.get(mesh);
+    if (!owner) return;
+    this.adaptiveGrassOwners.delete(mesh);
+    this.touchedAdaptiveGrassOwners.delete(owner);
+    owner.dispose();
+  }
 
   /** Current owner configuration/counters, not a GPU or visibility qualification. */
   getProfileReceipt(): StreamingGrassProfileReceipt {
@@ -2847,13 +2914,17 @@ export class GrassVisualManager implements QuadTreeListener {
     if (chunk) {
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
       const release = () => {
-        chunk.mesh.geometry.dispose();
-        if (
-          chunk.mesh.material !== this.material &&
-          chunk.mesh.material !== this.foldedMaterial
-        )
-          chunk.mesh.material.dispose();
-        chunk.mesh.dispose();
+        try {
+          this.retireAdaptiveGrassOwner(chunk.mesh);
+        } finally {
+          chunk.mesh.geometry.dispose();
+          if (
+            chunk.mesh.material !== this.material &&
+            chunk.mesh.material !== this.foldedMaterial
+          )
+            chunk.mesh.material.dispose();
+          chunk.mesh.dispose();
+        }
       };
       const cache = this.clumpInvariantCaches.get(chunk.mesh);
       this.clumpInvariantCaches.delete(chunk.mesh);
@@ -3572,6 +3643,20 @@ export class GrassVisualManager implements QuadTreeListener {
         "Compact grass requires complete blade grounding and provenance",
       );
 
+    // The fitted publication/provenance remains in worker order. Only these
+    // render-owned copies are permuted, with every instance/storage stream.
+    const adaptive =
+      this.submissionCandidate &&
+      blades &&
+      this.adaptiveGrassRenderer &&
+      supportsAdaptiveGrassDraw(this.adaptiveGrassRenderer)
+        ? prepareAdaptiveGrassRenderData(blades, {
+            x: node.centerX,
+            z: node.centerZ,
+          })
+        : null;
+    const renderData = adaptive?.data ?? data;
+
     const geo = this.instancingCandidate
       ? createMatrixFreeGrassGeometry(this.lodGeometries[lodLevel], data.count)
       : this.lodGeometries[lodLevel].clone();
@@ -3581,32 +3666,32 @@ export class GrassVisualManager implements QuadTreeListener {
     try {
       geo.setAttribute(
         "instanceOffset",
-        new THREE.InstancedBufferAttribute(data.offsets, 3),
+        new THREE.InstancedBufferAttribute(renderData.offsets, 3),
       );
       geo.setAttribute(
         "instanceRotScaleHash",
-        new THREE.InstancedBufferAttribute(data.rotScaleHash, 3),
+        new THREE.InstancedBufferAttribute(renderData.rotScaleHash, 3),
       );
       setColorTintInterleaved(
         geo,
-        data.groundColors,
-        data.grassTints,
+        renderData.groundColors,
+        renderData.grassTints,
         data.count,
       );
       geo.setAttribute(
         "instanceGroundNormal",
-        new THREE.InstancedBufferAttribute(data.groundNormals, 3),
+        new THREE.InstancedBufferAttribute(renderData.groundNormals, 3),
       );
 
       if (blades)
         material = createGroundedGrassMaterial(
           baseMaterial,
           geo,
-          blades.rootDeltas,
+          adaptive?.rootDeltas ?? blades.rootDeltas,
           data.count,
           lodLevel,
           this.geometryLayout,
-          blades.bladeVisibility,
+          adaptive?.bladeVisibility ?? blades.bladeVisibility,
         );
       if (material instanceof MeshSSSNodeMaterial)
         publishFineGrassLighting(material, this.geometryLayout);
@@ -3665,6 +3750,16 @@ export class GrassVisualManager implements QuadTreeListener {
         ...(data.placementCoverage
           ? { grassPlacementCoverage: data.placementCoverage }
           : {}),
+        ...(adaptive
+          ? {
+              grassAdaptiveSubmission: {
+                mode: this.submissionCandidate,
+                renderOrder: adaptive.renderOrder,
+                renderSourceIndices: adaptive.renderSourceIndices,
+                quadrants: adaptive.quadrants,
+              },
+            }
+          : {}),
       };
 
       if (mesh instanceof THREE.InstancedMesh) {
@@ -3706,6 +3801,17 @@ export class GrassVisualManager implements QuadTreeListener {
           new GrassClumpInvariantCache(mesh, this.clumpFieldFactory),
         );
 
+      if (adaptive) {
+        const owner = createAdaptiveGrassDrawOwner(
+          mesh,
+          adaptive,
+          this.adaptiveGrassRenderer!,
+          (touched) => this.touchedAdaptiveGrassOwners.add(touched),
+        );
+        if (!owner) throw new Error("Adaptive grass renderer feature changed");
+        this.adaptiveGrassOwners.set(mesh, owner);
+      }
+
       this.container.add(mesh);
       this.chunks.set(key, {
         nodeId: node.id,
@@ -3718,9 +3824,13 @@ export class GrassVisualManager implements QuadTreeListener {
     } catch (error) {
       mesh?.removeFromParent();
       const release = () => {
-        geo.dispose();
-        if (material !== baseMaterial) material.dispose();
-        mesh?.dispose();
+        try {
+          if (mesh) this.retireAdaptiveGrassOwner(mesh);
+        } finally {
+          geo.dispose();
+          if (material !== baseMaterial) material.dispose();
+          mesh?.dispose();
+        }
       };
       const cache = mesh ? this.clumpInvariantCaches.get(mesh) : null;
       if (mesh) this.clumpInvariantCaches.delete(mesh);
@@ -3874,6 +3984,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.destroyed = true;
     this.meadowDetailMaterialFactory = null;
     this.reflectionGrassCuller = null;
+    this.adaptiveGrassRenderer = null;
     this.pendingNodes.length = 0;
     this.settledWorkerResults.length = 0;
     this.workerInflight.clear();

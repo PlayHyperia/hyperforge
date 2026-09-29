@@ -138,6 +138,7 @@ export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassGeometryCandidate =
   "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
 export type GrassInstancingCandidate = "attributes-v1";
+export type GrassSubmissionCandidate = "adaptive-ranges-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -320,6 +321,29 @@ export function resolveGrassInstancingCandidate(
   if (resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1")
     throw new Error("Grass instancing requires the explicit meadow field");
   return "attributes-v1";
+}
+
+/** Submission-only trial, captured once; absence never changes existing work. */
+export function resolveGrassSubmissionCandidate(
+  win?: Window,
+): GrassSubmissionCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassSubmission") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "adaptive-ranges-v1")
+    throw new Error("Unknown or duplicate grass submission candidate");
+  if (
+    isStreamingLikeViewport(windowRef) ||
+    resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1" ||
+    resolveGrassGroundingExecution(windowRef) !== "worker-v1" ||
+    params?.has("grassInstancing")
+  )
+    throw new Error(
+      "Adaptive grass submission requires the ordinary worker-backed meadow field without a separate instancing trial",
+    );
+  return "adaptive-ranges-v1";
 }
 
 /** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
