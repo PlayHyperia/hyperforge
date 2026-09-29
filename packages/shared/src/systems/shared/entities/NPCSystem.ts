@@ -7,7 +7,7 @@ import type { Entity, World } from "../../../types/index";
 import { getEntitiesSystem, getSystem } from "../../../utils/SystemUtils";
 import { SHOP_ITEMS, getItem } from "../../../data/items";
 import type { NPCLocation } from "../../../data/world-areas";
-import { ALL_WORLD_AREAS, STARTER_TOWNS } from "../../../data/world-areas";
+import { STARTER_TOWNS } from "../../../data/world-areas";
 import {
   BankTransaction,
   PlayerBankStorage,
@@ -20,16 +20,12 @@ import { SystemBase } from "../infrastructure/SystemBase";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { InventorySystem } from "../character/InventorySystem";
 import { EventType } from "../../../types/events";
-// NOTE: Import directly to avoid circular dependency through barrel file
-import { TerrainSystem } from "../world/TerrainSystem";
-import { groundToTerrain } from "../../../utils/game/EntityUtils";
 
 export class NPCSystem extends SystemBase {
   private bankStorage: Map<string, PlayerBankStorage> = new Map();
   private storeInventory: Map<string, number> = new Map();
   private transactionHistory: Array<BankTransaction | StoreTransaction> = [];
   private towns = new Map<string, Town>();
-  private terrainSystem!: TerrainSystem;
 
   // Store prices (multipliers of base item value)
   private readonly BUY_PRICE_MULTIPLIER = 1.2; // 20% markup
@@ -48,9 +44,6 @@ export class NPCSystem extends SystemBase {
   }
 
   async init(): Promise<void> {
-    // Get terrain system reference
-    this.terrainSystem = this.world.getSystem("terrain")!;
-
     // Subscribe to NPC interaction events using type-safe event system
     this.subscribe(
       EventType.NPC_INTERACTION,
@@ -79,13 +72,6 @@ export class NPCSystem extends SystemBase {
     // server handler (packages/server/src/systems/ServerNetwork/handlers/store.ts)
     // with database transactions, input validation, and rate limiting.
 
-    // Subscribe to terrain generation to spawn NPCs and towns
-    this.subscribe(EventType.TERRAIN_TILE_GENERATED, (data) =>
-      this.onTileGenerated(
-        data as { tileX: number; tileZ: number; biome: string },
-      ),
-    );
-
     // Generate towns immediately as they are static placements
     this.generateTowns();
   }
@@ -93,81 +79,6 @@ export class NPCSystem extends SystemBase {
   async start(): Promise<void> {
     // NPCs are now spawned by MobNPCSpawnerSystem from world-areas manifest
     // No need to spawn here - avoids duplicates
-  }
-
-  /**
-   * Spawn a default bank clerk for initial world content
-   * Position matches bank_clerk in world-areas.json/world-areas.ts
-   */
-  private async spawnDefaultNPC(): Promise<void> {
-    // Wait for EntityManager to be ready
-    let entityManager = this.world.getSystem("entity-manager") as {
-      spawnEntity?: (config: unknown) => Promise<unknown>;
-    } | null;
-    let attempts = 0;
-
-    while ((!entityManager || !entityManager.spawnEntity) && attempts < 100) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      entityManager = this.world.getSystem("entity-manager") as {
-        spawnEntity?: (config: unknown) => Promise<unknown>;
-      } | null;
-      attempts++;
-
-      if (attempts % 10 === 0) {
-        // Log progress every 10 attempts
-      }
-    }
-
-    if (!entityManager?.spawnEntity) {
-      console.error(
-        "[NPCSystem] ❌ EntityManager never became available after 10 seconds!",
-      );
-      return;
-    }
-
-    // Use terrain height at spawn position, fallback to 43
-    const terrainSystem = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number | null;
-    } | null;
-    const groundY = terrainSystem?.getHeightAt?.(5, -5) ?? 43;
-
-    const npcConfig = {
-      id: "bank_clerk_1",
-      type: "npc" as const,
-      name: "Bank Clerk",
-      position: { x: 5, y: groundY, z: -5 }, // At ground level (model pivot handles foot placement)
-      rotation: { x: 0, y: 0, z: 0, w: 1 },
-      scale: { x: 100, y: 100, z: 100 }, // Scale up rigged model
-      visible: true,
-      interactable: true,
-      interactionType: "talk",
-      interactionDistance: 3,
-      description: "A helpful bank clerk who manages deposits and withdrawals",
-      model: "asset://models/human/human_rigged.glb",
-      properties: {},
-      // NPCEntity specific
-      npcType: "bank",
-      npcId: "bank_clerk",
-      dialogueLines: [], // Dialogue handled by DialogueSystem from npcs.json
-      services: ["bank"],
-      inventory: [],
-      skillsOffered: [],
-      questsAvailable: [],
-    };
-
-    try {
-      await entityManager.spawnEntity(npcConfig);
-
-      // Verify it's in the world
-      const verify = this.world.entities.get("bank_clerk_1");
-      if (verify) {
-        console.log(
-          "[NPCSystem] ✅ Bank Clerk spawned at (5, " + groundY + ", -5)",
-        );
-      }
-    } catch (err) {
-      console.error("[NPCSystem] ❌ Error spawning bank clerk:", err);
-    }
   }
 
   /**
@@ -521,91 +432,6 @@ export class NPCSystem extends SystemBase {
           amount: "totalPrice" in transaction ? transaction.totalPrice : 0,
         })),
     };
-  }
-
-  /**
-   * Handle terrain tile generation - spawn NPCs and towns for new tiles
-   */
-  private onTileGenerated(tileData: {
-    tileX: number;
-    tileZ: number;
-    biome: string;
-  }): void {
-    const TILE_SIZE = this.terrainSystem.getTileSize();
-    const tileBounds = {
-      minX: tileData.tileX * TILE_SIZE,
-      maxX: (tileData.tileX + 1) * TILE_SIZE,
-      minZ: tileData.tileZ * TILE_SIZE,
-      maxZ: (tileData.tileZ + 1) * TILE_SIZE,
-    };
-
-    // Find which world areas overlap with this new tile
-    const overlappingAreas: Array<
-      (typeof ALL_WORLD_AREAS)[keyof typeof ALL_WORLD_AREAS]
-    > = [];
-    for (const area of Object.values(ALL_WORLD_AREAS)) {
-      const areaBounds = area.bounds;
-      // Simple bounding box overlap check
-      if (
-        tileBounds.minX < areaBounds.maxX &&
-        tileBounds.maxX > areaBounds.minX &&
-        tileBounds.minZ < areaBounds.maxZ &&
-        tileBounds.maxZ > areaBounds.minZ
-      ) {
-        overlappingAreas.push(area);
-      }
-    }
-
-    if (overlappingAreas.length > 0) {
-      this.generateContentForTile(tileData, overlappingAreas);
-    }
-  }
-
-  /**
-   * Generate NPCs for overlapping world areas
-   */
-  private generateContentForTile(
-    tileData: { tileX: number; tileZ: number },
-    areas: Array<(typeof ALL_WORLD_AREAS)[keyof typeof ALL_WORLD_AREAS]>,
-  ): void {
-    for (const area of areas) {
-      // Spawn NPCs from world-areas.ts data if they fall within this tile
-      this.generateNPCsForArea(area, tileData);
-    }
-  }
-
-  /**
-   * Spawn NPCs from a world area when its tile generates
-   */
-  private generateNPCsForArea(
-    area: (typeof ALL_WORLD_AREAS)[keyof typeof ALL_WORLD_AREAS],
-    tileData: { tileX: number; tileZ: number },
-  ): void {
-    const TILE_SIZE = this.terrainSystem.getTileSize();
-    for (const npc of area.npcs) {
-      const npcTileX = Math.floor(npc.position.x / TILE_SIZE);
-      const npcTileZ = Math.floor(npc.position.z / TILE_SIZE);
-
-      if (npcTileX === tileData.tileX && npcTileZ === tileData.tileZ) {
-        // Ground NPC to terrain
-        const groundedPosition = groundToTerrain(
-          this.world,
-          npc.position,
-          0.1,
-          Infinity,
-        );
-
-        this.emitTypedEvent(EventType.NPC_SPAWN_REQUEST, {
-          npcId: npc.id,
-          name: npc.name,
-          type: npc.type,
-          position: groundedPosition,
-          services: npc.services,
-          modelPath: npc.modelPath,
-          storeId: npc.storeId,
-        });
-      }
-    }
   }
 
   /**

@@ -57,6 +57,15 @@ export class MobNPCSpawnerSystem extends SystemBase {
   private lastSpawnTime = 0;
   private readonly SPAWN_COOLDOWN = 5000; // 5 seconds between spawns
   private readonly BIOME_SPAWNS_PER_TILE = 3;
+  private npcSpawningStopped = false;
+  private startPromise: Promise<void> | null = null;
+
+  // EntityManager publishes only after async Entity.init. Reserve before that
+  // await, across spawner instances sharing the same authoritative manager.
+  private static readonly pendingNPCPlacements = new WeakMap<
+    EntityManager,
+    Map<string, Promise<boolean>>
+  >();
 
   private static readonly banditCapIds = new Set<string>(
     MOB_CONSTANTS.BANDIT_MOB_IDS_FOR_GLOBAL_CAP,
@@ -104,17 +113,83 @@ export class MobNPCSpawnerSystem extends SystemBase {
     );
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
     // Spawn NPCs immediately at world start (they're static, not reactive to terrain)
     // NPCs like bank clerks, shopkeepers should be available from the start
-    if (this.world.isServer) {
+    if (!this.world.isServer || this.npcSpawningStopped)
+      return Promise.resolve();
+    if (this.startPromise) return this.startPromise;
+    const start = Promise.resolve().then(async () => {
       await this.spawnAllNPCsFromManifest();
+      if (this.npcSpawningStopped) return;
       // Spawn procedural building NPCs inside town buildings
       await this.spawnBuildingNPCs();
+      if (this.npcSpawningStopped) return;
       // Spawn a default test goblin near origin for testing combat
       await this.spawnDefaultMob();
-    }
+    });
+    this.startPromise = start.finally(() => {
+      this.startPromise = null;
+    });
     // Additional mobs are spawned reactively as terrain tiles generate via biomes.json
+    return this.startPromise;
+  }
+
+  /** Static NPCs remain resident across tile reloads and spawner replacement. */
+  private static async npcPlacementId(
+    prefix: string,
+    placement: readonly (string | number)[],
+  ): Promise<string> {
+    // A deterministic 160-bit SHA-256 suffix keeps the established prefix and
+    // current manifest IDs within the entity protocol's 64-character alphabet.
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify(placement)),
+    );
+    const suffix = Array.from(new Uint8Array(digest).subarray(0, 20), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return `${prefix}${suffix}`;
+  }
+
+  private async spawnNPCPlacement(
+    manager: EntityManager,
+    config: Parameters<EntityManager["spawnEntity"]>[0],
+    onSpawn?: (
+      entity: NonNullable<Awaited<ReturnType<EntityManager["spawnEntity"]>>>,
+    ) => void,
+  ): Promise<boolean> {
+    if (this.npcSpawningStopped) return false;
+    let pending = MobNPCSpawnerSystem.pendingNPCPlacements.get(manager);
+    if (!pending) {
+      pending = new Map();
+      MobNPCSpawnerSystem.pendingNPCPlacements.set(manager, pending);
+    }
+    const existing = pending.get(config.id);
+    if (existing) {
+      await existing;
+      // An old owner may have been destroyed while initializing. A live
+      // replacement can retry after that owner's cleanup, never concurrently.
+      return this.spawnNPCPlacement(manager, config, onSpawn);
+    }
+    if (manager.getEntity(config.id)) return false;
+    const spawn = Promise.resolve().then(async () => {
+      if (this.npcSpawningStopped) return false;
+      const entity = await manager.spawnEntity(config);
+      if (!entity) return false;
+      if (this.npcSpawningStopped) {
+        if (manager.getEntity(config.id) === entity)
+          manager.destroyEntity(config.id);
+        return false;
+      }
+      onSpawn?.(entity);
+      return true;
+    });
+    const reservation = spawn.finally(() => {
+      if (pending.get(config.id) === reservation) pending.delete(config.id);
+    });
+    pending.set(config.id, reservation);
+    return reservation;
   }
 
   /**
@@ -126,12 +201,13 @@ export class MobNPCSpawnerSystem extends SystemBase {
     let entityManager = this.world.getSystem<EntityManager>("entity-manager");
     let attempts = 0;
 
-    while (!entityManager && attempts < 50) {
+    while (!entityManager && attempts < 50 && !this.npcSpawningStopped) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       entityManager = this.world.getSystem<EntityManager>("entity-manager");
       attempts++;
     }
 
+    if (this.npcSpawningStopped) return;
     if (!entityManager) {
       console.error(
         "[MobNPCSpawnerSystem] ❌ EntityManager not available for NPC spawning",
@@ -145,6 +221,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
       if (!area.npcs || area.npcs.length === 0) continue;
 
       for (const npc of area.npcs) {
+        if (this.npcSpawningStopped) return;
         // Get ground height at NPC position
         const groundY = terrainSystem.getHeightAt(
           npc.position.x,
@@ -172,7 +249,14 @@ export class MobNPCSpawnerSystem extends SystemBase {
         const npcName = npcManifestData.name || npc.id;
 
         const npcConfig = {
-          id: `npc_${npc.id}_${Date.now()}`,
+          // Authored physical placement, not mutable service metadata or the
+          // terrain-resolved height. Array reordering must not change identity.
+          id: await MobNPCSpawnerSystem.npcPlacementId(`npc_${npc.id}_`, [
+            area.id,
+            npc.position.x,
+            npc.position.y,
+            npc.position.z,
+          ]),
           type: EntityType.NPC,
           name: npcName, // From npcs.json
           position: { x: npc.position.x, y: spawnY, z: npc.position.z },
@@ -207,16 +291,22 @@ export class MobNPCSpawnerSystem extends SystemBase {
         };
 
         try {
-          const spawnedNPC = await entityManager.spawnEntity(npcConfig);
-          if (npc.storeId && spawnedNPC) {
-            this.emitTypedEvent(EventType.STORE_REGISTER_NPC, {
-              npcId: spawnedNPC.id,
-              storeId: npc.storeId,
-              position: npc.position,
-              name: npcName,
-              area: area.id,
-            });
-          }
+          const spawned = await this.spawnNPCPlacement(
+            entityManager,
+            npcConfig,
+            (spawnedNPC) => {
+              if (npc.storeId) {
+                this.emitTypedEvent(EventType.STORE_REGISTER_NPC, {
+                  npcId: spawnedNPC.id,
+                  storeId: npc.storeId,
+                  position: npc.position,
+                  name: npcName,
+                  area: area.id,
+                });
+              }
+            },
+          );
+          if (!spawned) continue;
           console.log(
             `[MobNPCSpawnerSystem] ✅ Spawned NPC ${npc.id} (${npcName}) at (${npc.position.x}, ${spawnY.toFixed(2)}, ${npc.position.z})`,
           );
@@ -329,6 +419,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
 
     let spawnedCount = 0;
     for (const point of spawnPoints) {
+      if (this.npcSpawningStopped) return;
       const config = MobNPCSpawnerSystem.BUILDING_NPC_CONFIG[point.npcType];
       if (!config) {
         console.warn(
@@ -339,7 +430,10 @@ export class MobNPCSpawnerSystem extends SystemBase {
 
       // Unique NPC name per building: e.g. "Innkeeper of Oakvale"
       const npcName = `${config.name} of ${point.townName}`;
-      const npcId = `building_npc_${point.buildingId}_${Date.now()}`;
+      const npcId = await MobNPCSpawnerSystem.npcPlacementId("building_npc_", [
+        point.townId,
+        point.buildingId,
+      ]);
 
       // Convert rotation (radians) to quaternion for Y-axis rotation
       const halfAngle = point.rotation / 2;
@@ -377,8 +471,8 @@ export class MobNPCSpawnerSystem extends SystemBase {
       };
 
       try {
-        await entityManager.spawnEntity(npcConfig);
-        spawnedCount++;
+        if (await this.spawnNPCPlacement(entityManager, npcConfig))
+          spawnedCount++;
       } catch (err) {
         console.error(
           `[MobNPCSpawnerSystem] ❌ Failed to spawn building NPC ${npcId}:`,
@@ -1157,6 +1251,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
    * Cleanup when system is destroyed
    */
   destroy(): void {
+    this.npcSpawningStopped = true;
     // Clear all spawn tracking
     this.spawnedMobs.clear();
     this.spawnedMobDetails.clear();
