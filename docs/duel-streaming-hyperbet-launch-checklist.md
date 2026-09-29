@@ -4,6 +4,12 @@
 
 This is the execution queue, not a claim that the island already meets the visual or performance target. Avatar/equipment polish remains deferred.
 
+### Native167 far-grass rejection
+
+- [x] **Reject normal-gameplay promotion:** native 2× midday/dawn/low-moon review shows thinner, flatter far grass. The root-to-tip triangle omits the ribbon's broad middle; keep `grassFarGeometry=triangle-v1` off. Matching 94 chunk names/counts/matrices and 162,220 metadata clumps is not actual buffer-hash or pixel parity. [Evidence](grass-canopy-visibility-research-20260928.md#native167-far-grass-outcome-reject-gameplay-promotion).
+- [x] **Count reduction, no meaningful performance win:** main/mirror grass triangles fall 1,890,705→1,107,537 / 1,880,625→1,104,177 with unchanged grass draws. Last-29-sample envelope P50 is 82.182→80.871 ms, P95 worsens 94.765→97.190 ms; neither exclusive grass cost nor display FPS. Both runs record 31 samples / 248 passes, no sampling/GPU errors or loss, 93/93 query resources destroyed and controls restored. Private167 is STOPPED with no errors, protected state unchanged, disposable database removed and private ports clear; public3333/build161 is preserved.
+- [ ] **Coverage gate before another far-geometry trial:** test silhouette/coverage across blade angles and bends before native review; counts/root parity alone are insufficient. Do not compensate with root-tip width, density or lighting sweeps. Broader world art and sustained 2× performance remain open.
+
 ### Native166 bounded follow-up
 
 - [x] **Reflection no-saving result explained:** all ten guards pass for all 23 grass bounds, plane differences are zero, and every bound overlaps the `[0,342,1512,520]` crop in a `1512×862` target. Hooks/flag restore; this view offers no whole-cell saving. Keep the candidate off. [Guard receipt](/Users/lucid/Downloads/hyperia-native166-footprint-guards.json), SHA256 `c29d811d2e6997b52470222f2e18c8d9d9436ea0140779fc8556b33cb9e3beb5`.
