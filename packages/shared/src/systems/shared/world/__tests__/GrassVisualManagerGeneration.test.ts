@@ -561,7 +561,6 @@ async function coastalFixture(
     lighting: ConstructorParameters<typeof GrassVisualManager>[15];
     geometry: ConstructorParameters<typeof GrassVisualManager>[17];
     instancing?: ConstructorParameters<typeof GrassVisualManager>[19];
-    farGeometry?: ConstructorParameters<typeof GrassVisualManager>[20];
   },
   historicalConstraints?: "pre-fe4a6f1ab",
 ) {
@@ -831,7 +830,6 @@ async function coastalFixture(
     rendering?.geometry,
     undefined,
     rendering?.instancing,
-    rendering?.farGeometry,
   );
   if (geometryRecipe === "historical-linear") {
     // Historical-only fixture input, installed before any generation/update.
@@ -1145,159 +1143,6 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
       f.close();
     }
   });
-
-  it.each([0, 1, 2] as const)(
-    "keeps far triangle production placement, masks, roots and swept bounds exact at LOD%s",
-    async (lod) => {
-      let baseline: unknown;
-      let baselineIndex: number[] = [];
-      for (const farGeometry of [undefined, "triangle-v1"] as const) {
-        const f = await coastalFixture(
-          true,
-          [350, 350],
-          false,
-          {
-            ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
-            roadClearance: "per-blade-v1",
-          },
-          "current",
-          "fine-meadow-green-v1",
-          "current-canopy",
-          undefined,
-          undefined,
-          {
-            lighting: "leaf-volume-v1",
-            geometry: "meadow-field-v1",
-            farGeometry,
-          },
-        );
-        try {
-          const key = "gcell_v1_14_12";
-          const work = f.manager["liveWorkUnits"].get(key)!;
-          expect(work).toBeDefined();
-          f.manager["lodFocusX"] =
-            work.bounds.maxX +
-            (lod === 0
-              ? 0
-              : lod === 1
-                ? (f.manager["fineLodBoundary"](0) +
-                    f.manager["fineLodBoundary"](1)) /
-                  2
-                : f.manager["fineLodBoundary"](1) + 10);
-          f.manager["lodFocusZ"] = (work.bounds.minZ + work.bounds.maxZ) / 2;
-          expect(f.manager["desiredLod"](work)).toBe(lod);
-          const worker = await actualWorker(
-            f.manager["createWorkerInput"](work, key, lod),
-          );
-          const fallback = f.manager["generateInstanceData"](
-            work,
-            f.manager["spacingMultiplierForLod"](lod),
-          )!;
-          expect(worker.count).toBeGreaterThan(0);
-          expectPlacementParity(fallback, worker);
-          f.manager["settleWorkerResult"](
-            f.manager["createWorkerTicket"](work, key, lod, false),
-            worker,
-          );
-          f.manager["processSettledWorkerResults"]();
-          const entry = f.manager["groundingJobs"].get(key)!;
-          expect(entry).toBeDefined();
-          let slices = 0;
-          while (entry.job.state.status === "running" && slices++ < 500)
-            f.manager["advanceGroundingJob"]();
-          expect(entry.job.state.status).toBe("ready");
-          if (entry.job.state.status !== "ready")
-            throw new Error("Real retained-terrain grounding must finish");
-          const ready = entry.job.state.result;
-          const chunk = f.manager["chunks"].get(key)!;
-          const mesh = chunk.mesh;
-          const geometry = mesh.geometry;
-          const material = mesh.material;
-          if (!(material instanceof MeshStandardNodeMaterial))
-            throw new Error("Expected actual grounded material");
-          expect(chunk.lodLevel).toBe(lod);
-          expect(mesh.count).toBeGreaterThan(0);
-          expect(mesh.count).toBe(ready.data.count);
-          expect(ready.bladeVisibility).toBeInstanceOf(Uint32Array);
-          expect(
-            geometry.getAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE).array,
-          ).toBe(ready.rootDeltas);
-          expect(
-            geometry.getAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE).array,
-          ).toBe(ready.bladeVisibility);
-          expect(geometry.index!.array).toEqual(
-            f.manager["lodGeometries"][lod].index!.array,
-          );
-          const snapshot = {
-            placement: worker,
-            data: ready.data,
-            roots: ready.rootDeltas,
-            masks: ready.bladeVisibility,
-            sourceIndices: ready.sourceIndices,
-            sweptBounds: ready.sweptBounds,
-            attributes: Object.fromEntries(
-              Object.entries(geometry.attributes).map(([name, value]) => [
-                name,
-                {
-                  itemSize: value.itemSize,
-                  normalized: value.normalized,
-                  array: Array.from(value.array),
-                },
-              ]),
-            ),
-            mesh: {
-              count: mesh.count,
-              position: mesh.position.toArray(),
-              receiveShadow: mesh.receiveShadow,
-              castShadow: mesh.castShadow,
-            },
-            bounds: {
-              box: mesh.boundingBox?.clone(),
-              sphere: mesh.boundingSphere?.clone(),
-              chunk: chunk.box.clone(),
-            },
-            material: {
-              type: material.type,
-              side: material.side,
-              transparent: material.transparent,
-              depthWrite: material.depthWrite,
-              alphaTest: material.alphaTest,
-            },
-          };
-          const indices = Array.from(geometry.index!.array);
-          if (farGeometry) {
-            expect(snapshot).toEqual(baseline);
-            expect(indices).toEqual(
-              lod === 2
-                ? Array.from({ length: 12 }, (_, blade) => [
-                    blade * 5,
-                    blade * 5 + 1,
-                    blade * 5 + 4,
-                  ]).flat()
-                : baselineIndex,
-            );
-            if (lod === 2)
-              expect(indices.length * 3).toBe(baselineIndex.length);
-          } else {
-            baseline = snapshot;
-            baselineIndex = indices;
-          }
-          let disposals = 0;
-          geometry.addEventListener("dispose", () => disposals++);
-          material.addEventListener("dispose", () => disposals++);
-          f.manager["retireGrassWork"](key);
-          expect(mesh.parent).toBeNull();
-          expect(f.manager["chunks"].has(key)).toBe(false);
-          expect(disposals).toBe(2);
-          f.manager["retireGrassWork"](key);
-          expect(disposals).toBe(2);
-        } finally {
-          f.close();
-        }
-      }
-    },
-    30_000,
-  );
 
   it.each([0, 1, 2] as const)(
     "keeps matrix-free production chunks equivalent through real placement, grounding, culling and retirement at LOD%s",

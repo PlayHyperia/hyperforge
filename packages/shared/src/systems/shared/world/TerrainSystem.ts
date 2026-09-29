@@ -210,7 +210,6 @@ import {
   resolveGrassGeometryCandidate,
   resolveGrassVergeEvaluation,
   resolveGrassInstancingCandidate,
-  resolveGrassFarGeometryCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -474,7 +473,6 @@ export class TerrainSystem extends System {
         geometry?: ReturnType<typeof resolveGrassGeometryCandidate>;
         vergeEvaluation?: ReturnType<typeof resolveGrassVergeEvaluation>;
         instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
-        farGeometry?: ReturnType<typeof resolveGrassFarGeometryCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -942,7 +940,6 @@ export class TerrainSystem extends System {
       const geometry = resolveGrassGeometryCandidate();
       const vergeEvaluation = resolveGrassVergeEvaluation();
       const instancing = resolveGrassInstancingCandidate();
-      const farGeometry = resolveGrassFarGeometryCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -961,7 +958,6 @@ export class TerrainSystem extends System {
         ...(geometry ? { geometry } : {}),
         ...(vergeEvaluation ? { vergeEvaluation } : {}),
         ...(instancing ? { instancing } : {}),
-        ...(farGeometry ? { farGeometry } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3086,7 +3082,6 @@ export class TerrainSystem extends System {
         grassSelection.geometry,
         grassSelection.vergeEvaluation,
         grassSelection.instancing,
-        grassSelection.farGeometry,
       );
       this.grassVisualManager.setReflectionGrassCuller(
         this.waterSystem.intersectsReflectionGrassBounds,

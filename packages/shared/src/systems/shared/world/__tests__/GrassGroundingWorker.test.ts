@@ -38,7 +38,6 @@ import { gridGeometry } from "./terrain-grid.fixture";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
 import {
   createClumpGeometry,
-  createFarMeadowTriangleGeometry,
   createPairedMeadowClumpGeometry,
   FINE_GRASS_MEADOW_FIELD_SHAPE,
 } from "../GrassVisualManager";
@@ -232,28 +231,20 @@ afterEach(async () => {
 });
 
 describe("actual isolated grass grounding worker", () => {
-  it.each(
-    (
-      ["fine-meadow-paired-near-v1", "fine-meadow-far-triangle-v1"] as const
-    ).flatMap((geometryLayout) =>
-      ([0, 1, 2] as const).map((lod) => ({ geometryLayout, lod })),
-    ),
-  )(
-    "roundtrips $geometryLayout LOD$lod through real cold/cached fitting with one root pair and bit per slot",
-    async ({ geometryLayout, lod }) => {
+  it.each([0, 1, 2] as const)(
+    "roundtrips paired-family LOD%s through real cold/cached fitting with one root pair and bit per slot",
+    async (lod) => {
       const fixture = createSameFaceCase("fine-lod0");
+      const geometryLayout = "fine-meadow-paired-near-v1";
       const tier = getGrassBladeLayout(lod, geometryLayout);
-      const paired = geometryLayout === "fine-meadow-paired-near-v1";
       const geometry =
-        paired && lod === 0
+        lod === 0
           ? createPairedMeadowClumpGeometry()
-          : !paired && lod === 2
-            ? createFarMeadowTriangleGeometry()
-            : createClumpGeometry(
-                tier.bladesPerClump,
-                tier.bladeSegments,
-                FINE_GRASS_MEADOW_FIELD_SHAPE,
-              );
+          : createClumpGeometry(
+              tier.bladesPerClump,
+              2,
+              FINE_GRASS_MEADOW_FIELD_SHAPE,
+            );
       fixture.geometries.push(geometry);
       fixture.request.geometry = geometry;
       fixture.request.geometryLayout = geometryLayout;
@@ -290,12 +281,8 @@ describe("actual isolated grass grounding worker", () => {
           );
           expect(cold.geometry.uv).toEqual(geometry.getAttribute("uv").array);
           expect(cold.geometry.index).toEqual(geometry.index!.array);
-          expect(cold.geometry.position).toHaveLength(
-            (paired ? [168, 105, 60] : [147, 105, 60])[lod] * 3,
-          );
-          expect(cold.geometry.index).toHaveLength(
-            (paired ? [126, 63, 36] : [105, 63, 12])[lod] * 3,
-          );
+          expect(cold.geometry.position).toHaveLength([168, 105, 60][lod] * 3);
+          expect(cold.geometry.index).toHaveLength([126, 63, 36][lod] * 3);
           const worker = await actualWorker();
           const packet = cached
             ? (await prepareCachedGrassGroundingWorkerRequest(worker, cold))

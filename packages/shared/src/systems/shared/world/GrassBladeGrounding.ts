@@ -16,7 +16,6 @@ import {
   getGrassBladeWindFactor,
   getFoldedGrassBladeIndices,
   isFoldedGrassBladeLayout,
-  isFarTriangleGrassBladeLayout,
   isMeadowGrassBladeLayout,
   isPairedGrassBladeLayout,
   type FineGrassGeometryLayout,
@@ -546,10 +545,6 @@ function* validateGeometry(
       }
       for (const value of getFoldedGrassBladeIndices(segments))
         expectIndex(first + value);
-    } else if (isFarTriangleGrassBladeLayout(lod, geometryLayout)) {
-      // Render only the root edge and tip, but retain all source stations in
-      // the vertex stream below: clearance/root fitting must not shrink.
-      for (const value of [first, first + 1, tip]) expectIndex(value);
     } else {
       for (let row = 0; row < segments - 1; row++) {
         const a = first + row * 2;

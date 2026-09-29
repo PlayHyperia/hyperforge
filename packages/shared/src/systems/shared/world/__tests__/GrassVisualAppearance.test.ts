@@ -81,7 +81,6 @@ function manager(
   geometry?: ConstructorParameters<typeof GrassVisualManager>[17],
   vergeEvaluation?: ConstructorParameters<typeof GrassVisualManager>[18],
   instancing?: ConstructorParameters<typeof GrassVisualManager>[19],
-  farGeometry?: ConstructorParameters<typeof GrassVisualManager>[20],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -125,7 +124,6 @@ function manager(
     geometry,
     vergeEvaluation,
     instancing,
-    farGeometry,
   );
 }
 
@@ -571,153 +569,6 @@ describe("matrix-free meadow owner admission and precompilation (CPU only)", () 
     const owner = manager(...invalid);
     try {
       expect(owner["instancingCandidate"]).toBeUndefined();
-    } finally {
-      owner.destroy();
-    }
-  });
-});
-
-describe("far triangle meadow owner admission and precompilation (CPU only)", () => {
-  const options: Parameters<typeof manager> = [
-    { ...FINE_MEADOW_GRASS_VISUAL_PROFILE, roadClearance: "per-blade-v1" },
-    SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
-    true,
-    "fine-meadow-v1",
-    undefined,
-    "leaf-volume-v1",
-    undefined,
-    "meadow-field-v1",
-    undefined,
-    undefined,
-    "triangle-v1",
-  ];
-
-  it("changes only far indices in all three real precompile owners and disposes their borrowed clones", async () => {
-    const baselineOptions: Parameters<typeof manager> = [...options];
-    baselineOptions[10] = undefined;
-    const baseline = manager(...baselineOptions);
-    const candidate = manager(...options);
-    const references: THREE.InstancedMesh[] = [];
-    const disposals = [0, 0, 0];
-    let borrowedDisposals = 0;
-    let observed = 0;
-    try {
-      expect(baseline.getProfileReceipt()).not.toHaveProperty(
-        "farGeometryCandidate",
-      );
-      expect(candidate.getProfileReceipt()).toEqual({
-        ...baseline.getProfileReceipt(),
-        geometryLayout: "fine-meadow-far-triangle-v1",
-        farGeometryCandidate: "triangle-v1",
-      });
-      candidate["material"].addEventListener(
-        "dispose",
-        () => borrowedDisposals++,
-      );
-      for (const template of candidate["lodGeometries"])
-        template.addEventListener("dispose", () => borrowedDisposals++);
-      await baseline.precompileRepresentativeChunk(async (object) => {
-        if (!(object instanceof THREE.InstancedMesh))
-          throw new Error("Expected actual baseline representative");
-        references.push(object);
-      });
-      await candidate.precompileRepresentativeChunk(async (object) => {
-        const lod = observed++;
-        const before = references[lod];
-        if (
-          !(object instanceof THREE.InstancedMesh) ||
-          !(object.material instanceof MeshSSSNodeMaterial) ||
-          !(before.material instanceof MeshSSSNodeMaterial)
-        )
-          throw new Error("Expected actual far-triangle SSS representative");
-        expect(object.count).toBe(1);
-        expect(Object.keys(object.geometry.attributes)).toEqual(
-          Object.keys(before.geometry.attributes),
-        );
-        for (const name of Object.keys(before.geometry.attributes)) {
-          const actual = object.geometry.getAttribute(name);
-          const expected = before.geometry.getAttribute(name);
-          expect(actual.array).toEqual(expected.array);
-          expect(actual.itemSize).toBe(expected.itemSize);
-          expect(actual.count).toBe(expected.count);
-        }
-        const expectedIndices =
-          lod === 2
-            ? Array.from({ length: 12 }, (_, blade) => [
-                blade * 5,
-                blade * 5 + 1,
-                blade * 5 + 4,
-              ]).flat()
-            : Array.from(before.geometry.index!.array);
-        expect(Array.from(object.geometry.index!.array)).toEqual(
-          expectedIndices,
-        );
-        expect(object.geometry.getAttribute("position").count).toBe(
-          lod === 0 ? 147 : lod === 1 ? 105 : 60,
-        );
-        for (const flag of [
-          "receiveShadow",
-          "castShadow",
-          "frustumCulled",
-        ] as const)
-          expect(object[flag]).toBe(before[flag]);
-        for (const flag of [
-          "side",
-          "transparent",
-          "depthWrite",
-          "depthTest",
-          "alphaTest",
-          "alphaToCoverage",
-        ] as const)
-          expect(object.material[flag]).toBe(before.material[flag]);
-        object.geometry.addEventListener("dispose", () => disposals[0]++);
-        object.material.addEventListener("dispose", () => disposals[1]++);
-        object.addEventListener("dispose", () => disposals[2]++);
-      });
-      expect(observed).toBe(3);
-      expect(disposals).toEqual([3, 3, 3]);
-      expect(borrowedDisposals).toBe(0);
-      expect(candidate["chunks"].size).toBe(0);
-      expect(candidate["container"].children).toHaveLength(0);
-    } finally {
-      candidate.destroy();
-      baseline.destroy();
-    }
-  });
-
-  it.each([null, "", "unknown", " triangle-v1", false, {}, ["triangle-v1"]])(
-    "rejects an invalid far triangle selection %j",
-    (value) => {
-      const invalid: unknown[] = [...options];
-      invalid[10] = value;
-      expect(() => Reflect.apply(manager, undefined, invalid)).toThrow(
-        "Far grass geometry",
-      );
-    },
-  );
-
-  it("rejects unsupported profiles, missing workers, lighting and geometry while omission stays inert", () => {
-    const invalid: Parameters<typeof manager>[] = [];
-    const ordinary: Parameters<typeof manager> = [...options];
-    ordinary[0] = {};
-    ordinary[3] = undefined;
-    ordinary[5] = undefined;
-    ordinary[7] = undefined;
-    invalid.push(ordinary);
-    for (const index of [2, 5, 7] as const) {
-      const changed: Parameters<typeof manager> = [...options];
-      if (index === 2) changed[2] = false;
-      else changed[index] = undefined;
-      invalid.push(changed);
-    }
-    for (const args of invalid) expect(() => manager(...args)).toThrow();
-    ordinary[10] = undefined;
-    const owner = manager(...ordinary);
-    try {
-      expect(owner["farGeometryCandidate"]).toBeUndefined();
-      expect(owner.getProfileReceipt()).not.toHaveProperty(
-        "farGeometryCandidate",
-      );
     } finally {
       owner.destroy();
     }

@@ -32,7 +32,6 @@ import {
   resolveGrassGeometryCandidate,
   resolveGrassVergeEvaluation,
   resolveGrassInstancingCandidate,
-  resolveGrassFarGeometryCandidate,
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
@@ -2979,125 +2978,9 @@ describe("explicit attribute-only grass instancing", () => {
       1,
     );
     expect(source).toMatch(
-      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*grassSelection\.farGeometry,\s*\);/u,
+      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*\);/u,
     );
   });
-});
-
-describe("explicit far grass indexed geometry", () => {
-  const dependencies =
-    "worldPreview=retained-v1&streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1";
-  const selected = "grassFarGeometry=triangle-v1";
-  const dom = new JSDOM("", { url: "http://localhost:3344/" });
-  afterAll(() => dom.window.close());
-  function visit(query: string, path = "/"): Window {
-    dom.reconfigure({ url: `http://localhost:3344${path}?${query}` });
-    return dom.window as unknown as Window;
-  }
-
-  it("leaves omission inert even with malformed independent selectors", () => {
-    expect(resolveGrassFarGeometryCandidate()).toBeUndefined();
-    for (const query of [
-      "",
-      dependencies,
-      "grassGeometry=invalid&grassInstancing=invalid",
-    ])
-      expect(resolveGrassFarGeometryCandidate(visit(query))).toBeUndefined();
-  });
-
-  it("admits only an explicit ordinary meadow field and preserves peer choices", () => {
-    const peers = [
-      resolveGrassGeometryCandidate,
-      resolveGrassLightingCandidate,
-      resolveGrassInstancingCandidate,
-      resolveGrassVergeEvaluation,
-      resolveGrassGroundingExecution,
-      resolveClientViewportRuntimeProfile,
-    ];
-    const before = peers.map((resolve) => resolve(visit(dependencies)));
-    const candidate = visit(`${dependencies}&${selected}`);
-    expect(resolveGrassFarGeometryCandidate(candidate)).toBe("triangle-v1");
-    expect(peers.map((resolve) => resolve(candidate))).toEqual(before);
-    for (const geometry of [
-      "sheath-close-v1",
-      "rooted-fan-v1",
-      "meadow-canopy-v1",
-    ])
-      expect(() =>
-        resolveGrassFarGeometryCandidate(
-          visit(
-            `${dependencies.replace("meadow-field-v1", geometry)}&${selected}`,
-          ),
-        ),
-      ).toThrow("explicit meadow field");
-    for (const key of [
-      "streamRenderProfile",
-      "grassAppearance",
-      "grassLighting",
-      "grassGeometry",
-    ]) {
-      for (const change of ["missing", "duplicate", "invalid"]) {
-        const params = new URLSearchParams(dependencies);
-        if (change === "missing") params.delete(key);
-        else if (change === "duplicate") params.append(key, params.get(key)!);
-        else params.set(key, "invalid");
-        expect(() =>
-          resolveGrassFarGeometryCandidate(visit(`${params}&${selected}`)),
-        ).toThrow();
-      }
-    }
-  });
-
-  it("rejects unknown/duplicate values and streaming routes", () => {
-    for (const suffix of [
-      "grassFarGeometry=",
-      "grassFarGeometry=true",
-      "grassFarGeometry=triangle-v2",
-      `${selected}&${selected}`,
-    ])
-      expect(() =>
-        resolveGrassFarGeometryCandidate(visit(`${dependencies}&${suffix}`)),
-      ).toThrow("Unknown or duplicate");
-    const stream = dependencies.replace("worldPreview=retained-v1&", "");
-    for (const [path, query] of [
-      ["/stream.html", stream],
-      ["/", `page=stream&${stream}`],
-      ["/", `${stream}&embedded=true`],
-    ])
-      expect(() =>
-        resolveGrassFarGeometryCandidate(visit(`${query}&${selected}`, path)),
-      ).toThrow();
-  });
-
-  it.each([false, true])(
-    "captures the actual terrain selection once, candidate=%s",
-    (enabled) => {
-      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
-      const world = new World();
-      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
-      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
-      Object.defineProperty(globalThis, "window", {
-        configurable: true,
-        value: visit(`${dependencies}${enabled ? `&${selected}` : ""}`),
-      });
-      try {
-        terrain["getCompactGrassColorGrade"]();
-        const selection = terrain["grassVisualSelection"]!;
-        expect(Object.isFrozen(selection)).toBe(true);
-        expect(selection.farGeometry).toBe(enabled ? "triangle-v1" : undefined);
-        expect(
-          Object.prototype.hasOwnProperty.call(selection, "farGeometry"),
-        ).toBe(enabled);
-        visit(`${dependencies}&grassFarGeometry=invalid`);
-        terrain["getCompactGrassColorGrade"]();
-        expect(terrain["grassVisualSelection"]).toBe(selection);
-      } finally {
-        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
-        else Reflect.deleteProperty(globalThis, "window");
-        world.destroy();
-      }
-    },
-  );
 });
 
 describe("explicit exact-zero ground sampling URL policy", () => {
@@ -3677,7 +3560,7 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(farGeometry \? \{ farGeometry \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,
