@@ -120,6 +120,7 @@ import { ResourceEntity } from "../../entities/world/ResourceEntity";
 import type { ResourceSystem } from "../shared/entities/ResourceSystem";
 import { EventType, type EventMap } from "../../types/events";
 import type {
+  EntryRetryState,
   FishingInteractionPresentationPayload,
   FletchingInterfaceOpenPayload,
   ProcessingInteractionPresentationPayload,
@@ -284,7 +285,20 @@ export class ClientNetwork extends SystemBase {
   private reconnectTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private lastWsUrl: string | null = null;
   private lastInitOptions: Record<string, unknown> | null = null;
+  // Undefined is uncaptured, not a request to reread storage on reconnect.
+  private selectedCharacterId: string | null | undefined;
   private intentionalDisconnect: boolean = false;
+  private entryRetryIntent: {
+    transport: WebSocket;
+    characterId: string;
+    admission: number;
+    awaitingResponse: boolean;
+    expired: boolean;
+  } | null = null;
+  private entryRetryValue: EntryRetryState | null = null;
+  private entryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private entryRetryStaleTransport: WebSocket | null = null;
+  private entryRetryAdmission: number | null = null;
   private resourceAuthorityToken: object | null = null;
   private resourceAuthorityOwner: ResourceSystem | null = null;
 
@@ -590,6 +604,31 @@ export class ClientNetwork extends SystemBase {
     return undefined;
   }
 
+  private captureCharacterSelection(options: WorldOptions): void {
+    const previous = this.selectedCharacterId;
+    if (options.selectedCharacterId !== undefined) {
+      this.selectedCharacterId = options.selectedCharacterId;
+    } else if (this.selectedCharacterId === undefined) {
+      try {
+        this.selectedCharacterId =
+          typeof sessionStorage === "undefined"
+            ? null
+            : sessionStorage.getItem("selectedCharacterId");
+      } catch {
+        // Storage can be unavailable or denied. Never infer another character.
+        this.selectedCharacterId = null;
+        this.logger.warn("Character selection storage is unavailable");
+      }
+    }
+    if (previous !== this.selectedCharacterId && this.ws) {
+      this.clearEntryRetry();
+    }
+    this.lastInitOptions = {
+      ...options,
+      selectedCharacterId: this.selectedCharacterId,
+    };
+  }
+
   async init(options: WorldOptions): Promise<void> {
     const wsUrl = (options as { wsUrl?: string }).wsUrl;
 
@@ -619,7 +658,7 @@ export class ClientNetwork extends SystemBase {
 
     // Store connection options for reconnection
     this.lastWsUrl = wsUrl;
-    this.lastInitOptions = options as Record<string, unknown>;
+    this.captureCharacterSelection(options);
 
     // CRITICAL: If we already have a WORKING WebSocket, don't recreate
     // But if it's closed or closing, we need to reconnect
@@ -653,6 +692,9 @@ export class ClientNetwork extends SystemBase {
       this.id = null;
     }
 
+    this.clearEntryRetry(false);
+    this.entryRetryStaleTransport = null;
+    this.entryRetryAdmission = null;
     this.worldAdmission.beginConnection();
     this.beginResourceAuthority();
     this.connected = false;
@@ -1187,6 +1229,145 @@ export class ClientNetwork extends SystemBase {
     return (performance.now() + this.serverTimeOffset) / 1000; // seconds
   }
 
+  get entryRetryState(): EntryRetryState | null {
+    return this.entryRetryValue;
+  }
+
+  private publishEntryRetry(state: EntryRetryState | null): void {
+    if (state === this.entryRetryValue) return;
+    this.entryRetryValue = state === null ? null : Object.freeze(state);
+    this.emitTypedEvent(EventType.ENTRY_RETRY_CHANGED, {
+      state: this.entryRetryValue,
+    });
+  }
+
+  private clearEntryRetry(disqualifyTransport = true): void {
+    if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+    this.entryRetryTimer = null;
+    if (disqualifyTransport && this.entryRetryIntent) {
+      this.entryRetryStaleTransport = this.entryRetryIntent.transport;
+    }
+    this.entryRetryIntent = null;
+    // Rejections carry no attempt/character ID. Once intent changes, a late
+    // response must never authorize recovery for another choice on this socket.
+    this.publishEntryRetry(null);
+  }
+
+  private requestInitialEntry(): boolean {
+    const transport = this.ws;
+    const characterId = this.selectedCharacterId;
+    const admission = this.entryRetryAdmission;
+    if (
+      this.entryRetryIntent ||
+      !transport ||
+      transport.readyState !== WebSocket.OPEN ||
+      this.entryRetryStaleTransport === transport ||
+      !characterId ||
+      admission === null ||
+      !this.worldAdmission.isCurrent(admission) ||
+      !this.connected ||
+      this.intentionalDisconnect ||
+      this.isReconnecting ||
+      this.world.entities.player ||
+      this.isEmbeddedSpectator ||
+      this.embeddedCharacterId !== null ||
+      isStreamingLikeViewport()
+    )
+      return false;
+    const intent = {
+      transport,
+      characterId,
+      admission,
+      awaitingResponse: true,
+      expired: false,
+    };
+    this.entryRetryIntent = intent;
+    try {
+      transport.send(writePacket("enterWorld", { characterId }));
+      return true;
+    } catch {
+      this.expireEntryRetry(intent);
+      return false;
+    }
+  }
+
+  private isCurrentEntryRetry(
+    intent: NonNullable<ClientNetwork["entryRetryIntent"]>,
+  ): boolean {
+    return (
+      this.entryRetryIntent === intent &&
+      this.ws === intent.transport &&
+      intent.transport.readyState === WebSocket.OPEN &&
+      this.connected &&
+      !this.intentionalDisconnect &&
+      !this.isReconnecting &&
+      this.worldAdmission.isCurrent(intent.admission) &&
+      this.selectedCharacterId === intent.characterId &&
+      !this.world.entities.player &&
+      !this.isEmbeddedSpectator &&
+      this.embeddedCharacterId === null &&
+      !isStreamingLikeViewport()
+    );
+  }
+
+  private expireEntryRetry(
+    intent: NonNullable<ClientNetwork["entryRetryIntent"]>,
+  ): void {
+    if (this.entryRetryIntent !== intent) return;
+    if (!this.isCurrentEntryRetry(intent)) {
+      this.clearEntryRetry();
+      return;
+    }
+    if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+    this.entryRetryTimer = null;
+    intent.expired = true;
+    this.publishEntryRetry({
+      characterId: intent.characterId,
+      status: "expired",
+      message:
+        "The entry request has not completed. Wait for the server or reload; another request will not be sent.",
+    });
+  }
+
+  /** Explicit action only. Never queues entry across transports or takes over. */
+  retryEnterWorld(): boolean {
+    const intent = this.entryRetryIntent;
+    if (!intent || !this.isCurrentEntryRetry(intent)) {
+      this.clearEntryRetry();
+      return false;
+    }
+    if (
+      intent.awaitingResponse ||
+      intent.expired ||
+      this.entryRetryValue?.status !== "available"
+    )
+      return false;
+    intent.awaitingResponse = true;
+    this.publishEntryRetry({
+      characterId: intent.characterId,
+      status: "pending",
+      message: "Waiting for the server to admit this character…",
+    });
+    if (!this.isCurrentEntryRetry(intent)) {
+      if (this.entryRetryIntent === intent) this.clearEntryRetry();
+      return false;
+    }
+    this.entryRetryTimer = setTimeout(
+      () => this.expireEntryRetry(intent),
+      15_000,
+    );
+    try {
+      intent.transport.send(
+        writePacket("enterWorld", { characterId: intent.characterId }),
+      );
+      return true;
+    } catch {
+      // A send exception cannot prove the request was not accepted remotely.
+      this.expireEntryRetry(intent);
+      return false;
+    }
+  }
+
   onPacket = (e: MessageEvent) => {
     if (
       this.worldAdmission.rejected ||
@@ -1221,6 +1402,7 @@ export class ClientNetwork extends SystemBase {
       this.rejectWorldAdmission();
       return;
     }
+    this.entryRetryAdmission = admission;
     this.id = data.id; // Store our network ID
     this.connected = true; // Mark as connected when we get the snapshot
 
@@ -1268,14 +1450,10 @@ export class ClientNetwork extends SystemBase {
 
       // Handle character selection and world entry (non-spectators only)
       if (isCharacterSelectMode) {
-        // Get characterId from embedded config (read at init) OR sessionStorage
-        // NOTE: sessionStorage is per-tab, preventing cross-tab character conflicts
-        // (localStorage was causing Tab B to overwrite Tab A's character selection)
+        // The entry choice was captured before socket setup, not reread from
+        // mutable tab storage after asynchronous authentication/loading.
         const characterId =
-          this.embeddedCharacterId ||
-          (typeof sessionStorage !== "undefined"
-            ? sessionStorage.getItem("selectedCharacterId")
-            : null);
+          this.embeddedCharacterId || this.selectedCharacterId;
 
         console.log("[PlayerLoading] Character select mode detected", {
           characterId,
@@ -1292,7 +1470,18 @@ export class ClientNetwork extends SystemBase {
           console.log(
             `[PlayerLoading] Sending enterWorld with characterId: ${characterId}`,
           );
-          this.send("enterWorld", { characterId });
+          if (
+            this.isEmbeddedSpectator ||
+            this.embeddedCharacterId !== null ||
+            isStreamingLikeViewport() ||
+            this.isReconnecting
+          ) {
+            // Reconnect may still own a local entity. Preserve its established
+            // queued reattachment at snapshot completion, without retry intent.
+            this.send("enterWorld", { characterId });
+          } else {
+            this.requestInitialEntry();
+          }
         } else {
           if (process.env.PLAYWRIGHT_TEST === "true") {
             console.log(
@@ -1412,6 +1601,7 @@ export class ClientNetwork extends SystemBase {
       try {
         await this.world.entities.deserialize(snapshotEntities);
         if (!this.worldAdmission.isCurrent(admission)) return;
+        if (this.world.entities.player) this.clearEntryRetry();
         for (const entityData of snapshotEntities) {
           const entity = this.world.entities.get(entityData.id);
           if (entity) this.admitAuthoritativeResourceEntity(entity, entityData);
@@ -1655,6 +1845,7 @@ export class ClientNetwork extends SystemBase {
   }
 
   private rejectWorldAdmission(): void {
+    this.clearEntryRetry();
     const reason =
       this.worldAdmission.failure ??
       "World snapshot arrived outside an active connection.";
@@ -1715,10 +1906,15 @@ export class ClientNetwork extends SystemBase {
   /**
    * Handler for enterWorldApproved packet.
    * The actual game state transition is handled by CharacterSelectScreen,
-   * this handler just prevents the "no handler" warning.
+   * Matching approval also retires the pre-entry recovery intent.
    */
-  onEnterWorldApproved = (_data: { playerId: string; characterId: string }) => {
-    // Handled by CharacterSelectScreen socket listener
+  onEnterWorldApproved = (data: { playerId: string; characterId: string }) => {
+    if (data.characterId === this.selectedCharacterId) {
+      this.entryRetryStaleTransport = this.ws;
+    }
+    if (data.characterId === this.entryRetryIntent?.characterId) {
+      this.clearEntryRetry();
+    }
   };
 
   onEntityAdded = (data: EntityData) => {
@@ -1733,6 +1929,10 @@ export class ClientNetwork extends SystemBase {
       const isLocalPlayer =
         (data as { type?: string; owner?: string }).type === "player" &&
         (data as { owner?: string }).owner === this.id;
+      if (isLocalPlayer) {
+        this.entryRetryStaleTransport = this.ws;
+        this.clearEntryRetry();
+      }
       if (
         isLocalPlayer &&
         Array.isArray((data as { position?: number[] }).position)
@@ -3444,12 +3644,9 @@ export class ClientNetwork extends SystemBase {
     // Cache and re-emit so UI can show the modal
     this.lastCharacterList = data.characters || [];
     this.world.emit(EventType.CHARACTER_LIST, data);
-    // Auto-select previously chosen character if available
-    // NOTE: Use sessionStorage (per-tab) to prevent cross-tab character conflicts
-    const storedId =
-      typeof sessionStorage !== "undefined"
-        ? sessionStorage.getItem("selectedCharacterId")
-        : null;
+    // Only the retained entry intent may auto-select; a late tab-storage write
+    // must not change the character chosen before socket setup.
+    const storedId = this.selectedCharacterId;
     if (
       storedId &&
       Array.isArray(data.characters) &&
@@ -4314,10 +4511,20 @@ export class ClientNetwork extends SystemBase {
     this.send("characterCreate", { name });
   }
   requestCharacterSelect(characterId: string) {
+    if (characterId !== this.selectedCharacterId) this.clearEntryRetry();
+    this.selectedCharacterId = characterId;
+    if (this.lastInitOptions) {
+      this.lastInitOptions = {
+        ...this.lastInitOptions,
+        selectedCharacterId: characterId,
+      };
+    }
     this.send("characterSelected", { characterId });
   }
-  requestEnterWorld() {
-    this.send("enterWorld", {});
+  requestEnterWorld(): boolean {
+    return this.entryRetryIntent
+      ? this.retryEnterWorld()
+      : this.requestInitialEntry();
   }
 
   // Inventory actions
@@ -5841,6 +6048,12 @@ export class ClientNetwork extends SystemBase {
    * Handle server acknowledgment of a successful session reconnection.
    */
   onReconnected = (data: { characterId: string }) => {
+    if (data.characterId === this.selectedCharacterId) {
+      this.entryRetryStaleTransport = this.ws;
+    }
+    if (data.characterId === this.entryRetryIntent?.characterId) {
+      this.clearEntryRetry();
+    }
     this.logger.info(
       `[ClientNetwork] Server confirmed reconnection for character ${data.characterId}`,
     );
@@ -5850,8 +6063,9 @@ export class ClientNetwork extends SystemBase {
   };
 
   onKick = (code: string) => {
+    this.clearEntryRetry();
     // Emit a typed UI event for kicks
-    this.emitTypedEvent("UI_KICK", {
+    this.emitTypedEvent(EventType.UI_KICK, {
       playerId: this.id || "unknown",
       reason: code || "unknown",
     });
@@ -5867,11 +6081,42 @@ export class ClientNetwork extends SystemBase {
       data.reason,
       data.message,
     );
-    // Emit as a kick event with the duplicate_user code
-    // This will show the proper overlay and let the user know
-    this.emitTypedEvent("UI_KICK", {
+    const intent = this.entryRetryIntent;
+    if (
+      data.reason === "already_logged_in" &&
+      intent &&
+      this.isCurrentEntryRetry(intent)
+    ) {
+      if (intent.expired || !intent.awaitingResponse) return;
+      if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+      this.entryRetryTimer = null;
+      intent.awaitingResponse = false;
+      this.publishEntryRetry({
+        characterId: intent.characterId,
+        status: "available",
+        message: "Close the other session, then try entering again.",
+      });
+      return;
+    }
+    if (
+      data.reason === "already_logged_in" &&
+      ((this.entryRetryStaleTransport !== null &&
+        this.entryRetryStaleTransport === this.ws) ||
+        intent)
+    ) {
+      // This response has no character/attempt ID. A canceled or successfully
+      // admitted intent must not become a denial of the next selection/player.
+      this.clearEntryRetry();
+      return;
+    }
+    this.clearEntryRetry();
+    // Authentication and unknown failures are not duplicate-session failures.
+    this.emitTypedEvent(EventType.UI_KICK, {
       playerId: this.id || "unknown",
-      reason: "duplicate_user",
+      reason:
+        data.reason === "already_logged_in"
+          ? "duplicate_user"
+          : data.reason || "unknown",
     });
   };
 
@@ -6213,6 +6458,7 @@ export class ClientNetwork extends SystemBase {
 
   onClose = (code: CloseEvent) => {
     if (code.currentTarget && code.currentTarget !== this.ws) return;
+    this.clearEntryRetry();
     this.worldAdmission.close();
     this.closeResourceAuthority();
     console.error("[ClientNetwork] 🔌 WebSocket CLOSED:", {
@@ -6399,6 +6645,7 @@ export class ClientNetwork extends SystemBase {
   }
 
   destroy = () => {
+    this.clearEntryRetry();
     this.worldAdmission.close();
     this.closeResourceAuthority();
     // Mark as intentional disconnect to prevent reconnection
@@ -6636,6 +6883,7 @@ export class ClientNetwork extends SystemBase {
 
   // Plugin-specific disconnect method
   async disconnect(): Promise<void> {
+    this.clearEntryRetry();
     // console.debug('[ClientNetwork] Disconnect called')
     // Mark as intentional disconnect to prevent reconnection
     this.intentionalDisconnect = true;

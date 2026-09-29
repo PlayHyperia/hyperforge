@@ -157,6 +157,7 @@ interface AvatarInstance {
 
 interface AvatarNode {
   instance: AvatarInstance | null;
+  mounted: boolean;
   mount?: () => Promise<void>;
   position: THREE.Vector3;
   visible: boolean;
@@ -529,6 +530,52 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
   // Internal avatar reference (rename existing avatar property)
   private _avatar?: AvatarNode;
+  private avatarPresentationRequest = 0;
+  private pendingAvatarPresentationLoads = 0;
+  private completedAvatarPresentation?: {
+    request: number;
+    node: AvatarNode;
+    instance: AvatarInstance;
+    scene: THREE.Object3D;
+    url: string;
+  };
+
+  /**
+   * Whether the current avatar completed mounting and is visibly attached to
+   * this world's current stage, with no admitted avatar load still pending.
+   * This is not proof of animation-asset completion or visual quality. It
+   * deliberately fails closed on stale replacements; it does not repair the
+   * existing different-URL loading/recovery concurrency in applyAvatar.
+   */
+  isAvatarReadyForPresentation(): boolean {
+    const completed = this.completedAvatarPresentation;
+    if (
+      !this.active ||
+      this.destroyed ||
+      this.pendingAvatarPresentationLoads !== 0 ||
+      this.loadingAvatarUrl !== undefined ||
+      !completed ||
+      completed.request !== this.avatarPresentationRequest ||
+      this._avatar !== completed.node ||
+      this.avatarUrl !== completed.url ||
+      completed.node.ctx !== this.world ||
+      !completed.node.mounted ||
+      completed.node.visible !== true ||
+      completed.node.instance !== completed.instance ||
+      completed.instance.raw?.scene !== completed.scene
+    ) {
+      return false;
+    }
+
+    const stage = this.world.stage?.scene;
+    let scene: THREE.Object3D | null = completed.scene;
+    while (scene) {
+      if (!scene.visible) return false;
+      if (scene === stage) return true;
+      scene = scene.parent;
+    }
+    return false;
+  }
 
   // ========== PLAYER SILHOUETTE (classic fantasy MMORPG-style x-ray effect) ==========
   //
@@ -1488,6 +1535,14 @@ export class PlayerLocal extends Entity implements HotReloadable {
     avatarUrlOverride?: string,
     allowFallback: boolean = true,
   ): Promise<void> {
+    return this.applyAvatarForPresentation(avatarUrlOverride, allowFallback);
+  }
+
+  private async applyAvatarForPresentation(
+    avatarUrlOverride: string | undefined,
+    allowFallback: boolean,
+    inheritedPresentationRequest?: number,
+  ): Promise<void> {
     const defaultAvatarUrl = DEFAULT_AVATAR_URL;
     const avatarUrl = avatarUrlOverride ?? this.getAvatarUrl();
 
@@ -1498,6 +1553,23 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
     // If we already have the correct avatar loaded, just reuse it
     if (this.avatarUrl === avatarUrl && this._avatar) {
+      // A pending replacement may already own _avatar while avatarUrl still
+      // names the old asset. Preserve the loader's reuse behavior, but do not
+      // let that replacement certify this newer direct presentation request.
+      const completed = this.completedAvatarPresentation;
+      if (
+        inheritedPresentationRequest === undefined &&
+        this.pendingAvatarPresentationLoads > 0 &&
+        (!completed ||
+          completed.request !== this.avatarPresentationRequest ||
+          completed.node !== this._avatar ||
+          completed.url !== avatarUrl ||
+          completed.instance !== this._avatar.instance ||
+          completed.scene !== this._avatar.instance?.raw?.scene)
+      ) {
+        this.avatarPresentationRequest++;
+        this.completedAvatarPresentation = undefined;
+      }
       return;
     }
 
@@ -1511,6 +1583,12 @@ export class PlayerLocal extends Entity implements HotReloadable {
     if (this.loadingAvatarUrl === avatarUrl) {
       return;
     }
+    // Same-URL reuse/dedup above must not invalidate a completed presentation.
+    // A fallback belongs to the initiating request, not a newer independent one.
+    const presentationRequest =
+      inheritedPresentationRequest ?? ++this.avatarPresentationRequest;
+    this.pendingAvatarPresentationLoads++;
+    this.completedAvatarPresentation = undefined;
     this.loadingAvatarUrl = avatarUrl;
 
     try {
@@ -1739,6 +1817,24 @@ export class PlayerLocal extends Entity implements HotReloadable {
           child.raycast = () => {};
         });
       }
+      if (
+        this.active &&
+        !this.destroyed &&
+        presentationRequest === this.avatarPresentationRequest &&
+        this._avatar === avatarAsNode &&
+        instance &&
+        instance === vrmInstance &&
+        avatarAsNode.instance === instance &&
+        instance.raw?.scene
+      ) {
+        this.completedAvatarPresentation = {
+          request: presentationRequest,
+          node: avatarAsNode,
+          instance,
+          scene: instance.raw.scene,
+          url: avatarUrl,
+        };
+      }
     } catch (error) {
       console.error(
         `[PlayerLocal] Avatar load failed for ${avatarUrl}:`,
@@ -1749,7 +1845,11 @@ export class PlayerLocal extends Entity implements HotReloadable {
         console.warn(
           `[PlayerLocal] Falling back to default avatar: ${defaultAvatarUrl}`,
         );
-        await this.applyAvatar(defaultAvatarUrl, false);
+        await this.applyAvatarForPresentation(
+          defaultAvatarUrl,
+          false,
+          presentationRequest,
+        );
         return;
       }
 
@@ -1761,6 +1861,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
       if (this.loadingAvatarUrl === avatarUrl) {
         this.loadingAvatarUrl = undefined;
       }
+      this.pendingAvatarPresentationLoads--;
     }
   }
 
@@ -3021,6 +3122,8 @@ export class PlayerLocal extends Entity implements HotReloadable {
   override destroy(): void {
     // Mark as inactive to prevent further operations
     this.active = false;
+    this.avatarPresentationRequest++;
+    this.completedAvatarPresentation = undefined;
 
     // Clean up intervals
     if (this.positionValidationInterval) {

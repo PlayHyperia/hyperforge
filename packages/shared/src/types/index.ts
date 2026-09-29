@@ -503,6 +503,8 @@ export interface WorldOptions {
   db?: SystemDatabase;
   // Client-network convenience options (optional)
   wsUrl?: string;
+  /** Explicit entry choice; null forbids fallback, undefined seeds tab storage once. */
+  selectedCharacterId?: string | null;
   name?: string;
   avatar?: string;
   /** DOM element to render into (client/editor only) */

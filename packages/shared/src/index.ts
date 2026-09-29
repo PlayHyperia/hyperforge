@@ -692,6 +692,7 @@ export { ClientLoader } from "./systems/client/ClientLoader";
 // ServerNetwork removed from main exports - import directly from ./systems/server when needed on server side
 export { Environment } from "./systems/shared";
 export { ClientNetwork } from "./systems/client/ClientNetwork";
+export type { EntryRetryState } from "./types/events";
 export type { InventorySnapshot } from "./systems/client/ClientNetwork";
 export { ClientGraphics } from "./systems/client/ClientGraphics";
 export { ClientRuntime } from "./systems/client/ClientRuntime"; // Client lifecycle and diagnostics

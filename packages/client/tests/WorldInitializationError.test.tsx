@@ -9,6 +9,10 @@ import {
   normalizeWorldInitializationFailure,
   WorldInitializationError,
 } from "../src/screens/WorldInitializationError";
+import {
+  LoadingReadinessWarning,
+  MEADOW_PREPARATION_BLOCKED_MESSAGE,
+} from "../src/screens/LoadingReadinessWarning";
 
 // Real React SSR checks; these do not exercise browser focus, reload or WebGPU.
 function render(error: unknown, entryRecoveryPresent = false): string {
@@ -150,4 +154,39 @@ describe("world initialization failure presentation", () => {
     expect(markup).toContain("&lt;img");
     expect(markup).not.toContain("<img");
   });
+});
+
+describe("loading readiness warning presentation", () => {
+  it.each([false, true])(
+    "distinguishes terminal meadow failure from waiting: %s",
+    (blocked) => {
+      const message = blocked
+        ? MEADOW_PREPARATION_BLOCKED_MESSAGE
+        : "Loading is continuing; you can wait or reload.";
+      const markup = renderToStaticMarkup(
+        <LoadingReadinessWarning
+          blocked={blocked}
+          stage={blocked ? "Meadow preparation failed" : "Growing meadow..."}
+          message={message}
+          onReload={() => {
+            throw new Error("Rendering must not reload");
+          }}
+        />,
+      );
+      expect(markup).toContain(
+        blocked ? "Meadow preparation failed" : "Still preparing the world",
+      );
+      expect(markup).toContain(blocked ? 'role="alert"' : 'role="status"');
+      expect(markup).toContain(message);
+      expect(markup.match(/<button\b/g)).toHaveLength(1);
+      expect(markup).toContain('type="button"');
+      expect(markup).toContain('data-modal="true"');
+      expect(markup).toContain("Reload");
+      if (blocked) {
+        expect(markup).toContain("Waiting will not retry these failed jobs");
+        expect(markup).not.toContain("Loading is continuing");
+        expect(markup).not.toContain("Still preparing");
+      }
+    },
+  );
 });

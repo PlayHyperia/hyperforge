@@ -413,6 +413,7 @@ export { ClientInterface } from "./systems/client/ClientInterface"; // UI state,
 export { ClientLoader } from "./systems/client/ClientLoader";
 export { Environment } from "./systems/shared";
 export { ClientNetwork } from "./systems/client/ClientNetwork";
+export type { EntryRetryState } from "./types/events";
 export { ClientGraphics } from "./systems/client/ClientGraphics";
 export { ClientRuntime } from "./systems/client/ClientRuntime"; // Client lifecycle and diagnostics
 export { ClientAudio } from "./systems/client/ClientAudio";

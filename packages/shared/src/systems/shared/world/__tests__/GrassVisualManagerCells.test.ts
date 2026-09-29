@@ -21,6 +21,7 @@ import {
 import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import {
   groundGrassBlades,
+  GrassGroundingContinuation,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
   type GrassGroundingDiagnosticSubcells,
 } from "../GrassBladeGrounding";
@@ -304,6 +305,156 @@ async function fixture(
 }
 
 describe("fine meadow cells borrow actual terrain owners without replacing them", () => {
+  it("reports terminal required grounding separately from pending, stale and out-of-radius work", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const f = await fixture(undefined, undefined, 16, port);
+    try {
+      f.owner.setPlayerPosition(387.5, 362.5);
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      const entry = f.owner["groundingJobs"].get(f.work.key)!;
+      expect(entry.job).toBeInstanceOf(GrassGroundingWorkerJob);
+      expect(f.owner.getStreamingReadiness([f.node], 1)).toMatchObject({
+        ready: false,
+        requiredChunks: 1,
+        readyChunks: 0,
+        pendingChunks: 1,
+        blockedChunks: 0,
+      });
+      // A malformed real retained buffer is copied and rejected by the actual
+      // worker. No worker response, clock or manager method is substituted.
+      const positions = entry.ticket.surface["positions"];
+      const height = positions[1];
+      positions[1] = NaN;
+      try {
+        const deadline = performance.now() + 10_000;
+        while (entry.job.state.status === "running") {
+          f.owner["advanceGroundingJob"]();
+          if (performance.now() >= deadline)
+            throw new Error("Actual terminal-readiness worker deadline");
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        positions[1] = height;
+      }
+      expect(entry.job.state.status).toBe("failed_input");
+      expect(f.owner.getStreamingReadiness([f.node], 1)).toMatchObject({
+        ready: false,
+        requiredChunks: 1,
+        readyChunks: 0,
+        pendingChunks: 1,
+        blockedChunks: 1,
+      });
+      const calls = port.postCalls;
+      for (let i = 0; i < 3; i++) {
+        expect(f.owner["advanceGroundingJob"]()).toBe(0);
+        expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(
+          1,
+        );
+      }
+      expect(port.postCalls).toBe(calls);
+      // The same failed job is not a current obligation for another radius/LOD.
+      f.owner.setPlayerPosition(337.5, 337.5);
+      expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(0);
+      f.owner.setPlayerPosition(387.5, 362.5);
+      f.owner["lodFocusX"] = 450;
+      f.owner["lodFocusZ"] = 362.5;
+      expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(0);
+      f.owner["lodFocusX"] = 385;
+      f.owner["lodFocusZ"] = 374;
+      expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(1);
+      // A new retained surface is a new generation even before reconciliation.
+      f.visual["generateChunkSync"](f.node);
+      expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(0);
+      f.owner["reconcileGrassHorizon"]();
+      expect(f.owner["groundingJobs"].has(f.work.key)).toBe(false);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("reports an exhausted real continuation budget without restarting its iterator", async () => {
+    const f = await fixture();
+    try {
+      f.owner.setPlayerPosition(387.5, 362.5);
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      const entry = f.owner["groundingJobs"].get(f.work.key)!;
+      const original = entry.job;
+      if (
+        !(original instanceof GrassGroundingContinuation) ||
+        !original["iterator"]
+      )
+        throw new Error("Actual local grounding continuation required");
+      // Resume the actual production iterator at the admitted cumulative cap.
+      // No fake result, time source, generator or worker is installed.
+      entry.job = new GrassGroundingContinuation(
+        original["iterator"],
+        original["isCurrent"],
+        {
+          operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+          activeMs: 0,
+          maximumSliceMs: 0,
+        },
+      );
+      expect(f.owner.getStreamingReadiness([f.node], 1).blockedChunks).toBe(0);
+      expect(f.owner["advanceGroundingJob"]()).toBe(0);
+      expect(entry.job.state).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(f.owner.getStreamingReadiness([f.node], 1)).toMatchObject({
+        ready: false,
+        pendingChunks: 1,
+        blockedChunks: 1,
+      });
+      expect(entry.job.operations).toBe(
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("keeps displayed ready coverage ahead of a terminal refinement failure", async () => {
+    const f = await fixture();
+    try {
+      f.owner.setPlayerPosition(387.5, 362.5);
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      expect(f.finish()).toBe(1);
+      const mesh = f.owner["chunks"].get(f.work.key)!.mesh;
+      expect(f.owner.getStreamingReadiness([f.node], 1)).toMatchObject({
+        ready: true,
+        requiredChunks: 1,
+        readyChunks: 1,
+        pendingChunks: 0,
+        blockedChunks: 0,
+      });
+      f.owner["lodFocusX"] = 450;
+      f.owner["lodFocusZ"] = 362.5;
+      const refinement = await f.queue(1, true);
+      refinement.output.offsets[0] = NaN;
+      f.owner["processSettledWorkerResults"]();
+      const entry = f.owner["groundingJobs"].get(f.work.key)!;
+      expect(f.finish()).toBe(0);
+      expect(entry.job.state.status).toBe("failed_input");
+      expect(f.owner["chunks"].get(f.work.key)!.mesh).toBe(mesh);
+      expect(f.owner.getStreamingReadiness([f.node], 1)).toMatchObject({
+        ready: true,
+        requiredChunks: 1,
+        readyChunks: 1,
+        pendingChunks: 0,
+        blockedChunks: 0,
+      });
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([
     {
       selection: "rooted-fan-v1",
@@ -3287,6 +3438,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(f.finish()).toBe(0);
       const entry = f.owner["groundingJobs"].get(f.work.key)!;
       expect(entry.job.state.status).toBe("waiting_support");
+      expect(f.owner.getStreamingReadiness([f.node]).blockedChunks).toBe(0);
       expect(f.owner.getStreamingReadiness([f.node]).readyChunks).toBe(0);
       expect(f.container.children).toHaveLength(0);
       f.visual["generateChunkSync"](east);

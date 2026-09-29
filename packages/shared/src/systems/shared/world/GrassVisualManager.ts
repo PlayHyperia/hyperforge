@@ -1663,6 +1663,8 @@ export interface GrassVisualReadiness {
   requiredChunks: number;
   readyChunks: number;
   pendingChunks: number;
+  /** Current required, not-ready chunks with terminal grounding failure. */
+  blockedChunks: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -2510,6 +2512,7 @@ export class GrassVisualManager implements QuadTreeListener {
           radiusSquared,
       );
     let readyChunks = 0;
+    let blockedChunks = 0;
     for (const work of requiredNodes) {
       const { node, key } = work;
       if (
@@ -2517,8 +2520,26 @@ export class GrassVisualManager implements QuadTreeListener {
         this.completedNodes.get(key) === node &&
         this.completedSurfaces.get(key) === this.getRenderedSurface(node) &&
         (!this.compactMeadow || this.isCompletedGroundingCurrent(key))
-      )
+      ) {
+        // A failed refinement must not block still-current displayed coverage.
         readyChunks++;
+        continue;
+      }
+      const entry = this.groundingJobs.get(key);
+      const status = entry?.job.state.status;
+      if (
+        entry &&
+        (status === "failed_input" || status === "failed_budget") &&
+        entry.ticket.work === work &&
+        entry.ticket.node === node &&
+        this.isNodeInGrassHorizon(work) &&
+        this.isTicketLodCurrent(entry.ticket) &&
+        this.getRenderedSurface(node) === entry.ticket.surface &&
+        (!entry.region || entry.region.isCurrent()) &&
+        (!entry.ticket.grounding?.inputs ||
+          entry.ticket.grounding.inputs.isCurrent())
+      )
+        blockedChunks++;
     }
     const requiredChunks = requiredNodes.length;
     return {
@@ -2527,6 +2548,7 @@ export class GrassVisualManager implements QuadTreeListener {
       requiredChunks,
       readyChunks,
       pendingChunks: requiredChunks - readyChunks,
+      blockedChunks,
     };
   }
 

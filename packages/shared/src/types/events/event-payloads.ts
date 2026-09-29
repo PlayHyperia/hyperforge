@@ -36,6 +36,13 @@ export type { ProcessingSkill } from "../game/processing-interaction-presentatio
 // EVENT PAYLOAD INTERFACES
 // ============================================================================
 
+/** Same-transport entry recovery; this is not an authoritative player kick. */
+export type EntryRetryState = Readonly<{
+  characterId: string;
+  status: "available" | "pending" | "expired";
+  message: string;
+}>;
+
 /** Equipment sync data for login - subset of database row for event payloads */
 export interface EquipmentSyncData {
   slotType: string;
@@ -1384,6 +1391,7 @@ export interface EventMap {
     };
   };
   [EventType.UI_KICK]: { playerId: string; reason: string };
+  [EventType.ENTRY_RETRY_CHANGED]: { state: EntryRetryState | null };
   [EventType.UI_TOAST]: {
     /** Player to receive the toast (server-side routing). Client ignores this. */
     playerId?: string;

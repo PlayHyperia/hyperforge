@@ -201,6 +201,7 @@ export function GameClient({
   const onSetupRef = useRef(onSetup);
   const onInitErrorRef = useRef(onInitError);
   const [initError, setInitError] = useState<string | null>(null);
+  const [initializedWorld, setInitializedWorld] = useState<World | null>(null);
 
   onSetupRef.current = onSetup;
   onInitErrorRef.current = onInitError;
@@ -380,7 +381,10 @@ export function GameClient({
 
       try {
         await world.init(config);
-        onInitErrorRef.current?.(null);
+        if (!cleanedUp && !needsCleanup) {
+          setInitializedWorld(world);
+          onInitErrorRef.current?.(null);
+        }
       } catch (error) {
         const message =
           error instanceof Error
@@ -475,7 +479,10 @@ export function GameClient({
                 );
               }}
             >
-              <CoreUI world={world} />
+              <CoreUI
+                world={world}
+                worldInitialized={initializedWorld === world}
+              />
             </ErrorBoundary>
           )}
         </div>
