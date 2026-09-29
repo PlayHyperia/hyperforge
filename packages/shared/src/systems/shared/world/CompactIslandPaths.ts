@@ -320,6 +320,17 @@ export function createCompactIslandPaths(
     z: arena.baseZ - 2.2 / 2 - COMPACT_PATH_BLEND_WIDTH - CLEARANCE,
   };
   let inlandPondApproach: Point[] | undefined;
+  let pondArrival: Point | undefined;
+  let pondGuide: Point | undefined;
+  const pondCourts = serviceCourts?.courts.filter(
+    (court) =>
+      court.layoutId !== serviceCourts.primaryBankId &&
+      isCompactBankCourt(court) &&
+      pondArea.stations?.some((row) => row.id === court.stationIds[0]),
+  );
+  if (meadowPaths && pondDocks && pondCourts && pondCourts.length > 1)
+    throw new Error("Compact pond circulation requires one local bank court");
+  const pondJunction = meadowPaths && pondDocks ? pondCourts?.[0] : undefined;
   if (pondDocks) {
     if (!bankPavilion || dockWater?.id !== pond.id)
       throw new Error(
@@ -332,31 +343,38 @@ export function createCompactIslandPaths(
     const pete = pondArea.npcs.filter((row) => row.id === "fisherman_pete");
     if (pete.length !== 1)
       throw new Error("Compact pond paths require the actual fishing guide");
-    // Meet the landward apron, pass the guide's clear western side, then use
-    // the existing west safe-ground passage. Its historical footprint is layout
-    // metadata, not a physical floor: removing the recovery court must not move
-    // the admitted pond-to-bank route or require a vanished platform owner.
-    const corridorX =
-      (lobby.centerX -
-        lobby.width / 2 +
-        HOSPITAL_CENTER_X +
-        HOSPITAL_WIDTH / 2) /
-      2;
-    inlandPondApproach = [
-      { x: landing.x - direction.x * 3.5, z: landing.z - direction.z * 3.5 },
-      { x: pete[0].position.x - 2.5, z: pete[0].position.z + 3 },
-      { x: pete[0].position.x - 2.5, z: pete[0].position.z },
-      { x: pete[0].position.x - 8, z: pete[0].position.z - 7 },
-      { x: corridorX + 4, z: lobby.centerZ + lobby.depth / 2 + 14 },
-      { x: corridorX, z: lobby.centerZ + lobby.depth / 2 + 5 },
-      { x: corridorX, z: lobby.centerZ - lobby.depth / 2 - 8 },
-      { x: front.x + 19, z: front.z + 16 },
-      { x: front.x + 9, z: front.z + 15 },
-      { x: bankPavilion.position.x + 3, z: bankPavilion.position.z + 13 },
-      { x: bankPavilion.position.x, z: bankPavilion.position.z + 8 },
-      { x: bankPavilion.position.x, z: bankPavilion.position.z + 2 },
-      front,
-    ];
+    pondArrival = {
+      x: landing.x - direction.x * 3.5,
+      z: landing.z - direction.z * 3.5,
+    };
+    pondGuide = { x: pete[0].position.x - 2.5, z: pete[0].position.z };
+    if (!pondJunction) {
+      // Meet the landward apron, pass the guide's clear western side, then use
+      // the existing west safe-ground passage. Its historical footprint is layout
+      // metadata, not a physical floor: removing the recovery court must not move
+      // the admitted pond-to-bank route or require a vanished platform owner.
+      const corridorX =
+        (lobby.centerX -
+          lobby.width / 2 +
+          HOSPITAL_CENTER_X +
+          HOSPITAL_WIDTH / 2) /
+        2;
+      inlandPondApproach = [
+        pondArrival,
+        { x: pete[0].position.x - 2.5, z: pete[0].position.z + 3 },
+        { x: pete[0].position.x - 2.5, z: pete[0].position.z },
+        { x: pete[0].position.x - 8, z: pete[0].position.z - 7 },
+        { x: corridorX + 4, z: lobby.centerZ + lobby.depth / 2 + 14 },
+        { x: corridorX, z: lobby.centerZ + lobby.depth / 2 + 5 },
+        { x: corridorX, z: lobby.centerZ - lobby.depth / 2 - 8 },
+        { x: front.x + 19, z: front.z + 16 },
+        { x: front.x + 9, z: front.z + 15 },
+        { x: bankPavilion.position.x + 3, z: bankPavilion.position.z + 13 },
+        { x: bankPavilion.position.x, z: bankPavilion.position.z + 8 },
+        { x: bankPavilion.position.x, z: bankPavilion.position.z + 2 },
+        front,
+      ];
+    }
   }
   const definitions: Array<{
     id: string;
@@ -639,9 +657,10 @@ export function createCompactIslandPaths(
   }
   // The pond outpost is a distinct service destination, not a second town
   // forecourt. Bind wear to its actual chest/clerk and the existing landward
-  // arrival. This changes only the shared terrain/grass field: no collision,
-  // grading, navigation restriction, shoreline or resource placement changes.
-  if (inlandPondApproach && serviceCourts) {
+  // arrival. This changes the shared surface/ecology field, not collision,
+  // grading, navigation restrictions or the shoreline. Road-dependent grass
+  // and resource acceptance can change where the field changes.
+  if (pondArrival && serviceCourts) {
     for (const court of serviceCourts.courts) {
       if (
         court.layoutId === serviceCourts.primaryBankId ||
@@ -658,7 +677,7 @@ export function createCompactIslandPaths(
       if (clerks.length !== 1 || court.npcIds.length !== 1)
         throw new Error("Pond bank wear requires one local bound clerk");
       const center = court.position;
-      const arrival = inlandPondApproach[0];
+      const arrival = pondArrival;
       const distance = Math.hypot(arrival.x - center.x, arrival.z - center.z);
       if (distance < 6)
         throw new Error("Pond bank wear requires a separate landward arrival");
@@ -674,15 +693,16 @@ export function createCompactIslandPaths(
         x: point.x + (center.x - point.x) * amount,
         z: point.z + (center.z - point.z) * amount,
       });
-      definitions.push(
-        {
+      if (court !== pondJunction)
+        definitions.push({
           id: court.layoutId + "-arrival",
           fromId: "pond-shore",
           toId: court.layoutId,
           width: 0.8,
           blendWidth: 0.65,
           points: [arrival, approach(6, -0.45), approach(2, -0.2), center],
-        },
+        });
+      definitions.push(
         {
           id: court.layoutId + "-service",
           clearing: true,
@@ -819,7 +839,9 @@ export function createCompactIslandPaths(
       length,
     });
   };
-  const paths: CompactIslandPath[] = definitions.map(buildPath);
+  const paths: CompactIslandPath[] = definitions
+    .filter((definition) => !(pondJunction && definition.id === "pond-bank"))
+    .map(buildPath);
   if (meadowPaths) {
     // Wear follows short, unequal portions of the actual curved route. A
     // tapered lateral offset joins each skirt back into its core instead of
@@ -875,6 +897,7 @@ export function createCompactIslandPaths(
       },
     ];
     for (const skirt of skirts) {
+      if (pondJunction && skirt.route === "pond-bank") continue;
       const route = paths.find(
         (value) => value.id === "compact-path-" + skirt.route,
       );
@@ -1115,6 +1138,77 @@ export function createCompactIslandPaths(
         }),
       );
     }
+  }
+  if (pondJunction && pondArrival && pondGuide) {
+    // The existing lobby stone already connects the town bank to the arena
+    // spine. Do not draw a second northern bypass across that spine. Give the
+    // pond bank one continuous approach and the dock a short branch instead.
+    // Join the finished platform-aware curve, never a guessed world position
+    // or a control polygon that later smoothing would move away from the join.
+    const spine = paths.find((path) => path.id === "compact-path-lobby-arena");
+    if (!spine)
+      throw new Error("Pond circulation requires the lobby-arena spine");
+    const supportRadius = 0.8 / 2 + 0.65;
+    const closestPoint = (
+      route: CompactIslandPath,
+      anchor: Point,
+      avoidFloors: boolean,
+    ): Point => {
+      let closest: Point | undefined;
+      let minimum = Infinity;
+      for (let index = 1; index < route.path.length; index++) {
+        const a = route.path[index - 1],
+          b = route.path[index];
+        const dx = b.x - a.x,
+          dz = b.z - a.z;
+        const lengthSquared = dx * dx + dz * dz;
+        if (lengthSquared === 0) continue;
+        const t = Math.max(
+          0,
+          Math.min(
+            1,
+            ((anchor.x - a.x) * dx + (anchor.z - a.z) * dz) / lengthSquared,
+          ),
+        );
+        const point = { x: a.x + dx * t, z: a.z + dz * t };
+        if (
+          avoidFloors &&
+          exclusions.some((bounds) =>
+            compactPathIntersectsBounds(point, point, bounds, supportRadius),
+          )
+        )
+          continue;
+        const distance = Math.hypot(point.x - anchor.x, point.z - anchor.z);
+        if (distance < minimum) {
+          closest = point;
+          minimum = distance;
+        }
+      }
+      if (!closest)
+        throw new Error("Pond circulation requires an admitted route junction");
+      return closest;
+    };
+    const junction = closestPoint(spine, pondGuide, true);
+    const approach = buildPath({
+      id: "pond-approach",
+      fromId: pondJunction.layoutId,
+      toId: "lobby-arena-junction",
+      width: 0.8,
+      blendWidth: 0.65,
+      points: [pondJunction.position, pondGuide, junction],
+    });
+    const dockJunction = closestPoint(approach, pondArrival, false);
+    paths.push(
+      approach,
+      buildPath({
+        id: pondJunction.layoutId + "-arrival",
+        fromId: "pond-shore",
+        toId: "pond-approach-junction",
+        width: 0.8,
+        blendWidth: 0.65,
+        points: [pondArrival, dockJunction],
+      }),
+    );
   }
   if (bankPavilion) {
     // The open bank has no opaque floor. Two unequal, joined wear patches

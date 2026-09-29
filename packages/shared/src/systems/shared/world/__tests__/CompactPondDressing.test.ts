@@ -923,7 +923,8 @@ describe("bounded pond dressing", () => {
           config,
         );
         const protectedIds = [
-          "compact-path-pond-bank",
+          "compact-path-pond-approach",
+          "compact-path-haven-pond-bank-v1-arrival",
           "compact-clearing-bank-apron",
           "compact-clearing-bank-clerk-approach",
           "compact-clearing-bank-shopkeeper-approach",
