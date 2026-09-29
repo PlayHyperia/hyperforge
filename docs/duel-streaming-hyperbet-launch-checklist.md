@@ -4,6 +4,12 @@
 
 This is the execution queue, not a claim that the island already meets the visual or performance target. Avatar/equipment polish remains deferred.
 
+### Current public preview: canonical172
+
+- [x] **Promote public161 to172 with saved state preserved:** existing refresh exits 0, ready at 07:18:00.915 UTC; database, player-state and assets checks pass. Two backup catalogs validate, but restore is not tested. The retained query is unchanged; projected tree/reflection-grass candidates stay off and the rejected far-triangle route is absent. The client denylist additionally rejects six unaccepted tree/palette/coastal/coverage selectors; native tree LOD rejection occurs before world initialization. [Promotion evidence](grass-canopy-visibility-research-20260928.md#current-public-preview-canonical172-promotion).
+- [x] **Verify ordinary saved-player entry and pond movement:** public172 has WebGPU `3840×1926`/DPR2, 12 NPCs / 12 owned roots / zero sampled orphans. Warm-start near 32.55 s and two warm frames near 34.68 s are not instant-loading acceptance; five inherited console errors remain.
+- [x] **Complete bounded public image and Bank UI smoke:** ordinary server movement reaches the pond; right-click Pond Bank Clerk → Bank opens the modal with 0 items / 480 slots and coins 3, with no item/coin transfers or quest changes. Root views the unedited bank/night image; the 12/12/0 census is unchanged. Modal and owned game/DevTools windows close, connected-user count returns to zero, and public172 services remain running. Only tree LOD rejection was exercised natively, not all ten denied selectors. Whole-island visual, sustained 2× FPS, broader lifecycle/banking and full-release acceptance remain open. Public161 statements below retain historical evidence, not current service identity.
+
 ### Launch blocker: entity render-identity audit
 
 - [ ] **Finish the island NPC/avatar render-identity audit:** native169 confirmed all 12 manifest definitions duplicated; native170 startup/post-walk now has one entity and owned root per definition. The bounded count correction is verified, not the entire lifecycle/orphan/LOD/effects audit. Attribute the dark post silhouette separately. Map authoritative IDs to render roots, skinned meshes, mixers and owned effects; preserve intentional NPCs and deliberate multipart/effect rendering. [Evidence](grass-canopy-visibility-research-20260928.md#current-checkpoint-npc-ownership-and-clerk-banking).
