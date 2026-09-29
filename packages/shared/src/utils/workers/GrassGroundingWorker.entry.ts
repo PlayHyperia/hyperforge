@@ -23,6 +23,7 @@ import {
 import {
   GRASS_GROUNDING_WORKER_LIMITS as limits,
   grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
   type GrassGroundingWorkerRequest,
   type GrassGroundingWorkerCachedRequest,
   type GrassGroundingWorkerPrepareSurface,
@@ -291,11 +292,17 @@ function admit(value: unknown, cached: boolean) {
     [
       "geometryLayout",
       "roadClearance",
+      "diagnosticSubcells",
       "bankVerge",
       "pondServiceGround",
       "maximumBaseError",
       "workBudget",
     ],
+  );
+  requireValue(
+    settings.diagnosticSubcells === undefined ||
+      settings.diagnosticSubcells === "world-grid-6.25m-v1",
+    "Invalid grounding diagnostic subcells selection",
   );
   const layout = getGrassBladeLayout(
     settings.lod as number,
@@ -829,6 +836,7 @@ function packResult(row: ActiveFit): {
   const state = row.job.state;
   requireValue(state.status !== "running", "Grounding job is not terminal");
   const transfers: ArrayBuffer[] = [];
+  let diagnosticBytes = 0;
   let output: Extract<
     GrassGroundingWorkerResponse,
     { type: "result" }
@@ -843,6 +851,12 @@ function packResult(row: ActiveFit): {
       }),
     };
     if (result.status === "ready") {
+      diagnosticBytes = validateGrassGroundingDiagnosticSubcells(
+        result.diagnosticSubcells,
+        row.request.settings.diagnosticSubcells,
+        result.data.count,
+        result.sweptBounds,
+      );
       const arrays = [
         result.data.offsets,
         result.data.rotScaleHash,
@@ -874,7 +888,7 @@ function packResult(row: ActiveFit): {
   else output = state;
   const resultBytes = transfers.reduce(
     (sum, buffer) => sum + buffer.byteLength,
-    0,
+    diagnosticBytes,
   );
   if (resultBytes > limits.maximumResultBytes) {
     output = {
@@ -897,7 +911,7 @@ function packResult(row: ActiveFit): {
     terrainRebuildWork: row.terrainRebuildWork,
     inputBytes: row.inputBytes,
     derivedBytesReserved: row.derivedBytes,
-    resultBytes: transfers.length ? resultBytes : 0,
+    resultBytes: output.status === "ready" ? resultBytes : 0,
     ...(output.status === "failed_budget" || output.status === "failed_input"
       ? { timing: row.job.captureTiming() }
       : {}),

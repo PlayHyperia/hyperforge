@@ -6,6 +6,7 @@ import {
 } from "../../../../utils/workers/GrassGroundingWorkerClient";
 import {
   grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
   type GrassGroundingWorkerRequest,
   type GrassGroundingWorkerCachedRequest,
   type GrassGroundingWorkerPrepareSurface,
@@ -207,6 +208,298 @@ afterEach(async () => {
 });
 
 describe("actual grounding worker client", () => {
+  it("validates requested diagnostic subcells against a real ready slot and rejects malformed or unsolicited metadata", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = workerRequest(fixture.request);
+      packet.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+      client.submit(withoutId(packet));
+      const response = await port.waitFor("result", 1);
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (
+        !slot ||
+        typeof validate !== "function" ||
+        response.state.status !== "ready" ||
+        response.state.result.status !== "ready" ||
+        !response.state.result.diagnosticSubcells
+      )
+        throw new Error("Missing actual ready diagnostic boundary");
+      const result = response.state.result;
+      const metadata = result.diagnosticSubcells;
+      if (!metadata) throw new Error("Missing diagnostic cells");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      const withMetadata = (value: unknown) => ({
+        ...response,
+        state: {
+          ...response.state,
+          result: { ...result, diagnosticSubcells: value },
+        },
+      });
+      expect(metadata.cells.length).toBeGreaterThan(1);
+      expect(metadata.cells.some((cell) => cell.x < 0 || cell.z < 0)).toBe(
+        true,
+      );
+      expect(check(response)).toBe(response);
+      expect(takeResponse(client).response).toBe(response);
+      const numericBytes = 8 + metadata.cells.length * 72;
+      expect(
+        validateGrassGroundingDiagnosticSubcells(
+          metadata,
+          "world-grid-6.25m-v1",
+          result.data.count,
+          result.sweptBounds,
+        ),
+      ).toBe(numericBytes);
+      expect(() =>
+        check({
+          ...response,
+          resultBytes: response.resultBytes - numericBytes,
+        }),
+      ).toThrow(/buffer receipt/);
+      const without = { ...result };
+      delete without.diagnosticSubcells;
+      expect(() =>
+        check({ ...response, state: { ...response.state, result: without } }),
+      ).toThrow();
+      const first = metadata.cells[0];
+      const withCell = (patch: Record<string, unknown>) => ({
+        ...metadata,
+        cells: [{ ...first, ...patch }, ...metadata.cells.slice(1)],
+      });
+      const malformed: Array<[string, unknown]> = [
+        ["absent", undefined],
+        ["null", null],
+        ["array", []],
+        ["class", new Date()],
+        ["mode", { ...metadata, mode: "other" }],
+        ["grid", { ...metadata, cellSize: 6.5 }],
+        ["extra", { ...metadata, extra: true }],
+        ["missing", { mode: metadata.mode, cells: metadata.cells }],
+        ["empty", { ...metadata, cells: [] }],
+        [
+          "overflow",
+          { ...metadata, cells: Array.from({ length: 4097 }, () => first) },
+        ],
+        ["duplicate", { ...metadata, cells: [first, ...metadata.cells] }],
+        ["unsorted", { ...metadata, cells: [...metadata.cells].reverse() }],
+        ["count zero", withCell({ count: 0 })],
+        ["count fractional", withCell({ count: 0.5 })],
+        ["count mismatch", withCell({ count: first.count + 1 })],
+        ["key fraction", withCell({ x: 0.5 })],
+        ["key NaN", withCell({ z: NaN })],
+        ["key unsafe", withCell({ x: Number.MAX_SAFE_INTEGER + 1 })],
+        ["negative zero", withCell({ z: -0 })],
+        ["cell extra", withCell({ extra: 1 })],
+        [
+          "nonfinite",
+          withCell({ bounds: { ...first.bounds, maxY: Infinity } }),
+        ],
+        [
+          "inverted",
+          withCell({
+            bounds: { ...first.bounds, minY: first.bounds.maxY + 1 },
+          }),
+        ],
+        [
+          "outside",
+          withCell({
+            bounds: {
+              ...first.bounds,
+              minY: (result.sweptBounds?.minY ?? 0) - 1,
+            },
+          }),
+        ],
+        [
+          "union mismatch",
+          {
+            ...metadata,
+            cells: metadata.cells.map((cell) => ({
+              ...cell,
+              bounds: { ...cell.bounds, maxY: cell.bounds.maxY - 0.000001 },
+            })),
+          },
+        ],
+      ];
+      for (const [label, value] of malformed)
+        expect(() => check(withMetadata(value)), label).toThrow();
+      let getters = 0;
+      const getter = () => {
+        getters++;
+        throw new Error("Diagnostic getter must not run");
+      };
+      for (const level of [
+        "top",
+        "metadata",
+        "array",
+        "cell",
+        "bounds",
+      ] as const) {
+        const value = structuredClone(metadata);
+        const reply = withMetadata(value);
+        if (level === "top")
+          Object.defineProperty(reply.state.result, "diagnosticSubcells", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "metadata")
+          Object.defineProperty(value, "cells", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "array")
+          Object.defineProperty(value.cells, "0", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "cell")
+          Object.defineProperty(value.cells[0], "x", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "bounds")
+          Object.defineProperty(value.cells[0].bounds, "minX", {
+            enumerable: true,
+            get: getter,
+          });
+        expect(() => check(reply), level).toThrow();
+      }
+      const sparse = structuredClone(metadata);
+      Reflect.deleteProperty(sparse.cells, "0");
+      expect(() => check(withMetadata(sparse))).toThrow();
+      const hidden = structuredClone(metadata);
+      Object.defineProperty(hidden, "mode", { enumerable: false });
+      expect(() => check(withMetadata(hidden))).toThrow();
+      const symbol = structuredClone(metadata);
+      Reflect.set(symbol.cells[0], Symbol("extra"), 1);
+      expect(() => check(withMetadata(symbol))).toThrow();
+      const inherited = structuredClone(metadata);
+      Object.setPrototypeOf(inherited.cells[0], { ...first });
+      expect(() => check(withMetadata(inherited))).toThrow();
+      expect(getters).toBe(0);
+      // Numeric-boundary packets derived from the real admitted bounds; these
+      // validate transport limits, not a claim of 4096 physically fitted cells.
+      const maximum = {
+        ...metadata,
+        cells: Array.from({ length: 4096 }, (_, x) => ({
+          x: x - 2048,
+          z: 0,
+          count: 1,
+          bounds: { ...first.bounds },
+        })),
+      };
+      expect(
+        validateGrassGroundingDiagnosticSubcells(
+          maximum,
+          "world-grid-6.25m-v1",
+          4096,
+          first.bounds,
+        ),
+      ).toBe(8 + 4096 * 72);
+      expect(() =>
+        validateGrassGroundingDiagnosticSubcells(
+          maximum,
+          undefined,
+          4096,
+          first.bounds,
+        ),
+      ).toThrow();
+      client.submit(withoutId(workerRequest(fixture.request, 2)));
+      const ordinary = await port.waitFor("result", 2);
+      const ordinarySlot: unknown = Reflect.get(client, "slot");
+      if (ordinary.state.status !== "ready")
+        throw new Error("Expected ordinary ready result");
+      const ordinaryResult = ordinary.state.result;
+      for (const value of [metadata, undefined])
+        expect(() =>
+          Reflect.apply(validate, client, [
+            {
+              ...ordinary,
+              state: {
+                ...ordinary.state,
+                result: { ...ordinaryResult, diagnosticSubcells: value },
+              },
+            },
+            ordinarySlot,
+          ]),
+        ).toThrow();
+      expect(takeResponse(client).response).toBe(ordinary);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it.each<SameFaceCase>(["empty", "missing-neighbor"])(
+    "accepts requested diagnostic subcell %s results with exact empty/deferred accounting",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const { client, port } = await actualClient();
+        const packet = workerRequest(fixture.request);
+        packet.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+        client.submit(withoutId(packet));
+        const response = await settledResponse(client, port, "result", 1);
+        if (!("result" in response.state))
+          throw new Error("Expected terminal fitted result");
+        if (id === "empty") {
+          expect(response.state.result).toMatchObject({
+            status: "ready",
+            data: { count: 0 },
+            sweptBounds: null,
+            diagnosticSubcells: {
+              mode: "world-grid-6.25m-v1",
+              cellSize: 6.25,
+              cells: [],
+            },
+          });
+          expect(response.resultBytes).toBe(8);
+        } else {
+          expect(response.state.status).toBe("waiting_support");
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              response.state.result,
+              "diagnosticSubcells",
+            ),
+          ).toBe(false);
+          expect(response.resultBytes).toBe(0);
+        }
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("rejects invalid diagnostic selectors without getters, posting or detaching owned input", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      for (const value of [null, "other", true, {}]) {
+        const packet = workerRequest(fixture.request);
+        Reflect.set(packet.settings, "diagnosticSubcells", value);
+        expect(() => client.submit(withoutId(packet))).toThrow();
+        expect(packet.data.offsets.byteLength).toBeGreaterThan(0);
+      }
+      let getters = 0;
+      const packet = workerRequest(fixture.request);
+      Object.defineProperty(packet.settings, "diagnosticSubcells", {
+        enumerable: true,
+        get() {
+          getters++;
+          return "world-grid-6.25m-v1";
+        },
+      });
+      expect(() => client.submit(withoutId(packet))).toThrow();
+      expect(getters).toBe(0);
+      expect(port.postCalls).toBe(0);
+      expect(client.busy).toBe(false);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
   it("accepts real opt-in prepared and fitted work above250ms with one unchanged deadline", async () => {
     const fixture = createSameFaceCase("fine-lod1");
     try {

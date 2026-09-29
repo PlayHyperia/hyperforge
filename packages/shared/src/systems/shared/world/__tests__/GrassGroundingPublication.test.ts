@@ -47,12 +47,17 @@ function drain<T>(steps: Generator<string, T, void>): T {
   throw new Error("Publication fixture exceeded bounded resumptions");
 }
 
-async function completed(id: SameFaceCase = "fine-near4", roads = false) {
+async function completed(
+  id: SameFaceCase = "fine-near4",
+  roads = false,
+  diagnosticSubcells?: "world-grid-6.25m-v1",
+) {
   const item = createSameFaceCase(id);
   cases.push(item);
   const request = {
     ...item.request,
     ...(roads ? { roadClearance: "per-blade-v1" as const } : {}),
+    ...(diagnosticSubcells ? { diagnosticSubcells } : {}),
   };
   const inputs = (): GrassGroundingInputLease => ({
     isCurrent: () =>
@@ -119,6 +124,9 @@ async function completed(id: SameFaceCase = "fine-near4", roads = false) {
     lod: prepared.settings.lod,
     geometryLayout: prepared.settings.geometryLayout,
     roadClearance: prepared.settings.roadClearance,
+    ...(prepared.settings.diagnosticSubcells
+      ? { diagnosticSubcells: prepared.settings.diagnosticSubcells }
+      : {}),
   };
   return {
     item,
@@ -207,6 +215,120 @@ describe("actual projected worker result publication", () => {
     expect(output.rootDeltas).toBe(row.result.rootDeltas);
     expect(output.bladeVisibility).toBe(row.result.bladeVisibility);
     expect(output.grounding).not.toBe(row.lease.grounding);
+  });
+
+  it.each(["fine-near4", "empty", "missing-neighbor"] satisfies SameFaceCase[])(
+    "publishes requested diagnostic subcells from the actual worker: %s",
+    async (id) => {
+      const row = await completed(id, true, "world-grid-6.25m-v1");
+      const output = drain(
+        finishGroundedGrassWorkerSteps(row.result, row.lease),
+      );
+      expect(comparable(output, row.request)).toEqual(
+        comparable(row.reference, row.request),
+      );
+      if (
+        output.status === "ready" &&
+        row.result.status === "ready" &&
+        row.reference.status === "ready"
+      ) {
+        expect(output.diagnosticSubcells).toBe(row.result.diagnosticSubcells);
+        expect(output.diagnosticSubcells).toEqual(
+          row.reference.diagnosticSubcells,
+        );
+        expect(
+          output.diagnosticSubcells?.cells.reduce(
+            (sum, cell) => sum + cell.count,
+            0,
+          ),
+        ).toBe(output.data.count);
+        expect(output.rootDeltas).toBe(row.result.rootDeltas);
+      } else {
+        expect(output.status).toBe("defer");
+        expect(
+          Object.prototype.hasOwnProperty.call(output, "diagnosticSubcells"),
+        ).toBe(false);
+      }
+    },
+  );
+
+  it("omits diagnostic metadata when the original publication lease did not request it", async () => {
+    const row = await completed();
+    const output = drain(finishGroundedGrassWorkerSteps(row.result, row.lease));
+    expect(
+      Object.prototype.hasOwnProperty.call(output, "diagnosticSubcells"),
+    ).toBe(false);
+  });
+
+  it.each([
+    "missing",
+    "mode",
+    "count",
+    "union",
+    "inherited",
+    "accessor",
+    "non-enumerable",
+    "unsolicited",
+    "unsolicited-undefined",
+    "deferred",
+  ] as const)("rejects diagnostic publication mismatch: %s", async (change) => {
+    const unsolicited = change.startsWith("unsolicited");
+    const row = await completed(
+      change === "deferred" ? "missing-neighbor" : "fine-near4",
+      false,
+      unsolicited ? undefined : "world-grid-6.25m-v1",
+    );
+    let accesses = 0;
+    const field = Object.getOwnPropertyDescriptor(
+      row.result,
+      "diagnosticSubcells",
+    );
+    if (change === "missing")
+      Reflect.deleteProperty(row.result, "diagnosticSubcells");
+    if (change === "inherited") {
+      Reflect.deleteProperty(row.result, "diagnosticSubcells");
+      Object.setPrototypeOf(row.result, { diagnosticSubcells: field?.value });
+    }
+    if (change === "accessor")
+      Object.defineProperty(row.result, "diagnosticSubcells", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          accesses++;
+          return field?.value;
+        },
+      });
+    if (change === "non-enumerable")
+      Object.defineProperty(row.result, "diagnosticSubcells", {
+        enumerable: false,
+      });
+    if (unsolicited || change === "deferred")
+      Object.defineProperty(row.result, "diagnosticSubcells", {
+        enumerable: true,
+        value:
+          change === "unsolicited-undefined"
+            ? undefined
+            : {
+                mode: "world-grid-6.25m-v1",
+                cellSize: 6.25,
+                cells: [],
+              },
+      });
+    if (change === "mode" || change === "count" || change === "union") {
+      if (row.result.status !== "ready" || !row.result.diagnosticSubcells)
+        throw new Error("Actual selected diagnostic result required");
+      const metadata = row.result.diagnosticSubcells;
+      expect(metadata.cells.length).toBeGreaterThan(0);
+      if (change === "mode")
+        Object.defineProperty(metadata, "mode", { value: "unknown" });
+      if (change === "count") metadata.cells[0].count++;
+      if (change === "union")
+        metadata.cells[0].bounds.minX = row.result.sweptBounds!.minX - 1;
+    }
+    expect(() =>
+      drain(finishGroundedGrassWorkerSteps(row.result, row.lease)),
+    ).toThrow(/diagnostic/i);
+    expect(accesses).toBe(0);
   });
 
   it.each(["token", "revision", "duplicate", "uses"] as const)(

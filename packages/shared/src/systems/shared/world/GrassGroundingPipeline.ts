@@ -1,5 +1,8 @@
 import type { GrassTerrainSurfaceSnapshot } from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
-import type { GrassGroundingWorkerResult } from "../../../utils/workers/GrassGroundingWorkerWire";
+import {
+  validateGrassGroundingDiagnosticSubcells,
+  type GrassGroundingWorkerResult,
+} from "../../../utils/workers/GrassGroundingWorkerWire";
 import { getGrassBladeLayout } from "./GrassBladeLayout";
 import type { RetainedTerrainSurface } from "./TerrainGridSurface";
 import {
@@ -257,7 +260,11 @@ export function prepareGroundedGrassSteps(
  * lifetime; revisions alone never establish ownership of a rendered surface. */
 export type GrassGroundingPublicationLease = Pick<
   GrassBladeGroundingRequest,
-  "ownSurface" | "lod" | "geometryLayout" | "roadClearance"
+  | "ownSurface"
+  | "lod"
+  | "geometryLayout"
+  | "roadClearance"
+  | "diagnosticSubcells"
 > & {
   surfaces: readonly { token: number; surface: RetainedTerrainSurface }[];
   grounding: GrassGrounding;
@@ -333,6 +340,19 @@ export function* finishGroundedGrassWorkerSteps(
     receipt.roadClearance?.mode !== lease.roadClearance
   )
     throw new Error("Grounding publication request/receipt mismatch");
+  const subcellField = Object.getOwnPropertyDescriptor(
+    result,
+    "diagnosticSubcells",
+  );
+  if (
+    ("diagnosticSubcells" in result &&
+      (!subcellField ||
+        !("value" in subcellField) ||
+        !subcellField.enumerable)) ||
+    (subcellField &&
+      (result.status === "defer" || lease.diagnosticSubcells === undefined))
+  )
+    throw new Error("Grounding publication diagnostic request mismatch");
   if (result.status === "defer") return { ...result, dependencies };
 
   const { data, rootDeltas, sourceIndices, bladeVisibility, sweptBounds } =
@@ -370,6 +390,12 @@ export function* finishGroundedGrassWorkerSteps(
         sweptBounds.minZ > sweptBounds.maxZ)
   )
     throw new Error("Invalid grounding publication output layout");
+  validateGrassGroundingDiagnosticSubcells(
+    subcellField?.value,
+    lease.diagnosticSubcells,
+    count,
+    sweptBounds,
+  );
 
   const floats: Float32Array[] = [rootDeltas];
   for (const [key, stride] of [

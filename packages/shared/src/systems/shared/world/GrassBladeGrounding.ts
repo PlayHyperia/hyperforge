@@ -46,6 +46,23 @@ export const GRASS_BLADE_GROUNDING_LIMITS = Object.freeze({
   maximumWorkBudget: 1_000_000,
 });
 
+/** Transient culling census only; no rendering or placement policy. */
+export const GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE = 6.25;
+export type GrassGroundingDiagnosticSubcell = {
+  /** World-origin grid indices, keyed by the accepted clump anchor. */
+  x: number;
+  z: number;
+  count: number;
+  /** Full accepted sweep, not clipped to the anchor's grid cell. */
+  bounds: TerrainGridBounds & { minY: number; maxY: number };
+};
+export type GrassGroundingDiagnosticSubcells = {
+  mode: "world-grid-6.25m-v1";
+  cellSize: typeof GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE;
+  /** Nonempty cells sorted by x, then z; at most maxClumps entries. */
+  cells: GrassGroundingDiagnosticSubcell[];
+};
+
 const NUMERIC_GUARD = 0.00001;
 // Bound cheap validation work without allocating an iterator result per float.
 // This is not the geometric work budget, which still charges every take().
@@ -91,6 +108,8 @@ export type GrassBladeGroundingRequest = {
   authoredMeadow?: GrassAuthoredMeadowUnion;
   /** Explicit candidate: retain only blades whose full sweep clears roads. */
   roadClearance?: "per-blade-v1";
+  /** Explicit transient metadata; omission retains no subcell allocations. */
+  diagnosticSubcells?: "world-grid-6.25m-v1";
   /** Explicit fine-meadow vertical deformation; never changes root sampling. */
   bankVerge?: CompactTerrainBankVerge;
   /** Bounded service wear; root admission is unchanged. */
@@ -195,6 +214,8 @@ export type GrassBladeGroundingResult =
       /** Accepted world-space vertices through the complete fade/wind envelope.
        * Null means validated empty output, never missing or deferred support. */
       sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null;
+      /** Present only when requested; never used to change rendering. */
+      diagnosticSubcells?: GrassGroundingDiagnosticSubcells;
       /** Present only after the installation pipeline remaps source evidence. */
       grounding?: GrassGrounding;
       dependencies: readonly GrassBladeGroundingDependency[];
@@ -606,6 +627,19 @@ export function* groundGrassBladeSteps(
   )
     throw new Error("Invalid grass road-clearance mode");
   const perBladeRoads = clearanceProperty?.value === "per-blade-v1";
+  const subcellProperty = Object.getOwnPropertyDescriptor(
+    request,
+    "diagnosticSubcells",
+  );
+  if (
+    "diagnosticSubcells" in request &&
+    (!subcellProperty ||
+      !("value" in subcellProperty) ||
+      (subcellProperty.value !== undefined &&
+        subcellProperty.value !== "world-grid-6.25m-v1"))
+  )
+    throw new Error("Invalid grass diagnostic subcell mode");
+  const captureSubcells = subcellProperty?.value === "world-grid-6.25m-v1";
   const workBudget =
     request.workBudget ?? GRASS_BLADE_GROUNDING_LIMITS.defaultWorkBudget;
   const maximumBaseError = request.maximumBaseError ?? 0.02;
@@ -1378,6 +1412,9 @@ export function* groundGrassBladeSteps(
   };
   let sweptBounds: (TerrainGridBounds & { minY: number; maxY: number }) | null =
     null;
+  const diagnosticCells = captureSubcells
+    ? new Map<string, GrassGroundingDiagnosticSubcell>()
+    : null;
   const left: Point = { x: 0, y: 0, z: 0 },
     right: Point = { x: 0, y: 0, z: 0 },
     point: Point = { x: 0, y: 0, z: 0 };
@@ -1784,6 +1821,37 @@ export function* groundGrassBladeSteps(
           }
         }
         retained.push(i);
+        if (diagnosticCells) {
+          // Reuse the accepted double-precision envelope only after all
+          // admission checks and hidden-blade anchor inclusion. Never resample
+          // terrain, revisit vertices, clip the sweep or alter compacted order.
+          const cellX =
+            Math.floor(x / GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE) + 0;
+          const cellZ =
+            Math.floor(z / GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE) + 0;
+          if (!Number.isSafeInteger(cellX) || !Number.isSafeInteger(cellZ))
+            throw new Error("Invalid grass diagnostic subcell key");
+          const key = `${cellX}:${cellZ}`;
+          const cell = diagnosticCells.get(key);
+          if (cell) {
+            cell.count++;
+            cell.bounds.minX = Math.min(cell.bounds.minX, box.minX);
+            cell.bounds.maxX = Math.max(cell.bounds.maxX, box.maxX);
+            cell.bounds.minY = Math.min(cell.bounds.minY, minY);
+            cell.bounds.maxY = Math.max(cell.bounds.maxY, maxY);
+            cell.bounds.minZ = Math.min(cell.bounds.minZ, box.minZ);
+            cell.bounds.maxZ = Math.max(cell.bounds.maxZ, box.maxZ);
+          } else {
+            // Each row requires a distinct accepted clump, so the existing
+            // maxClumps admission also bounds map size and final sorting work.
+            diagnosticCells.set(key, {
+              x: cellX,
+              z: cellZ,
+              count: 1,
+              bounds: { ...box, minY, maxY },
+            });
+          }
+        }
         if (!sweptBounds) sweptBounds = { ...box, minY, maxY };
         else {
           sweptBounds.minX = Math.min(sweptBounds.minX, box.minX);
@@ -1855,6 +1923,17 @@ export function* groundGrassBladeSteps(
     ...(bladeVisibility === undefined ? {} : { bladeVisibility }),
     sourceIndices,
     sweptBounds,
+    ...(diagnosticCells
+      ? {
+          diagnosticSubcells: {
+            mode: "world-grid-6.25m-v1" as const,
+            cellSize: GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE,
+            cells: [...diagnosticCells.values()].sort(
+              (a, b) => a.x - b.x || a.z - b.z,
+            ),
+          },
+        }
+      : {}),
     dependencies: dependencies(),
     receipt: finish(),
   };

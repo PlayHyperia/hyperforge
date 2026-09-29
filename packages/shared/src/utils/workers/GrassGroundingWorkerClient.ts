@@ -10,6 +10,7 @@ import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout
 import {
   GRASS_GROUNDING_WORKER_LIMITS as limits,
   grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
   type GrassGroundingWorkerRequest,
   type GrassGroundingWorkerCachedRequest,
   type GrassGroundingWorkerPrepareSurface,
@@ -91,6 +92,7 @@ type Admission = {
   bladesPerClump: number;
   perBladeRoads: boolean;
   geometryLayout: string | undefined;
+  diagnosticSubcells: GrassGroundingWorkerRequest["settings"]["diagnosticSubcells"];
 };
 type Slot = Admission & {
   jobId: number;
@@ -742,6 +744,7 @@ export class GrassGroundingWorkerClient {
       bladesPerClump: 0,
       perBladeRoads: false,
       geometryLayout: undefined,
+      diagnosticSubcells: undefined,
     };
     if (type === "release_surfaces") {
       admission.tokens = tokens(r.surfaceTokens, true);
@@ -800,12 +803,19 @@ export class GrassGroundingWorkerClient {
         [
           "geometryLayout",
           "roadClearance",
+          "diagnosticSubcells",
           "bankVerge",
           "pondServiceGround",
           "maximumBaseError",
           "workBudget",
         ],
       );
+      ensure(
+        settings.diagnosticSubcells === undefined ||
+          settings.diagnosticSubcells === "world-grid-6.25m-v1",
+        "Invalid grounding diagnostic subcells selection",
+      );
+      admission.diagnosticSubcells = settings.diagnosticSubcells;
       const layout = getGrassBladeLayout(
         settings.lod as number,
         settings.geometryLayout as GrassGroundingWorkerRequest["settings"]["geometryLayout"],
@@ -1116,7 +1126,12 @@ export class GrassGroundingWorkerClient {
             "receipt",
           ]
         : ["status", "reason", "dependencies", "receipt"],
-      status === "ready" ? ["bladeVisibility"] : [],
+      status === "ready"
+        ? [
+            "bladeVisibility",
+            ...(slot.diagnosticSubcells ? ["diagnosticSubcells"] : []),
+          ]
+        : [],
     );
     ensure(
       result.status === (status === "ready" ? "ready" : "defer"),
@@ -1317,10 +1332,18 @@ export class GrassGroundingWorkerClient {
         "Unexpected grounding visibility buffer",
       );
     const buffers = arrays.map((array) => array.buffer);
+    const diagnosticBytes = validateGrassGroundingDiagnosticSubcells(
+      result.diagnosticSubcells,
+      slot.diagnosticSubcells,
+      data.count,
+      result.sweptBounds,
+    );
     ensure(
       new Set(buffers).size === buffers.length &&
-        buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0) ===
-          resultBytes,
+        buffers.reduce(
+          (sum, buffer) => sum + buffer.byteLength,
+          diagnosticBytes,
+        ) === resultBytes,
       "Grounding result buffer receipt mismatch",
     );
     if (data.count === 0)

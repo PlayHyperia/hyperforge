@@ -1,4 +1,5 @@
 import type { GrassAnchorData } from "../../systems/shared/world/GrassTerrainProjection";
+import { GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE } from "../../systems/shared/world/GrassBladeGrounding";
 import type {
   GrassBladeGroundingRequest,
   GrassBladeGroundingResult,
@@ -17,6 +18,7 @@ export const GRASS_GROUNDING_WORKER_LIMITS = Object.freeze({
   // limits, not counted here or qualified as a total transient heap budget.
   maximumDerivedBytes: 16 * 1024 * 1024,
   maximumResultBytes: 2 * 1024 * 1024,
+  maximumDiagnosticSubcells: 4096,
   maximumCachedSurfaces: 16,
 });
 
@@ -47,6 +49,7 @@ export type GrassGroundingWorkerRequest = {
     | "lod"
     | "geometryLayout"
     | "roadClearance"
+    | "diagnosticSubcells"
     | "bankVerge"
     | "pondServiceGround"
     | "oceanLevel"
@@ -114,6 +117,132 @@ type WireResult<R> = R extends GrassBladeGroundingResult
   : never;
 export type GrassGroundingWorkerResult = WireResult<GrassBladeGroundingResult>;
 
+/** Strict optional numerical diagnostic boundary shared by worker, supervisor
+ * and publication. Bytes cover cellSize and nine doubles per cell, not strings,
+ * object/array overhead or total JS heap. Omission performs no allocation. */
+export function validateGrassGroundingDiagnosticSubcells(
+  value: unknown,
+  expectedMode: GrassBladeGroundingRequest["diagnosticSubcells"],
+  count: number,
+  sweptBounds: unknown,
+): number {
+  if (expectedMode === undefined) {
+    if (value !== undefined)
+      throw new Error("Unexpected grounding diagnostic subcells");
+    return 0;
+  }
+  const fail: () => never = () => {
+    throw new Error("Invalid grounding diagnostic subcells");
+  };
+  if (
+    expectedMode !== "world-grid-6.25m-v1" ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > 4096
+  )
+    fail();
+  const record = (input: unknown, fields: readonly string[]) => {
+    if (
+      input === null ||
+      typeof input !== "object" ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(input))
+    )
+      fail();
+    const keys = Reflect.ownKeys(input);
+    if (
+      keys.length !== fields.length ||
+      keys.some((key) => typeof key !== "string" || !fields.includes(key))
+    )
+      fail();
+    for (const field of fields) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, field);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+        fail();
+    }
+    return input as Record<string, unknown>;
+  };
+  const fields = ["minX", "maxX", "minY", "maxY", "minZ", "maxZ"] as const;
+  const bounds = (input: unknown) => {
+    const row = record(input, fields);
+    for (const key of fields)
+      if (typeof row[key] !== "number" || !Number.isFinite(row[key])) fail();
+    const result = row as Record<(typeof fields)[number], number>;
+    for (const axis of ["X", "Y", "Z"] as const)
+      if (result[`min${axis}`] > result[`max${axis}`]) fail();
+    return result;
+  };
+  const metadata = record(value, ["mode", "cellSize", "cells"]);
+  if (
+    metadata.mode !== expectedMode ||
+    metadata.cellSize !== GRASS_GROUNDING_DIAGNOSTIC_SUBCELL_SIZE
+  )
+    fail();
+  const cells = metadata.cells;
+  if (
+    !Array.isArray(cells) ||
+    Object.getPrototypeOf(cells) !== Array.prototype ||
+    cells.length > GRASS_GROUNDING_WORKER_LIMITS.maximumDiagnosticSubcells ||
+    cells.length > count ||
+    Reflect.ownKeys(cells).length !== cells.length + 1
+  )
+    fail();
+  if (count === 0) {
+    if (sweptBounds !== null || cells.length !== 0) fail();
+    return 8;
+  }
+  const aggregate = bounds(sweptBounds);
+  const union = {
+    minX: Infinity,
+    maxX: -Infinity,
+    minY: Infinity,
+    maxY: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+  };
+  let total = 0,
+    previousX = -Infinity,
+    previousZ = -Infinity;
+  for (let index = 0; index < cells.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(cells, String(index));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+      fail();
+    const cell = record(descriptor.value, ["x", "z", "count", "bounds"]);
+    const x = cell.x,
+      z = cell.z,
+      cellCount = cell.count;
+    if (
+      typeof x !== "number" ||
+      !Number.isSafeInteger(x) ||
+      Object.is(x, -0) ||
+      typeof z !== "number" ||
+      !Number.isSafeInteger(z) ||
+      Object.is(z, -0) ||
+      typeof cellCount !== "number" ||
+      !Number.isSafeInteger(cellCount) ||
+      cellCount <= 0 ||
+      cellCount > count ||
+      x < previousX ||
+      (x === previousX && z <= previousZ)
+    )
+      fail();
+    previousX = x;
+    previousZ = z;
+    total += cellCount;
+    if (total > count) fail();
+    const box = bounds(cell.bounds);
+    for (const axis of ["X", "Y", "Z"] as const) {
+      const min = `min${axis}` as const,
+        max = `max${axis}` as const;
+      if (box[min] < aggregate[min] || box[max] > aggregate[max]) fail();
+      union[min] = Math.min(union[min], box[min]);
+      union[max] = Math.max(union[max], box[max]);
+    }
+  }
+  if (total !== count || fields.some((key) => union[key] !== aggregate[key]))
+    fail();
+  return 8 + cells.length * 9 * 8;
+}
+
 export type GrassGroundingWorkerResponse =
   | {
       type: "accepted";
@@ -155,6 +284,8 @@ export type GrassGroundingWorkerResponse =
       terrainRebuildWork: GrassGroundingConsumedWork | null;
       inputBytes: number;
       derivedBytesReserved: number;
+      /** Transferable buffers plus selected diagnostic numerical slots;
+       * excludes structured-clone object/string overhead and JS/GPU heap. */
       resultBytes: number;
       cache?: GrassGroundingWorkerCacheReceipt;
     }

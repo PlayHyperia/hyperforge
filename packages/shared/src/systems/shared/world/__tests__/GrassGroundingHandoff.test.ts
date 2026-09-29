@@ -125,6 +125,76 @@ function payloadArrays(value: GrassGroundingPreparedInput) {
 }
 
 describe("real main-thread grass grounding handoff preparation", () => {
+  it("forwards only an own opt-in diagnostic subcells setting without changing copies or work", () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const baselineJob = createJob(fixture).job;
+      const baseline = prepared(baselineJob);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          baseline.settings,
+          "diagnosticSubcells",
+        ),
+      ).toBe(false);
+      fixture.request.diagnosticSubcells = undefined;
+      expect(prepared(createJob(fixture).job).settings).toEqual(
+        baseline.settings,
+      );
+      fixture.request.diagnosticSubcells = "world-grid-6.25m-v1";
+      const selectedJob = createJob(fixture).job;
+      const selected = prepared(selectedJob);
+      const { diagnosticSubcells, ...settings } = selected.settings;
+      expect(diagnosticSubcells).toBe("world-grid-6.25m-v1");
+      expect(settings).toEqual(baseline.settings);
+      expect(selected.data).toEqual(baseline.data);
+      expect(selected.geometry).toEqual(baseline.geometry);
+      expect(selected.inputBytes).toBe(baseline.inputBytes);
+      expect(selectedJob.operations).toBe(baselineJob.operations);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("rejects malformed/accessor/inherited diagnostic subcells before handoff and invalidates mid-copy changes", () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    let getters = 0;
+    try {
+      for (const value of [null, true, "other", {}]) {
+        Reflect.set(fixture.request, "diagnosticSubcells", value);
+        const { job, events } = createJob(fixture);
+        expect(finish(job).status).toBe("failed_input");
+        expect(events).toEqual([]);
+      }
+      Object.defineProperty(fixture.request, "diagnosticSubcells", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          getters++;
+          return "world-grid-6.25m-v1";
+        },
+      });
+      expect(finish(createJob(fixture).job).status).toBe("failed_input");
+      expect(getters).toBe(0);
+      delete fixture.request.diagnosticSubcells;
+      const prototype = Object.getPrototypeOf(fixture.request);
+      try {
+        Object.setPrototypeOf(fixture.request, {
+          diagnosticSubcells: "world-grid-6.25m-v1",
+        });
+        expect(finish(createJob(fixture).job).status).toBe("failed_input");
+      } finally {
+        Object.setPrototypeOf(fixture.request, prototype);
+      }
+      fixture.request.diagnosticSubcells = "world-grid-6.25m-v1";
+      const { job } = createJob(fixture);
+      atPhase(job, "handoff_geometry_position_copy");
+      delete fixture.request.diagnosticSubcells;
+      expect(finish(job).status).toBe("failed_input");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
   it.each<SameFaceCase>([
     "ordinary-lod0",
     "ordinary-lod1",

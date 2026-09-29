@@ -21,6 +21,7 @@ import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import {
   groundGrassBlades,
   GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  type GrassGroundingDiagnosticSubcells,
 } from "../GrassBladeGrounding";
 import { prepareGroundedGrassSteps } from "../GrassGroundingPipeline";
 import { GrassGroundingWorkerJob } from "../GrassGroundingWorkerCoordinator";
@@ -66,6 +67,7 @@ async function fixture(
   lightingCandidate?: "leaf-volume-v1",
   geometryCandidate?: GrassGeometryCandidate,
   roadClearance?: "per-blade-v1",
+  diagnosticSubcells?: "world-grid-6.25m-v1",
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -210,6 +212,7 @@ async function fixture(
         ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
         ...(coverageTrial ? { coverageTrial } : {}),
         ...(roadClearance ? { roadClearance } : {}),
+        ...(diagnosticSubcells ? { diagnosticSubcells } : {}),
       },
       undefined,
       (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
@@ -874,6 +877,177 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.close();
     }
   });
+
+  it("publishes opt-in diagnostic subcells with exact active ribbon parity across all LODs and real worker execution", async () => {
+    const port = new ActualGrassGroundingClientPort(
+      (await bundleGrassGroundingWorker()).source,
+    );
+    await port.ready();
+    const original = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+    );
+    const sync = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+      "world-grid-6.25m-v1",
+    );
+    const worker = await fixture(
+      undefined,
+      undefined,
+      16,
+      port,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+      "world-grid-6.25m-v1",
+    );
+    try {
+      for (const lod of [0, 1, 2]) {
+        const queued: Awaited<ReturnType<typeof original.queue>>[] = [];
+        for (const f of [original, sync, worker]) {
+          f.owner["lodFocusX"] = f.work.bounds.maxX + [0, 20, 60][lod];
+          f.owner["lodFocusZ"] = (f.work.bounds.minZ + f.work.bounds.maxZ) / 2;
+          if (lod)
+            f.owner["pendingLodSwap"].set(f.work.key, {
+              node: f.node,
+              work: f.work,
+              desiredLod: lod,
+            });
+          queued.push(await f.queue(lod, lod !== 0));
+          f.owner["processSettledWorkerResults"]();
+          if (f === worker)
+            expect(
+              f.owner["groundingJobs"].get(f.work.key)?.job,
+            ).toBeInstanceOf(GrassGroundingWorkerJob);
+          let uploads = 0;
+          const deadline = performance.now() + 10_000;
+          while (
+            f.owner["groundingJobs"].get(f.work.key)?.job.state.status ===
+            "running"
+          ) {
+            const count = f.owner["advanceGroundingJob"]();
+            expect(count).toBeLessThanOrEqual(1);
+            uploads += count;
+            if (performance.now() >= deadline)
+              throw new Error("Diagnostic ribbon grounding deadline");
+            if (f === worker)
+              await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          expect(uploads).toBe(1);
+          expect(f.owner["chunks"].get(f.work.key)?.lodLevel).toBe(lod);
+        }
+        expect(queued[1].input).toEqual(queued[0].input);
+        expect(queued[2].input).toEqual(queued[0].input);
+        expect(queued[1].output).toEqual(queued[0].output);
+        expect(queued[2].output).toEqual(queued[0].output);
+        const baseline = original.owner["chunks"].get(original.work.key)!.mesh;
+        const expected = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+        expect(baseline.geometry.getAttribute("position").count).toBe(
+          [147, 105, 60][lod],
+        );
+        expect(baseline.geometry.index?.count).toBe([315, 189, 108][lod]);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            baseline.userData.grassBladeGrounding,
+            "diagnosticSubcells",
+          ),
+        ).toBe(false);
+        for (const f of [sync, worker]) {
+          const mesh = f.owner["chunks"].get(f.work.key)!.mesh;
+          expect(mesh.count).toBeGreaterThan(0);
+          expect(mesh.count).toBe(baseline.count);
+          expect(mesh.position).toEqual(baseline.position);
+          expect(mesh.geometry.index?.array).toEqual(
+            baseline.geometry.index?.array,
+          );
+          expect(Object.keys(mesh.geometry.attributes).sort()).toEqual(
+            Object.keys(baseline.geometry.attributes).sort(),
+          );
+          for (const name of Object.keys(baseline.geometry.attributes)) {
+            const actual = mesh.geometry.getAttribute(name),
+              before = baseline.geometry.getAttribute(name);
+            expect(actual.itemSize, name).toBe(before.itemSize);
+            expect(actual.count, name).toBe(before.count);
+            expect(actual.array, name).toEqual(before.array);
+          }
+          expect(mesh.geometry.getAttribute("grassRootDeltas").count).toBe(
+            mesh.count * expected.bladesPerClump,
+          );
+          expect(mesh.geometry.boundingBox).toEqual(
+            baseline.geometry.boundingBox,
+          );
+          expect(mesh.boundingBox).toEqual(baseline.boundingBox);
+          const receipt = mesh.userData.grassBladeGrounding;
+          expect(receipt.sourceIndices).toEqual(
+            baseline.userData.grassBladeGrounding.sourceIndices,
+          );
+          expect(receipt.sweptBounds).toEqual(
+            baseline.userData.grassBladeGrounding.sweptBounds,
+          );
+          const metadata: GrassGroundingDiagnosticSubcells =
+            receipt.diagnosticSubcells;
+          expect(metadata.mode).toBe("world-grid-6.25m-v1");
+          expect(metadata.cellSize).toBe(6.25);
+          expect(metadata.cells.length).toBeGreaterThan(0);
+          expect(metadata.cells.length).toBeLessThanOrEqual(16);
+          const offsets = mesh.geometry.getAttribute("instanceOffset");
+          const counts = new Map<string, number>();
+          for (let i = 0; i < mesh.count; i++) {
+            const key = `${Math.floor((offsets.getX(i) + mesh.position.x) / 6.25)},${Math.floor((offsets.getZ(i) + mesh.position.z) / 6.25)}`;
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+          }
+          expect(
+            new Map(
+              metadata.cells.map((cell) => [`${cell.x},${cell.z}`, cell.count]),
+            ),
+          ).toEqual(counts);
+          for (const axis of ["X", "Y", "Z"] as const) {
+            expect(
+              Math.min(
+                ...metadata.cells.map((cell) => cell.bounds[`min${axis}`]),
+              ),
+            ).toBe(receipt.sweptBounds[`min${axis}`]);
+            expect(
+              Math.max(
+                ...metadata.cells.map((cell) => cell.bounds[`max${axis}`]),
+              ),
+            ).toBe(receipt.sweptBounds[`max${axis}`]);
+          }
+        }
+        expect(
+          worker.owner["chunks"].get(worker.work.key)!.mesh.userData
+            .grassBladeGrounding.diagnosticSubcells,
+        ).toEqual(
+          sync.owner["chunks"].get(sync.work.key)!.mesh.userData
+            .grassBladeGrounding.diagnosticSubcells,
+        );
+      }
+      expect(worker.owner.getProfileReceipt().grounding).toMatchObject({
+        execution: "worker-v1",
+        // This is the one currently retained owner after two real LOD swaps.
+        completedChunks: 1,
+        failedChunks: 0,
+      });
+    } finally {
+      original.close();
+      sync.close();
+      worker.close();
+      await port.close();
+    }
+    expect(port.terminateCalls).toBe(1);
+    expect(port.listenerCount).toBe(0);
+  }, 60_000);
 
   it("publishes five-section detail through the real grounding worker without changing the sync result", async () => {
     const port = new ActualGrassGroundingClientPort(

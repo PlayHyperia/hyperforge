@@ -4940,6 +4940,262 @@ describe("opt-in bank-verge grounding deformation (actual generated blades)", ()
   });
 });
 
+describe("opt-in accepted grass diagnostic subcells (real grounding)", () => {
+  it.each([0, 1, 2] as const)(
+    "partitions LOD%s accepted sweeps without changing any grounding work or output",
+    (lod) => {
+      const f = analyticOwner("fine");
+      try {
+        const surface = f.makeSurface(
+          1,
+          6.25,
+          -6.25,
+          32,
+          (x, z) => 20 + 0.17 * x - 0.11 * z,
+        );
+        const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+        const geometry = createClumpGeometry(
+          layout.bladesPerClump,
+          layout.bladeSegments,
+          FINE_GRASS_MEADOW_FIELD_SHAPE,
+        );
+        f.geometries.push(geometry);
+        const data = f.dataAt(surface, [
+          [0, 0, 0.8],
+          [-0.25, 0.25, 2.4],
+          [-6.25, 6.25, 5.1],
+          [-6.251, 6.25, 1.3],
+          [6.25, 6.25, 3.2],
+          [-0.5, 0.5, 0.1],
+        ]);
+        for (let i = 0; i < data.count; i++)
+          data.rotScaleHash[i * 3 + 1] = 0.6 + (i % 3) * 0.5;
+        const request: GrassBladeGroundingRequest = {
+          ...f.request(surface, data, lod),
+          geometry,
+          geometryLayout: "fine-meadow-ribbon-v1",
+          wind: { x: 0.3, z: 0.165 },
+          roadClearance: "per-blade-v1",
+        };
+        const baseline = drainPipeline(groundGrassBladeSteps(request));
+        const selected = drainPipeline(
+          groundGrassBladeSteps({
+            ...request,
+            diagnosticSubcells: "world-grid-6.25m-v1",
+          }),
+        );
+        if (
+          baseline.result.status !== "ready" ||
+          selected.result.status !== "ready"
+        )
+          throw Error("Expected accepted diagnostic subcell fixture");
+        const { diagnosticSubcells, ...unchanged } = selected.result;
+        expect(diagnosticSubcells).toBeDefined();
+        expect(baseline.result).not.toHaveProperty("diagnosticSubcells");
+        expect(selected.trace).toEqual(baseline.trace);
+        expect(withoutGroundingElapsed(unchanged)).toEqual(
+          withoutGroundingElapsed(baseline.result),
+        );
+        expect(selected.result.data.count).toBe(6);
+        expect(diagnosticSubcells).toMatchObject({
+          mode: "world-grid-6.25m-v1",
+          cellSize: 6.25,
+        });
+        const cells = diagnosticSubcells!.cells;
+        expect(cells.map(({ x, z, count }) => [x, z, count])).toEqual([
+          [-1, 0, 1],
+          [0, -1, 2],
+          [0, 0, 1],
+          [1, -1, 1],
+          [2, 0, 1],
+        ]);
+        const union = emptyScalarSweepBounds();
+        for (const cell of cells) {
+          const expected = emptyScalarSweepBounds();
+          let count = 0;
+          for (let i = 0; i < data.count; i++) {
+            const x = Math.floor(
+              (surface.centerX + data.offsets[i * 3]) / 6.25,
+            );
+            const z = Math.floor(
+              (surface.centerZ + data.offsets[i * 3 + 2]) / 6.25,
+            );
+            if (x !== cell.x || z !== cell.z) continue;
+            const isolated = groundGrassBlades({
+              ...request,
+              data: one(data, i),
+            });
+            if (isolated.status !== "ready" || !isolated.sweptBounds)
+              throw Error("Expected isolated accepted clump");
+            count++;
+            for (const key of ["minX", "minY", "minZ"] as const)
+              expected[key] = Math.min(
+                expected[key],
+                isolated.sweptBounds[key],
+              );
+            for (const key of ["maxX", "maxY", "maxZ"] as const)
+              expected[key] = Math.max(
+                expected[key],
+                isolated.sweptBounds[key],
+              );
+          }
+          expect(cell.count).toBe(count);
+          expect(cell.bounds).toEqual(expected);
+          for (const key of ["minX", "minY", "minZ"] as const)
+            union[key] = Math.min(union[key], cell.bounds[key]);
+          for (const key of ["maxX", "maxY", "maxZ"] as const)
+            union[key] = Math.max(union[key], cell.bounds[key]);
+        }
+        expect(union).toEqual(selected.result.sweptBounds);
+        expect(cells.reduce((total, cell) => total + cell.count, 0)).toBe(
+          data.count,
+        );
+        // Anchor partitioning must not clip geometry that crosses a cell edge.
+        expect(
+          cells.find((cell) => cell.x === 1 && cell.z === -1)!.bounds.minX,
+        ).toBeLessThan(6.25);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("rejects unadmitted, inherited and accessor diagnostic selectors without invoking accessors", () => {
+    const f = analyticOwner();
+    try {
+      const request = f.request(f.makeSurface());
+      for (const value of [
+        null,
+        false,
+        true,
+        0,
+        "",
+        "world-grid-5m-v1",
+        {},
+        [],
+      ]) {
+        const invalid = { ...request };
+        Object.defineProperty(invalid, "diagnosticSubcells", { value });
+        expect(() => groundGrassBlades(invalid)).toThrow("diagnostic subcell");
+      }
+      const inherited = { ...request };
+      Object.setPrototypeOf(inherited, {
+        diagnosticSubcells: "world-grid-6.25m-v1",
+      });
+      expect(() => groundGrassBlades(inherited)).toThrow("diagnostic subcell");
+      let reads = 0;
+      const accessor = { ...request };
+      Object.defineProperty(accessor, "diagnosticSubcells", {
+        get() {
+          reads++;
+          return "world-grid-6.25m-v1";
+        },
+      });
+      expect(() => groundGrassBlades(accessor)).toThrow("diagnostic subcell");
+      expect(reads).toBe(0);
+      const omitted = drainPipeline(groundGrassBladeSteps(request));
+      const undefinedOption = drainPipeline(
+        groundGrassBladeSteps({ ...request, diagnosticSubcells: undefined }),
+      );
+      expect(undefinedOption.trace).toEqual(omitted.trace);
+      expect(withoutGroundingElapsed(undefinedOption.result)).toEqual(
+        withoutGroundingElapsed(omitted.result),
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("counts only retained clumps after a rejected source leaves a compaction gap", () => {
+    const f = analyticOwner();
+    try {
+      const surface = f.makeSurface();
+      const request = f.request(
+        surface,
+        f.dataAt(surface, [
+          [12.5, 0],
+          [-12.5, 0],
+          [0, 6.25],
+        ]),
+      );
+      request.terrainSurface.zones.push({
+        id: "diagnostic-rejected-source",
+        centerX: 12.5,
+        centerZ: 0,
+        width: 4,
+        depth: 4,
+        height: 20,
+        blendRadius: 0,
+      });
+      const baseline = groundGrassBlades(request);
+      const actual = groundGrassBlades({
+        ...request,
+        diagnosticSubcells: "world-grid-6.25m-v1",
+      });
+      if (actual.status !== "ready") throw Error(actual.reason);
+      expect(Array.from(actual.sourceIndices)).toEqual([1, 2]);
+      expect(
+        actual.diagnosticSubcells?.cells.map(({ x, z, count }) => [
+          x,
+          z,
+          count,
+        ]),
+      ).toEqual([
+        [-2, 0, 1],
+        [0, 1, 1],
+      ]);
+      expect(actual.receipt.rejected.pad).toBe(1);
+      const { diagnosticSubcells: _diagnosticSubcells, ...unchanged } = actual;
+      expect(withoutGroundingElapsed(unchanged)).toEqual(
+        withoutGroundingElapsed(baseline),
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it.each(["empty", "rejected", "deferred"] as const)(
+    "never reports unaccepted clumps for %s output",
+    (mode) => {
+      const f = analyticOwner();
+      try {
+        const surface = f.makeSurface();
+        const request = f.request(
+          surface,
+          f.dataAt(surface, mode === "empty" ? [] : [[0, 0]]),
+        );
+        if (mode === "rejected") request.oceanLevel = 30;
+        if (mode === "deferred") request.workBudget = 1;
+        const baseline = groundGrassBlades(request);
+        const selected = groundGrassBlades({
+          ...request,
+          diagnosticSubcells: "world-grid-6.25m-v1",
+        });
+        if (selected.status === "ready") {
+          const { diagnosticSubcells, ...unchanged } = selected;
+          expect(diagnosticSubcells).toEqual({
+            mode: "world-grid-6.25m-v1",
+            cellSize: 6.25,
+            cells: [],
+          });
+          expect(selected.data.count).toBe(0);
+          expect(withoutGroundingElapsed(unchanged)).toEqual(
+            withoutGroundingElapsed(baseline),
+          );
+        } else {
+          expect(mode).toBe("deferred");
+          expect(selected).not.toHaveProperty("diagnosticSubcells");
+          expect(withoutGroundingElapsed(selected)).toEqual(
+            withoutGroundingElapsed(baseline),
+          );
+        }
+      } finally {
+        f.close();
+      }
+    },
+  );
+});
+
 describe("opt-in per-blade road clearance (real generated geometry, CPU only)", () => {
   it("requires an own plain exact mode and preserves omitted/undefined legacy keys, bytes, yields and work", () => {
     const f = analyticOwner("fine");
@@ -5321,6 +5577,26 @@ describe("opt-in per-blade road clearance (real generated geometry, CPU only)", 
         minY: anchor.y,
         minZ: anchor.z,
       });
+      const diagnosed = groundGrassBlades({
+        ...request,
+        roadSegments: roads,
+        roadClearance: "per-blade-v1",
+        diagnosticSubcells: "world-grid-6.25m-v1",
+      });
+      if (diagnosed.status !== "ready") throw Error(diagnosed.reason);
+      expect(diagnosed.diagnosticSubcells?.cells).toEqual([
+        {
+          x: Math.floor(anchor.x / 6.25),
+          z: Math.floor(anchor.z / 6.25),
+          count: 1,
+          bounds: partial.sweptBounds,
+        },
+      ]);
+      const { diagnosticSubcells: _diagnosticSubcells, ...unchanged } =
+        diagnosed;
+      expect(withoutGroundingElapsed(unchanged)).toEqual(
+        withoutGroundingElapsed(partial),
+      );
       // The added anchor overlaps every exclusion above. Retaining the clump
       // therefore proves admission used the original geometry envelope, while
       // final culling contains the hidden triangles' actual collapse point.

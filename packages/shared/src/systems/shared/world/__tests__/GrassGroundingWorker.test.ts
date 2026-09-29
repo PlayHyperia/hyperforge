@@ -3,6 +3,7 @@ import { BufferAttribute } from "three/src/core/BufferAttribute.js";
 import {
   GRASS_GROUNDING_WORKER_LIMITS,
   grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
   type GrassGroundingWorkerRequest,
   type GrassGroundingWorkerCachedRequest,
   type GrassGroundingWorkerPrepareSurface,
@@ -231,6 +232,114 @@ afterEach(async () => {
 });
 
 describe("actual isolated grass grounding worker", () => {
+  it.each<SameFaceCase>([
+    "fine-lod0",
+    "fine-lod1",
+    "fine-lod2",
+    "empty",
+    "missing-neighbor",
+  ])(
+    "roundtrips opt-in diagnostic subcells cold/cached without changing %s fitting",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const original = sameFaceInputHash(fixture);
+        const worker = await actualWorker();
+        const baselinePacket = workerRequest(fixture.request);
+        baselinePacket.settings.diagnosticSubcells = undefined;
+        const baseline = await run(worker, baselinePacket);
+        const selected = workerRequest(fixture.request, 2);
+        selected.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+        const result = await run(worker, selected);
+        const expected = groundGrassBlades({
+          ...fixture.request,
+          diagnosticSubcells: "world-grid-6.25m-v1",
+        });
+        expect(result.state.status).toBe(baseline.state.status);
+        if (!("result" in baseline.state) || !("result" in result.state))
+          throw new Error("Expected real terminal grounding results");
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            baseline.state.result,
+            "diagnosticSubcells",
+          ),
+        ).toBe(false);
+        const cachedWorker = await actualWorker();
+        const cold = workerRequest(fixture.request);
+        cold.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+        const { request } = await prepareCachedGrassGroundingWorkerRequest(
+          cachedWorker,
+          cold,
+        );
+        const cached = await run(cachedWorker, request);
+        if (!("result" in cached.state))
+          throw new Error("Expected cached result");
+        if (
+          result.state.result.status === "ready" &&
+          expected.status === "ready" &&
+          cached.state.result.status === "ready"
+        ) {
+          const { diagnosticSubcells, ...unchanged } = result.state.result;
+          expect(diagnosticSubcells).toEqual(expected.diagnosticSubcells);
+          expect(cached.state.result.diagnosticSubcells).toEqual(
+            diagnosticSubcells,
+          );
+          expect(semanticResult(unchanged, fixture.request)).toEqual(
+            semanticResult(baseline.state.result, fixture.request),
+          );
+          const bytes = validateGrassGroundingDiagnosticSubcells(
+            diagnosticSubcells,
+            "world-grid-6.25m-v1",
+            result.state.result.data.count,
+            result.state.result.sweptBounds,
+          );
+          expect(result.resultBytes).toBe(baseline.resultBytes + bytes);
+          expect(cached.resultBytes).toBe(result.resultBytes);
+        } else {
+          expect(expected.status).toBe("defer");
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              result.state.result,
+              "diagnosticSubcells",
+            ),
+          ).toBe(false);
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              cached.state.result,
+              "diagnosticSubcells",
+            ),
+          ).toBe(false);
+          expect(result.resultBytes).toBe(0);
+          expect(cached.resultBytes).toBe(0);
+        }
+        expect(result.work.operations).toBe(baseline.work.operations);
+        expect(sameFaceInputHash(fixture)).toBe(original);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("rejects unknown diagnostic subcell selections in the actual worker before fitting", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const worker = await actualWorker();
+      for (const value of ["other", null, true, {}, 6.25]) {
+        const packet = workerRequest(fixture.request);
+        Reflect.set(packet.settings, "diagnosticSubcells", value);
+        worker.send(packet);
+        expect(await reply(worker, "rejected", 1)).toMatchObject({
+          reason: "invalid_message",
+        });
+      }
+      expect(
+        (await run(worker, workerRequest(fixture.request, 2))).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "roundtrips paired-family LOD%s through real cold/cached fitting with one root pair and bit per slot",
     async (lod) => {

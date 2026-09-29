@@ -1297,6 +1297,7 @@ export class GrassGroundingWorkerCoordinator {
         lod: prepared.settings.lod,
         geometryLayout: prepared.settings.geometryLayout,
         roadClearance: prepared.settings.roadClearance,
+        diagnosticSubcells: prepared.settings.diagnosticSubcells,
       }),
       () => this.current(context),
       context.fit,

@@ -229,6 +229,24 @@ export function* prepareGrassGroundingHandoffSteps(
     "Invalid grass handoff surface owners",
   );
   const clearance = Object.getOwnPropertyDescriptor(request, "roadClearance");
+  const diagnosticSelection = () => {
+    const field = Object.getOwnPropertyDescriptor(
+      request,
+      "diagnosticSubcells",
+    );
+    requireValue(
+      !("diagnosticSubcells" in request) ||
+        Boolean(
+          field &&
+          "value" in field &&
+          field.enumerable &&
+          (field.value === undefined || field.value === "world-grid-6.25m-v1"),
+        ),
+      "Invalid handoff diagnostic subcells selection",
+    );
+    return field?.value as GrassGroundingHandoffRequest["diagnosticSubcells"];
+  };
+  const diagnosticSubcells = diagnosticSelection();
   requireValue(
     !("roadClearance" in request) ||
       Boolean(
@@ -248,6 +266,7 @@ export function* prepareGrassGroundingHandoffSteps(
     ...(clearance?.value === undefined
       ? {}
       : { roadClearance: "per-blade-v1" as const }),
+    ...(diagnosticSubcells === undefined ? {} : { diagnosticSubcells }),
     ...(bankVerge === undefined ? {} : { bankVerge }),
     ...(pondServiceGround === undefined ? {} : { pondServiceGround }),
     ...(request.maximumBaseError === undefined
@@ -258,6 +277,10 @@ export function* prepareGrassGroundingHandoffSteps(
       : { workBudget: request.workBudget }),
   };
   const current = () => {
+    requireValue(
+      diagnosticSelection() === diagnosticSubcells,
+      "Grass handoff diagnostic subcells selection changed",
+    );
     requireValue(inputs.isCurrent(), "Grass handoff input lease invalidated");
     requireValue(
       request.geometry === geometry &&

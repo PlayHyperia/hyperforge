@@ -1603,6 +1603,8 @@ export interface GrassVisualProfile {
   coverageTrial?: GrassPlacementCoverageTrial;
   /** Restart-owned fine-grass road clearance; ordinary profiles stay unchanged. */
   roadClearance?: "per-blade-v1";
+  /** Opt-in bounds census only; never changes placement or rendering. */
+  diagnosticSubcells?: "world-grid-6.25m-v1";
 }
 
 /**
@@ -1792,6 +1794,7 @@ export class GrassVisualManager implements QuadTreeListener {
     GrassPlacementDistribution | undefined;
   private readonly coverageTrial: GrassPlacementCoverageTrial | undefined;
   private readonly roadClearance: "per-blade-v1" | undefined;
+  private readonly diagnosticSubcells: "world-grid-6.25m-v1" | undefined;
   private readonly placementOperations = createGrassPlacementCellOperations();
   private readonly nodeWorkUnits = new Map<
     TerrainQuadNode,
@@ -2009,6 +2012,21 @@ export class GrassVisualManager implements QuadTreeListener {
     this.roadClearance = clearanceField?.value;
     if (this.roadClearance && !this.fineMeadow)
       throw new Error("Grass road clearance requires the explicit fine meadow");
+    const subcellField = Object.getOwnPropertyDescriptor(
+      profile,
+      "diagnosticSubcells",
+    );
+    if (
+      "diagnosticSubcells" in profile &&
+      (!subcellField ||
+        !("value" in subcellField) ||
+        (subcellField.value !== undefined &&
+          subcellField.value !== "world-grid-6.25m-v1"))
+    )
+      throw new Error("Invalid grass visual diagnostic subcell mode");
+    this.diagnosticSubcells = subcellField?.value;
+    if (this.diagnosticSubcells && !this.fineMeadow)
+      throw new Error("Grass subcell census requires the explicit fine meadow");
     this.compactGrassColorGrade =
       createCompactTerrainColorOperations().grassColorGrade(
         workerSetup?.compactGrassColorGrade,
@@ -2885,6 +2903,9 @@ export class GrassVisualManager implements QuadTreeListener {
             ...(manager.roadClearance
               ? { roadClearance: manager.roadClearance }
               : {}),
+            ...(manager.diagnosticSubcells
+              ? { diagnosticSubcells: manager.diagnosticSubcells }
+              : {}),
             ...(manager.fineMeadow &&
             manager.compactGrassColorGrade &&
             manager.compactMacroField?.coastalMeadow &&
@@ -3533,7 +3554,11 @@ export class GrassVisualManager implements QuadTreeListener {
     const key = data.chunkKey;
     if (key !== work.key) throw new Error("Grass work unit key mismatch");
     if (this.chunks.has(key)) return;
-    if (blades) this.assertBladeRoadClearance(blades);
+    if (blades) {
+      this.assertBladeRoadClearance(blades);
+      if (blades.diagnosticSubcells?.mode !== this.diagnosticSubcells)
+        throw new Error("Grass visual diagnostic request mismatch");
+    }
     if (data.count === 0) return;
     if (
       this.compactMeadow &&
@@ -3623,6 +3648,9 @@ export class GrassVisualManager implements QuadTreeListener {
                 schemaVersion: 1,
                 ...blades.receipt,
                 sweptBounds: blades.sweptBounds,
+                ...(blades.diagnosticSubcells
+                  ? { diagnosticSubcells: blades.diagnosticSubcells }
+                  : {}),
                 sourceIndices: blades.sourceIndices,
                 surfaceRevisions: blades.dependencies.map(
                   ({ surface }) => surface.revision,
