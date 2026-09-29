@@ -98,6 +98,34 @@ test("node copies and GPU instancing cannot hide behind one small shared mesh", 
   assert.equal(s.allNodeTriangles, 44);
   assert.equal(s.maxSceneTriangles, 44);
   assert.equal(s.triangles, 44);
+  assert.equal(s.loaderSelectedScene.triangles, 44);
+  assert.equal(s.loaderSelectedScene.primitiveOccurrences, 2);
+  assert.equal(s.loaderSelectedScene.primitiveInstanceOccurrences, 11);
+  assert.deepEqual(
+    s.loaderSelectedScene.nodes.map((node) => ({
+      index: node.nodeIndex,
+      instances: node.instanceCount,
+      triangles: node.triangles,
+      primitives: node.primitiveOccurrences,
+      primitiveInstances: node.primitiveInstanceOccurrences,
+    })),
+    [
+      {
+        index: 0,
+        instances: 1,
+        triangles: 4,
+        primitives: 1,
+        primitiveInstances: 1,
+      },
+      {
+        index: 1,
+        instances: 10,
+        triangles: 40,
+        primitives: 1,
+        primitiveInstances: 10,
+      },
+    ],
+  );
 });
 
 test("alternate scenes are reported independently and unused definitions remain in the inventory gate", () => {
@@ -114,6 +142,159 @@ test("alternate scenes are reported independently and unused definitions remain 
   );
 });
 
+test("omitted scene selects scene zero while preserving the historical explicit-default field", (t) => {
+  const d = document(3);
+  delete d.scene;
+  d.meshes[0].name = "selected mesh";
+  d.nodes[0].name = "selected node";
+  const before = structuredClone(d);
+  const s = inspectModel(file(directory(t), "implicit.gltf", d));
+  const selected = s.loaderSelectedScene;
+  assert.equal(s.defaultSceneTriangles, null);
+  assert.equal(s.triangles, 3);
+  assert.equal(selected.status, "resolved");
+  assert.equal(selected.index, 0);
+  assert.equal(selected.basis, "implicit-scene-0");
+  assert.equal(selected.triangles, 3);
+  assert.equal(selected.primitiveOccurrences, 1);
+  assert.equal(selected.primitiveInstanceOccurrences, 1);
+  assert.deepEqual(selected.nodes, [
+    {
+      nodeIndex: 0,
+      nodeName: "selected node",
+      meshIndex: 0,
+      meshName: "selected mesh",
+      instanceCount: 1,
+      triangles: 3,
+      primitiveOccurrences: 1,
+      primitiveInstanceOccurrences: 1,
+      materialIndices: [],
+      usesDefaultMaterial: true,
+    },
+  ]);
+  assert.deepEqual(d, before);
+});
+
+test("explicit alternate scene excludes orphan nodes and unused definitions only from the selected census", () => {
+  const d = document(3);
+  d.accessors.push(
+    { count: 60, type: "VEC3", componentType: 5126 },
+    { count: 15, type: "VEC3", componentType: 5126 },
+    { count: 21, type: "VEC3", componentType: 5126 },
+  );
+  d.meshes.push(
+    { name: "orphan mesh", primitives: [{ attributes: { POSITION: 1 } }] },
+    { name: "selected mesh", primitives: [{ attributes: { POSITION: 2 } }] },
+    {
+      name: "unused definition",
+      primitives: [{ attributes: { POSITION: 3 } }],
+    },
+  );
+  d.nodes.push({ mesh: 1, name: "orphan" }, { children: [3] }, { mesh: 2 });
+  d.scenes.push({ nodes: [2] });
+  d.scene = 1;
+  const s = summarizeModelDocument(d);
+  assert.equal(s.definitionTriangles, 35);
+  assert.equal(s.allNodeTriangles, 28);
+  assert.equal(s.triangles, 35);
+  assert.deepEqual(s.sceneTriangles, [3, 5]);
+  assert.equal(s.defaultSceneTriangles, 5);
+  assert.equal(s.loaderSelectedScene.index, 1);
+  assert.equal(s.loaderSelectedScene.basis, "explicit-scene");
+  assert.equal(s.loaderSelectedScene.triangles, 5);
+  assert.deepEqual(
+    s.loaderSelectedScene.nodes.map((node) => node.nodeIndex),
+    [3],
+  );
+});
+
+test("two selected nodes referencing one mesh count both occurrences through a parent hierarchy", () => {
+  const d = document(3);
+  d.meshes[0].primitives.push({ attributes: { POSITION: 0 } });
+  d.nodes.push({ mesh: 0 }, { children: [0, 1] });
+  d.scenes[0].nodes = [2];
+  const s = summarizeModelDocument(d);
+  assert.equal(s.definitionTriangles, 6);
+  assert.equal(s.loaderSelectedScene.triangles, 12);
+  assert.equal(s.loaderSelectedScene.primitiveOccurrences, 4);
+  assert.equal(s.loaderSelectedScene.primitiveInstanceOccurrences, 4);
+  assert.deepEqual(
+    s.loaderSelectedScene.nodes.map((node) => node.meshIndex),
+    [0, 0],
+  );
+});
+
+test("selected materials count unique source slots and one implicit default, not runtime clones", () => {
+  const d = document();
+  d.materials = [{ name: "used" }, { name: "unused" }];
+  d.meshes[0].primitives.push({ attributes: { POSITION: 0 }, material: 0 });
+  d.nodes.push({ mesh: 0 });
+  d.scenes[0].nodes.push(1);
+  const s = summarizeModelDocument(d);
+  assert.equal(s.materialCount, 1); // Existing definition field stays unchanged.
+  assert.equal(s.loaderSelectedScene.materialCount, 2);
+  assert.deepEqual(s.loaderSelectedScene.materialIndices, [0]);
+  assert.equal(s.loaderSelectedScene.usesDefaultMaterial, true);
+  for (const node of s.loaderSelectedScene.nodes) {
+    assert.deepEqual(node.materialIndices, [0]);
+    assert.equal(node.usesDefaultMaterial, true);
+  }
+  const noMaterials = summarizeModelDocument(document());
+  assert.equal(noMaterials.materialCount, 0);
+  assert.equal(noMaterials.loaderSelectedScene.materialCount, 1);
+  assert.equal(noMaterials.loaderSelectedScene.usesDefaultMaterial, true);
+  d.meshes[0].primitives[0].material = 0;
+  const explicitOnly = summarizeModelDocument(d).loaderSelectedScene;
+  assert.equal(explicitOnly.materialCount, 1);
+  assert.equal(explicitOnly.usesDefaultMaterial, false);
+  assert.match(explicitOnly.scope, /not visibility, actual draw calls/);
+  assert.match(explicitOnly.scope, /alternative library-mesh selection/);
+});
+
+test("missing scenes leave the loader-selected census unresolved, including animation-only data", () => {
+  for (const animated of [false, true]) {
+    const d = document();
+    delete d.scene;
+    delete d.scenes;
+    if (animated) {
+      delete d.meshes;
+      delete d.nodes[0].mesh;
+      d.animations = [{ channels: [], samplers: [] }];
+    }
+    const s = summarizeModelDocument(d);
+    assert.equal(s.contentKind, animated ? "animation-only" : "mesh-asset");
+    assert.equal(s.triangles, animated ? 0 : 2);
+    assert.equal(s.loaderSelectedScene.status, "unresolved-no-scenes");
+    assert.equal(s.loaderSelectedScene.basis, "no-scenes");
+    for (const key of [
+      "index",
+      "triangles",
+      "primitiveOccurrences",
+      "primitiveInstanceOccurrences",
+      "materialCount",
+      "materialIndices",
+      "usesDefaultMaterial",
+      "nodes",
+    ])
+      assert.equal(s.loaderSelectedScene[key], null, key);
+  }
+});
+
+test("an existing empty selected scene is distinct from an unresolved absent scene", () => {
+  const d = document(3);
+  d.scenes.push({});
+  d.scene = 1;
+  const s = summarizeModelDocument(d);
+  assert.equal(s.triangles, 3);
+  assert.equal(s.loaderSelectedScene.status, "resolved");
+  assert.equal(s.loaderSelectedScene.index, 1);
+  assert.equal(s.loaderSelectedScene.triangles, 0);
+  assert.equal(s.loaderSelectedScene.primitiveOccurrences, 0);
+  assert.equal(s.loaderSelectedScene.primitiveInstanceOccurrences, 0);
+  assert.equal(s.loaderSelectedScene.materialCount, 0);
+  assert.deepEqual(s.loaderSelectedScene.nodes, []);
+});
+
 test("animation-only documents are explicit non-geometry entries, not inspection failures", (t) => {
   const dir = directory(t),
     d = document();
@@ -126,6 +307,9 @@ test("animation-only documents are explicit non-geometry entries, not inspection
   assert.equal(result.models[0].triangles, 0);
   assert.equal(result.models[0].budgetApplicable, false);
   assert.equal(result.summary.inspectionErrors, 0);
+  assert.equal(result.models[0].loaderSelectedScene.status, "resolved");
+  assert.equal(result.models[0].loaderSelectedScene.triangles, 0);
+  assert.equal(result.models[0].loaderSelectedScene.materialCount, 0);
 });
 
 test("skin, morph, material and compressed metadata is reported without invoking a decoder", () => {
@@ -207,6 +391,18 @@ test("invalid scene references, cycles and multiple parents cannot yield partial
     },
     (d) => {
       d.scene = 99;
+    },
+    (d) => {
+      d.scene = null;
+    },
+    (d) => {
+      d.scene = "0";
+    },
+    (d) => {
+      d.scene = 0.5;
+    },
+    (d) => {
+      d.scene = -1;
     },
     (d) => {
       d.nodes[0].children = [0];

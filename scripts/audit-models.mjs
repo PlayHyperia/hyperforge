@@ -143,6 +143,16 @@ export function summarizeModelDocument(document) {
       return safeCount(sum + (mode === 4 ? count / 3 : count - 2), label);
     }, 0);
   });
+  const meshMaterialIndices = meshes.map((mesh) => [
+    ...new Set(
+      mesh.primitives
+        .filter((primitive) => primitive.material !== undefined)
+        .map((primitive) => primitive.material),
+    ),
+  ]);
+  const meshUsesDefaultMaterial = meshes.map((mesh) =>
+    mesh.primitives.some((primitive) => primitive.material === undefined),
+  );
   for (const view of arrayField(document, "bufferViews"))
     for (const extension of Object.keys(view.extensions ?? {}))
       extensions.add(extension);
@@ -156,6 +166,7 @@ export function summarizeModelDocument(document) {
       parents.set(child, i);
     }
   }
+  const nodeInstanceCounts = new Array(nodes.length).fill(0);
   const nodeTriangles = nodes.map((node, index) => {
     const instancing = node.extensions?.EXT_mesh_gpu_instancing;
     if (instancing && node.mesh === undefined)
@@ -182,6 +193,7 @@ export function summarizeModelDocument(document) {
         throw new Error(`Instanced node ${index} has unequal attribute counts`);
       instances = counts[0];
     }
+    nodeInstanceCounts[index] = instances;
     return safeCount(meshTriangles[node.mesh] * instances, `Node ${index}`);
   });
   // Validate all nodes, including unreachable ones; never silently skip a cycle.
@@ -210,11 +222,12 @@ export function summarizeModelDocument(document) {
       );
       stack.push(...children[index]);
     }
-    return triangles;
+    return { triangles, nodeIndices: [...seen] };
   };
-  const sceneTriangles = scenes.map((scene) =>
+  const sceneCounts = scenes.map((scene) =>
     countScene(arrayField(scene, "nodes")),
   );
+  const sceneTriangles = sceneCounts.map((scene) => scene.triangles);
   if (document.scene !== undefined)
     referenced(scenes, document.scene, "Default scene");
   const sum = (values) =>
@@ -224,6 +237,70 @@ export function summarizeModelDocument(document) {
   const maxSceneTriangles = sceneTriangles.length
     ? Math.max(...sceneTriangles)
     : null;
+  // Three GLTFLoader publishes scenes[json.scene || 0]. Keep the historical
+  // explicit-default field below unchanged, and report this loader choice
+  // separately from the conservative inventory gate and library mesh selection.
+  const selectedIndex = scenes.length ? (document.scene ?? 0) : null;
+  const selectedNodes =
+    selectedIndex === null
+      ? null
+      : sceneCounts[selectedIndex].nodeIndices
+          .filter((index) => nodes[index].mesh !== undefined)
+          .sort((a, b) => a - b)
+          .map((index) => {
+            const node = nodes[index];
+            const mesh = meshes[node.mesh];
+            return {
+              nodeIndex: index,
+              nodeName: node.name ?? null,
+              meshIndex: node.mesh,
+              meshName: mesh.name ?? null,
+              instanceCount: nodeInstanceCounts[index],
+              triangles: nodeTriangles[index],
+              primitiveOccurrences: mesh.primitives.length,
+              primitiveInstanceOccurrences: safeCount(
+                mesh.primitives.length * nodeInstanceCounts[index],
+                `Node ${index} primitive instances`,
+              ),
+              materialIndices: [...meshMaterialIndices[node.mesh]].sort(
+                (a, b) => a - b,
+              ),
+              usesDefaultMaterial: meshUsesDefaultMaterial[node.mesh],
+            };
+          });
+  const selectedMaterials = selectedNodes
+    ? [...new Set(selectedNodes.flatMap((node) => node.materialIndices))].sort(
+        (a, b) => a - b,
+      )
+    : null;
+  const selectedUsesDefaultMaterial = selectedNodes
+    ? selectedNodes.some((node) => node.usesDefaultMaterial)
+    : null;
+  const loaderSelectedScene = {
+    status: selectedIndex === null ? "unresolved-no-scenes" : "resolved",
+    index: selectedIndex,
+    basis:
+      selectedIndex === null
+        ? "no-scenes"
+        : document.scene === undefined
+          ? "implicit-scene-0"
+          : "explicit-scene",
+    triangles: selectedIndex === null ? null : sceneTriangles[selectedIndex],
+    primitiveOccurrences: selectedNodes
+      ? sum(selectedNodes.map((node) => node.primitiveOccurrences))
+      : null,
+    primitiveInstanceOccurrences: selectedNodes
+      ? sum(selectedNodes.map((node) => node.primitiveInstanceOccurrences))
+      : null,
+    materialCount: selectedMaterials
+      ? selectedMaterials.length + Number(selectedUsesDefaultMaterial)
+      : null,
+    materialIndices: selectedMaterials,
+    usesDefaultMaterial: selectedUsesDefaultMaterial,
+    nodes: selectedNodes,
+    scope:
+      "Declared loader-selected scene only, not visibility, actual draw calls or alternative library-mesh selection. Primitive occurrences count node/primitive attachments; primitive-instance occurrences also multiply GPU instances. Materials count unique source slots plus one implicit default, not runtime clones.",
+  };
   return {
     contentKind: meshes.length ? "mesh-asset" : "animation-only",
     animationCount,
@@ -236,6 +313,7 @@ export function summarizeModelDocument(document) {
     maxSceneTriangles,
     defaultSceneTriangles:
       document.scene === undefined ? null : sceneTriangles[document.scene],
+    loaderSelectedScene,
     meshes: meshes.map((mesh, index) => ({
       index,
       name: mesh.name ?? null,

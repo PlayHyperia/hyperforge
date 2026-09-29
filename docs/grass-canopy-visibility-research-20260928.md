@@ -1,5 +1,17 @@
 # Grass canopy visibility: research checkpoint
 
+## Expanded declared-asset census (no runtime promotion)
+
+The [expanded inventory](world-art-candidates/model-budget-census.json), SHA256 `a8f29c84147d0ac1e6316966abdeb7bcf46e0d113a7de09c68de55b894e421b2`, covers 322 declared entries: 321 present files, comprising 314 mesh assets and seven animation-only files. Fourteen present files exceed the existing provisional file caps; the remaining failure is the known missing `models/cow/cow.vrm` placeholder. All 56 earlier world-sample hashes match. Coverage expands to model/animation URLs from 17 served manifests, 94 inferred tree LOD paths and 18 files belonging to six registered avatar options. Alternatives and LODs are not assumed to render together.
+
+The audit now reports the scene selected by Three's loader: explicit `scene`, otherwise scene 0. It retains the conservative mesh-definition/all-node budget gate and historical explicit-default field. Missing scenes are unresolved with null selected counts, not rendered zero. Selected triangles include node and GPU-instance multiplication; primitive attachments, instance-expanded occurrences and source material slots remain distinct from actual draw calls or runtime material clones. The rock library's app-side variant/LOD selection is also distinct from loading its whole scene. Root's combined model-audit/avatar-audit/VRM-optimizer run passes 31/31 tests, including 24 model-audit tests; lint, formatting and independent review pass.
+
+**Mining LOD correction:** the served mining data omits LOD paths. ResourceSystem converts absence to `null`; the instanced visual strategy passes `config.lod1Model ?? null` and `config.lod2Model ?? null`, disabling path inference. The 18 absent hypothetical ore-LOD filenames are not missing requested assets.
+
+**Do not use the legacy `models:optimize` route for this work.** It mutates inputs in place, uses a first-match regular expression over human-readable mesh counts and selects Draco for static models. Current primary loaders configure Meshopt, not Draco. An explicit source-to-derived-candidate pipeline with decoded checks, supported-loader tests and native appearance verification is required before use. Preserve the originals.
+
+No model assets or runtime behavior changed in this audit. Per-role numeric budgets, full placed populations, procedural geometry, dynamic/network bindings, memory and measured main/shadow/reflection cost remain open. This is neither whole-launch coverage nor performance acceptance.
+
 ## Reflection grass submission candidate (default off)
 
 The source now supports `water.setReflectionGrassFootprintEnabled(true)`, independently of the earlier raster-scissor experiment. It rejects only grounded grass chunks whose complete wind-swept world bounds are outside the conservative union of lake reflection-sampling regions. The normal per-pass frustum test runs first. Legacy chunks without those bounds keep their existing behavior; main-view membership, blade counts, meshes, materials, full reflection target/clear/shader and capture cadence remain unchanged.
@@ -14,7 +26,11 @@ Canonical build166 compiles nine bundles from 975 production inputs with zero so
 
 The checkpoint excludes the 15 pre-existing WaterSystem shadow-reuse prototype lines while preserving them in the working tree. That exact candidate-only Water source, SHA256 `7e9804a3ae695090aa4dc781bdaa21000c20a8a5d2f12d0f99aa796d30ba1156`, separately passes 50/50 water/lifecycle tests through a read-only source overlay. Matched compiler-host comparison over 730 roots retains identical five inherited diagnostics and zero scoped errors. [Candidate-only receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/reflection-grass-footprint-candidate-only01.log), SHA256 `f2e51348f88ce1b62d4573902c867ff552a7d431d876b1b167d254f7ed309614`. This protects checkpoint scope; it is not native acceptance or a whole-clean-checkout release test.
 
-**Native acceptance remains open:** measure actual removable chunk/triangle counts, sampled-pixel parity, ordinary main/shadow isolation, moving/grazing views and net GPU/frame-time benefit at unchanged 2× resolution. The earlier 2.60M far-reflection triangles are only an opportunity ceiling, not a measured saving. The Mac remains locked; no native166 run or default promotion has occurred. Public3333 remains build161.
+**Native166 result — no submission saving in the tested view; keep the candidate off.** The bounded fixed-view baseline/candidate/baseline probe at 3024×1724, DPR2 records 35 native samples. Excluding the first two seconds of each 12-second phase leaves 10/9/10 samples. Culler calls total 35,164 / 35,400 / 37,288; the candidate has 150 scoped counter rows and zero rejected queries. These are culling queries, not unique chunks or draw calls.
+
+Every retained sample in all three phases reports the same mirror work: 236 draws / 2,870,212 triangles, including 1,880,625 grass triangles. Main work remains 240 draws / 2,897,796 triangles; shadow work remains 156 draws / 989,980 triangles across two 78-draw passes. There is no measured submission reduction here. [Raw native receipt](/Users/lucid/Downloads/hyperia-native166-reflection-grass-probe.json), SHA256 `8db7eae878f85b5f3658e2268da68018ebf1f55943a3459e64a0ca6e814524f3`.
+
+The probe reports zero timing/GPU errors, no device loss, 105/105 query resources destroyed and the original culler/camera/clock restored. The owned native tab is closed to Chrome's New Tab; runtime166 stopped with no errors, private ports are free and its disposable database is removed. Public3333/build161 and protected state are preserved. This is not sampled-pixel parity, moving/grazing validation, exclusive GPU-cost attribution or FPS acceptance. The historical 2.60M far-reflection triangles remain an opportunity ceiling only, not a current saving; no default promotion follows. The census received formatting only, with no semantic change.
 
 ## Current follow-up: isolated output cost and next geometry work
 
