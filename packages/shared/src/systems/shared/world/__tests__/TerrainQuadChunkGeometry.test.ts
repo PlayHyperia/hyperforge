@@ -2854,9 +2854,19 @@ describe("feature-conforming authoritative floor collars", () => {
                 expect(angle).toBeLessThan(10);
                 count++;
               }
-      expect(count).toBe(108);
+      const expectedFloorIds = [
+        ...Array.from(
+          { length: getDuelArenaConfig().arenaCount },
+          (_, index) => `duel_arena_floor_${index + 1}`,
+        ),
+        "duel_lobby_floor",
+      ];
+      expect(floors.map((floor) => floor.id)).toEqual(expectedFloorIds);
+      // Four corners, three distances and three one-sided crease samples
+      // for every admitted floor; removed floors must not add phantom samples.
+      expect(count).toBe(expectedFloorIds.length * 4 * 3 * 3);
       process.stdout.write(
-        `Floor collar raycasts ${JSON.stringify({ count, worstHeight, worstNormal, nativeOrGameplayAcceptance: false })}\n`,
+        `Floor collar raycasts ${JSON.stringify({ floorIds: expectedFloorIds, count, worstHeight, worstNormal, nativeOrGameplayAcceptance: false })}\n`,
       );
     } finally {
       material.dispose();
@@ -2955,4 +2965,217 @@ describe("feature-conforming authoritative floor collars", () => {
       results.forEach((result) => result.geometry.dispose());
     }
   });
+});
+
+describe("cooperative broad-bank preparation", () => {
+  const ring: TerrainSurfaceRefinementAnnulus = {
+    centerX: 0,
+    centerZ: 0,
+    innerRadius: 0,
+    outerRadius: 30,
+  };
+  const curved: HeightField = (x, z) =>
+    28 + 0.5 * x * x + 0.7 * z * z + 0.3 * Math.sin(21 * x) * Math.sin(17 * z);
+  const bytes = (array: ArrayBufferView) =>
+    new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+
+  it.each([
+    { name: "three-level curved bank", x: 0, z: 0, size: 2, signedZero: false },
+    {
+      name: "fractional negative bank",
+      x: -2.137,
+      z: -3.271,
+      size: 1.51,
+      signedZero: false,
+    },
+    {
+      name: "signed-zero coordinates and height",
+      x: -0,
+      z: -0,
+      size: 2,
+      signedZero: true,
+    },
+  ])(
+    "preserves exact sync/staged bytes with bounded height-query batches for $name",
+    (spec) => {
+      const height: HeightField = spec.signedZero
+        ? (x, z) => (x === 0 && z === 0 ? -0 : curved(x, z))
+        : curved;
+      const syncProvider = new AnalyticTerrain(height, () => null, undefined, [
+        ring,
+      ]);
+      const stepProvider = new AnalyticTerrain(height, () => null, undefined, [
+        ring,
+      ]);
+      const syncData = generateQuadChunkDataSync(
+        spec.x,
+        spec.z,
+        spec.size,
+        5,
+        syncProvider,
+      );
+      const stepData = generateQuadChunkDataSync(
+        spec.x,
+        spec.z,
+        spec.size,
+        5,
+        stepProvider,
+      );
+      const original = bytes(stepData.heightData).slice();
+      expect(stepData).toEqual(syncData);
+      if (spec.signedZero)
+        expect(Object.is(stepData.heightData[12], -0)).toBe(true);
+      const sync = assembleQuadChunkGeometry(syncData, syncProvider, 3);
+      const iterator = assembleQuadChunkGeometrySteps(
+        stepData,
+        stepProvider,
+        3,
+      );
+      const phases = new Map<string, number>();
+      let staged: ReturnType<typeof assembleQuadChunkGeometry> | undefined;
+      try {
+        for (let count = 0; count < 100000; count++) {
+          const before = stepProvider.heightSamples;
+          const next = iterator.next();
+          const queries = stepProvider.heightSamples - before;
+          if (next.done) {
+            staged = next.value;
+            break;
+          }
+          phases.set(
+            next.value,
+            Math.max(phases.get(next.value) ?? 0, queries),
+          );
+          // This fails on the old synchronous hierarchy: the curved fixture
+          // performs 182 canonical queries before its next partition yield.
+          if (next.value === "collar_partition")
+            expect(queries).toBeLessThanOrEqual(18);
+          if (next.value === "collar_bank_probe")
+            expect(queries).toBeLessThanOrEqual(9);
+          if (next.value === "collar_bank_vertices")
+            expect(queries).toBeLessThanOrEqual(4);
+        }
+        expect(staged).toBeDefined();
+        expect(phases.has("collar_bank_probe")).toBe(true);
+        expect(phases.has("collar_bank_vertices")).toBe(true);
+        expect(bytes(staged!.heightData)).toEqual(bytes(sync.heightData));
+        for (const [name, attribute] of Object.entries(
+          sync.geometry.attributes,
+        )) {
+          const actual = staged!.geometry.getAttribute(name);
+          expect(actual.itemSize).toBe(attribute.itemSize);
+          expect(bytes(actual.array)).toEqual(bytes(attribute.array));
+        }
+        expect(bytes(staged!.geometry.index!.array)).toEqual(
+          bytes(sync.geometry.index!.array),
+        );
+        expect(staged!.geometry.userData.terrainCellTopology).toEqual(
+          sync.geometry.userData.terrainCellTopology,
+        );
+        expect(staged!.geometry.boundingBox).toEqual(sync.geometry.boundingBox);
+        expect(staged!.geometry.boundingSphere).toEqual(
+          sync.geometry.boundingSphere,
+        );
+        expect(bytes(stepData.heightData)).toEqual(original);
+        expect(stepProvider.heightSamples).toBe(syncProvider.heightSamples);
+      } finally {
+        iterator.return(undefined as never);
+        sync.geometry.dispose();
+        staged?.geometry.dispose();
+      }
+    },
+  );
+
+  it.each(["collar_bank_probe", "collar_bank_vertices"])(
+    "cancels at %s without further provider queries and disposes the private geometry once",
+    (phase) => {
+      const terrain = new AnalyticTerrain(curved, () => null, undefined, [
+        ring,
+      ]);
+      const worker = generateQuadChunkDataSync(0, 0, 2, 5, terrain);
+      const original = bytes(worker.heightData).slice();
+      const iterator = assembleQuadChunkGeometrySteps(worker, terrain, 3);
+      // Call-through observation: the actual Three geometry owns its cleanup.
+      const dispose = vi.spyOn(THREE.BufferGeometry.prototype, "dispose");
+      try {
+        let step = iterator.next();
+        for (
+          let count = 0;
+          !step.done && step.value !== phase && count < 100000;
+          count++
+        )
+          step = iterator.next();
+        expect(step.done).toBe(false);
+        expect(step.value).toBe(phase);
+        const before = dispose.mock.calls.length,
+          queries = terrain.heightSamples;
+        expect(iterator.return(undefined as never)).toEqual({
+          done: true,
+          value: undefined,
+        });
+        expect(dispose.mock.calls.length - before).toBe(1);
+        expect(iterator.next()).toEqual({ done: true, value: undefined });
+        expect(terrain.heightSamples).toBe(queries);
+        expect(bytes(worker.heightData)).toEqual(original);
+      } finally {
+        iterator.return(undefined as never);
+        dispose.mockRestore();
+      }
+    },
+  );
+
+  it.each(["throw", "non-finite"] as const)(
+    "propagates a %s provider failure after a bank yield and cleans up the real geometry",
+    (mode) => {
+      let armed = false;
+      const failure = new Error("Analytic height input failed");
+      const height: HeightField = (x, z) => {
+        if (armed) {
+          if (mode === "throw") throw failure;
+          return NaN;
+        }
+        return curved(x, z);
+      };
+      const terrain = new AnalyticTerrain(height, () => null, undefined, [
+        ring,
+      ]);
+      const worker = generateQuadChunkDataSync(0, 0, 2, 5, terrain);
+      const iterator = assembleQuadChunkGeometrySteps(worker, terrain, 3);
+      const dispose = vi.spyOn(THREE.BufferGeometry.prototype, "dispose");
+      try {
+        let step = iterator.next();
+        for (
+          let count = 0;
+          !step.done && step.value !== "collar_bank_probe" && count < 100000;
+          count++
+        )
+          step = iterator.next();
+        expect(step.done).toBe(false);
+        expect(step.value).toBe("collar_bank_probe");
+        const before = dispose.mock.calls.length;
+        armed = true;
+        let caught: unknown;
+        try {
+          for (let count = 0; count < 100000; count++) {
+            if (iterator.next().done) break;
+          }
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        if (mode === "throw") expect(caught).toBe(failure);
+        else
+          expect((caught as Error).message).toMatch(
+            /Non-finite terrain (bank probe|collar height)/,
+          );
+        expect(dispose.mock.calls.length - before).toBe(1);
+        const queries = terrain.heightSamples;
+        expect(iterator.next()).toEqual({ done: true, value: undefined });
+        expect(terrain.heightSamples).toBe(queries);
+      } finally {
+        iterator.return(undefined as never);
+        dispose.mockRestore();
+      }
+    },
+  );
 });

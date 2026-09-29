@@ -762,7 +762,11 @@ function* refineSurfaceFeaturesSteps(
     if ((i + 1) % 128 === 0) yield "collar_vertex_index";
   }
   yield "collar_vertex_index";
-  const vertex = (x: number, z: number): number => {
+  const vertex = (
+    x: number,
+    z: number,
+    sampleHeight?: (worldX: number, worldZ: number) => number,
+  ): number => {
     x = Math.fround(x);
     z = Math.fround(z);
     const key = `${x},${z}`,
@@ -777,7 +781,9 @@ function* refineSurfaceFeaturesSteps(
         `Terrain collar refinement vertex limit exceeded at ${centerX + x},${centerZ + z} (${id - baseCount} extra vertices)`,
       );
     const height = Math.fround(
-      provider.getHeightAtComputed(centerX + x, centerZ + z),
+      sampleHeight
+        ? sampleHeight(centerX + x, centerZ + z)
+        : provider.getHeightAtComputed(centerX + x, centerZ + z),
     );
     if (!Number.isFinite(height))
       throw new Error("Non-finite terrain collar height");
@@ -877,11 +883,33 @@ function* refineSurfaceFeaturesSteps(
     }
     return [...values].sort((a, b) => a - b);
   };
-  const refineBankPatch = (
+  // One outer bank patch owns this bounded raw-double cache. Never seed it
+  // from Float32 vertices, quantize keys, or share it across preparation leases.
+  const createBankHeightSampler = () => {
+    const values = new Map<number, Map<number, number>>();
+    let count = 0;
+    return (x: number, z: number): number => {
+      // Map aliases signed zero. Preserve even sign-sensitive provider inputs.
+      if (x === 0 || z === 0) return provider.getHeightAtComputed(x, z);
+      const row = values.get(x);
+      if (row?.has(z)) return row.get(z)!;
+      const height = provider.getHeightAtComputed(x, z);
+      // The cap bounds retained memory, not geometry: extra samples still use
+      // the canonical owner rather than changing detail or failing preparation.
+      if (count < 256) {
+        if (row) row.set(z, height);
+        else values.set(x, new Map([[z, height]]));
+        count++;
+      }
+      return height;
+    };
+  };
+  const refineBankPatch = function* (
     polygon: number[],
     steps: readonly number[],
     stepIndex = 0,
-  ): number[][] => {
+    sampleHeight = createBankHeightSampler(),
+  ): Generator<string, number[][], void> {
     const fineStep = steps[stepIndex],
       hasNext = stepIndex + 1 < steps.length;
     const [a, b, c, d] = polygon;
@@ -895,7 +923,7 @@ function* refineSurfaceFeaturesSteps(
       middleZ = (top + bottom) / 2;
     // Do not emit decision probes: unused vertices would invalidate topology.
     const canonical = (x: number, z: number) => {
-      const height = provider.getHeightAtComputed(centerX + x, centerZ + z);
+      const height = sampleHeight(centerX + x, centerZ + z);
       if (!Number.isFinite(height))
         throw new Error("Non-finite terrain bank probe");
       return height;
@@ -934,6 +962,8 @@ function* refineSurfaceFeaturesSteps(
         normalAgreement((hc - hb) / width, (hb - ha) / depth),
         normalAgreement((hd - ha) / width, (hc - hd) / depth),
       ) < Math.cos(Math.PI / 30);
+    // Yield inside the hierarchy, not only after its complete recursive tree.
+    yield "collar_bank_probe";
     if (!refine) return [polygon];
     const axis = (lo: number, hi: number, origin: number) => {
       const values = [lo];
@@ -954,16 +984,24 @@ function* refineSurfaceFeaturesSteps(
     for (let z = 0; z < zs.length - 1; z++)
       for (let x = 0; x < xs.length - 1; x++) {
         const part = [
-          vertex(xs[x], zs[z]),
-          vertex(xs[x], zs[z + 1]),
-          vertex(xs[x + 1], zs[z + 1]),
-          vertex(xs[x + 1], zs[z]),
+          vertex(xs[x], zs[z], sampleHeight),
+          vertex(xs[x], zs[z + 1], sampleHeight),
+          vertex(xs[x + 1], zs[z + 1], sampleHeight),
+          vertex(xs[x + 1], zs[z], sampleHeight),
         ];
+        yield "collar_bank_vertices";
         // Broad banks receive the same error decision again at the original
         // .125 m scale, with the same .0625 m finest detail and forced seams.
-        parts.push(
-          ...(!hasNext ? [part] : refineBankPatch(part, steps, stepIndex + 1)),
-        );
+        if (hasNext)
+          parts.push(
+            ...(yield* refineBankPatch(
+              part,
+              steps,
+              stepIndex + 1,
+              sampleHeight,
+            )),
+          );
+        else parts.push(part);
       }
     return parts;
   };
@@ -1120,7 +1158,7 @@ function* refineSurfaceFeaturesSteps(
             active
               .filter((zone) => zone.kind === "annulus")
               .every((zone) => zone.kind === "annulus" && zone.broadAdaptive);
-          parts = refineBankPatch(
+          parts = yield* refineBankPatch(
             parts[0],
             broadAdaptive
               ? BROAD_BANK_STEPS
