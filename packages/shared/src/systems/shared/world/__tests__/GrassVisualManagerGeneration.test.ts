@@ -69,6 +69,11 @@ import type {
   TerrainGridBounds,
 } from "../TerrainGridSurface";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+} from "../../../../data/arena-grading";
+import { getDuelArenaConfig } from "../../../../data/duel-manifest";
 import { EventType } from "../../../../types/events";
 import { sameFaceHash } from "./fixtures/GrassBladeGroundingSameFaceCases";
 import { groundGrassBladeSteps as legacyGroundGrassBladeSteps } from "./fixtures/LegacyGrassBladeGroundingReference";
@@ -557,6 +562,7 @@ async function coastalFixture(
     geometry: ConstructorParameters<typeof GrassVisualManager>[17];
     instancing?: ConstructorParameters<typeof GrassVisualManager>[19];
   },
+  historicalConstraints?: "pre-fe4a6f1ab",
 ) {
   await DataManager.getInstance().initialize();
   const baselineProfile = DataManager.getWorldTerrainProfile();
@@ -622,6 +628,55 @@ async function coastalFixture(
   if (pondBlend !== "composition-v1") {
     terrain["loadWaterBodiesFromManifest"]();
     terrain["loadFlatZonesFromManifest"]();
+  }
+  const retiredFloorId = "duel_hospital_floor";
+  expect(terrain["flatZones"].has(retiredFloorId)).toBe(false);
+  expect(terrain["arenaFloorZoneIds"].has(retiredFloorId)).toBe(false);
+  expect(
+    createDuelArenaFloorZones(
+      getDuelArenaConfig(),
+      getDuelArenaGradeHeight(),
+    ).some((zone) => zone.id === retiredFloorId),
+  ).toBe(false);
+  if (historicalConstraints) {
+    expect(historicalConstraints).toBe("pre-fe4a6f1ab");
+    expect(
+      bankWorld && geometryRecipe === "historical-linear" && !pondBlend,
+    ).toBe(true);
+    // Exact retired input from arena-grading.ts at fe4a6f1ab^ (source SHA
+    // a97521b87cc04a43c885ec6174a2fd0babb7e47bc0baf33c5c2aecde2fc01eff).
+    // The historical census counts missed pad checks too. Its semantic hashes
+    // and operation totals require the old constraints, not a production pad.
+    const retiredFloor = {
+      id: retiredFloorId,
+      centerX: 345,
+      centerZ: 376,
+      width: 12,
+      depth: 12,
+      height: getDuelArenaGradeHeight() + 0.4,
+      blendRadius: 1,
+      carveInset: 1,
+    };
+    const zones = [...terrain["flatZones"].values()];
+    const lobbyIndex = zones.findIndex(
+      (zone) => zone.id === "duel_lobby_floor",
+    );
+    expect(lobbyIndex).toBeGreaterThanOrEqual(0);
+    // Preserve actual registration/spatial-index order: the retired floor was
+    // immediately after the lobby and before station pads in this fixture.
+    const later = zones.slice(lobbyIndex + 1);
+    for (const zone of later) terrain.unregisterFlatZone(zone.id);
+    terrain.registerFlatZone(retiredFloor);
+    for (const zone of later) terrain.registerFlatZone(zone);
+    terrain["setCanonicalArenaGrade"](
+      new Set([...terrain["arenaFloorZoneIds"], retiredFloorId]),
+      getDuelArenaGradeHeight(),
+    );
+    expect([...terrain["flatZones"].keys()]).toEqual([
+      ...zones.slice(0, lobbyIndex + 1).map((zone) => zone.id),
+      retiredFloorId,
+      ...later.map((zone) => zone.id),
+    ]);
   }
   if (pondBlend === "shore-contact-v1") {
     // Explicit review52 bank inputs, through the real authoritative owner;
@@ -1058,6 +1113,37 @@ function horizonFixture(initiallyFar = false, empty = false) {
 }
 
 describe("GrassVisualManager request ownership with real workers and geometry", () => {
+  it("never applies reflection footprint culling to legacy chunks without swept blade bounds", async () => {
+    const f = fixture();
+    let calls = 0;
+    f.manager.setReflectionGrassCuller(() => {
+      calls++;
+      return false;
+    });
+    try {
+      const mesh = await populate(f);
+      expect(mesh.userData.grassBladeGrounding).toBeUndefined();
+      const bounds = mesh.boundingBox!.clone().applyMatrix4(mesh.matrixWorld);
+      const center = bounds.getCenter(new THREE.Vector3());
+      const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
+      camera.position.copy(center).add(new THREE.Vector3(0, 20, 50));
+      camera.lookAt(center);
+      camera.updateMatrixWorld(true);
+      const full = new THREE.Frustum().setFromProjectionMatrix(
+        new THREE.Matrix4().multiplyMatrices(
+          camera.projectionMatrix,
+          camera.matrixWorldInverse,
+        ),
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      expect(mesh.intersectsFrustum(full)).toBe(true);
+      expect(calls).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "keeps matrix-free production chunks equivalent through real placement, grounding, culling and retirement at LOD%s",
     async (lod) => {
@@ -1337,9 +1423,36 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           );
           expect(frustum.intersectsBox(transformed)).toBe(true);
           expect(mesh.intersectsFrustum!(frustum)).toBe(true);
+          // The optional reflection owner receives the exact published,
+          // wind-swept world box after the ordinary per-pass test succeeds.
+          const cropCamera = camera.clone();
+          cropCamera.position.x += 1000;
+          cropCamera.updateMatrixWorld(true);
+          const crop = new THREE.Frustum().setFromProjectionMatrix(
+            new THREE.Matrix4().multiplyMatrices(
+              cropCamera.projectionMatrix,
+              cropCamera.matrixWorldInverse,
+            ),
+            cropCamera.coordinateSystem,
+            cropCamera.reversedDepth,
+          );
+          const observedBounds: THREE.Box3[] = [];
+          f.manager.setReflectionGrassCuller((actualFrustum, bounds) => {
+            expect(actualFrustum).toBe(frustum);
+            observedBounds.push(bounds.clone());
+            return crop.intersectsBox(bounds);
+          });
+          expect(mesh.intersectsFrustum!(frustum)).toBe(false);
+          expect(observedBounds).toEqual([transformed]);
+          expect(mesh.visible).toBe(true);
+          expect(mesh.geometry).toBe(geometry);
+          expect(mesh.material).toBe(material);
+          expect(mesh.count).toBe(ready.data.count);
           parent.position.x += 1000;
           parent.updateMatrixWorld(true);
           expect(mesh.intersectsFrustum!(frustum)).toBe(false);
+          // A full-frustum rejection never consults the crop owner.
+          expect(observedBounds).toHaveLength(1);
           expect(mesh.visible).toBe(true);
           expect(mesh.boundingBox).toEqual(snapshot.localBox);
 
@@ -1407,6 +1520,10 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           );
         } finally {
           f.close();
+          expect(f.manager["reflectionGrassCuller"]).toBeNull();
+          expect(() => f.manager.setReflectionGrassCuller(() => true)).toThrow(
+            "destroyed",
+          );
           expect(() =>
             f.manager.setClumpInvariantPreparation(async () => {}),
           ).toThrow("destroyed");
@@ -2030,6 +2147,13 @@ describe("GrassVisualManager request ownership with real workers and geometry", 
           pathRecipe,
           undefined,
           geometryRecipe,
+          undefined,
+          undefined,
+          undefined,
+          captureRecipe === "current-canopy" ? undefined : "pre-fe4a6f1ab",
+        );
+        expect(f.terrain["flatZones"].has("duel_hospital_floor")).toBe(
+          captureRecipe !== "current-canopy",
         );
         // Deliberately ungraded to isolate the current geometry from the
         // separate graded bank-wear/height tests; not a full native bank claim.

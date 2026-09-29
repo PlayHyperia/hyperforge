@@ -3083,6 +3083,9 @@ export class TerrainSystem extends System {
         grassSelection.vergeEvaluation,
         grassSelection.instancing,
       );
+      this.grassVisualManager.setReflectionGrassCuller(
+        this.waterSystem.intersectsReflectionGrassBounds,
+      );
       if (grassSelection.instancing)
         this.registerGrassClumpInvariantPreparation(this.grassVisualManager);
 

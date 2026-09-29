@@ -232,6 +232,21 @@ type LakeReflectionOwner = {
   captured: boolean;
 };
 
+type LakeGrassFootprint = {
+  renderer: NonNullable<NodeFrame["renderer"]>;
+  scene: THREE.Scene;
+  camera: THREE.Camera;
+  target: THREE.RenderTarget;
+  width: number;
+  height: number;
+  projection: THREE.Matrix4;
+  view: THREE.Matrix4;
+  full: THREE.Frustum;
+  crop: THREE.Frustum;
+  before: THREE.Scene["onBeforeRender"];
+  after: THREE.Scene["onAfterRender"];
+};
+
 type UniformFloat = UniformNode<"float", number>;
 type UniformVec3 = UniformNode<"vec3", THREE.Vector3>;
 type UniformColor = UniformNode<"color", THREE.Color>;
@@ -297,6 +312,8 @@ export class WaterSystem {
   private readonly reflectionAxis = new THREE.Vector3(0, 0, 1);
   private readonly reflectionScale = new THREE.Vector3(1, 1, 1);
   private reflectionFootprintEnabled = false;
+  private reflectionGrassFootprintEnabled = false;
+  private reflectionGrassFootprint: LakeGrassFootprint | null = null;
   private lakeWavePositionNode: Node | null = null;
   private lakeReflectionUvNode: Node | null = null;
   private readonly reflectionViewProjection = new THREE.Matrix4();
@@ -330,6 +347,239 @@ export class WaterSystem {
   /** Opt-in until native moving-view pixel and cost qualification is complete. */
   setReflectionFootprintEnabled(enabled: boolean): void {
     this.reflectionFootprintEnabled = enabled;
+  }
+
+  /** Submission-only experiment. Never enables the separate raster scissor. */
+  setReflectionGrassFootprintEnabled(enabled: boolean): void {
+    this.reflectionGrassFootprintEnabled = enabled;
+    if (!enabled) this.reflectionGrassFootprint = null;
+  }
+
+  /** Called only for grass with an admitted, wind-swept world-space bound.
+   * The renderer shares its Frustum across passes: identity alone is unsafe. */
+  readonly intersectsReflectionGrassBounds = (
+    frustum: THREE.Frustum,
+    bounds: THREE.Box3,
+  ): boolean => {
+    const scope = this.reflectionGrassFootprint;
+    if (
+      !this.reflectionGrassFootprintEnabled ||
+      !scope ||
+      scope.renderer.getRenderTarget() !== scope.target ||
+      scope.target.width !== scope.width ||
+      scope.target.height !== scope.height ||
+      scope.scene.onBeforeRender !== scope.before ||
+      scope.scene.onAfterRender !== scope.after ||
+      !scope.camera.projectionMatrix.equals(scope.projection) ||
+      !scope.camera.matrixWorldInverse.equals(scope.view) ||
+      !frustum.planes.every((plane, index) =>
+        plane.equals(scope.full.planes[index]),
+      ) ||
+      ![
+        bounds.min.x,
+        bounds.min.y,
+        bounds.min.z,
+        bounds.max.x,
+        bounds.max.y,
+        bounds.max.z,
+      ].every(Number.isFinite)
+    )
+      return true;
+    return scope.crop.intersectsBox(bounds);
+  };
+
+  /** Lease only the synchronous reflection traversal. The mirror camera is
+   * still stale at _updateResolution; the scene callback observes its final
+   * oblique projection, immediately before r186 builds the render list. */
+  private beginLakeGrassFootprint(
+    renderer: NonNullable<NodeFrame["renderer"]>,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    target: THREE.RenderTarget,
+    pixels: THREE.Vector4,
+  ): (() => void) | null {
+    if (
+      !this.reflectionGrassFootprintEnabled ||
+      !this._reflectionsEnabled ||
+      // Unknown scene callbacks can change the sampled lake footprint after
+      // admission. Do not compose this experiment with those side effects.
+      scene.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+      scene.onAfterRender !== THREE.Object3D.prototype.onAfterRender ||
+      renderer.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+      renderer.xr?.isPresenting ||
+      camera instanceof THREE.ArrayCamera ||
+      !this.hasBilinearLakeReflectionSampler(target.texture) ||
+      ![
+        target.width,
+        target.height,
+        pixels.x,
+        pixels.y,
+        pixels.z,
+        pixels.w,
+      ].every(Number.isSafeInteger) ||
+      target.width <= 0 ||
+      target.height <= 0 ||
+      pixels.x < 0 ||
+      pixels.y < 0 ||
+      pixels.z <= 0 ||
+      pixels.w <= 0 ||
+      pixels.x + pixels.z > target.width ||
+      pixels.y + pixels.w > target.height
+    )
+      return null;
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onBeforeRender",
+    );
+    const afterDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onAfterRender",
+    );
+    if (
+      !Object.isExtensible(scene) ||
+      [beforeDescriptor, afterDescriptor].some(
+        (descriptor) =>
+          descriptor && (!descriptor.configurable || !("value" in descriptor)),
+      )
+    )
+      return null;
+    const originalBefore = scene.onBeforeRender;
+    const originalAfter = scene.onAfterRender;
+    const previous = this.reflectionGrassFootprint;
+    const stack: Array<LakeGrassFootprint | null> = [];
+    const water = this;
+    const width = target.width;
+    const height = target.height;
+    const cropMatrix = new THREE.Matrix4().set(
+      width / pixels.z,
+      0,
+      0,
+      (width - 2 * pixels.x - pixels.z) / pixels.z,
+      0,
+      height / pixels.w,
+      0,
+      (2 * pixels.y + pixels.w - height) / pixels.w,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+    );
+    let released = false;
+    const before: THREE.Scene["onBeforeRender"] = function (
+      this: THREE.Scene,
+      ...args: unknown[]
+    ) {
+      stack.push(water.reflectionGrassFootprint);
+      water.reflectionGrassFootprint = null;
+      const result = Reflect.apply(originalBefore, this, args);
+      if (
+        released ||
+        !water.reflectionGrassFootprintEnabled ||
+        this !== scene ||
+        args[0] !== renderer ||
+        args[1] !== scene ||
+        args[2] !== camera ||
+        args[3] !== target ||
+        renderer.getRenderTarget() !== target ||
+        scene.onBeforeRender !== before ||
+        scene.onAfterRender !== after ||
+        target.width !== width ||
+        target.height !== height ||
+        camera.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+        camera instanceof THREE.ArrayCamera ||
+        ![
+          ...camera.projectionMatrix.elements,
+          ...camera.matrixWorldInverse.elements,
+          ...cropMatrix.elements,
+        ].every(Number.isFinite)
+      )
+        return result;
+      const projection = camera.projectionMatrix.clone();
+      const view = camera.matrixWorldInverse.clone();
+      const vp = new THREE.Matrix4().multiplyMatrices(projection, view);
+      const full = new THREE.Frustum().setFromProjectionMatrix(
+        vp,
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      const crop = new THREE.Frustum().setFromProjectionMatrix(
+        vp.premultiply(cropMatrix),
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      if (
+        ![...full.planes, ...crop.planes].every(
+          (plane) =>
+            [
+              plane.normal.x,
+              plane.normal.y,
+              plane.normal.z,
+              plane.constant,
+            ].every(Number.isFinite) &&
+            Math.abs(plane.normal.lengthSq() - 1) < 1e-6,
+        )
+      )
+        return result;
+      water.reflectionGrassFootprint = {
+        renderer,
+        scene,
+        camera,
+        target,
+        width,
+        height,
+        projection,
+        view,
+        full,
+        crop,
+        before,
+        after,
+      };
+      return result;
+    };
+    const after: THREE.Scene["onAfterRender"] = function (
+      this: THREE.Scene,
+      ...args: unknown[]
+    ) {
+      try {
+        return Reflect.apply(originalAfter, this, args);
+      } finally {
+        water.reflectionGrassFootprint = stack.pop() ?? null;
+      }
+    };
+    Object.defineProperty(scene, "onBeforeRender", {
+      configurable: true,
+      writable: true,
+      value: before,
+    });
+    Object.defineProperty(scene, "onAfterRender", {
+      configurable: true,
+      writable: true,
+      value: after,
+    });
+    return () => {
+      if (released) return;
+      released = true;
+      water.reflectionGrassFootprint = previous;
+      stack.length = 0;
+      // A foreign replacement owns its new callback; never overwrite it.
+      try {
+        if (scene.onBeforeRender === before) {
+          if (beforeDescriptor)
+            Object.defineProperty(scene, "onBeforeRender", beforeDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onBeforeRender;
+        }
+      } finally {
+        if (scene.onAfterRender === after) {
+          if (afterDescriptor)
+            Object.defineProperty(scene, "onAfterRender", afterDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onAfterRender;
+        }
+      }
+    };
   }
 
   /**
@@ -940,6 +1190,8 @@ export class WaterSystem {
       renderer: NonNullable<NodeFrame["renderer"]>;
       owner: LakeReflectionOwner;
       target: THREE.RenderTarget | null;
+      scissored: boolean;
+      endGrassFootprint: (() => void) | null;
       previousTargetScissorTest: boolean;
       previousRendererScissorTest: boolean;
     };
@@ -1001,6 +1253,28 @@ export class WaterSystem {
         )
           return;
         scope.target = target;
+        if (this.reflectionGrassFootprintEnabled && scope.owner.scene) {
+          const direction = scope.owner.camera.getWorldDirection(
+            new THREE.Vector3(),
+          );
+          const eye = new THREE.Vector3().setFromMatrixPosition(
+            scope.owner.camera.matrixWorld,
+          );
+          // No tight crop at an unsupported/grazing mirror view.
+          if (
+            Math.abs(direction.dot(scope.owner.plane.normal)) > 1e-4 &&
+            scope.owner.plane.distanceToPoint(eye) > 1e-5
+          )
+            scope.endGrassFootprint = this.beginLakeGrassFootprint(
+              renderer,
+              scope.owner.scene,
+              virtualCamera,
+              target,
+              scissor,
+            );
+        }
+        if (!this.reflectionFootprintEnabled) return;
+        scope.scissored = true;
         scope.previousTargetScissorTest = target.scissorTest;
         target.scissor.copy(scissor);
         target.scissorTest = true;
@@ -1022,11 +1296,16 @@ export class WaterSystem {
       const previousWorldAutoUpdate = node.target.matrixWorldAutoUpdate;
       const previousScope = captureScope;
       const scope: CaptureScope | null =
-        this.reflectionFootprintEnabled && frame.renderer && !previousScope
+        (this.reflectionFootprintEnabled ||
+          this.reflectionGrassFootprintEnabled) &&
+        frame.renderer &&
+        !previousScope
           ? {
               renderer: frame.renderer,
               owner,
               target: null,
+              scissored: false,
+              endGrassFootprint: null,
               previousTargetScissorTest: false,
               previousRendererScissorTest: frame.renderer.getScissorTest(),
             }
@@ -1038,22 +1317,29 @@ export class WaterSystem {
         owner.captured = result !== false && reflection.hasOutput;
         return result;
       } finally {
-        if (scope?.target) {
-          // The native resize just set this exact full-sized rectangle, even
-          // after a resize. Do not restore stale pre-resize pixel dimensions.
-          scope.target.scissor.set(
-            0,
-            0,
-            scope.target.width,
-            scope.target.height,
-          );
-          scope.target.scissorTest = scope.previousTargetScissorTest;
-          scope.renderer.setScissorTest(scope.previousRendererScissorTest);
+        try {
+          scope?.endGrassFootprint?.();
+        } finally {
+          try {
+            if (scope?.scissored && scope.target) {
+              // The native resize just set this exact full-sized rectangle, even
+              // after a resize. Do not restore stale pre-resize pixel dimensions.
+              scope.target.scissor.set(
+                0,
+                0,
+                scope.target.width,
+                scope.target.height,
+              );
+              scope.target.scissorTest = scope.previousTargetScissorTest;
+              scope.renderer.setScissorTest(scope.previousRendererScissorTest);
+            }
+          } finally {
+            captureScope = previousScope;
+            // The nested render must not rebuild this world-owned plane from the
+            // legacy ocean-level target transform. Restore its exact owner flag.
+            node.target.matrixWorldAutoUpdate = previousWorldAutoUpdate;
+          }
         }
-        captureScope = previousScope;
-        // The nested render must not rebuild this world-owned plane from the
-        // legacy ocean-level target transform. Restore its exact owner flag.
-        node.target.matrixWorldAutoUpdate = previousWorldAutoUpdate;
       }
     };
     node.target.rotateX(-Math.PI / 2);
@@ -2633,6 +2919,7 @@ export class WaterSystem {
     this.lakeReflectionPlaneUniform = null;
     this.lakeWavePositionNode = null;
     this.lakeReflectionUvNode = null;
+    this.reflectionGrassFootprint = null;
     this.oceanDisplacementBounds.length = 0;
 
     // Dispose materials

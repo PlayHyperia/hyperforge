@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { JSDOM } from "jsdom";
 
 import type { World } from "../../../../types";
 import THREE from "../../../../extras/three/three";
@@ -1213,6 +1214,417 @@ describe("WaterSystem material graph", () => {
     expect(typeof harness.oceanUniforms?.windStrength.value).toBe("number");
 
     system.destroy();
+  });
+});
+
+describe("WaterSystem reflection-only grass submission footprint", () => {
+  // Actual Three cameras, targets and uninitialized WebGPU renderer. Invoking
+  // its scene callbacks tests the CPU lease, not native raster/pixel parity.
+  function fixture(perspective = false) {
+    const dom = new JSDOM("<!doctype html><canvas></canvas>");
+    const renderer = new THREE.WebGPURenderer({
+      canvas: dom.window.document.querySelector("canvas")!,
+    });
+    const water = new WaterSystem(new RealWorld());
+    const scene = new THREE.Scene();
+    const camera = perspective
+      ? new THREE.PerspectiveCamera(65, 100 / 80, 0.1, 100)
+      : new THREE.OrthographicCamera(-20, 20, 15, -15, 0.1, 100);
+    camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+    camera.position.set(0, 0, 20);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    const target = new THREE.RenderTarget(100, 80, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+    });
+    const pixels = new THREE.Vector4(60, 10, 25, 20);
+    const full = () =>
+      new THREE.Frustum().setFromProjectionMatrix(
+        new THREE.Matrix4().multiplyMatrices(
+          camera.projectionMatrix,
+          camera.matrixWorldInverse,
+        ),
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+    const box = (x: number, y: number) =>
+      new THREE.Box3(
+        new THREE.Vector3(x - 0.1, y - 0.1, 0),
+        new THREE.Vector3(x + 0.1, y + 0.1, 1),
+      );
+    const begin = () =>
+      water["beginLakeGrassFootprint"](renderer, scene, camera, target, pixels);
+    const before = (
+      view: THREE.Camera = camera,
+      rt: THREE.RenderTarget = target,
+    ) => {
+      renderer.setRenderTarget(rt);
+      return Reflect.apply(scene.onBeforeRender, scene, [
+        renderer,
+        scene,
+        view,
+        rt,
+      ]);
+    };
+    const after = (
+      view: THREE.Camera = camera,
+      rt: THREE.RenderTarget = target,
+    ) => Reflect.apply(scene.onAfterRender, scene, [renderer, scene, view, rt]);
+    return {
+      dom,
+      renderer,
+      water,
+      scene,
+      camera,
+      target,
+      pixels,
+      full,
+      box,
+      begin,
+      before,
+      after,
+      dispose() {
+        renderer.setRenderTarget(null);
+        target.dispose();
+        water.destroy();
+        dom.window.close();
+      },
+    };
+  }
+
+  it("is default-off independently of raster scissor and never changes target or camera state", () => {
+    const h = fixture();
+    try {
+      expect(h.water["reflectionGrassFootprintEnabled"]).toBe(false);
+      expect(h.water["reflectionFootprintEnabled"]).toBe(false);
+      const original = h.scene.onBeforeRender;
+      const projection = h.camera.projectionMatrix.clone();
+      const viewport = h.target.viewport.clone(),
+        scissor = h.target.scissor.clone();
+      expect(h.begin()).toBeNull();
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(true);
+      h.water.setReflectionGrassFootprintEnabled(true);
+      const release = h.begin()!;
+      try {
+        h.before();
+        expect(
+          h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+        ).toBe(false);
+        h.water.setReflectionGrassFootprintEnabled(false);
+        expect(
+          h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+        ).toBe(true);
+      } finally {
+        release();
+      }
+      expect(h.scene.onBeforeRender).toBe(original);
+      expect(
+        Object.prototype.hasOwnProperty.call(h.scene, "onBeforeRender"),
+      ).toBe(false);
+      expect(h.camera.projectionMatrix).toEqual(projection);
+      expect(h.target.viewport).toEqual(viewport);
+      expect(h.target.scissor).toEqual(scissor);
+      expect(h.target.scissorTest).toBe(false);
+      expect(h.renderer.getScissorTest()).toBe(false);
+      expect(h.water["reflectionFootprintEnabled"]).toBe(false);
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("keeps every sampled pixel in an asymmetric top-left crop without a second X flip", () => {
+    const h = fixture();
+    h.water.setReflectionGrassFootprintEnabled(true);
+    const release = h.begin()!;
+    try {
+      // The lease is acquired before mirror-camera updates; it must use the
+      // final camera, not a projection cached at acquisition.
+      h.camera.position.x = 13;
+      h.camera.updateMatrixWorld(true);
+      h.before();
+      const full = h.full();
+      let admitted = 0;
+      for (const depth of [0.01, 0.5, 0.99]) {
+        for (let ix = 0; ix <= 20; ix++)
+          for (let iy = 0; iy <= 20; iy++) {
+            const u = (60 + (ix * 25) / 20) / 100;
+            const v = (10 + (iy * 20) / 20) / 80;
+            const p = new THREE.Vector3(2 * u - 1, 1 - 2 * v, depth).unproject(
+              h.camera,
+            );
+            const bounds = new THREE.Box3().setFromCenterAndSize(
+              p,
+              new THREE.Vector3(1e-5, 1e-5, 1e-5),
+            );
+            expect(full.intersectsBox(bounds)).toBe(true);
+            expect(h.water.intersectsReflectionGrassBounds(full, bounds)).toBe(
+              true,
+            );
+            admitted++;
+          }
+      }
+      expect(admitted).toBe(1323);
+      expect(h.water.intersectsReflectionGrassBounds(full, h.box(3, -10))).toBe(
+        false,
+      );
+      expect(h.water.intersectsReflectionGrassBounds(full, h.box(23, 8))).toBe(
+        true,
+      );
+      // Another pass may reuse the SAME frustum object with changed planes.
+      full.planes[0].constant += 0.001;
+      expect(h.water.intersectsReflectionGrassBounds(full, h.box(3, -10))).toBe(
+        true,
+      );
+      h.camera.projectionMatrix.elements[0] += 0.01;
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(3, -10)),
+      ).toBe(true);
+    } finally {
+      release();
+      h.dispose();
+    }
+  });
+
+  it("preserves perspective oblique clip Z/W while retaining the complete sampled rectangle", () => {
+    const h = fixture(true);
+    // CPU algebra only: nonzero oblique third-row X/Y, just as the reflector
+    // modifies its actual camera. No native mirror construction is simulated.
+    const e = h.camera.projectionMatrix.elements;
+    e[2] = 0.025;
+    e[6] = -0.04;
+    e[10] = -1.005;
+    e[14] = -0.25;
+    h.camera.projectionMatrixInverse.copy(h.camera.projectionMatrix).invert();
+    h.camera.rotation.set(-0.18, 0.31, 0.07);
+    h.camera.updateMatrixWorld(true);
+    const projection = h.camera.projectionMatrix.clone();
+    h.water.setReflectionGrassFootprintEnabled(true);
+    const release = h.begin()!;
+    try {
+      h.before();
+      const full = h.full();
+      const scope = h.water["reflectionGrassFootprint"]!;
+      expect(scope).not.toBeNull();
+      for (const depth of [0.01, 0.25, 0.8]) {
+        for (let ix = 0; ix <= 10; ix++)
+          for (let iy = 0; iy <= 10; iy++) {
+            const u = (60 + ix * 2.5) / 100;
+            const v = (10 + iy * 2) / 80;
+            const point = new THREE.Vector3(
+              2 * u - 1,
+              1 - 2 * v,
+              depth,
+            ).unproject(h.camera);
+            const clip = new THREE.Vector4(point.x, point.y, point.z, 1)
+              .applyMatrix4(h.camera.matrixWorldInverse)
+              .applyMatrix4(projection);
+            expect(clip.w).toBeGreaterThan(0);
+            const box = new THREE.Box3().setFromCenterAndSize(
+              point,
+              new THREE.Vector3(1e-5, 1e-5, 1e-5),
+            );
+            expect(full.intersectsBox(box)).toBe(true);
+            expect(h.water.intersectsReflectionGrassBounds(full, box)).toBe(
+              true,
+            );
+          }
+      }
+      const outside = new THREE.Vector3(-0.8, -0.6, 0.5).unproject(h.camera);
+      const box = new THREE.Box3().setFromCenterAndSize(
+        outside,
+        new THREE.Vector3(1e-5, 1e-5, 1e-5),
+      );
+      expect(full.intersectsBox(box)).toBe(true);
+      expect(h.water.intersectsReflectionGrassBounds(full, box)).toBe(false);
+      expect(scope.crop.planes[4]).toEqual(scope.full.planes[4]);
+      expect(scope.crop.planes[5]).toEqual(scope.full.planes[5]);
+      expect(h.camera.projectionMatrix).toEqual(projection);
+    } finally {
+      release();
+      h.dispose();
+    }
+  });
+
+  it("suppresses the lease for nested shadow/main passes and restores exact callback descriptors", () => {
+    const h = fixture();
+    const originalBefore = h.scene.onBeforeRender;
+    const originalAfter = h.scene.onAfterRender;
+    Object.defineProperty(h.scene, "onBeforeRender", {
+      value: originalBefore,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    });
+    Object.defineProperty(h.scene, "onAfterRender", {
+      value: originalAfter,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    const descriptors = [
+      Object.getOwnPropertyDescriptor(h.scene, "onBeforeRender"),
+      Object.getOwnPropertyDescriptor(h.scene, "onAfterRender"),
+    ];
+    const shadow = new THREE.RenderTarget(64, 64);
+    h.water.setReflectionGrassFootprintEnabled(true);
+    const release = h.begin()!;
+    try {
+      expect(h.before()).toBeUndefined();
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(false);
+      const otherCamera = h.camera.clone(); // Equal matrices are not camera ownership.
+      h.before(otherCamera, shadow);
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(true);
+      expect(h.after(otherCamera, shadow)).toBeUndefined();
+      h.renderer.setRenderTarget(h.target);
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(false);
+      h.before(otherCamera); // Main/other camera even on the same target.
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(true);
+      h.after(otherCamera);
+      h.after();
+      expect(
+        h.water.intersectsReflectionGrassBounds(h.full(), h.box(-10, -10)),
+      ).toBe(true);
+    } finally {
+      release();
+      release();
+      shadow.dispose();
+    }
+    expect([
+      Object.getOwnPropertyDescriptor(h.scene, "onBeforeRender"),
+      Object.getOwnPropertyDescriptor(h.scene, "onAfterRender"),
+    ]).toEqual(descriptors);
+    h.dispose();
+  });
+
+  it("fails open on unsupported samplers, dimensions, projections and callback ownership", () => {
+    const h = fixture();
+    h.water.setReflectionGrassFootprintEnabled(true);
+    try {
+      h.target.texture.generateMipmaps = true;
+      expect(h.begin()).toBeNull();
+      h.target.texture.generateMipmaps = false;
+      h.pixels.x = -1;
+      expect(h.begin()).toBeNull();
+      h.pixels.x = 60;
+      Object.defineProperty(h.scene, "onAfterRender", {
+        configurable: false,
+        value: h.scene.onAfterRender,
+      });
+      expect(h.begin()).toBeNull();
+    } finally {
+      h.dispose();
+    }
+    const f = fixture();
+    f.water.setReflectionGrassFootprintEnabled(true);
+    const release = f.begin()!;
+    try {
+      f.camera.projectionMatrix.elements[0] = NaN;
+      f.before();
+      expect(f.water["reflectionGrassFootprint"]).toBeNull();
+      f.after();
+      f.camera.updateProjectionMatrix();
+      f.before();
+      const nonfinite = f.box(0, 0);
+      nonfinite.min.x = NaN;
+      expect(f.water.intersectsReflectionGrassBounds(f.full(), nonfinite)).toBe(
+        true,
+      );
+      f.target.setSize(101, 80);
+      expect(
+        f.water.intersectsReflectionGrassBounds(f.full(), f.box(-10, -10)),
+      ).toBe(true);
+      const foreign = () => {};
+      f.scene.onBeforeRender = foreign;
+      release();
+      expect(f.scene.onBeforeRender).toBe(foreign);
+      expect(
+        Object.prototype.hasOwnProperty.call(f.scene, "onAfterRender"),
+      ).toBe(false);
+      expect(f.water["reflectionGrassFootprint"]).toBeNull();
+    } finally {
+      release();
+      f.dispose();
+    }
+  });
+
+  it.each(["before", "after"] as const)(
+    "declines an unknown %s callback without invoking or replacing it",
+    (which) => {
+      const h = fixture();
+      const throwing = () => {
+        throw new Error("callback failure");
+      };
+      if (which === "before") h.scene.onBeforeRender = throwing;
+      else h.scene.onAfterRender = throwing;
+      const originalBefore = h.scene.onBeforeRender,
+        originalAfter = h.scene.onAfterRender;
+      h.water.setReflectionGrassFootprintEnabled(true);
+      try {
+        expect(h.begin()).toBeNull();
+        expect(h.scene.onBeforeRender).toBe(originalBefore);
+        expect(h.scene.onAfterRender).toBe(originalAfter);
+        expect(h.water["reflectionGrassFootprint"]).toBeNull();
+      } finally {
+        h.dispose();
+      }
+    },
+  );
+
+  it("restores the remaining callback even when a foreign descriptor makes the first restoration throw", () => {
+    const h = fixture();
+    h.water.setReflectionGrassFootprintEnabled(true);
+    const release = h.begin()!;
+    try {
+      h.before();
+      Object.defineProperty(h.scene, "onBeforeRender", { configurable: false });
+      expect(release).toThrow();
+      expect(
+        Object.prototype.hasOwnProperty.call(h.scene, "onAfterRender"),
+      ).toBe(false);
+      expect(h.water["reflectionGrassFootprint"]).toBeNull();
+    } finally {
+      release();
+      h.dispose();
+    }
+  });
+
+  it("releases an active nested lease after a synchronous render failure", () => {
+    const h = fixture();
+    h.water.setReflectionGrassFootprintEnabled(true);
+    const release = h.begin()!;
+    try {
+      expect(() => {
+        try {
+          h.before();
+          h.before(h.camera.clone());
+          throw new Error("render failure");
+        } finally {
+          release();
+        }
+      }).toThrow("render failure");
+      expect(
+        Object.prototype.hasOwnProperty.call(h.scene, "onBeforeRender"),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(h.scene, "onAfterRender"),
+      ).toBe(false);
+      expect(h.water["reflectionGrassFootprint"]).toBeNull();
+    } finally {
+      release();
+      h.dispose();
+    }
   });
 });
 

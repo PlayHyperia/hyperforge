@@ -1705,6 +1705,18 @@ export interface GrassWorkerSetup {
 }
 
 export class GrassVisualManager implements QuadTreeListener {
+  private reflectionGrassCuller:
+    ((frustum: THREE.Frustum, bounds: THREE.Box3) => boolean) | null = null;
+
+  /** Water owns the optional, exact-pass footprint. Ordinary culling remains
+   * authoritative; no visibility, geometry or primary-view state is changed. */
+  setReflectionGrassCuller(
+    culler: (frustum: THREE.Frustum, bounds: THREE.Box3) => boolean,
+  ): void {
+    if (this.destroyed) throw new Error("Grass manager is destroyed");
+    this.reflectionGrassCuller = culler;
+  }
+
   private container: THREE.Group;
   private getHeightAt: (x: number, z: number) => number;
   private getRoadInfluence: (wx: number, wz: number) => number;
@@ -3655,7 +3667,10 @@ export class GrassVisualManager implements QuadTreeListener {
       mesh.intersectsFrustum = (frustum) =>
         frustum.intersectsBox(
           renderedBounds.copy(localBounds).applyMatrix4(mesh.matrixWorld),
-        );
+        ) &&
+        (!blades?.sweptBounds ||
+          !this.reflectionGrassCuller ||
+          this.reflectionGrassCuller(frustum, renderedBounds));
 
       if (this.instancingCandidate && this.clumpFieldFactory)
         this.clumpInvariantCaches.set(
@@ -3830,6 +3845,7 @@ export class GrassVisualManager implements QuadTreeListener {
     if (this.destroyed) return;
     this.destroyed = true;
     this.meadowDetailMaterialFactory = null;
+    this.reflectionGrassCuller = null;
     this.pendingNodes.length = 0;
     this.settledWorkerResults.length = 0;
     this.workerInflight.clear();
