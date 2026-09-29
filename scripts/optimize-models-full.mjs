@@ -1,466 +1,693 @@
 #!/usr/bin/env node
-/**
- * Full Model Optimization Script for Hyperia
- * 
- * Optimizes all models to meet triangle limits:
- * - Characters, Mobs, World Objects: 20,000 triangles max
- * - Items, Armor, Weapons: 10,000 triangles max
- * 
- * Also applies:
- * - Draco mesh compression (for non-skinned meshes)
- * - KTX2 texture compression (GPU-compressed)
- * - Meshopt compression (for skinned meshes - Draco doesn't support skins well)
- * 
- * Usage: node scripts/optimize-models-full.mjs [options]
- * 
- * Options:
- *   --dry-run       Show what would be done without making changes
- *   --verbose       Show detailed output
- *   --models-only   Skip VRM avatars (use optimize-avatars.py for those)
- *   --skip-ktx2     Skip KTX2 conversion (keep WebP)
- *   --skip-draco    Skip Draco compression (use meshopt only)
- *   --backup        Create backups before modifying
- */
 
-import { execSync, spawnSync } from 'child_process';
-import { existsSync, readdirSync, statSync, copyFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
-import { basename, dirname, extname, join, relative, resolve } from 'path';
-import { fileURLToPath } from 'url';
+// Explicit static-prop candidates only: never a bulk or in-place asset optimizer.
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Logger, NodeIO } from "@gltf-transform/core";
+import {
+  EXTMeshoptCompression,
+  EXTTextureWebP,
+  KHRMaterialsUnlit,
+  KHRTextureTransform,
+} from "@gltf-transform/extensions";
+import {
+  MeshoptDecoder,
+  MeshoptEncoder,
+  MeshoptSimplifier,
+} from "meshoptimizer";
+import { validateBytes, version as validatorVersion } from "gltf-validator";
+import { summarizeModelDocument } from "./audit-models.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const ROOT_DIR = resolve(__dirname, '..');
-
-// Asset directories
-const MODEL_DIRS = [
-  'packages/server/world/assets/models',
+const EXTENSIONS = [
+  EXTMeshoptCompression,
+  EXTTextureWebP,
+  KHRMaterialsUnlit,
+  KHRTextureTransform,
 ];
+const SAFE_EXTENSIONS = new Set(
+  EXTENSIONS.map((extension) => extension.EXTENSION_NAME),
+);
+const HELP = [
+  "Generate one review-only static GLB candidate without modifying its source.",
+  "Usage: node scripts/optimize-models-full.mjs --input source.glb --output candidate.glb",
+  "       --max-triangles N --max-error E [--compression none|meshopt] [--dry-run] [--json]",
+  "",
+  "All four named arguments are required; output must not exist, even for dry-run.",
+  "E is meshoptimizer relative geometric error (0..1), not pixels or visual parity.",
+  "The file budget is max(mesh definitions, all node attachments), not visible draws.",
+  "Only embedded static TRIANGLES GLBs are admitted. No Draco, quantization, texture",
+  "conversion, welding, vertex compaction, node pruning, manifest changes or deployment.",
+  "Dry-run computes and validates the candidate in memory but writes nothing.",
+  "VRM, animation, skins, morphs and other extensions require a protected workflow.",
+].join("\n");
 
-const AVATAR_DIR = 'packages/server/world/assets/avatars';
-
-// Triangle limits by category
-const TRIANGLE_LIMITS = {
-  character: 20000, mob: 20000, npc: 20000, avatar: 20000,
-  human: 20000, goblin: 20000, imp: 20000, troll: 20000, thug: 20000,
-  tree: 20000, rock: 20000, ore: 20000, furnace: 20000, anvil: 20000,
-  altar: 20000, bank: 20000, cooking: 20000, chest: 20000, stump: 20000,
-  sword: 10000, bow: 10000, mace: 10000, shield: 10000, armor: 10000,
-  chainbody: 10000, helmet: 10000, pickaxe: 10000, hatchet: 10000,
-  fishing: 10000, rod: 10000, arrows: 10000, logs: 10000,
-  default: 20000,
-};
-
-// Parse command line arguments
-const args = process.argv.slice(2);
-const options = {
-  dryRun: args.includes('--dry-run'),
-  verbose: args.includes('--verbose'),
-  modelsOnly: args.includes('--models-only'),
-  skipKtx2: args.includes('--skip-ktx2'),
-  skipDraco: args.includes('--skip-draco'),
-  backup: args.includes('--backup'),
-};
-
-// Stats
-const stats = {
-  processed: 0,
-  decimated: 0,
-  compressed: 0,
-  skipped: 0,
-  errors: [],
-  totalSaved: 0,
-};
-
-function log(msg, level = 'info') {
-  const prefix = {
-    info: '\x1b[36mℹ\x1b[0m',
-    warn: '\x1b[33m⚠\x1b[0m',
-    error: '\x1b[31m✗\x1b[0m',
-    success: '\x1b[32m✓\x1b[0m',
-    debug: '\x1b[90m·\x1b[0m',
-  }[level] || 'ℹ';
-  
-  if (level === 'debug' && !options.verbose) return;
-  console.log(`${prefix} ${msg}`);
+function requireCondition(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonical(value[key])]),
+    );
+  }
+  return value;
+}
+function digest(value) {
+  return sha256(JSON.stringify(canonical(value)));
+}
+function numericOptions({ maxTriangles, maxError, compression = "none" }) {
+  requireCondition(
+    Number.isSafeInteger(maxTriangles) && maxTriangles > 0,
+    "maxTriangles must be a positive safe integer",
+  );
+  requireCondition(
+    Number.isFinite(maxError) && maxError >= 0 && maxError <= 1,
+    "maxError must be a finite relative error between 0 and 1",
+  );
+  requireCondition(
+    compression === "none" || compression === "meshopt",
+    "compression must be none or meshopt (Draco is not supported)",
+  );
+  return { maxTriangles, maxError, compression };
 }
 
-function getGltfTransformCmd() {
-  return `node ./node_modules/@gltf-transform/cli/bin/cli.js`;
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
-}
-
-function categorizeModel(filepath) {
-  const name = basename(filepath).toLowerCase();
-  const dir = dirname(filepath).toLowerCase();
-  const fullPath = (dir + '/' + name).toLowerCase();
-  
-  for (const [category, limit] of Object.entries(TRIANGLE_LIMITS)) {
-    if (category === 'default') continue;
-    if (fullPath.includes(category)) {
-      return { category, limit };
+export function parseOptions(argv) {
+  const options = {
+    compression: "none",
+    dryRun: false,
+    json: false,
+    help: false,
+  };
+  const seen = new Set();
+  const values = new Map([
+    ["--input", "input"],
+    ["--output", "output"],
+    ["--max-triangles", "maxTriangles"],
+    ["--max-error", "maxError"],
+    ["--compression", "compression"],
+  ]);
+  const flags = new Map([
+    ["--dry-run", "dryRun"],
+    ["--json", "json"],
+    ["--help", "help"],
+  ]);
+  for (let i = 0; i < argv.length; i++) {
+    const argument = argv[i];
+    requireCondition(!seen.has(argument), "Duplicate option: " + argument);
+    seen.add(argument);
+    if (flags.has(argument)) options[flags.get(argument)] = true;
+    else {
+      requireCondition(
+        values.has(argument),
+        "Unknown option: " + argument + "; use --help",
+      );
+      const value = argv[++i];
+      requireCondition(
+        typeof value === "string" &&
+          value.length > 0 &&
+          !value.startsWith("--"),
+        "Missing value for " + argument,
+      );
+      const key = values.get(argument);
+      if (key === "maxTriangles" || key === "maxError") {
+        requireCondition(
+          /^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value),
+          "Invalid number for " + argument,
+        );
+        options[key] = Number(value);
+      } else options[key] = value;
     }
   }
-  
-  if (extname(filepath).toLowerCase() === '.vrm') {
-    return { category: 'avatar', limit: TRIANGLE_LIMITS.avatar };
+  if (options.help) return options;
+  for (const name of ["input", "output", "maxTriangles", "maxError"]) {
+    requireCondition(
+      options[name] !== undefined,
+      "Missing required " + name + "; use --help",
+    );
   }
-  
-  return { category: 'default', limit: TRIANGLE_LIMITS.default };
+  numericOptions(options);
+  return options;
 }
 
-function getModelInfo(filepath) {
-  try {
-    const output = execSync(`${getGltfTransformCmd()} inspect "${filepath}"`, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: ROOT_DIR,
+function parseEmbeddedGlb(bytes) {
+  requireCondition(
+    bytes.length >= 20 &&
+      bytes.readUInt32LE(0) === 0x46546c67 &&
+      bytes.readUInt32LE(4) === 2 &&
+      bytes.readUInt32LE(8) === bytes.length,
+    "Input must be a complete glTF 2.0 GLB",
+  );
+  let offset = 12,
+    chunks = 0,
+    json;
+  while (offset + 8 <= bytes.length) {
+    const length = bytes.readUInt32LE(offset);
+    const type = bytes.readUInt32LE(offset + 4);
+    requireCondition(
+      length % 4 === 0 && offset + 8 + length <= bytes.length,
+      "Invalid GLB chunk length",
+    );
+    requireCondition(
+      chunks === 0 ? type === 0x4e4f534a : chunks === 1 && type === 0x004e4942,
+      "Only one JSON and one embedded BIN chunk are supported",
+    );
+    if (chunks === 0)
+      json = JSON.parse(
+        bytes.subarray(offset + 8, offset + 8 + length).toString("utf8"),
+      );
+    chunks++;
+    offset += length + 8;
+  }
+  requireCondition(offset === bytes.length && json, "Invalid GLB container");
+  for (const entry of [...(json.buffers ?? []), ...(json.images ?? [])]) {
+    requireCondition(
+      entry.uri === undefined ||
+        (typeof entry.uri === "string" && entry.uri.startsWith("data:")),
+      "External resources are not supported; supply a self-contained embedded GLB",
+    );
+  }
+  return json;
+}
+
+function admitDocument(json) {
+  const summary = summarizeModelDocument(json);
+  requireCondition(
+    !summary.vrm &&
+      !summary.animationCount &&
+      !summary.hasSkinnedMesh &&
+      !summary.morphPrimitiveCount &&
+      !json.skins?.length &&
+      !json.animations?.length &&
+      !(json.nodes ?? []).some((node) => node.weights !== undefined),
+    "VRM, animation, skins and morph targets require the protected avatar/animation workflow; this tool only handles static props",
+  );
+  requireCondition(
+    summary.contentKind === "mesh-asset" && summary.triangles > 0,
+    "A static mesh asset with triangles is required",
+  );
+  function checkExtensions(value) {
+    if (!value || typeof value !== "object") return;
+    if (value.extensions) {
+      for (const name of Object.keys(value.extensions)) {
+        requireCondition(
+          SAFE_EXTENSIONS.has(name),
+          "Unsupported extension " +
+            name +
+            "; add explicit preservation coverage before using this workflow",
+        );
+      }
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== "extras") checkExtensions(child);
+    }
+  }
+  checkExtensions(json);
+  for (const name of [
+    ...(json.extensionsUsed ?? []),
+    ...(json.extensionsRequired ?? []),
+  ]) {
+    requireCondition(
+      SAFE_EXTENSIONS.has(name),
+      "Unsupported extension " +
+        name +
+        "; no Draco, custom or unprotected extension conversion",
+    );
+  }
+  for (const mesh of json.meshes) {
+    requireCondition(
+      mesh.weights === undefined,
+      "Mesh weights require the protected morph workflow",
+    );
+    for (const primitive of mesh.primitives) {
+      requireCondition(
+        (primitive.mode ?? 4) === 4,
+        "Only TRIANGLES primitives are supported; strip/fan/line conversion is not implicit",
+      );
+      requireCondition(
+        primitive.targets === undefined,
+        "Morph targets require a protected workflow",
+      );
+    }
+  }
+  return summary;
+}
+
+async function validate(bytes, label) {
+  const result = await validateBytes(bytes, {
+    format: "glb",
+    maxIssues: 100,
+    writeTimestamp: false,
+  });
+  requireCondition(
+    !result.issues.truncated,
+    label + " validation report was truncated; complete validation is required",
+  );
+  requireCondition(
+    result.issues.numErrors === 0,
+    label +
+      " failed Khronos validation (" +
+      result.issues.numErrors +
+      " errors): " +
+      result.issues.messages
+        .filter((issue) => issue.severity === 0)
+        .slice(0, 5)
+        .map((issue) => issue.code)
+        .join(", "),
+  );
+  return { validator: validatorVersion(), ...result.issues };
+}
+function createIO() {
+  return new NodeIO()
+    .setLogger(new Logger(Logger.Verbosity.SILENT))
+    .registerExtensions(EXTENSIONS)
+    .registerDependencies({
+      "meshopt.decoder": MeshoptDecoder,
+      "meshopt.encoder": MeshoptEncoder,
     });
-    
-    const result = {
-      triangles: 0,
-      hasSkinnedMesh: false,
-      compression: 'none',
-      textureFormat: 'unknown',
-    };
-    
-    const meshMatch = output.match(/TRIANGLES\s*│\s*\d+\s*│\s*([\d,]+)\s*│\s*([\d,]+)/);
-    if (meshMatch) {
-      result.triangles = parseInt(meshMatch[1].replace(/,/g, ''), 10);
-    }
-    
-    result.hasSkinnedMesh = output.includes('JOINTS_0');
-    
-    if (output.includes('EXT_meshopt_compression')) {
-      result.compression = 'meshopt';
-    } else if (output.includes('KHR_draco_mesh_compression')) {
-      result.compression = 'draco';
-    }
-    
-    if (output.includes('image/ktx2')) {
-      result.textureFormat = 'ktx2';
-    } else if (output.includes('image/webp')) {
-      result.textureFormat = 'webp';
-    } else if (output.includes('image/png')) {
-      result.textureFormat = 'png';
-    }
-    
-    return result;
-  } catch (error) {
-    return { error: error.message };
+}
+function removeCompression(document) {
+  for (const extension of document.getRoot().listExtensionsUsed()) {
+    if (extension.extensionName === "EXT_meshopt_compression")
+      extension.dispose();
   }
 }
 
-function runGltfTransform(args, input, output) {
-  const tempOutput = output + '.tmp';
-  try {
-    execSync(`${getGltfTransformCmd()} ${args} "${input}" "${tempOutput}"`, {
-      stdio: 'pipe',
-      cwd: ROOT_DIR,
-    });
-    
-    if (existsSync(tempOutput)) {
-      if (existsSync(output) && output !== input) {
-        // Remove existing output
+// Canonical NodeIO serialization covers hierarchy, transforms, names/extras, scenes,
+// material/texture bindings, samplers and admitted extension payloads. Decoded attribute
+// and image bytes replace storage offsets/URIs. Only primitive indices may change.
+async function preservationFingerprint(document, io) {
+  const { json, resources } = await io.writeJSON(document);
+  const meshes = document.getRoot().listMeshes();
+  for (const [meshIndex, mesh] of (json.meshes ?? []).entries()) {
+    const sourcePrimitives = meshes[meshIndex].listPrimitives();
+    for (const [primitiveIndex, primitive] of mesh.primitives.entries()) {
+      delete primitive.indices;
+      for (const [semantic, index] of Object.entries(primitive.attributes)) {
+        // Writer groups/reorders accessors by usage. Its emitted accessor index
+        // is not an index into Root.listAccessors(); follow the actual binding.
+        const accessor =
+          sourcePrimitives[primitiveIndex].getAttribute(semantic);
+        const description = { ...json.accessors[index] };
+        delete description.bufferView;
+        delete description.byteOffset;
+        delete description.sparse;
+        const array = accessor.getArray();
+        description.bytesSha256 = sha256(
+          new Uint8Array(array.buffer, array.byteOffset, array.byteLength),
+        );
+        primitive.attributes[semantic] = description;
       }
-      renameSync(tempOutput, output);
-      return true;
     }
-    return false;
-  } catch (error) {
-    if (existsSync(tempOutput)) {
-      try { unlinkSync(tempOutput); } catch {}
-    }
-    log(`  gltf-transform failed: ${error.message}`, 'debug');
-    return false;
   }
+  for (const image of json.images ?? []) {
+    requireCondition(
+      resources[image.uri] instanceof Uint8Array,
+      "Missing embedded image during preservation fingerprint",
+    );
+    image.bytesSha256 = sha256(resources[image.uri]);
+    delete image.uri;
+  }
+  delete json.buffers;
+  delete json.bufferViews;
+  delete json.accessors;
+  return digest(json);
 }
 
-function findModels(dir, results = []) {
-  if (!existsSync(dir)) return results;
-  
-  const entries = readdirSync(dir, { withFileTypes: true });
-  
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    
-    if (entry.isDirectory()) {
-      if (!['node_modules', '.git', 'animations', 'sprites', 'backup'].includes(entry.name)) {
-        findModels(fullPath, results);
-      }
-    } else if (entry.isFile()) {
-      const ext = extname(entry.name).toLowerCase();
-      if (['.glb', '.gltf'].includes(ext)) {
-        // Skip LOD files and raw files for optimization
-        if (!entry.name.includes('_lod1') && !entry.name.includes('_lod2')) {
-          results.push(fullPath);
-        }
-      }
-    }
-  }
-  
-  return results;
-}
-
-async function optimizeModel(filepath) {
-  const relativePath = relative(ROOT_DIR, filepath);
-  const fileStats = statSync(filepath);
-  const originalSize = fileStats.size;
-  const { category, limit } = categorizeModel(filepath);
-  
-  log(`\n📁 ${relativePath}`, 'info');
-  
-  const info = getModelInfo(filepath);
-  if (info.error) {
-    log(`  Error inspecting: ${info.error}`, 'error');
-    stats.errors.push({ file: relativePath, error: info.error });
-    stats.skipped++;
-    return;
-  }
-  
-  log(`  Triangles: ${info.triangles.toLocaleString()} (limit: ${limit.toLocaleString()})`, 'debug');
-  log(`  Category: ${category}`, 'debug');
-  log(`  Skinned: ${info.hasSkinnedMesh}`, 'debug');
-  log(`  Current compression: ${info.compression}`, 'debug');
-  log(`  Current textures: ${info.textureFormat}`, 'debug');
-  
-  const needsDecimation = info.triangles > limit;
-  const needsDraco = !options.skipDraco && info.compression !== 'draco' && !info.hasSkinnedMesh;
-  const needsMeshopt = info.hasSkinnedMesh && info.compression !== 'meshopt';
-  const needsKtx2 = !options.skipKtx2 && info.textureFormat !== 'ktx2';
-  
-  if (!needsDecimation && !needsDraco && !needsMeshopt && !needsKtx2) {
-    log(`  ✅ Already optimized`, 'success');
-    stats.skipped++;
-    return;
-  }
-  
-  if (options.dryRun) {
-    log(`  Would optimize:`, 'info');
-    if (needsDecimation) {
-      const ratio = limit / info.triangles;
-      log(`    - Decimate from ${info.triangles.toLocaleString()} to ${limit.toLocaleString()} (ratio: ${(ratio * 100).toFixed(1)}%)`, 'info');
-    }
-    if (needsDraco) log(`    - Apply Draco compression`, 'info');
-    if (needsMeshopt) log(`    - Apply Meshopt compression (skinned mesh)`, 'info');
-    if (needsKtx2) log(`    - Convert textures to KTX2`, 'info');
-    return;
-  }
-  
-  // Create backup if requested
-  if (options.backup) {
-    const backupDir = join(dirname(filepath), 'backup');
-    if (!existsSync(backupDir)) {
-      mkdirSync(backupDir, { recursive: true });
-    }
-    const backupPath = join(backupDir, basename(filepath));
-    if (!existsSync(backupPath)) {
-      copyFileSync(filepath, backupPath);
-      log(`  Backed up to ${relative(ROOT_DIR, backupPath)}`, 'debug');
-    }
-  }
-  
-  let currentFile = filepath;
-  let tempFile = filepath + '.processing';
-  
-  try {
-    // Step 1: Decompression (if needed for decimation with meshopt-compressed files)
-    if (needsDecimation && info.compression === 'meshopt') {
-      log(`  Decompressing meshopt for decimation...`, 'debug');
-      if (runGltfTransform('dedup', currentFile, tempFile)) {
-        copyFileSync(tempFile, currentFile);
-        if (existsSync(tempFile)) unlinkSync(tempFile);
-      }
-    }
-    
-    // Step 2: Decimation (if needed) - use multiple passes for very high poly models
-    if (needsDecimation) {
-      const ratio = (limit / info.triangles) * 0.95; // Leave 5% margin
-      log(`  Simplifying mesh from ${info.triangles.toLocaleString()} to ~${limit.toLocaleString()} triangles...`, 'info');
-      
-      // For very aggressive decimation (>10x reduction), use weld + multiple passes
-      if (info.triangles > limit * 10) {
-        log(`    Using aggressive multi-pass decimation...`, 'debug');
-        
-        // First pass: weld vertices
-        const weldTemp = currentFile + '.weld.tmp';
-        if (runGltfTransform('weld', currentFile, weldTemp)) {
-          copyFileSync(weldTemp, currentFile);
-          if (existsSync(weldTemp)) unlinkSync(weldTemp);
-        }
-        
-        // Second pass: aggressive simplify with high error tolerance
-        const error = 0.15; // Higher error for extreme decimation
-        if (runGltfTransform(`simplify --ratio ${ratio.toFixed(4)} --error ${error}`, currentFile, tempFile)) {
-          copyFileSync(tempFile, currentFile);
-          if (existsSync(tempFile)) unlinkSync(tempFile);
-        }
-        
-        // Third pass: additional simplify if still over limit
-        const midInfo = getModelInfo(currentFile);
-        if (midInfo.triangles && midInfo.triangles > limit) {
-          const midRatio = (limit / midInfo.triangles) * 0.9;
-          if (runGltfTransform(`simplify --ratio ${midRatio.toFixed(4)} --error 0.2`, currentFile, tempFile)) {
-            copyFileSync(tempFile, currentFile);
-            if (existsSync(tempFile)) unlinkSync(tempFile);
+function topologyFingerprint(document) {
+  return digest(
+    document
+      .getRoot()
+      .listMeshes()
+      .map((mesh) =>
+        mesh.listPrimitives().map((primitive) => {
+          const indices =
+            primitive.getIndices()?.getArray() ??
+            Uint32Array.from(
+              { length: primitive.getAttribute("POSITION").getCount() },
+              (_, index) => index,
+            );
+          const triangles = [];
+          for (let i = 0; i < indices.length; i += 3) {
+            const a = indices[i],
+              b = indices[i + 1],
+              c = indices[i + 2];
+            // Lossless meshopt may cyclically rotate triangle corners, never their winding.
+            triangles.push(
+              a <= b && a <= c ? [a, b, c] : b <= c ? [b, c, a] : [c, a, b],
+            );
           }
-        }
-      } else {
-        // Standard simplification
-        const error = info.triangles > 50000 ? 0.05 : 0.01;
-        if (runGltfTransform(`simplify --ratio ${ratio.toFixed(4)} --error ${error}`, currentFile, tempFile)) {
-          copyFileSync(tempFile, currentFile);
-          if (existsSync(tempFile)) unlinkSync(tempFile);
-        }
-      }
-      
-      stats.decimated++;
-      const newInfo = getModelInfo(currentFile);
-      log(`  New triangle count: ${newInfo.triangles?.toLocaleString() || 'unknown'}`, 'info');
-      
-      if (newInfo.triangles && newInfo.triangles > limit) {
-        log(`  Warning: Could not reach target. Use Blender for more aggressive decimation.`, 'warn');
-      }
-    }
-    
-    // Step 3: Mesh compression (apply BEFORE texture changes to avoid losing compression)
-    // Note: Draco doesn't work well with skinned meshes, use meshopt instead
-    if (!info.hasSkinnedMesh && !options.skipDraco) {
-      log(`  Applying Draco compression...`, 'info');
-      if (runGltfTransform('draco', currentFile, tempFile)) {
-        copyFileSync(tempFile, currentFile);
-        if (existsSync(tempFile)) unlinkSync(tempFile);
-        stats.compressed++;
-      } else {
-        log(`  Draco failed, trying meshopt...`, 'debug');
-        if (runGltfTransform('meshopt --level medium', currentFile, tempFile)) {
-          copyFileSync(tempFile, currentFile);
-          if (existsSync(tempFile)) unlinkSync(tempFile);
-          stats.compressed++;
-        }
-      }
-    } else if (info.hasSkinnedMesh) {
-      log(`  Applying Meshopt compression (skinned mesh)...`, 'info');
-      if (runGltfTransform('meshopt --level medium', currentFile, tempFile)) {
-        copyFileSync(tempFile, currentFile);
-        if (existsSync(tempFile)) unlinkSync(tempFile);
-        stats.compressed++;
-      }
-    }
+          return triangles;
+        }),
+      ),
+  );
+}
 
-    // Step 4: Texture compression to KTX2 (if needed)
-    // Note: KTX2 requires PNG/JPEG input, not WebP. Convert WebP → PNG first.
-    // KTX2 files are larger on disk but much better for GPU (no CPU decompression needed)
-    if (needsKtx2) {
-      log(`  Converting textures to KTX2 (UASTC)...`, 'info');
-      
-      // Get fresh info after compression
-      const currentInfo = getModelInfo(currentFile);
-      
-      // First, convert WebP textures to PNG (required for KTX2)
-      if (currentInfo.textureFormat === 'webp') {
-        log(`    Converting WebP → PNG first...`, 'debug');
-        const pngTemp = currentFile + '.png.tmp';
-        if (runGltfTransform('png --formats webp', currentFile, pngTemp)) {
-          copyFileSync(pngTemp, currentFile);
-          if (existsSync(pngTemp)) unlinkSync(pngTemp);
-        }
+export async function optimizeModelCandidate(sourceBuffer, options) {
+  const { maxTriangles, maxError, compression } = numericOptions(options);
+  requireCondition(
+    sourceBuffer instanceof Uint8Array,
+    "sourceBuffer must contain GLB bytes",
+  );
+  const source = Buffer.from(sourceBuffer); // Own bytes; never mutate caller storage.
+  const before = admitDocument(parseEmbeddedGlb(source));
+  const sourceValidation = await validate(source, "Source");
+  await Promise.all([
+    MeshoptDecoder.ready,
+    MeshoptEncoder.ready,
+    MeshoptSimplifier.ready,
+  ]);
+  requireCondition(
+    MeshoptSimplifier.supported,
+    "Meshoptimizer WASM simplification is unavailable",
+  );
+  const io = createIO();
+  const document = await io.readBinary(source);
+  removeCompression(document);
+  // Khronos does not decode EXT_meshopt_compression. Validate the actual decoded
+  // streams too, including attributes other than the simplifier's POSITION/index.
+  const decodedSourceValidation = await validate(
+    await io.writeBinary(document),
+    "Decoded source",
+  );
+  const preservedBefore = await preservationFingerprint(document, io);
+  const ratio = Math.min(1, maxTriangles / before.triangles);
+  const primitives = [];
+  for (const [meshIndex, mesh] of document.getRoot().listMeshes().entries()) {
+    for (const [primitiveIndex, primitive] of mesh.listPrimitives().entries()) {
+      const position = primitive.getAttribute("POSITION");
+      const positions = position.getArray();
+      requireCondition(
+        positions instanceof Float32Array &&
+          position.getElementSize() === 3 &&
+          !position.getNormalized() &&
+          positions.every(Number.isFinite),
+        "POSITION must contain finite unquantized Float32 VEC3 data",
+      );
+      const previous = primitive.getIndices();
+      const sourceIndices =
+        previous?.getArray() ??
+        Uint32Array.from({ length: position.getCount() }, (_, index) => index);
+      const indices = Uint32Array.from(sourceIndices);
+      requireCondition(
+        indices.length > 0 &&
+          indices.length % 3 === 0 &&
+          indices.every((index) => index < position.getCount()),
+        "Invalid decoded triangle indices",
+      );
+      const targetTriangles = Math.max(
+        1,
+        Math.floor((indices.length / 3) * ratio),
+      );
+      let result = indices;
+      let error = 0;
+      if (targetTriangles * 3 < indices.length) {
+        [result, error] = MeshoptSimplifier.simplify(
+          indices,
+          positions,
+          3,
+          targetTriangles * 3,
+          maxError,
+          ["LockBorder"],
+        );
+        requireCondition(
+          result.length > 0 &&
+            result.length % 3 === 0 &&
+            result.every((index) => index < position.getCount()),
+          "Simplifier returned invalid or empty geometry",
+        );
+        requireCondition(
+          Number.isFinite(error) && error >= 0 && error <= maxError,
+          "Simplifier exceeded the requested error bound",
+        );
+        const outputIndices =
+          position.getCount() <= 65535 ? Uint16Array.from(result) : result;
+        const accessor = previous
+          ? previous.clone()
+          : document
+              .createAccessor()
+              .setType("SCALAR")
+              .setBuffer(position.getBuffer());
+        primitive.setIndices(accessor.setArray(outputIndices));
       }
-      
-      // Now convert to KTX2 using UASTC (higher quality than ETC1S)
-      if (runGltfTransform('uastc --level 2 --zstd 18', currentFile, tempFile)) {
-        copyFileSync(tempFile, currentFile);
-        if (existsSync(tempFile)) unlinkSync(tempFile);
-        log(`    KTX2 conversion complete (GPU-ready textures)`, 'debug');
-      } else {
-        log(`  KTX2 conversion failed - keeping original textures`, 'warn');
-      }
+      const scale = MeshoptSimplifier.getScale(positions, 3);
+      requireCondition(
+        Number.isFinite(scale) && scale >= 0,
+        "Invalid meshoptimizer geometric error scale",
+      );
+      primitives.push({
+        mesh: meshIndex,
+        primitive: primitiveIndex,
+        beforeTriangles: indices.length / 3,
+        afterTriangles: result.length / 3,
+        targetTriangles,
+        error,
+        scale,
+        localError: error * scale,
+      });
     }
-    
-    // Final cleanup and stats
-    const newStats = statSync(currentFile);
-    const savedBytes = originalSize - newStats.size;
-    stats.totalSaved += savedBytes;
-    stats.processed++;
-    
-    log(`  ✅ Optimized: ${formatSize(originalSize)} → ${formatSize(newStats.size)} (saved ${formatSize(savedBytes)})`, 'success');
-    
+  }
+  const preservedAfter = await preservationFingerprint(document, io);
+  requireCondition(
+    preservedBefore === preservedAfter,
+    "Candidate changed protected attributes, images, hierarchy or material bindings",
+  );
+  const topology = topologyFingerprint(document);
+  if (compression === "meshopt") {
+    // Direct extension encoding is lossless here. Never call meshopt(), quantize(),
+    // reorder(), FILTER encoding or a texture transform.
+    document
+      .createExtension(EXTMeshoptCompression)
+      .setRequired(true)
+      .setEncoderOptions({
+        method: EXTMeshoptCompression.EncoderMethod.QUANTIZE,
+      });
+  }
+  const output = Buffer.from(await io.writeBinary(document));
+  const after = admitDocument(parseEmbeddedGlb(output));
+  requireCondition(
+    after.triangles <= maxTriangles,
+    "Triangle budget unmet: " +
+      after.triangles +
+      " > " +
+      maxTriangles +
+      " at maxError=" +
+      maxError +
+      "; borders/seams and error bound were retained, nothing was written",
+  );
+  const candidateValidation = await validate(output, "Candidate");
+  const roundTrip = await io.readBinary(output);
+  removeCompression(roundTrip);
+  const decodedCandidateValidation = await validate(
+    await io.writeBinary(roundTrip),
+    "Decoded candidate",
+  );
+  const roundTripFingerprint = await preservationFingerprint(roundTrip, io);
+  requireCondition(
+    roundTripFingerprint === preservedBefore &&
+      topologyFingerprint(roundTrip) === topology,
+    "Encoded candidate failed decoded attribute/image/structure/index preservation",
+  );
+  return {
+    output,
+    report: {
+      status: "candidate",
+      scope:
+        "Explicit embedded static-prop GLB; review-only, not runtime or visual acceptance",
+      before,
+      after,
+      maxTriangles,
+      maxError,
+      compression,
+      sourceSha256: sha256(source),
+      outputSha256: sha256(output),
+      sourceBytes: source.length,
+      outputBytes: output.length,
+      preservation: {
+        matched: true,
+        beforeSha256: preservedBefore,
+        afterSha256: roundTripFingerprint,
+        topologySha256: topology,
+        scope:
+          "Decoded vertex streams and images byte-exact; canonical node/scene/material/texture structure unchanged; only primitive indices simplified",
+      },
+      simplification: {
+        errorMetric:
+          "Meshoptimizer relative geometric error; localError = returned error × getScale(POSITION). Not world-space, screen-space, UV/color error or visual parity.",
+        primitives,
+      },
+      validation: {
+        source: sourceValidation,
+        decodedSource: decodedSourceValidation,
+        candidate: candidateValidation,
+        decodedCandidate: decodedCandidateValidation,
+      },
+      limitations: [
+        "Vertex buffers are intentionally not compacted; index/triangle reduction does not promise smaller files or faster rendering.",
+        "Retained UV/normal/color samples are byte-exact, but interpolation and silhouette can change; native matched-view review is mandatory.",
+        "Conservative file totals include alternate/unused mesh definitions and node attachments, not measured visible geometry or draw calls.",
+        "No manifest, collision, resource, LOD, runtime or source asset is changed.",
+      ],
+    },
+  };
+}
+
+function absent(filename) {
+  try {
+    lstatSync(filename);
   } catch (error) {
-    stats.errors.push({ file: relativePath, error: error.message });
-    log(`  ❌ Error: ${error.message}`, 'error');
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error(
+    "Output already exists (including symlink/hardlink): " + filename,
+  );
+}
+function identity(stat) {
+  return stat.dev + ":" + stat.ino;
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const options = parseOptions(argv);
+  if (options.help) return { help: HELP };
+  const input = path.resolve(options.input);
+  const requestedOutput = path.resolve(options.output);
+  requireCondition(
+    path.extname(input).toLowerCase() === ".glb" &&
+      path.extname(requestedOutput).toLowerCase() === ".glb",
+    "Input and output must be .glb files",
+  );
+  requireCondition(
+    input !== requestedOutput,
+    "Input and output must be different paths",
+  );
+  const inputStat = lstatSync(input);
+  requireCondition(
+    inputStat.isFile() && !inputStat.isSymbolicLink() && inputStat.nlink === 1,
+    "Input must be a regular non-symlink file with no hardlinks",
+  );
+  absent(requestedOutput);
+  const requestedParent = path.dirname(requestedOutput);
+  requireCondition(
+    !lstatSync(requestedParent).isSymbolicLink(),
+    "Output parent must not be a symlink",
+  );
+  const parent = realpathSync(requestedParent);
+  const parentStat = lstatSync(parent);
+  requireCondition(
+    parentStat.isDirectory(),
+    "Output parent must be an existing directory",
+  );
+  const outputPath = path.join(parent, path.basename(requestedOutput));
+  requireCondition(
+    realpathSync(input) !== outputPath,
+    "Input and output resolve to the same path",
+  );
+  absent(outputPath);
+  const sourceFd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let source;
+  try {
+    requireCondition(
+      identity(fstatSync(sourceFd)) === identity(inputStat),
+      "Input changed while opening",
+    );
+    source = readFileSync(sourceFd);
   } finally {
-    // Cleanup temp files
-    if (existsSync(tempFile)) {
-      try { unlinkSync(tempFile); } catch {}
+    closeSync(sourceFd);
+  }
+  const { output, report } = await optimizeModelCandidate(source, options);
+  const finalInputStat = lstatSync(input);
+  requireCondition(
+    finalInputStat.isFile() &&
+      !finalInputStat.isSymbolicLink() &&
+      finalInputStat.nlink === 1 &&
+      identity(finalInputStat) === identity(inputStat) &&
+      sha256(readFileSync(input)) === report.sourceSha256,
+    "Input changed during candidate preparation; output not written",
+  );
+  requireCondition(
+    !lstatSync(requestedParent).isSymbolicLink() &&
+      realpathSync(requestedParent) === parent &&
+      identity(lstatSync(parent)) === identity(parentStat),
+    "Output parent changed during candidate preparation",
+  );
+  absent(outputPath);
+  if (!options.dryRun) {
+    let fd, createdIdentity;
+    try {
+      fd = openSync(
+        outputPath,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW,
+        0o644,
+      );
+      createdIdentity = identity(fstatSync(fd));
+      writeFileSync(fd, output);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      if (
+        createdIdentity &&
+        identity(lstatSync(outputPath)) === createdIdentity
+      )
+        unlinkSync(outputPath);
+      throw error;
     }
   }
+  return {
+    ...report,
+    input,
+    output: outputPath,
+    dryRun: options.dryRun,
+    written: !options.dryRun,
+  };
 }
 
-async function main() {
-  console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
-  console.log('║           🚀 HYPERIA MODEL OPTIMIZATION                        ║');
-  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
-  
-  log(`Triangle Limits:`);
-  log(`  - Characters, Mobs, World Objects: 20,000 triangles`);
-  log(`  - Items, Armor, Weapons: 10,000 triangles`);
-  log(``);
-  log(`Options:`);
-  log(`  Dry run: ${options.dryRun}`);
-  log(`  Skip KTX2: ${options.skipKtx2}`);
-  log(`  Skip Draco: ${options.skipDraco}`);
-  log(`  Backup: ${options.backup}`);
-  log(``);
-  
-  // Find all models
-  const allModels = [];
-  for (const modelDir of MODEL_DIRS) {
-    const dir = resolve(ROOT_DIR, modelDir);
-    const models = findModels(dir);
-    allModels.push(...models);
-    log(`Found ${models.length} models in ${modelDir}`);
-  }
-  
-  log(`\nTotal: ${allModels.length} models to process\n`);
-  log('═'.repeat(70));
-  
-  // Process each model
-  for (const modelPath of allModels) {
-    await optimizeModel(modelPath);
-  }
-  
-  // Summary
-  console.log('\n' + '═'.repeat(70));
-  console.log('\n📊 OPTIMIZATION SUMMARY\n');
-  
-  console.log(`  Models processed: ${stats.processed}`);
-  console.log(`  Models decimated: ${stats.decimated}`);
-  console.log(`  Models compressed: ${stats.compressed}`);
-  console.log(`  Models skipped: ${stats.skipped}`);
-  console.log(`  Total space saved: ${formatSize(stats.totalSaved)}`);
-  
-  if (stats.errors.length > 0) {
-    console.log(`\n  Errors: ${stats.errors.length}`);
-    for (const err of stats.errors.slice(0, 5)) {
-      console.log(`    - ${err.file}: ${err.error.substring(0, 50)}`);
-    }
-  }
-  
-  if (!options.modelsOnly) {
-    console.log(`\n📝 VRM AVATARS:`);
-    console.log(`  VRM files require special handling to preserve skinned meshes.`);
-    console.log(`  Run: blender --background --python scripts/optimize-avatars.py`);
-    console.log(`  Or update optimize-avatars.py to target 20k triangles.`);
-  }
-  
-  console.log(`\n✅ Done!\n`);
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main()
+    .then((report) => {
+      if (process.argv.includes("--json")) console.log(JSON.stringify(report));
+      else if (report.help) console.log(report.help);
+      else
+        console.log(
+          (report.written ? "Candidate written" : "Dry-run validated") +
+            ": " +
+            report.before.triangles +
+            " → " +
+            report.after.triangles +
+            " triangles. Source unchanged; native visual review still required.\n" +
+            report.output,
+        );
+    })
+    .catch((error) => {
+      if (process.argv.includes("--json"))
+        console.log(JSON.stringify({ status: "error", error: error.message }));
+      else console.error("Candidate rejected: " + error.message);
+      process.exitCode = 1;
+    });
 }
-
-main().catch((error) => {
-  console.error('Fatal error:', error.message);
-  process.exit(1);
-});
