@@ -1,15 +1,18 @@
 import { once } from "node:events";
 import { createServer, type ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { JSDOM } from "jsdom";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { ClientLoader } from "../../../client/ClientLoader";
+import { ClientGraphics } from "../../../client/ClientGraphics";
 import { modelCache } from "../../../../utils/rendering/ModelCache";
 import * as single from "../GLBTreeInstancer";
 import * as batched from "../GLBTreeBatchedInstancer";
 import { GPU_VEG_CONFIG, type TreeDissolveMaterial } from "../GPUMaterials";
 import { getLODDistances } from "../LODConfig";
 import { TREE_WIND_ATTRIBUTE, type TreeWindMode } from "../TreeWind";
+import { Wind } from "../Wind";
 
 type Kind = "single" | "batched";
 type Part = "bark" | "leaf";
@@ -35,10 +38,20 @@ function authoredPositions(variant: number, lod: number, part: Part): number[] {
 // alternating variants/LODs catches slot matching based on traversal order.
 // Lower LODs extend below the base and above LOD0's top to expose clamping or
 // accidentally deriving a new per-LOD/per-material wind descriptor.
-function treeGLB(variant: number, lod: number): Buffer {
+function treeGLB(variant: number, lod: number, leafMask?: number): Buffer {
   const order: Part[] = (variant + lod) % 2 ? ["leaf", "bark"] : [...parts];
   const positions = order.map((part) => authoredPositions(variant, lod, part));
-  const chunks = positions.map((values) =>
+  const attributes = [
+    ...positions,
+    ...(leafMask === undefined
+      ? []
+      : order.map((part) =>
+          Array.from({ length: 9 }, (_, i) =>
+            i % 3 === 0 ? (part === "leaf" ? leafMask : 0) : 1,
+          ),
+        )),
+  ];
+  const chunks = attributes.map((values) =>
     Buffer.from(new Float32Array(values).buffer),
   );
   const binary = Buffer.concat(chunks);
@@ -49,7 +62,17 @@ function treeGLB(variant: number, lod: number): Buffer {
       scenes: [{ nodes: [0, 1] }],
       nodes: order.map((name, mesh) => ({ name, mesh })),
       meshes: order.map((_, index) => ({
-        primitives: [{ attributes: { POSITION: index }, material: index }],
+        primitives: [
+          {
+            attributes: {
+              POSITION: index,
+              ...(leafMask === undefined
+                ? {}
+                : { COLOR_0: index + positions.length }),
+            },
+            material: index,
+          },
+        ],
       })),
       materials: order.map((name) => ({
         name,
@@ -64,7 +87,7 @@ function treeGLB(variant: number, lod: number): Buffer {
         byteOffset: index * chunk.length,
         byteLength: chunk.length,
       })),
-      accessors: positions.map((values, bufferView) => ({
+      accessors: attributes.map((values, bufferView) => ({
         bufferView,
         componentType: 5126,
         count: 3,
@@ -101,8 +124,8 @@ class TreePool {
     readonly urls: string[],
     readonly treeType = "wind-fixture",
   ) {}
-  init(mode?: TreeWindMode) {
-    const options = mode ? { windMode: mode } : undefined;
+  init(mode?: TreeWindMode, lodCandidate?: "projected-v1") {
+    const options = { windMode: mode, lodCandidate };
     if (this.kind === "single")
       single.initGLBTreeInstancer(this.world.stage.scene, this.world, options);
     else
@@ -212,13 +235,15 @@ async function withTrees(
     missingMiddleLods?: number[];
     heldPath?: string;
     mode?: TreeWindMode;
+    lodCandidate?: "projected-v1";
+    leafMask?: number;
   } = {},
 ) {
   const files = new Map<string, Buffer>();
   for (let variant = 0; variant < 3; variant++)
     for (let lod = 0; lod < 3; lod++) {
       if (variant === 1 && options.missingMiddleLods?.includes(lod)) continue;
-      files.set(pathFor(variant, lod), treeGLB(variant, lod));
+      files.set(pathFor(variant, lod), treeGLB(variant, lod, options.leafMask));
     }
   let released = !options.heldPath,
     signal!: () => void;
@@ -260,7 +285,7 @@ async function withTrees(
       world,
       variants.map((_, index) => origin + pathFor(index, 0)),
     );
-    pool.init(options.mode ?? "connected-v1");
+    pool.init(options.mode ?? "connected-v1", options.lodCandidate);
     await verify({
       pool,
       requested,
@@ -423,6 +448,194 @@ function verifyRow(
     Object.isFrozen((row.mesh.material as TreeDissolveMaterial).treeWind),
   ).toBe(true);
 }
+
+// Real DOM canvas and r186 renderer, deliberately never initialized on a GPU.
+// This tests public drawing-buffer sizing/CPU selection, not rendering quality.
+async function withTreeViewport(
+  world: World,
+  verify: (renderer: THREE.WebGPURenderer) => Promise<void>,
+) {
+  const dom = new JSDOM("<canvas></canvas>");
+  const canvas = dom.window.document.querySelector("canvas")!;
+  const renderer = new THREE.WebGPURenderer({ canvas });
+  const graphics = world.register("graphics", ClientGraphics);
+  if (!(graphics instanceof ClientGraphics))
+    throw new Error("Expected actual registered graphics system");
+  graphics.renderer = renderer;
+  renderer.setSize(1000, 500);
+  world.camera.aspect = 2;
+  world.camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+  world.camera.updateProjectionMatrix();
+  world.camera.position.set(20, 5, 200);
+  world.camera.lookAt(20, 2, 0);
+  world.camera.updateMatrixWorld(true);
+  try {
+    await verify(renderer);
+  } finally {
+    // This CPU fixture owns the uninitialized renderer; normal graphics teardown
+    // calls setAnimationLoop and would initialize a device even for null.
+    Reflect.deleteProperty(graphics, "renderer");
+    await renderer.dispose();
+    dom.window.close();
+  }
+}
+
+describe("actual GLB projected tree LOD candidate", () => {
+  it("encloses actual legacy COLOR.R wind without changing source vertices", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track, source }) => {
+        await withTreeViewport(pool.world, async () => {
+          const wind = pool.world.register("wind", Wind);
+          if (!(wind instanceof Wind)) throw new Error("Expected actual Wind");
+          wind.setStrength(0);
+          const geometry = (await source(0, 0)).get("leaf")!;
+          const original = geometryState(geometry);
+          expect(geometry.getAttribute("color").getX(0)).toBe(1);
+          expect(await track(pool.add(0, "legacy"))).toBe(true);
+          const lod1Meshes = activeRows(pool).map((row) => row.mesh);
+          expect(lod1Meshes).toHaveLength(2);
+          // A large but finite public uniform deliberately stresses the envelope;
+          // this is not a proposed production wind setting.
+          wind.setStrength(1000);
+          pool.world.frame++;
+          batched.updateGLBTreeBatchedInstancer(0);
+          expect(
+            activeRows(pool).every((row) => !lod1Meshes.includes(row.mesh)),
+          ).toBe(true);
+          for (const row of activeRows(pool))
+            expect(
+              (row.mesh.material as TreeDissolveMaterial).treeWind.mode,
+            ).toBe("legacy-leaf-v1");
+          wind.setStrength(0);
+          pool.world.frame++;
+          batched.updateGLBTreeBatchedInstancer(0);
+          expect(activeRows(pool).map((row) => row.mesh)).toEqual(lod1Meshes);
+          expect(geometryState(geometry)).toEqual(original);
+        });
+      },
+      { mode: "legacy-leaf-v1", lodCandidate: "projected-v1", leafMask: 1 },
+    );
+  });
+
+  it("keeps the ordinary distance defaults without an explicit selection", async () => {
+    await withTrees("batched", async ({ pool, track }) => {
+      await withTreeViewport(pool.world, async () => {
+        expect(await track(pool.add(0, "default"))).toBe(true);
+        for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+      });
+    });
+  });
+
+  it("uses native pixels, keeps per-frame membership and preserves interaction geometry/state", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track, source }) => {
+        await withTreeViewport(pool.world, async (renderer) => {
+          expect(await track(pool.add(0, "projected"))).toBe(true);
+          const original = [...(await source(0, 2)).values()];
+          const snapshots = original.map(geometryState);
+          const proxy = pool.proxy("projected")!;
+          expect(proxy.geometries).toEqual(original);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          pool.deplete("projected", 1);
+          const before = activeRows(pool).map((row) => row.dissolve);
+          const step = () => {
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+          };
+          step();
+          // A secondary render in this world frame cannot reselect the meshes.
+          renderer.setPixelRatio(10);
+          expect(renderer.domElement.width).toBe(10000);
+          expect(renderer.domElement.style.width).toBe("1000px");
+          batched.updateGLBTreeBatchedInstancer(0);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          step();
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          expect(activeRows(pool).map((row) => row.dissolve)).toEqual(before);
+          renderer.setPixelRatio(1);
+          pool.world.camera.position.z = 2000;
+          pool.world.camera.updateMatrixWorld(true);
+          step();
+          // This first trial never admits LOD2, even beyond the old 1000m cutoff.
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          expect(pool.proxy("projected")!.geometries).toEqual(proxy.geometries);
+          expect(original.map(geometryState)).toEqual(snapshots);
+        });
+      },
+      { lodCandidate: "projected-v1" },
+    );
+  });
+
+  it("uses shared batch-parent transforms and retains full detail on basis disagreement", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track }) => {
+        await withTreeViewport(pool.world, async () => {
+          expect(await track(pool.add(0, "parents"))).toBe(true);
+          const meshes = pool.meshes();
+          const parent = new THREE.Group();
+          pool.world.stage.scene.add(parent);
+          for (const mesh of meshes) parent.add(mesh);
+          const step = () => {
+            pool.world.stage.scene.updateMatrixWorld(true);
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+          };
+          // Put all batches back at the scene root for the shared row reader,
+          // preserving their identical complete parent-space affine transform.
+          parent.position.set(0, 0, 185);
+          parent.scale.set(2, 1.5, 1);
+          parent.rotation.y = 0.2;
+          step();
+          for (const mesh of meshes) pool.world.stage.scene.attach(mesh);
+          parent.removeFromParent();
+          step();
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          for (const mesh of meshes) {
+            mesh.position.set(0, 0, 0);
+            mesh.rotation.set(0, 0, 0);
+            mesh.scale.set(1, 1, 1);
+          }
+          step();
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          const otherParent = new THREE.Group();
+          pool.world.stage.scene.add(otherParent);
+          otherParent.add(meshes[0]);
+          step();
+          pool.world.stage.scene.add(meshes[0]);
+          otherParent.removeFromParent();
+          // The selection already returned to LOD0; reparenting alone cannot run it.
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          step();
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          meshes[0].position.x = 1;
+          step();
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+        });
+      },
+      { lodCandidate: "projected-v1" },
+    );
+  });
+
+  it("fails closed before renderer readiness and when a variant has no admitted LOD1", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track }) => {
+        expect(await track(pool.add(0, "not-ready"))).toBe(true);
+        for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+        expect(() => pool.init("connected-v1")).toThrow("requires teardown");
+        pool.remove("not-ready");
+        await withTreeViewport(pool.world, async () => {
+          expect(await track(pool.add(1, "missing-lod1"))).toBe(true);
+          for (const row of activeRows(pool)) verifyRow(row, 1, 0, "batched");
+        });
+      },
+      { lodCandidate: "projected-v1", missingMiddleLods: [1] },
+    );
+  });
+});
 
 describe("actual GLB tree pool connected-wind integration", () => {
   for (const kind of ["single", "batched"] as const) {

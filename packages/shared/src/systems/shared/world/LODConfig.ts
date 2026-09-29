@@ -11,6 +11,98 @@
 
 import * as THREE from "../../../extras/three/three";
 
+/** Native-pixel estimates for a private trial, not an accepted quality budget.
+ * Existing assets only; LOD2 is deliberately outside this initial trial. */
+export const PROJECTED_TREE_LOD_TRIAL = Object.freeze({
+  enterPixels: 150,
+  returnPixels: 167,
+});
+
+const projectedTreeMatrix = new THREE.Matrix4();
+const projectedTreeCorner = new THREE.Vector4();
+
+/** Projects the full affine-transformed source bounds, without screen clipping.
+ * Any near-plane crossing/invalid input keeps full detail. In particular, never
+ * project corners behind the eye and mistake their inverted extent for a tiny tree.
+ * Scratch objects stay private; no camera, bounds or instance matrix is changed. */
+export function projectedTreeBoundsPixels(
+  bounds: THREE.Box3,
+  matrixWorld: THREE.Matrix4,
+  camera: THREE.PerspectiveCamera,
+  viewportWidth: number,
+  viewportHeight: number,
+): number {
+  if (
+    !camera.isPerspectiveCamera ||
+    camera.reversedDepth ||
+    (camera.coordinateSystem !== THREE.WebGPUCoordinateSystem &&
+      camera.coordinateSystem !== THREE.WebGLCoordinateSystem) ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0 ||
+    bounds.isEmpty() ||
+    !Number.isFinite(bounds.min.x + bounds.min.y + bounds.min.z) ||
+    !Number.isFinite(bounds.max.x + bounds.max.y + bounds.max.z) ||
+    camera.projectionMatrix.elements[0] <= 0 ||
+    camera.projectionMatrix.elements[5] <= 0 ||
+    matrixWorld.determinant() === 0
+  )
+    return Infinity;
+  projectedTreeMatrix
+    .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    .multiply(matrixWorld);
+  if (!projectedTreeMatrix.elements.every(Number.isFinite)) return Infinity;
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  for (let corner = 0; corner < 8; corner++) {
+    projectedTreeCorner
+      .set(
+        corner & 1 ? bounds.max.x : bounds.min.x,
+        corner & 2 ? bounds.max.y : bounds.min.y,
+        corner & 4 ? bounds.max.z : bounds.min.z,
+        1,
+      )
+      .applyMatrix4(projectedTreeMatrix);
+    const { x, y, z, w } = projectedTreeCorner;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(z) ||
+      !Number.isFinite(w)
+    )
+      return Infinity;
+    const near =
+      camera.coordinateSystem === THREE.WebGPUCoordinateSystem ? 0 : -w;
+    if (w <= 0 || z - near <= 1e-7 * Math.max(1, Math.abs(w))) return Infinity;
+    minX = Math.min(minX, x / w);
+    maxX = Math.max(maxX, x / w);
+    minY = Math.min(minY, y / w);
+    maxY = Math.max(maxY, y / w);
+  }
+  const pixels = Math.max(
+    ((maxX - minX) * viewportWidth) / 2,
+    ((maxY - minY) * viewportHeight) / 2,
+  );
+  return Number.isFinite(pixels) && pixels >= 0 ? pixels : Infinity;
+}
+
+export function selectProjectedTreeLod(
+  pixels: number,
+  currentLod: 0 | 1 | 2,
+): 0 | 1 {
+  if (!Number.isFinite(pixels) || pixels < 0) return 0;
+  return currentLod === 0
+    ? pixels <= PROJECTED_TREE_LOD_TRIAL.enterPixels
+      ? 1
+      : 0
+    : pixels < PROJECTED_TREE_LOD_TRIAL.returnPixels
+      ? 1
+      : 0;
+}
+
 // ============================================================================
 // TYPES
 // ============================================================================

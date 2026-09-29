@@ -201,6 +201,21 @@ export function resolveTreeWindCandidate(
   return "connected-v1";
 }
 
+/** Unqualified existing-mesh LOD trial. Capture once per tree-pool lifetime. */
+export function resolveTreeLodCandidate(
+  win?: Window,
+): "projected-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("treeLod") ?? [];
+  if (values.length === 0) return undefined;
+  if (values.length !== 1 || values[0] !== "projected-v1")
+    throw new Error("Unknown or duplicate tree LOD candidate");
+  if (isStreamingLikeViewport(windowRef))
+    throw new Error("Projected tree LOD requires an ordinary player viewport");
+  return "projected-v1";
+}
+
 /** Explicit fine-meadow reflectance trial; captured once by the terrain owner.
  * No profile, placement, density, geometry, or lighting selection is changed. */
 export function resolveGrassPaletteCandidate(

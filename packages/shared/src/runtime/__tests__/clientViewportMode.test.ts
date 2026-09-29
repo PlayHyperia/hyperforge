@@ -35,6 +35,7 @@ import {
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
+  resolveTreeLodCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
   resolveGrassGroundingExecution,
@@ -359,6 +360,46 @@ describe("explicit rooted flower selection", () => {
       "non-embedded",
     );
   });
+});
+
+describe("explicit projected tree LOD selection", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const win = dom.window as unknown as Window;
+
+  it("does not enable the candidate by default or change other selections", () => {
+    dom.reconfigure({ url: "http://localhost:3344/" });
+    expect(resolveTreeLodCandidate(win)).toBeUndefined();
+    dom.reconfigure({ url: "http://localhost:3344/?treeLod=projected-v1" });
+    expect(resolveTreeLodCandidate(win)).toBe("projected-v1");
+    expect(resolveTreeWindCandidate(win)).toBeUndefined();
+    expect(resolveClientViewportRuntimeProfile(win).streamingLike).toBe(false);
+  });
+
+  it.each([
+    "?treeLod=",
+    "?treeLod=true",
+    "?treeLod=distance-v1",
+    "?treeLod=projected-v1&treeLod=projected-v1",
+    "?treeLod=projected-v1&treeLod=other",
+  ])("rejects invalid or duplicate selections: %s", (query) => {
+    dom.reconfigure({ url: `http://localhost:3344/${query}` });
+    expect(() => resolveTreeLodCandidate(win)).toThrow(
+      "Unknown or duplicate tree LOD candidate",
+    );
+  });
+
+  it.each(["/stream.html", "/?page=stream", "/?embedded=1&mode=spectator"])(
+    "does not admit the trial on streaming-like routes: %s",
+    (route) => {
+      const url = new URL(route, "http://localhost:3344");
+      url.searchParams.set("treeLod", "projected-v1");
+      dom.reconfigure({ url: url.href });
+      expect(() => resolveTreeLodCandidate(win)).toThrow(
+        "ordinary player viewport",
+      );
+    },
+  );
 });
 
 describe("explicit connected tree wind selection", () => {

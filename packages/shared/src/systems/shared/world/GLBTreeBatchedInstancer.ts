@@ -27,13 +27,22 @@ import {
 } from "./GPUMaterials";
 import type { Wind } from "./Wind";
 import type { TerrainSystem } from "./TerrainSystem";
-import { getLODDistances, inferLOD1Path, inferLOD2Path } from "./LODConfig";
+import {
+  getLODDistances,
+  inferLOD1Path,
+  inferLOD2Path,
+  projectedTreeBoundsPixels,
+  selectProjectedTreeLod,
+} from "./LODConfig";
 import {
   type DissolveAnim,
   startDissolve as startDissolveAnim,
   tickDissolveAnims,
 } from "./DissolveAnimation";
-import { shouldStreamVegetationBackgroundLods } from "../../../runtime/clientViewportMode";
+import {
+  resolveTreeLodCandidate,
+  shouldStreamVegetationBackgroundLods,
+} from "../../../runtime/clientViewportMode";
 import type { TreeInstanceLifetime } from "./GLBTreeInstancer";
 import {
   assertTreeWindInstanceMatrix,
@@ -122,7 +131,12 @@ interface TreeTypePool {
   modelHeight: number;
   modelRadius: number;
   /** Union of each exact variant's loaded LODs, before visual wind. */
-  variantBounds: { box: THREE.Box3; centerY: number; sphereRadius: number }[];
+  variantBounds: {
+    box: THREE.Box3;
+    centerY: number;
+    sphereRadius: number;
+    maximumLeafMask: number;
+  }[];
   windMode: TreeWindMode;
 }
 
@@ -133,6 +147,8 @@ let scene: THREE.Scene | null = null;
 let world: World | null = null;
 let poolGeneration = 0;
 let windMode: TreeWindMode = "legacy-leaf-v1";
+let lodCandidate: "projected-v1" | undefined;
+const _projectedBounds = new THREE.Box3();
 const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, TreeTypePool>();
 const entityToTreeType = new Map<string, string>();
@@ -557,6 +573,7 @@ async function ensureTreeTypePool(
     const variantBounds = allLod0Parts.map((parts, index) => {
       const box = new THREE.Box3();
       const point = new THREE.Vector3();
+      let maximumLeafMask = 0;
       for (const part of [
         ...parts,
         ...(lod1Parts[index] ?? []),
@@ -574,6 +591,20 @@ async function ensureTreeTypePool(
           );
           box.expandByPoint(point);
         }
+        if (lodCandidate) {
+          const color = part.geometry.getAttribute("color");
+          // GPUMaterials explicitly uses vec3(0, 1, 0) without vertex colors:
+          // absent COLOR.R means no legacy leaf wind, not a white attribute.
+          if (color) {
+            if (color.count !== position.count || color.itemSize < 3)
+              maximumLeafMask = Infinity;
+            for (let vertex = 0; vertex < color.count; vertex++)
+              maximumLeafMask = Math.max(
+                maximumLeafMask,
+                Math.abs(color.getX(vertex)),
+              );
+          }
+        }
       }
       if (
         box.isEmpty() ||
@@ -584,6 +615,7 @@ async function ensureTreeTypePool(
         throw new Error("Invalid tree variant bounds");
       return {
         box,
+        maximumLeafMask,
         centerY: (box.min.y + box.max.y) * 0.5,
         sphereRadius: Math.hypot(
           Math.max(Math.abs(box.min.x), Math.abs(box.max.x)),
@@ -744,21 +776,103 @@ function applyHighlightColor(
 
 // ---- Public API ----
 
+/** One main-world choice, reused unchanged by reflection/shadow rendering.
+ * This bounds the rest geometry plus a conservative shader wind envelope, not
+ * the dynamic visible silhouette. No renderer callback or secondary camera can
+ * reselect a LOD. Existing hot-update ordering uses the last completed main
+ * camera/parent matrices (one-frame motion lag). Different LOD parents/transforms
+ * keep full detail. */
+function selectPoolProjectedLod(
+  pool: TreeTypePool,
+  variant: number,
+  instanceMatrix: THREE.Matrix4,
+  currentLod: 0 | 1 | 2,
+): 0 | 1 {
+  const canvas = world?.graphics?.renderer?.domElement;
+  const camera = world?.camera;
+  const primary = pool.lod0?.batches[0];
+  if (!canvas || !camera || !primary || !pool.lod1?.sourceGeometries[variant])
+    return 0;
+  for (let level = 0; level < 3; level++) {
+    const lod = level === 0 ? pool.lod0 : level === 1 ? pool.lod1 : pool.lod2;
+    if (!lod) continue;
+    for (const batch of lod.batches)
+      if (
+        batch.parent !== primary.parent ||
+        !batch.matrixWorld.equals(primary.matrixWorld)
+      )
+        return 0;
+  }
+  const bounds = pool.variantBounds[variant];
+  if (!Number.isFinite(bounds.maximumLeafMask)) return 0;
+  _projectedBounds.copy(bounds.box).applyMatrix4(instanceMatrix);
+  if (pool.windMode === "connected-v1") {
+    _projectedBounds.expandByScalar(TREE_WIND_MAX_DISPLACEMENT);
+  } else {
+    // r186 applies positionNode after the instance transform, before the batch
+    // model transform. Legacy displacement is abs(y)*.006*leafMask*wind, with
+    // the two sine-wave weights summing to one; original normals/UVs stay intact.
+    const wind = world?.getSystem<Wind>("wind");
+    const material = primary.material as TreeDissolveMaterial;
+    const strength =
+      wind?.uniforms.windStrength.value ??
+      material.treeUniforms.windStrength.value;
+    const direction = wind?.uniforms.windDirection.value;
+    const dx = direction?.x ?? material.treeUniforms.windDirection.value.x;
+    const dz = direction?.z ?? material.treeUniforms.windDirection.value.y;
+    const amplitude =
+      Math.max(
+        Math.abs(_projectedBounds.min.y),
+        Math.abs(_projectedBounds.max.y),
+      ) *
+      0.006 *
+      bounds.maximumLeafMask *
+      Math.abs(strength);
+    if (
+      !Number.isFinite(amplitude) ||
+      !Number.isFinite(dx) ||
+      !Number.isFinite(dz)
+    )
+      return 0;
+    _projectedBounds.min.x -= amplitude * Math.abs(dx);
+    _projectedBounds.max.x += amplitude * Math.abs(dx);
+    _projectedBounds.min.z -= amplitude * Math.abs(dz);
+    _projectedBounds.max.z += amplitude * Math.abs(dz);
+  }
+  return selectProjectedTreeLod(
+    projectedTreeBoundsPixels(
+      _projectedBounds,
+      primary.matrixWorld,
+      camera,
+      canvas.width,
+      canvas.height,
+    ),
+    currentLod,
+  );
+}
+
 export function initGLBTreeBatchedInstancer(
   s: THREE.Scene,
   w: World,
-  options: TreeWindPoolOptions = {},
+  options: TreeWindPoolOptions & { lodCandidate?: "projected-v1" } = {},
 ): void {
   const nextMode = options.windMode ?? "legacy-leaf-v1";
+  const nextLodCandidate = options.lodCandidate ?? resolveTreeLodCandidate();
   if (nextMode !== "legacy-leaf-v1" && nextMode !== "connected-v1")
     throw new Error("Unknown tree wind mode");
+  if (nextLodCandidate !== undefined && nextLodCandidate !== "projected-v1")
+    throw new Error("Unknown tree LOD candidate");
   if (
-    (nextMode !== windMode || scene !== s || world !== w) &&
+    (nextMode !== windMode ||
+      nextLodCandidate !== lodCandidate ||
+      scene !== s ||
+      world !== w) &&
     (pools.size > 0 || pendingEnsure.size > 0 || pendingInstances.size > 0)
   )
     throw new Error("Tree pool owner or wind mode change requires teardown");
   poolGeneration++;
   windMode = nextMode;
+  lodCandidate = nextLodCandidate;
   scene = s;
   world = w;
 }
@@ -783,6 +897,7 @@ export function destroyGLBTreeBatchedInstancer(): void {
   scene = null;
   world = null;
   windMode = "legacy-leaf-v1";
+  lodCandidate = undefined;
   lastUpdateFrame = -1;
   highlightedEntityId = null;
 }
@@ -836,7 +951,14 @@ export async function addInstance(
 
     // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
     let initialLOD: 0 | 1 | 2 = 0;
-    if (world?.camera) {
+    if (lodCandidate) {
+      initialLOD = selectPoolProjectedLod(
+        pool,
+        variantIndex,
+        composeInstanceMatrix(position, rotation, scale, pool.yOffset),
+        0,
+      );
+    } else if (world?.camera) {
       const cp = world.camera.position;
       const dx = cp.x - position.x;
       const dz = cp.z - position.z;
@@ -1135,7 +1257,19 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
       const distSq = dx * dx + dz * dz;
 
       let targetLOD: 0 | 1 | 2;
-      if (distSq < lod1DistSq * hysteresisSq) {
+      if (lodCandidate) {
+        targetLOD = selectPoolProjectedLod(
+          pool,
+          slot.variantIndex,
+          composeInstanceMatrix(
+            slot.position,
+            slot.rotation,
+            slot.scale,
+            slot.yOffset,
+          ),
+          slot.currentLOD,
+        );
+      } else if (distSq < lod1DistSq * hysteresisSq) {
         targetLOD = 0;
       } else if (distSq < lod1DistSq) {
         targetLOD = slot.currentLOD === 0 ? 0 : pool.lod1 ? 1 : 0;
