@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { RendererPreparationQueue } from "../RendererPreparationQueue";
+import {
+  RendererPreparationQueue,
+  RendererPreparationTimeoutError,
+} from "../RendererPreparationQueue";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -14,6 +17,38 @@ const delay = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe("actual preparation ownership (CPU queue, no fake renderer)", () => {
+  it("identifies a preparation deadline without implying unsupported hardware", async () => {
+    const queue = new RendererPreparationQueue();
+    const underlying = deferred<void>();
+    const message = "WebGPU renderer preparation timed out after 10ms";
+    const outcome = queue
+      .run(
+        (arm) => {
+          arm();
+          return underlying.promise;
+        },
+        10,
+        message,
+      )
+      .catch((error: unknown) => error);
+
+    try {
+      const error = await outcome;
+      expect(error).toBeInstanceOf(RendererPreparationTimeoutError);
+      expect(error).toMatchObject({
+        code: "renderer-preparation-timeout",
+        name: "RendererPreparationTimeoutError",
+        timeoutMs: 10,
+        message,
+      });
+      expect(queue.pendingCount).toBe(1);
+    } finally {
+      underlying.resolve();
+      await queue.run(() => undefined, 1000, "unused");
+    }
+    expect(queue.pendingCount).toBe(0);
+  });
+
   it("blocks later work and stays pending after the first caller times out", async () => {
     const queue = new RendererPreparationQueue();
     const underlying = deferred<number>();

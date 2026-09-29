@@ -516,6 +516,7 @@ export {
 } from "./physics/PhysXManager";
 
 // Export renderer utilities (WebGPU only - no WebGL fallback)
+export { RendererPreparationTimeoutError } from "./utils/rendering/RendererPreparationQueue";
 export {
   createRenderer,
   configureRenderer,

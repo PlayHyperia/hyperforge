@@ -1,3 +1,16 @@
+/** A caller deadline expired; the queued GPU work is still owned until it settles. */
+export class RendererPreparationTimeoutError extends Error {
+  readonly code = "renderer-preparation-timeout";
+
+  constructor(
+    readonly timeoutMs: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RendererPreparationTimeoutError";
+  }
+}
+
 /**
  * Serializes actual renderer work, independently of a caller's timeout.
  * A timeout never cancels GPU work or makes its resources safe to dispose.
@@ -42,7 +55,9 @@ export class RendererPreparationQueue {
         if (!active || deadlineStarted) return;
         deadlineStarted = true;
         timeout = setTimeout(() => {
-          rejectCaller(new Error(timeoutMessage));
+          rejectCaller(
+            new RendererPreparationTimeoutError(timeoutMs, timeoutMessage),
+          );
         }, timeoutMs);
       };
       return operation(startCallerDeadline);
