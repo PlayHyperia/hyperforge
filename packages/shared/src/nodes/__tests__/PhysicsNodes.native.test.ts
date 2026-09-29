@@ -3,7 +3,7 @@ import { World } from "../../core/World";
 import { BoxGeometry, Quaternion, Vector3 } from "../../extras/three/three";
 import { PMeshHandle } from "../../extras/three/geometryToPxMesh";
 import { getPhysX, loadPhysX } from "../../physics/PhysXManager";
-import type { PhysXModule } from "../../types/systems/physics";
+import type { PhysicsHandle, PhysXModule } from "../../types/systems/physics";
 import { Collider } from "../Collider";
 import { RigidBody } from "../RigidBody";
 
@@ -270,6 +270,177 @@ describe("real PhysX static body / geometry collider ownership", () => {
       } finally {
         receipt.restore();
       }
+    }
+  });
+});
+
+describe("real PhysX raycast group filtering", () => {
+  async function rayFixture(group: "player" | "terrain" = "player") {
+    const world = new World();
+    await world.physics.init();
+    const origin = new Vector3(0, 10, 0);
+    const direction = new Vector3(0, 0, 1);
+    const geometry = new BoxGeometry(0.24, 3, 0.24);
+    const post = new RigidBody({
+      type: "static",
+      tag: "camera-environment-post",
+      position: [0, 10, 3],
+    });
+    post.add(
+      new Collider({
+        type: "geometry",
+        geometry,
+        convex: false,
+        layer: "environment",
+      }),
+    );
+    const pose = new px.PxTransform(px.PxIDENTITYEnum.PxIdentity);
+    pose.p.y = origin.y;
+    const capsuleGeometry = new px.PxCapsuleGeometry(0.3, 0.8);
+    const material = world.physics.physics!.createMaterial(0.4, 0.4, 0.1);
+    const capsule = world.physics.physics!.createRigidDynamic(pose);
+    const shape = world.physics.physics!.createShape(
+      capsuleGeometry,
+      material,
+      false,
+    );
+    // PlayerLocal and the native terrain hit both use a group in word0 with
+    // an all-bits word1. This real capsule supplies an initial overlap; it
+    // does not assert that the observed terrain actor used capsule geometry.
+    const filter = new px.PxFilterData(
+      world.createLayerMask(group),
+      0xffffffff,
+      0,
+      0,
+    );
+    shape.setQueryFilterData(filter);
+    shape.setSimulationFilterData(filter);
+    capsule.attachShape(shape);
+    capsule.setRigidBodyFlag(px.PxRigidBodyFlagEnum.eKINEMATIC, true);
+    world.physics.addActor(capsule, {
+      tag: group,
+      playerId: "camera-ray-filter-regression",
+      contactedHandles: new Set<PhysicsHandle>(),
+      triggeredHandles: new Set<PhysicsHandle>(),
+    });
+    post.activate(world);
+    return {
+      world,
+      origin,
+      direction,
+      post,
+      async dispose() {
+        post.deactivate();
+        world.physics.removeActor(capsule);
+        capsule.release();
+        shape.release();
+        material.release();
+        px.destroy(filter);
+        px.destroy(capsuleGeometry);
+        px.destroy(pose);
+        geometry.dispose();
+        await world.destroy();
+      },
+    };
+  }
+
+  it.each(["player", "terrain"] as const)(
+    "excludes an initial-overlap %s-group capsule and finds the environment triangle post behind it",
+    async (group) => {
+      const f = await rayFixture(group);
+      try {
+        const mask = f.world.createLayerMask(
+          "environment",
+          "prop",
+          "building",
+          "obstacle",
+        );
+        const self = f.world.raycast(
+          f.origin,
+          f.direction,
+          6,
+          f.world.createLayerMask(group),
+        );
+        expect(self?.distance).toBe(0);
+        expect(self?.point.toArray()).toEqual(f.origin.toArray());
+        const hit = f.world.raycast(f.origin, f.direction, 6, mask);
+        expect(hit?.distance).toBeCloseTo(2.88, 5);
+        expect(hit?.point.z).toBeCloseTo(2.88, 5);
+        expect(hit?.normal.z).toBeCloseTo(-1, 5);
+        // Retiring the actual obstacle leaves no hit in the requested groups.
+        f.post.deactivate();
+        expect(f.world.raycast(f.origin, f.direction, 6, mask)).toBeNull();
+      } finally {
+        await f.dispose();
+      }
+    },
+  );
+
+  it("retains explicit player, combined-group and omitted-mask initial-overlap hits", async () => {
+    const f = await rayFixture();
+    try {
+      for (const mask of [
+        f.world.createLayerMask("player"),
+        f.world.createLayerMask("player", "environment"),
+        undefined,
+      ]) {
+        expect(f.world.raycast(f.origin, f.direction, 6, mask)?.distance).toBe(
+          0,
+        );
+      }
+      expect(
+        f.world.raycast(
+          f.origin,
+          f.direction,
+          6,
+          f.world.createLayerMask("prop"),
+        ),
+      ).toBeNull();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("treats an explicit empty group mask as no hits rather than disabling native filtering", async () => {
+    const f = await rayFixture();
+    try {
+      expect(f.world.raycast(f.origin, f.direction, 6, 0)).toBeNull();
+      expect(
+        f.world.physics.raycastWithMask(f.origin, f.direction, 6, 0),
+      ).toBeNull();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("reestablishes group-only ray filtering after a sweep uses the shared query object", async () => {
+    const f = await rayFixture();
+    const sphere = new px.PxSphereGeometry(0.01);
+    try {
+      f.world.physics.sweep(
+        sphere,
+        f.origin,
+        f.direction,
+        6,
+        f.world.createLayerMask("environment"),
+      );
+      const hit = f.world.physics.raycastWithMask(
+        f.origin,
+        f.direction,
+        6,
+        f.world.createLayerMask("environment"),
+      );
+      expect(hit?.distance).toBeCloseTo(2.88, 5);
+      const data = f.world.physics.queryFilterData!.data;
+      expect([data.word0, data.word1, data.word2, data.word3]).toEqual([
+        f.world.createLayerMask("environment"),
+        0,
+        0,
+        0,
+      ]);
+    } finally {
+      px.destroy(sphere);
+      await f.dispose();
     }
   });
 });
