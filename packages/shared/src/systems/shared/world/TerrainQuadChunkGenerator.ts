@@ -1219,13 +1219,53 @@ function* refineSurfaceFeaturesSteps(
   if (zones.some((zone) => zone.kind === "annulus" && zone.broadAdaptive)) {
     const atX = new Map<number, Set<number>>(),
       atZ = new Map<number, Set<number>>();
+    const sortedX = new Map<number, readonly number[]>(),
+      sortedZ = new Map<number, readonly number[]>();
     const retain = (x: number, z: number) => {
       if (!atX.has(x)) atX.set(x, new Set());
       if (!atZ.has(z)) atZ.set(z, new Set());
-      atX.get(x)!.add(z);
-      atZ.get(z)!.add(x);
+      const xs = atX.get(x)!,
+        zs = atZ.get(z)!;
+      if (!xs.has(z)) {
+        xs.add(z);
+        sortedX.delete(x);
+      }
+      if (!zs.has(x)) {
+        zs.add(x);
+        sortedZ.delete(z);
+      }
     };
-    for (let id = 0; id < p.length / 3; id++) retain(p[id * 3], p[id * 3 + 2]);
+    // Preserve each axis's exact membership, but visit only cuts inside the
+    // current strip. A newly retained cut invalidates that axis immediately,
+    // including additions made earlier in the same fixed-point pass.
+    const addRange = (
+      map: Map<number, Set<number>>,
+      sorted: Map<number, readonly number[]>,
+      key: number,
+      lo: number,
+      hi: number,
+      cuts: Set<number>,
+    ) => {
+      let values = sorted.get(key);
+      if (!values) {
+        values = [...map.get(key)!].sort((a, b) => a - b);
+        sorted.set(key, values);
+      }
+      let left = 0,
+        right = values.length;
+      while (left < right) {
+        const middle = (left + right) >>> 1;
+        if (values[middle] < lo) left = middle + 1;
+        else right = middle;
+      }
+      for (let i = left; i < values.length && values[i] <= hi; i++)
+        cuts.add(values[i]);
+    };
+    for (let id = 0; id < p.length / 3; id++) {
+      retain(p[id * 3], p[id * 3 + 2]);
+      if ((id + 1) % 128 === 0) yield "collar_sliver_axes";
+    }
+    yield "collar_sliver_axes";
     let changed = true;
     while (changed) {
       changed = false;
@@ -1265,9 +1305,11 @@ function* refineSurfaceFeaturesSteps(
           const map = vertical ? atX : atZ;
           const lower = vertical ? left : top,
             upper = vertical ? right : bottom;
-          const cuts = [
-            ...new Set([lo, hi, ...map.get(lower)!, ...map.get(upper)!]),
-          ]
+          const sorted = vertical ? sortedX : sortedZ;
+          const localCuts = new Set([lo, hi]);
+          addRange(map, sorted, lower, lo, hi, localCuts);
+          addRange(map, sorted, upper, lo, hi, localCuts);
+          const cuts = [...localCuts]
             .filter((value) => value >= lo && value <= hi)
             .sort((a, b) => a - b);
           if (cuts.length === 2) {

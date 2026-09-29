@@ -2980,6 +2980,81 @@ describe("cooperative broad-bank preparation", () => {
     new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
 
   it.each([
+    {
+      name: "negative fractional bank",
+      x: -2.137,
+      z: -3.271,
+      size: 1.51,
+      signedZero: false,
+      expected:
+        "1664a21030d27d6fabab558ee6da572f04ed1fb9781ff03b426bf320b18eb5f7",
+    },
+    {
+      name: "positive fractional bank",
+      x: 2.137,
+      z: 3.271,
+      size: 1.51,
+      signedZero: false,
+      expected:
+        "2e574790356b7a197d855cf3d0b5c2e3cf592e95f3b8755345513f270962b53d",
+    },
+    {
+      name: "signed-zero off-lattice bank",
+      x: -0,
+      z: -0,
+      size: 1.51,
+      signedZero: true,
+      expected:
+        "112490a11ba80e5c56c85a2483a7e95d5b0385f8076db3ae6ea85511db9f4bb1",
+    },
+  ])(
+    "preserves byte-identical off-lattice sliver geometry for $name",
+    (spec) => {
+      const terrain = new AnalyticTerrain(
+        spec.signedZero
+          ? (x, z) => (x === 0 && z === 0 ? -0 : curved(x, z))
+          : curved,
+        () => null,
+        undefined,
+        [ring],
+      );
+      const raw = generateQuadChunkDataSync(
+        spec.x,
+        spec.z,
+        spec.size,
+        5,
+        terrain,
+      );
+      const result = assembleQuadChunkGeometry(raw, terrain, 3);
+      try {
+        const digest = createHash("sha256").update(bytes(result.heightData));
+        for (const [name, attribute] of Object.entries(
+          result.geometry.attributes,
+        ))
+          digest
+            .update(name)
+            .update(String(attribute.itemSize))
+            .update(String(attribute.normalized))
+            .update(attribute.array.constructor.name)
+            .update(bytes(attribute.array));
+        digest.update(bytes(result.geometry.index!.array));
+        for (const value of [
+          result.geometry.userData,
+          result.geometry.boundingBox,
+          result.geometry.boundingSphere,
+          result.geometry.groups,
+          result.geometry.drawRange,
+        ])
+          digest.update(JSON.stringify(value));
+        const sha256 = digest.digest("hex");
+        expect(sha256).toBe(spec.expected);
+      } finally {
+        result.geometry.dispose();
+      }
+    },
+  );
+
+  it.each([
     { name: "three-level curved bank", x: 0, z: 0, size: 2, signedZero: false },
     {
       name: "fractional negative bank",
@@ -3086,7 +3161,12 @@ describe("cooperative broad-bank preparation", () => {
     },
   );
 
-  it.each(["collar_bank_probe", "collar_bank_vertices"])(
+  it.each([
+    "collar_bank_probe",
+    "collar_bank_vertices",
+    "collar_sliver_axes",
+    "collar_sliver_balance",
+  ])(
     "cancels at %s without further provider queries and disposes the private geometry once",
     (phase) => {
       const terrain = new AnalyticTerrain(curved, () => null, undefined, [
@@ -3124,9 +3204,15 @@ describe("cooperative broad-bank preparation", () => {
     },
   );
 
-  it.each(["throw", "non-finite"] as const)(
-    "propagates a %s provider failure after a bank yield and cleans up the real geometry",
-    (mode) => {
+  it.each(
+    (["throw", "non-finite"] as const).flatMap((mode) =>
+      ["collar_bank_probe", "collar_sliver_axes", "collar_sliver_balance"].map(
+        (phase) => ({ mode, phase }),
+      ),
+    ),
+  )(
+    "propagates a $mode provider failure after $phase and cleans up the real geometry",
+    ({ mode, phase }) => {
       let armed = false;
       const failure = new Error("Analytic height input failed");
       const height: HeightField = (x, z) => {
@@ -3146,12 +3232,12 @@ describe("cooperative broad-bank preparation", () => {
         let step = iterator.next();
         for (
           let count = 0;
-          !step.done && step.value !== "collar_bank_probe" && count < 100000;
+          !step.done && step.value !== phase && count < 100000;
           count++
         )
           step = iterator.next();
         expect(step.done).toBe(false);
-        expect(step.value).toBe("collar_bank_probe");
+        expect(step.value).toBe(phase);
         const before = dispose.mock.calls.length;
         armed = true;
         let caught: unknown;
@@ -3166,7 +3252,7 @@ describe("cooperative broad-bank preparation", () => {
         if (mode === "throw") expect(caught).toBe(failure);
         else
           expect((caught as Error).message).toMatch(
-            /Non-finite terrain (bank probe|collar height)/,
+            /Non-finite terrain (bank probe|collar height|collar normal)/,
           );
         expect(dispose.mock.calls.length - before).toBe(1);
         const queries = terrain.heightSamples;
