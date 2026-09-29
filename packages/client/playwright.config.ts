@@ -138,12 +138,12 @@ export default defineConfig({
       : undefined,
     // Base URL for the client
     baseURL: `http://localhost:${CLIENT_PORT}`,
-    // Capture trace on first retry
-    trace: "on-first-retry",
+    // Keep initial local failures; preserve CI's first-retry policy.
+    trace: process.env.CI ? "on-first-retry" : "retain-on-failure",
     // Screenshot on failure
     screenshot: "only-on-failure",
     // Video on failure
-    video: "on-first-retry",
+    video: process.env.CI ? "on-first-retry" : "retain-on-failure",
     // Action and navigation timeouts
     actionTimeout: 30_000,
     navigationTimeout: 60_000,

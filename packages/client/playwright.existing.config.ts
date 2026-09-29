@@ -12,9 +12,9 @@ export default defineConfig({
   use: {
     headless: true,
     baseURL: "http://localhost:3333",
-    trace: "on-first-retry",
+    trace: process.env.CI ? "on-first-retry" : "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "off",
+    video: process.env.CI ? "off" : "retain-on-failure",
     actionTimeout: 30000,
     navigationTimeout: 60000,
   },
