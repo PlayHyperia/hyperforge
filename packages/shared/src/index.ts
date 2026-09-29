@@ -98,6 +98,7 @@ export { PlayerEntity } from "./entities/player/PlayerEntity";
 export { PlayerLocal } from "./entities/player/PlayerLocal";
 export { PlayerRemote } from "./entities/player/PlayerRemote";
 export { MobEntity } from "./entities/npc/MobEntity";
+export { NPCEntity } from "./entities/npc/NPCEntity";
 export type { EventCallback } from "./entities/Entity";
 
 // Export all types from types/index.ts
@@ -537,7 +538,7 @@ export { getAllStores, getStoreById } from "./data/banks-stores";
 
 // Public authored combat-NPC catalog used by the server's deterministic
 // acquisition planner. Runtime drop rolls remain server-authoritative.
-export { getCombatNPCs } from "./data/npcs";
+export { getCombatNPCs, getNPCById } from "./data/npcs";
 
 // Export avatar options for character creation and duel identity
 export {

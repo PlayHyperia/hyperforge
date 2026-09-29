@@ -1,6 +1,8 @@
 import {
   INTERACTION_DISTANCE,
+  NPCEntity,
   SessionType,
+  getNPCById,
   type World,
 } from "@hyperforge/shared";
 
@@ -63,11 +65,32 @@ export function validatePhysicalBankAccess(
     { type?: unknown; entityType?: unknown } | undefined;
   const runtimeEntityType = (bank as { entityType?: unknown } | undefined)
     ?.entityType;
-  if (
-    !bank ||
-    (bankData?.type !== "bank" &&
-      bankData?.entityType !== "bank" &&
-      runtimeEntityType !== "bank")
+  if (!bank || bank.destroyed) return "bank_target_invalid";
+
+  // An NPC's client-facing label/services are not authority. Require the exact
+  // live server-owned entity, its role, and the loaded manifest's bank service.
+  // Keep this separate from the existing chest branch so an NPC cannot enter
+  // that branch by changing its serialized entityType.
+  if (bank instanceof NPCEntity) {
+    const manager = world.getSystem("entity-manager") as
+      { getEntity(id: string): unknown } | undefined;
+    const manifest = getNPCById(bank.config.npcId);
+    if (
+      !world.isServer ||
+      bank.world !== world ||
+      bank.id !== bankId ||
+      manager?.getEntity(bankId) !== bank ||
+      bank.config.npcType !== "bank" ||
+      !bank.config.services?.includes("bank") ||
+      manifest?.services?.enabled !== true ||
+      !manifest.services.types.includes("bank")
+    ) {
+      return "bank_target_invalid";
+    }
+  } else if (
+    bankData?.type !== "bank" &&
+    bankData?.entityType !== "bank" &&
+    runtimeEntityType !== "bank"
   ) {
     return "bank_target_invalid";
   }

@@ -16,13 +16,15 @@
 
 import {
   type World,
-  type SessionType,
+  SessionType,
   INTERACTION_DISTANCE,
   chebyshevDistance,
 } from "@hyperforge/shared";
 import type { ServerSocket } from "../../../../shared/types";
 import type { RateLimitService } from "../../services";
 import type { BaseHandlerContext, ValidationResult } from "./types";
+import type { InteractionSessionManager } from "../../InteractionSessionManager";
+import { validatePhysicalBankAccess } from "../../../../shared/PhysicalBankAccess";
 import {
   getPlayerId,
   getDatabase,
@@ -66,12 +68,40 @@ function verifyDistanceToTarget(
   }
 
   // Get target from session manager (single source of truth)
-  const sessionManager = getSessionManager(world);
+  const sessionManager = getSessionManager(world) as
+    Pick<InteractionSessionManager, "getSession" | "closeSession"> | undefined;
   const session = sessionManager?.getSession(playerId);
 
   if (!session?.targetEntityId) {
     const typeName = SESSION_TYPE_DISPLAY_NAMES[sessionType] || sessionType;
     return `Session expired - please reopen the ${typeName}`;
+  }
+
+  if (sessionType === SessionType.BANK) {
+    // Bank mutations must use the bank session opened for this exact target,
+    // never a nearby dialogue/store session or a role that has since changed.
+    if (session.sessionType !== SessionType.BANK) {
+      return "Session expired - please reopen the bank";
+    }
+    const failure = validatePhysicalBankAccess(
+      world,
+      playerId,
+      session.targetEntityId,
+    );
+    if (!failure) return null;
+    sessionManager?.closeSession(
+      playerId,
+      failure === "bank_out_of_range"
+        ? "distance"
+        : failure === "duel_locked"
+          ? "combat"
+          : "target_gone",
+    );
+    if (failure === "bank_out_of_range") return "You are too far from the bank";
+    if (failure === "duel_locked") return "You can't use a bank during a duel.";
+    return failure === "player_unavailable"
+      ? "Player not found"
+      : "Target no longer exists";
   }
 
   // Get target entity from world

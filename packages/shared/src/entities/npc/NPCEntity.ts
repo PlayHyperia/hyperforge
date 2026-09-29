@@ -115,7 +115,7 @@ export class NPCEntity extends Entity {
     await super.init();
 
     // CRITICAL: Register for update loop (client only - NPCs don't need server updates)
-    if (this.world.isClient) {
+    if (this.world.isClient && !this.destroyed) {
       this.world.setHot(this, true);
     }
   }
@@ -331,6 +331,10 @@ export class NPCEntity extends Entity {
       this.config.model,
     )) as LoadedAvatar;
 
+    // The loader result/factory is shared. A retired NPC must not instantiate
+    // it: factory.create mounts its own scene and octree item immediately.
+    if (this.destroyed) return;
+
     // Convert to nodes
     const nodeMap = src.toNodes(vrmHooks);
     const avatarNode = nodeMap.get("avatar") || nodeMap.get("root");
@@ -361,16 +365,23 @@ export class NPCEntity extends Entity {
     this.node.updateMatrixWorld(true);
 
     // Create the VRM instance using the factory
-    this._avatarInstance = avatarNodeWithFactory.factory.create(
+    const instance = avatarNodeWithFactory.factory.create(
       this.node.matrixWorld,
       vrmHooks,
     );
-    if (!this._avatarInstance) {
+    if (!instance) {
       console.warn(
         `[NPCEntity] ${this.id}: VRM factory.create() returned null for ${this.config.model}`,
       );
       return;
     }
+    // Scene attachment can synchronously notify listeners which retire this
+    // entity before create returns. Only this new instance belongs to us.
+    if (this.destroyed) {
+      instance.destroy();
+      return;
+    }
+    this._avatarInstance = instance;
 
     // Set initial emote to idle (service NPCs should stand still)
     this._currentEmote = Emotes.IDLE;
@@ -439,7 +450,7 @@ export class NPCEntity extends Entity {
    * mesh is added directly to THREE.Scene and provides instant raycast response.
    */
   private createRaycastProxy(): void {
-    if (this._raycastProxy) return; // Already created
+    if (this.destroyed || this._raycastProxy) return;
 
     const scene = this.world.stage?.scene;
     if (!scene) return;
@@ -481,7 +492,7 @@ export class NPCEntity extends Entity {
   }
 
   protected async createMesh(): Promise<void> {
-    if (this.world.isServer) {
+    if (this.destroyed || this.world.isServer) {
       return;
     }
 
@@ -504,6 +515,19 @@ export class NPCEntity extends Entity {
           this.config.model,
           this.world,
         );
+
+        if (this.destroyed) {
+          // SkeletonUtils gives this result its own skeletons, but shares the
+          // cached geometry/materials. Do not dispose the shared model/cache.
+          const skeletons = new Set<THREE.Skeleton>();
+          scene.traverse((child) => {
+            if (child instanceof THREE.SkinnedMesh) {
+              skeletons.add(child.skeleton);
+            }
+          });
+          for (const skeleton of skeletons) skeleton.dispose();
+          return;
+        }
 
         this.mesh = scene;
         this.mesh.name = `NPC_${this.config.npcType}_${this.id}`;
@@ -580,6 +604,8 @@ export class NPCEntity extends Entity {
 
         return;
       } catch (error) {
+        // A rejected pending load must not resurrect a retired placeholder.
+        if (this.destroyed) return;
         console.warn(
           `[NPCEntity] Failed to load model for ${this.config.npcType}, using placeholder:`,
           error,
@@ -768,6 +794,9 @@ export class NPCEntity extends Entity {
    * Override destroy to clean up animations, avatar, and raycast proxy
    */
   override destroy(): void {
+    this.world.setHot(this, false);
+    if (this.destroyed) return;
+
     // Clean up raycast proxy (added directly to scene)
     if (this._raycastProxy) {
       const scene = this.world.stage?.scene;
