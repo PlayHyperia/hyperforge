@@ -4170,7 +4170,13 @@ export class ClientCameraSystem extends SystemBase {
       const collidedDistance =
         this.computeCollisionAdjustedDistance(desiredDistance);
       const targetEffective = Math.min(desiredDistance, collidedDistance);
-      if (this.zoomDirty || this.orbitingActive) {
+      // A newly obstructed ray must retract immediately; damping inward can
+      // leave the camera beyond the hit. Preserve the existing smooth release.
+      if (
+        targetEffective < this.effectiveRadius ||
+        this.zoomDirty ||
+        this.orbitingActive
+      ) {
         this.effectiveRadius = targetEffective;
       } else {
         const radiusDamping = this.settings.radiusDampingFactor ?? 0.18;
@@ -4257,35 +4263,33 @@ export class ClientCameraSystem extends SystemBase {
   private _lastCollisionRaycastTime = 0;
   private _cachedCollisionDistance = 0;
   private _lastCollisionDesired = 0;
+  private readonly _lastCollisionOrigin = new THREE.Vector3();
+  private readonly _lastCollisionDirection = new THREE.Vector3();
   private static readonly COLLISION_RAYCAST_THROTTLE_MS = 80;
 
   private computeCollisionAdjustedDistance(desiredDistance: number): number {
     if (!this.camera || !this.target) return desiredDistance;
 
-    // Throttle raycasts: reuse cached result if camera hasn't moved much
+    // Probe the current requested orbit, not cameraPosition from the previous
+    // update. Its effective radius and terrain clamp are applied afterward.
+    const dir = _v3_3
+      .setFromSphericalCoords(1, this.spherical.phi, this.spherical.theta)
+      .normalize();
+    const origin = _v3_2.copy(this.smoothedTarget);
+
+    // Reuse only the same ray segment. Orbit/target motion must not inherit a
+    // clear result from another direction or location during this interval.
     const now = performance.now();
     if (
       now - this._lastCollisionRaycastTime <
         ClientCameraSystem.COLLISION_RAYCAST_THROTTLE_MS &&
-      Math.abs(desiredDistance - this._lastCollisionDesired) < 0.1
+      desiredDistance === this._lastCollisionDesired &&
+      origin.equals(this._lastCollisionOrigin) &&
+      dir.equals(this._lastCollisionDirection)
     ) {
       return this._cachedCollisionDistance;
     }
 
-    // Direction from orbit center (smoothed target) to ideal camera position
-    const dir = _v3_3
-      .set(
-        this.cameraPosition.x - this.smoothedTarget.x,
-        this.cameraPosition.y - this.smoothedTarget.y,
-        this.cameraPosition.z - this.smoothedTarget.z,
-      )
-      .normalize();
-
-    const origin = _v3_2.set(
-      this.smoothedTarget.x,
-      this.smoothedTarget.y,
-      this.smoothedTarget.z,
-    );
     const hit = this.world.raycast(
       origin,
       dir,
@@ -4308,6 +4312,8 @@ export class ClientCameraSystem extends SystemBase {
 
     this._lastCollisionRaycastTime = now;
     this._lastCollisionDesired = desiredDistance;
+    this._lastCollisionOrigin.copy(origin);
+    this._lastCollisionDirection.copy(dir);
     this._cachedCollisionDistance = result;
     return result;
   }

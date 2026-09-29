@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import * as THREE from "../../../extras/three/three";
+import { World } from "../../../core/World";
+import { loadPhysX } from "../../../physics/PhysXManager";
+import { RigidBody } from "../../../nodes/RigidBody";
+import { Collider } from "../../../nodes/Collider";
 import {
   ClientCameraSystem,
   dampStreamingCinematicRadius,
@@ -40,6 +44,155 @@ import {
   shouldUseStreamingResolutionLivePositions,
   type StreamingCinematicPhase,
 } from "../ClientCameraSystem";
+
+describe("ordinary camera real physics collision", () => {
+  beforeAll(async () => {
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      await loadPhysX();
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previous;
+    }
+  });
+
+  async function fixture(wallX: number, wallZ: number) {
+    const world = new World();
+    await world.physics.init();
+    const body = new RigidBody({ type: "static" });
+    body.position.set(wallX, 2, wallZ);
+    body.add(new Collider({ type: "box", width: 1, height: 4, depth: 1 }));
+    body.activate(world);
+    const target = new THREE.Object3D();
+    const system = new ClientCameraSystem(world);
+    // Use the real update/collision path without DOM controls or a renderer.
+    world.rig.remove(world.camera);
+    system["camera"] = world.camera;
+    system["target"] = target;
+    system["cameraOffset"].set(0, 2, 0);
+    system["smoothedTarget"].set(0, 2, 0);
+    system["spherical"].set(6, Math.PI / 2, 0);
+    system["targetSpherical"].copy(system["spherical"]);
+    system["cameraPosition"].set(0, 2, 6);
+    system["effectiveRadius"] = 6;
+    system["_lastCollisionRaycastTime"] = Number.NEGATIVE_INFINITY;
+    world.camera.position.copy(system["cameraPosition"]);
+    const ray = (origin: THREE.Vector3, direction: THREE.Vector3) =>
+      world.raycast(origin, direction, 6, world.createLayerMask("environment"));
+    return {
+      world,
+      system,
+      target,
+      body,
+      ray,
+      async close() {
+        system.destroy();
+        body.deactivate();
+        await world.destroy();
+      },
+    };
+  }
+
+  it("probes the current orbit rather than the preceding camera position", async () => {
+    const f = await fixture(3, 0);
+    try {
+      expect(
+        f.ray(new THREE.Vector3(0, 2, 0), new THREE.Vector3(0, 0, 1)),
+      ).toBeNull();
+      expect(
+        f.ray(new THREE.Vector3(0, 2, 0), new THREE.Vector3(1, 0, 0))?.distance,
+      ).toBeCloseTo(2.5, 5);
+      f.system["targetSpherical"].theta = Math.PI / 2;
+      f.system["zoomDirty"] = true;
+      f.system.update(1 / 60);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(2.1, 5);
+      expect(f.world.camera.position.x).toBeCloseTo(2.1, 5);
+      expect(f.world.camera.position.z).toBeCloseTo(0, 5);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("invalidates a same-radius cached clear ray on an immediate orbit", async () => {
+    const f = await fixture(3, 0);
+    try {
+      f.system.update(1 / 60);
+      const firstQuery = f.system["_lastCollisionRaycastTime"];
+      expect(f.system["effectiveRadius"]).toBe(6);
+      f.system["targetSpherical"].theta = Math.PI / 2;
+      f.system["zoomDirty"] = true;
+      f.system.update(1 / 60);
+      // Real monotonic time: this assertion proves the cache window was hit.
+      expect(performance.now() - firstQuery).toBeLessThan(80);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(2.1, 5);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("invalidates a cached clear ray when the followed target moves", async () => {
+    const f = await fixture(3, 3);
+    try {
+      f.system.update(1 / 60);
+      const firstQuery = f.system["_lastCollisionRaycastTime"];
+      expect(f.system["effectiveRadius"]).toBe(6);
+      f.target.position.x = 3;
+      expect(
+        f.ray(new THREE.Vector3(3, 2, 0), new THREE.Vector3(0, 0, 1))?.distance,
+      ).toBeCloseTo(2.5, 5);
+      f.system.update(1 / 60);
+      expect(performance.now() - firstQuery).toBeLessThan(80);
+      expect(f.world.camera.position.x).toBe(3);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(2.1, 5);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("invalidates the cache for a small extension of the requested ray", async () => {
+    const f = await fixture(0, 6.525);
+    try {
+      f.system.update(1 / 60);
+      const firstQuery = f.system["_lastCollisionRaycastTime"];
+      expect(f.system["effectiveRadius"]).toBe(6);
+      f.system["spherical"].radius = 6.05;
+      f.system["targetSpherical"].radius = 6.05;
+      f.system["zoomDirty"] = true;
+      f.system.update(1 / 60);
+      expect(performance.now() - firstQuery).toBeLessThan(80);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(5.625, 5);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("snaps inward at a real obstruction and smooths outward after it clears", async () => {
+    const f = await fixture(0, 3);
+    try {
+      f.system.update(1 / 60);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(2.1, 5);
+      const inward = f.system["effectiveRadius"];
+      const firstQuery = f.system["_lastCollisionRaycastTime"];
+      f.system.update(1 / 60);
+      expect(performance.now() - firstQuery).toBeLessThan(80);
+      expect(f.system["_lastCollisionRaycastTime"]).toBe(firstQuery);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(inward, 5);
+      f.body.deactivate();
+      // Expire the retained query, without substituting either clock or physics.
+      f.system["_lastCollisionRaycastTime"] = Number.NEGATIVE_INFINITY;
+      f.system.update(1 / 60);
+      expect(f.system["effectiveRadius"]).toBeGreaterThan(inward);
+      expect(f.system["effectiveRadius"]).toBeLessThan(6);
+      expect(f.system["effectiveRadius"]).toBeCloseTo(
+        inward + (6 - inward) * 0.18,
+        5,
+      );
+    } finally {
+      await f.close();
+    }
+  });
+});
 
 describe("streaming cinematic framing", () => {
   it("keeps the preparation lens through the authoritative public ready hold", () => {
