@@ -4766,6 +4766,25 @@ export class GrassVisualManager implements QuadTreeListener {
       const worldBase = modelWorldMatrix
         .mul(vec4(offset.x, float(0), offset.z, float(1)))
         .toVar("naturalGrassWorldBase");
+      // Retain only pure height-field code. Locality and habitat stay in their
+      // original stages, and every chunk keeps its own resource bindings.
+      const vergeHeight = Fn(
+        ([world, locality]: [Node<"vec3">, Node<"float">]) =>
+          createCompactBankVergeHeightScale(
+            world,
+            this.compactMacroField,
+            locality,
+            this.grassVergeEvaluation,
+          ),
+        "float",
+      ).setLayout({
+        name: "hyperiaGrassVergeHeightScale",
+        type: "float",
+        inputs: [
+          { name: "world", type: "vec3" },
+          { name: "locality", type: "float" },
+        ],
+      });
       // The exact same TSL factories serve the live fallback and the one-time
       // per-clump compute. Only the existing attribute-only candidate owns the
       // cache; time, wind, distance fade and lighting remain per-render work.
@@ -4775,12 +4794,7 @@ export class GrassVisualManager implements QuadTreeListener {
           : float(0);
         const height =
           bankVerge || this.compactMacroField?.pondServiceGround
-            ? createCompactBankVergeHeightScale(
-                world,
-                this.compactMacroField,
-                locality,
-                this.grassVergeEvaluation,
-              )
+            ? vergeHeight(world, locality)
             : float(1);
         const soil = this.habitatComposition
           ? createCompactHabitatSoilNode(
@@ -4806,12 +4820,7 @@ export class GrassVisualManager implements QuadTreeListener {
       const bankHeightScale = cachedFields
         ? cachedFields.x
         : bankVerge || this.compactMacroField?.pondServiceGround
-          ? createCompactBankVergeHeightScale(
-              worldBase.xyz,
-              this.compactMacroField,
-              vergeLocality,
-              this.grassVergeEvaluation,
-            )
+          ? vergeHeight(worldBase.xyz, vergeLocality)
           : float(1);
       if (bankVerge)
         bankLocality = vergeLocality.toVarying("v_naturalGrassBankLocality");

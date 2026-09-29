@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Worker } from "node:worker_threads";
 import { JSDOM } from "jsdom";
+import { MeshStandardNodeMaterial, WGSLNodeBuilder } from "three/webgpu";
+import { Fn } from "three/tsl";
+import ConvertNode from "three/src/nodes/utils/ConvertNode.js";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
@@ -12,6 +15,7 @@ import {
   type GrassWorkerOutput,
 } from "../../../../utils/workers/GrassWorker";
 import { TerrainSystem } from "../TerrainSystem";
+import { validateWorldTerrainProfile } from "../WorldTerrainProfile";
 import { RoadNetworkSystem } from "../RoadNetworkSystem";
 import { TerrainVisualManager } from "../TerrainVisualManager";
 import {
@@ -71,6 +75,7 @@ async function fixture(
   roadClearance?: "per-blade-v1",
   diagnosticSubcells?: "world-grid-6.25m-v1",
   submissionCandidate?: "adaptive-ranges-v1",
+  includeHabitat = false,
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -110,11 +115,66 @@ async function fixture(
     });
   }
   const setupDisposals: (() => void)[] = [];
+  let restoreProfile: (() => void) | undefined;
   try {
     await DataManager.getInstance().initialize();
+    if (includeHabitat) {
+      // Admit the same authored meadow used by the generation suite before any
+      // world owner captures it. Do not depend on private external manifests.
+      const config = DataManager.getWorldConfig();
+      if (!config)
+        throw new Error("Loaded fixture world configuration required");
+      const profile = DataManager.getWorldTerrainProfile();
+      const admitted = validateWorldTerrainProfile({
+        ...profile,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      });
+      const owners = Object.fromEntries(
+        ["worldConfig", "worldTerrainProfile", "worldContentIdentity"].map(
+          (key) => {
+            const descriptor = Object.getOwnPropertyDescriptor(
+              DataManager,
+              key,
+            );
+            if (!descriptor) throw new Error(`Missing fixture owner: ${key}`);
+            return [key, descriptor];
+          },
+        ),
+      );
+      let restored = false;
+      restoreProfile = () => {
+        if (restored) return;
+        Object.defineProperties(DataManager, owners);
+        restored = true;
+        expect(DataManager.getWorldConfig()).toBe(config);
+        expect(DataManager.getWorldTerrainProfile()).toBe(profile);
+      };
+      setupDisposals.push(restoreProfile);
+      Object.defineProperty(DataManager, "worldContentIdentity", {
+        ...owners.worldContentIdentity,
+        value: null,
+      });
+      DataManager.setWorldConfig({ ...config, terrainProfile: admitted });
+    }
     const world = new World();
     setupDisposals.push(() => world.destroy());
     const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    const habitat = includeHabitat
+      ? terrain["getCompactHabitatMaterial"]("haven-understory-v1")
+      : undefined;
     const roads = world.register(
       "roads",
       RoadNetworkSystem,
@@ -221,7 +281,7 @@ async function fixture(
       (x, z) => terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
       (bounds) => visual.captureRetainedSurfaceRegion(bounds),
       "fine-meadow-v1",
-      undefined,
+      habitat,
       lightingCandidate,
       groundingPort
         ? {
@@ -275,11 +335,15 @@ async function fixture(
       execute,
       finish,
       close() {
-        void worker.terminate();
-        owner.destroy();
-        visual.dispose();
-        material.dispose();
-        world.destroy();
+        try {
+          void worker.terminate();
+          owner.destroy();
+          visual.dispose();
+          material.dispose();
+          world.destroy();
+        } finally {
+          restoreProfile?.();
+        }
       },
     };
   } catch (error) {
@@ -880,6 +944,160 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     } finally {
       baseline.close();
       candidate.close();
+    }
+  });
+
+  it("reuses pure ordinary CPU position-stage height code across three LOD owners", async () => {
+    const f = await fixture(
+      "fine-meadow-regional-v1",
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+      undefined,
+      undefined,
+      true,
+    );
+    try {
+      const dom = new JSDOM("<canvas></canvas>");
+      try {
+        const canvas = dom.window.document.querySelector("canvas");
+        if (!canvas) throw new Error("Actual constructor canvas required");
+        const renderer = new THREE.WebGPURenderer({ canvas });
+        try {
+          expect(f.owner["grassVergeEvaluation"]).toBeUndefined();
+          expect(f.owner["instancingCandidate"]).toBeUndefined();
+          expect(f.owner["clumpFieldFactory"]).toBeNull();
+          expect(f.owner["habitatComposition"]).toBeTruthy();
+          expect(f.owner["compactMacroField"]?.bankVerge).toBeTruthy();
+          const functions = new Set<unknown>();
+          const roots = new Set<unknown>();
+          const masks = new Set<unknown>();
+          const materials = new Set<unknown>();
+          const bodies = new Set<string>();
+          let lods = 0;
+          await f.owner.precompileRepresentativeChunk(async (object) => {
+            if (
+              !(object instanceof THREE.InstancedMesh) ||
+              !(object.material instanceof MeshStandardNodeMaterial)
+            )
+              throw new Error(
+                "Actual ordinary grounded representative required",
+              );
+            const material = object.material;
+            materials.add(material);
+            const root = object.geometry.getAttribute("grassRootDeltas");
+            const mask = object.geometry.getAttribute("grassBladeVisibility");
+            expect(root).toBeDefined();
+            expect(mask).toBeDefined();
+            roots.add(root);
+            masks.add(mask);
+            const builder = new WGSLNodeBuilder(object, renderer);
+            Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+            // Observe the installed compiler's actual return identity. This does
+            // not replace field math, shader generation, renderer or GPU results.
+            const original: unknown = Reflect.get(builder, "buildFunctionNode");
+            if (typeof original !== "function")
+              throw new Error("Actual function compiler required");
+            Object.defineProperty(builder, "buildFunctionNode", {
+              configurable: true,
+              value: function (this: WGSLNodeBuilder, ...args: unknown[]) {
+                const actual: unknown = Reflect.apply(original, this, args);
+                const shaderNode = args[0];
+                if (shaderNode && typeof shaderNode === "object") {
+                  const layout: unknown = Reflect.get(shaderNode, "layout");
+                  if (
+                    layout &&
+                    typeof layout === "object" &&
+                    Reflect.get(layout, "name") ===
+                      "hyperiaGrassVergeHeightScale"
+                  )
+                    functions.add(actual);
+                }
+                return actual;
+              },
+            });
+            try {
+              const build: unknown = Reflect.get(builder, "flowStagesNode");
+              const includes: unknown = Reflect.get(builder, "getCodes");
+              if (typeof build !== "function" || typeof includes !== "function")
+                throw new Error(
+                  "Actual installed stage-flow compiler required",
+                );
+              Reflect.set(builder, "shaderStage", "vertex");
+              const shadowNodes: unknown = Reflect.apply(
+                Reflect.get(renderer, "_getShadowNodes"),
+                renderer,
+                [material],
+              );
+              if (!shadowNodes || typeof shadowNodes !== "object")
+                throw new Error("Actual material shadow nodes required");
+              const position: unknown = Reflect.get(
+                shadowNodes,
+                "positionNode",
+              );
+              if (!(position instanceof THREE.Node))
+                throw new Error("Actual ordinary position required");
+              expect(position).toBe(material.positionNode);
+              const flow: unknown = Reflect.apply(build, builder, [
+                Fn(() => new ConvertNode(position, "vec3"), "vec3")(),
+                "vec3",
+              ]);
+              if (!flow || typeof flow !== "object")
+                throw new Error("Actual flow required");
+              const definition: unknown = Reflect.apply(includes, builder, [
+                "vertex",
+              ]);
+              if (typeof definition !== "string")
+                throw new Error("Actual includes required");
+              const emitted =
+                definition +
+                Reflect.get(flow, "vars") +
+                Reflect.get(flow, "code") +
+                Reflect.get(flow, "result");
+              const invocation =
+                Reflect.get(flow, "code") + Reflect.get(flow, "result");
+              expect(invocation).toContain("hyperiaGrassVergeHeightScale(");
+              expect(
+                (definition.match(/fn hyperiaGrassVergeHeightScale/g) ?? [])
+                  .length,
+              ).toBe(1);
+              const body = /fn hyperiaGrassVergeHeightScale[\s\S]*?\n}/.exec(
+                definition,
+              )?.[0];
+              expect(body).toBeDefined();
+              if (!body)
+                throw new Error("Actual height function definition missing");
+              expect(body).not.toMatch(
+                /storage|uniform|texture|habitat|soil|instance|player|time/i,
+              );
+              expect(emitted).not.toMatch(
+                /habitat|soil|undefined|NaN|Infinity/i,
+              );
+              bodies.add(body);
+              lods++;
+            } finally {
+              Reflect.deleteProperty(builder, "buildFunctionNode");
+            }
+          });
+          expect(lods).toBe(3);
+          expect(functions.size).toBe(1);
+          expect(bodies.size).toBe(1);
+          expect(materials.size).toBe(3);
+          expect(roots.size).toBe(3);
+          expect(masks.size).toBe(3);
+          // Actual CPU stage generation is not driver validation or GPU execution.
+          expect(renderer.initialized).toBe(false);
+        } finally {
+          await renderer.dispose();
+        }
+      } finally {
+        dom.window.close();
+      }
+    } finally {
+      f.close();
     }
   });
 
