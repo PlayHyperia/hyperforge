@@ -1957,7 +1957,10 @@ export const GRASS_GROUNDING_CROSS_REALM_CLOCK_TOLERANCE_MS = 16;
 export type GrassGroundingExecutionClockScope = "local" | "cross-realm";
 export type GrassGroundingExecution = Readonly<{
   policy: GrassGroundingExecutionPolicy;
-  /** Shared performance epoch, so transport queueing cannot renew the deadline. */
+  /**
+   * Absolute deadline in the receiving realm's performance epoch. Worker
+   * transport translates one original main deadline without renewing it.
+   */
   deadlineEpochMs: number;
 }>;
 

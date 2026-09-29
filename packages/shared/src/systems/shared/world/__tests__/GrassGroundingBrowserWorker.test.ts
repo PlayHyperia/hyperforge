@@ -168,6 +168,12 @@ const probeSource = String.raw`
         worker.addEventListener("message", event => messages.push({
           type: event.data.type, jobId: event.data.jobId, busyAtReceive: client.busy,
         }));
+        const startupDeadline = performance.now() + 11000;
+        while (client.busy && !client.terminated) {
+          if (performance.now() >= startupDeadline) throw new Error("Native worker clock startup timed out");
+          await new Promise(resolve => setTimeout(resolve, 4));
+        }
+        if (client.terminated) throw new Error(client.transportFailure?.error ?? "Native worker clock startup failed");
         for (let i = 0; i < encodedRequests.length; i++) {
           const request = decode(encodedRequests[i]);
           const transfers = request.type === "release_surfaces" ? [] :

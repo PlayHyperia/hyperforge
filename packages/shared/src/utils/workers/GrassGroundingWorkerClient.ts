@@ -6,6 +6,14 @@ import {
   type GrassGroundingConsumedWork,
   type GrassGroundingExecution,
 } from "../../systems/shared/world/GrassBladeGrounding";
+import {
+  captureGrassGroundingWorkerClock,
+  translateGrassGroundingWorkerExecution,
+  GRASS_GROUNDING_CLOCK_STARTUP_MS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+  type GrassGroundingWorkerClock,
+} from "./GrassGroundingWorkerClock";
 import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
 import {
   GRASS_GROUNDING_WORKER_LIMITS as limits,
@@ -429,6 +437,11 @@ export class GrassGroundingWorkerClient {
   private completedId = 0;
   private lastPreparedToken = 0;
   private stopped = false;
+  private clock: GrassGroundingWorkerClock | null = null;
+  private clockProbeId = 0;
+  private clockSentEpochMs = 0;
+  private readonly clockStartupEpochMs =
+    performance.timeOrigin + performance.now();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private failure: Readonly<GrassGroundingClientFailure> | null = null;
 
@@ -437,6 +450,11 @@ export class GrassGroundingWorkerClient {
       port.addEventListener("message", this.onMessage);
       port.addEventListener("error", this.onError);
       port.addEventListener("messageerror", this.onMessageError);
+      this.timer = setTimeout(
+        () => this.fail("timeout", "Grounding worker clock startup timed out"),
+        GRASS_GROUNDING_CLOCK_STARTUP_MS,
+      );
+      this.sendClockProbe();
     } catch (error) {
       this.teardown();
       throw error;
@@ -444,7 +462,7 @@ export class GrassGroundingWorkerClient {
   }
 
   get busy(): boolean {
-    return this.slot !== null;
+    return (!this.stopped && this.clock === null) || this.slot !== null;
   }
   get terminated(): boolean {
     return this.stopped;
@@ -459,6 +477,7 @@ export class GrassGroundingWorkerClient {
   submit(request: GrassGroundingClientRequest): number {
     ensure(!this.stopped, "Grounding worker client is terminated");
     ensure(!this.slot, "Grounding worker client is busy");
+    ensure(this.clock !== null, "Grounding worker clock is not ready");
     ensure(
       Number.isSafeInteger(this.nextId),
       "Grounding worker job ID exhausted",
@@ -466,7 +485,18 @@ export class GrassGroundingWorkerClient {
     const started = performance.now();
     const admitted = this.admit(request);
     const jobId = this.nextId++;
-    const packet = { ...request, jobId } as Request;
+    const packet = {
+      ...request,
+      jobId,
+      ...(admitted.execution
+        ? {
+            execution: translateGrassGroundingWorkerExecution(
+              admitted.execution,
+              this.clock,
+            ),
+          }
+        : {}),
+    } as Request;
     const transfers =
       packet.type === "release_surfaces"
         ? []
@@ -619,6 +649,68 @@ export class GrassGroundingWorkerClient {
     this.teardown();
   }
 
+  private sendClockProbe(): void {
+    this.clockProbeId++;
+    this.clockSentEpochMs = performance.timeOrigin + performance.now();
+    try {
+      this.port.postMessage(
+        {
+          type: "clock_probe",
+          schemaVersion: 1,
+          probeId: this.clockProbeId,
+        },
+        [],
+      );
+    } catch (error) {
+      this.fail("post_message", boundedError(error));
+    }
+  }
+
+  private receiveClockSample(value: unknown, receivedEpochMs: number): void {
+    const row = record(value, [
+      "type",
+      "schemaVersion",
+      "probeId",
+      "workerEpochMs",
+    ]);
+    ensure(
+      row.type === "clock_sample" &&
+        row.schemaVersion === 1 &&
+        row.probeId === this.clockProbeId &&
+        this.clock === null &&
+        this.slot === null &&
+        finite(row.workerEpochMs),
+      "Invalid grounding clock response",
+    );
+    if (
+      receivedEpochMs - this.clockStartupEpochMs >=
+      GRASS_GROUNDING_CLOCK_STARTUP_MS
+    ) {
+      this.fail("timeout", "Grounding worker clock startup timed out");
+      return;
+    }
+    if (
+      receivedEpochMs - this.clockSentEpochMs >
+      GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS
+    ) {
+      if (this.clockProbeId < GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS) {
+        this.sendClockProbe();
+      } else {
+        this.fail(
+          "timeout",
+          "Grounding worker clock calibration stayed delayed",
+        );
+      }
+      return;
+    }
+    this.clock = captureGrassGroundingWorkerClock(
+      this.clockSentEpochMs,
+      receivedEpochMs,
+      row.workerEpochMs,
+    );
+    this.clearTimer();
+  }
+
   private readonly onError = (event: ErrorEvent): void => {
     this.fail(
       "error",
@@ -639,6 +731,12 @@ export class GrassGroundingWorkerClient {
         value !== null && typeof value === "object",
         "Invalid grounding response envelope",
       );
+      const type = Object.getOwnPropertyDescriptor(value, "type");
+      if (type && "value" in type && type.value === "clock_sample") {
+        charged = null;
+        this.receiveClockSample(value, performance.timeOrigin + started);
+        return;
+      }
       const identity = Object.getOwnPropertyDescriptor(value, "jobId");
       ensure(
         identity &&

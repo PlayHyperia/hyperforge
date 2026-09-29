@@ -1,5 +1,8 @@
 import { Worker } from "node:worker_threads";
-import type { GrassGroundingWorkerPort } from "../../../../../utils/workers/GrassGroundingWorkerClient";
+import type {
+  GrassGroundingWorkerClient,
+  GrassGroundingWorkerPort,
+} from "../../../../../utils/workers/GrassGroundingWorkerClient";
 import type { GrassGroundingWorkerResponse } from "../../../../../utils/workers/GrassGroundingWorkerWire";
 
 type MessageListener = (event: MessageEvent<unknown>) => void;
@@ -26,7 +29,9 @@ export class ActualGrassGroundingClientPort implements GrassGroundingWorkerPort 
   private readonly readiness: Promise<void>;
   private closing = false;
   private termination: Promise<number> | null = null;
+  /** Gameplay/cancellation traffic, excluding bounded startup calibration. */
   postCalls = 0;
+  clockPostCalls = 0;
   terminateCalls = 0;
 
   constructor(source: string) {
@@ -61,6 +66,15 @@ parentPort.postMessage({testTransportReady: true});`,
         }
         const event = new MessageEvent<unknown>("message", { data });
         for (const listener of this.messages) listener(event);
+        // Deliver the actual startup sample to the client, but never cast it
+        // into a job response or let it satisfy a gameplay response waiter.
+        if (
+          data &&
+          typeof data === "object" &&
+          "type" in data &&
+          data.type === "clock_sample"
+        )
+          return;
         const response = data as GrassGroundingWorkerResponse;
         if (this.received.length >= 128)
           throw new Error("Actual client worker reply bound exceeded");
@@ -133,12 +147,36 @@ parentPort.postMessage({testTransportReady: true});`,
   }
 
   postMessage(message: unknown, transfer: ArrayBuffer[]): void {
-    this.postCalls++;
+    if (
+      message &&
+      typeof message === "object" &&
+      "type" in message &&
+      message.type === "clock_probe"
+    )
+      this.clockPostCalls++;
+    else this.postCalls++;
     this.worker.postMessage(message, transfer);
   }
 
   ready(): Promise<void> {
     return this.readiness;
+  }
+
+  /** Wait for the actual client handshake; never manufacture clock samples. */
+  async readyFor(client: GrassGroundingWorkerClient): Promise<void> {
+    const deadline = performance.now() + 11_000;
+    await this.ready();
+    for (;;) {
+      if (client.terminated)
+        throw new Error(
+          client.transportFailure?.error ??
+            "Actual grounding client terminated",
+        );
+      if (!client.busy) return;
+      if (performance.now() >= deadline)
+        throw new Error("Actual grounding client startup timed out");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
   }
 
   waitFor<K extends GrassGroundingWorkerResponse["type"]>(

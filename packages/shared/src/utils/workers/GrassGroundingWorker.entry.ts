@@ -15,6 +15,7 @@ import {
   type GrassGroundingExecution,
 } from "../../systems/shared/world/GrassBladeGrounding";
 import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
+import { GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS } from "./GrassGroundingWorkerClock";
 import {
   RetainedTerrainSurface,
   type TerrainCellTopology,
@@ -30,6 +31,7 @@ import {
   type GrassGroundingWorkerCacheReceipt,
   type GrassGroundingWorkerResponse,
   type GrassGroundingWorkerResult,
+  type GrassGroundingWorkerClockSample,
 } from "./GrassGroundingWorkerWire";
 
 // The same browser bundle is exercised by the Node worker transport adapter.
@@ -37,7 +39,7 @@ import {
 const scope = self as unknown as {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
   postMessage(
-    message: GrassGroundingWorkerResponse,
+    message: GrassGroundingWorkerResponse | GrassGroundingWorkerClockSample,
     transfer?: ArrayBuffer[],
   ): void;
 };
@@ -1138,6 +1140,7 @@ channel.port1.onmessage = () => {
   if (row.job.state.status === "running") schedule();
   else terminal(row);
 };
+let lastClockProbeId = 0;
 scope.onmessage = ({ data }) => {
   let jobId: number | null = null,
     generation: number | null = null;
@@ -1147,6 +1150,29 @@ scope.onmessage = ({ data }) => {
       "Invalid grounding message",
     );
     const identity = data as Record<string, unknown>;
+    if (identity.type === "clock_probe") {
+      object(data, ["type", "schemaVersion", "probeId"]);
+      requireValue(
+        identity.schemaVersion === 1 &&
+          integer(
+            identity.probeId,
+            1,
+            GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+          ) &&
+          identity.probeId === lastClockProbeId + 1 &&
+          !active &&
+          lastAcceptedId === 0,
+        "Invalid grounding clock probe",
+      );
+      lastClockProbeId = identity.probeId;
+      scope.postMessage({
+        type: "clock_sample",
+        schemaVersion: 1,
+        probeId: lastClockProbeId,
+        workerEpochMs: performance.timeOrigin + performance.now(),
+      });
+      return;
+    }
     if (integer(identity.jobId, 1)) jobId = identity.jobId;
     if (integer(identity.generation, 1)) generation = identity.generation;
     if (identity.type === "cancel") {

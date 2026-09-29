@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createGrassTerrainSurfaceOperations } from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import { GrassGroundingWorkerClient } from "../../../../utils/workers/GrassGroundingWorkerClient";
 import {
   GRASS_GROUNDING_WORKER_LIMITS,
   type GrassGroundingWorkerResponse,
@@ -81,6 +82,13 @@ async function session(): Promise<Session> {
     }
   >();
   const observe = (event: MessageEvent<unknown>) => {
+    if (
+      event.data &&
+      typeof event.data === "object" &&
+      "type" in event.data &&
+      event.data.type === "clock_sample"
+    )
+      return;
     const response = event.data as GrassGroundingWorkerResponse;
     if (history.length >= 128) history.shift();
     history.push({
@@ -131,6 +139,11 @@ async function session(): Promise<Session> {
     },
   };
   sessions.push(value);
+  // Inspect the actual owned client; do not replace the coordinator or transport.
+  const client: unknown = Reflect.get(coordinator, "client");
+  if (!(client instanceof GrassGroundingWorkerClient))
+    throw new Error("Missing actual coordinator client");
+  await port.readyFor(client);
   return value;
 }
 

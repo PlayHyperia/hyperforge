@@ -1736,6 +1736,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
             );
             await clientPort.ready();
             groundingClient = new GrassGroundingWorkerClient(clientPort);
+            await clientPort.readyFor(groundingClient);
             jobId = groundingClient.submit({
               type: "prepare_surface",
               schemaVersion: 1,
@@ -3032,6 +3033,7 @@ describe.each(cases)("$name", (scenario: PondGroundingScenario) => {
         clientPort = new ActualGrassGroundingClientPort(groundingWorkerSource);
         await clientPort.ready();
         groundingClient = new GrassGroundingWorkerClient(clientPort);
+        await clientPort.readyFor(groundingClient);
         const copyAt = performance.now();
         const admittedSources =
           createGrassGroundingWorkerRequest(request).surfaces;

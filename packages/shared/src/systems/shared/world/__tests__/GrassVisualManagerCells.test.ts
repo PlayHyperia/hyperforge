@@ -1261,6 +1261,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.owner["processSettledWorkerResults"]();
       const entries = [...f.owner["groundingJobs"].values()],
         coordinator = f.owner["groundingWorker"]!;
+      await port.readyFor(coordinator["client"]);
       expect(entries).toHaveLength(2);
       expect(
         entries.every(({ job }) => job instanceof GrassGroundingWorkerJob),
@@ -1438,7 +1439,7 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
     try {
       f.owner.onNodeNeedsGeometry(f.nodes[3]);
       const work = f.owner["liveWorkUnits"].get("gcell_v1_12_11")!;
-      for (const spacing of [0.7, 0.65, 0.6, 0.55, 0.5]) {
+      for (const spacing of [0.7, 0.65, 0.6, 0.55, 0.5, 0.45]) {
         const input = {
           ...f.owner["createWorkerInput"](work, work.key, 0),
           clumpSpacing: spacing,
@@ -1487,7 +1488,15 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
         expect(result.receipt.workBudget).toBe(1_000_000);
         expect(result.receipt.workUnits).toBeLessThanOrEqual(1_000_000);
         if (spacing === 0.7) expect(result.status).toBe("ready");
-        if (spacing === 0.5) expect(result.status).toBe("defer");
+        if (spacing === 0.5) expect(result.status).toBe("ready");
+        if (spacing === 0.45) {
+          expect(result.status).toBe("defer");
+          if (result.status === "defer")
+            expect(result.reason).toBe("work_budget");
+          expect(result.receipt.processedClumps).toBeLessThan(
+            result.receipt.inputClumps,
+          );
+        }
       }
       expect(f.container.children).toHaveLength(0);
     } finally {

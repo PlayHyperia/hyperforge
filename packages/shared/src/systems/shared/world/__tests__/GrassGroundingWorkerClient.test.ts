@@ -43,7 +43,7 @@ async function actualClient() {
   const port = new ActualGrassGroundingClientPort(bundledSource);
   const client = new GrassGroundingWorkerClient(port);
   sessions.push({ client, port });
-  await port.ready();
+  await port.readyFor(client);
   return { client, port };
 }
 
@@ -208,6 +208,82 @@ afterEach(async () => {
 });
 
 describe("actual grounding worker client", () => {
+  it("admits no gameplay or transferred input until the actual startup clock is ready", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    const port = new ActualGrassGroundingClientPort(bundledSource);
+    try {
+      await port.ready();
+      const client = new GrassGroundingWorkerClient(port);
+      sessions.push({ client, port });
+      const packet = workerRequest(fixture.request);
+      const buffers = grassGroundingWorkerInputTransfers(packet);
+      expect(client.busy).toBe(true);
+      expect(client.cancel()).toBe(false);
+      expect(() => client.submit(withoutId(packet))).toThrow(
+        /clock is not ready/,
+      );
+      expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+      expect(port.postCalls).toBe(0);
+      await port.readyFor(client);
+      expect(client.busy).toBe(false);
+      expect(client.transportFailure).toBeNull();
+      expect(port.clockPostCalls).toBeGreaterThanOrEqual(1);
+      expect(port.clockPostCalls).toBeLessThanOrEqual(3);
+      expect(client.submit(withoutId(packet))).toBe(1);
+      expect(
+        (await settledResponse(client, port, "result", 1)).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+      await port.close();
+    }
+  });
+
+  it("fails closed on an unsolicited actual worker clock reply after startup", async () => {
+    const { client, port } = await actualClient();
+    // Ask the real worker for another sample. No clock or response is replaced.
+    // A worker already at its probe cap rejects this unsolicited request instead.
+    port.postMessage(
+      {
+        type: "clock_probe",
+        schemaVersion: 1,
+        probeId: port.clockPostCalls + 1,
+      },
+      [],
+    );
+    const deadline = performance.now() + 11_000;
+    while (!client.terminated) {
+      if (performance.now() >= deadline)
+        throw new Error("Unsolicited actual clock reply was not rejected");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    expect(client.transportFailure?.reason).toBe("protocol");
+    expect(client.busy).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+  });
+
+  it("destroys an actual client during startup without retaining timers or listeners", async () => {
+    const port = new ActualGrassGroundingClientPort(bundledSource);
+    await port.ready();
+    const client = new GrassGroundingWorkerClient(port);
+    sessions.push({ client, port });
+    expect(client.busy).toBe(true);
+    client.destroy();
+    client.destroy();
+    await port.close();
+    expect(client.terminated).toBe(true);
+    expect(client.busy).toBe(false);
+    expect(client.cancel()).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+    expect(Reflect.get(client, "timer")).toBeNull();
+    await expect(port.readyFor(client)).rejects.toThrow(/terminated/);
+  });
   it("validates requested diagnostic subcells against a real ready slot and rejects malformed or unsolicited metadata", async () => {
     const fixture = createSameFaceCase("fine-lod1");
     try {

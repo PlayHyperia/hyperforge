@@ -22,6 +22,19 @@ export const GRASS_GROUNDING_WORKER_LIMITS = Object.freeze({
   maximumCachedSurfaces: 16,
 });
 
+/** Dedicated-port startup handshake; IDs do not consume grounding job IDs. */
+export type GrassGroundingWorkerClockProbe = {
+  type: "clock_probe";
+  schemaVersion: 1;
+  probeId: number;
+};
+export type GrassGroundingWorkerClockSample = {
+  type: "clock_sample";
+  schemaVersion: 1;
+  probeId: number;
+  workerEpochMs: number;
+};
+
 export type GrassGroundingGeometrySnapshot = {
   position: Float32Array;
   normal: Float32Array;
@@ -58,7 +71,7 @@ export type GrassGroundingWorkerRequest = {
     | "workBudget"
   >;
   consumed: GrassGroundingConsumedWork;
-  /** Opt-in only; one original absolute deadline, never a per-stage renewal. */
+  /** Receiver-domain deadline translated from one original main deadline. */
   execution?: GrassGroundingExecution;
 };
 
