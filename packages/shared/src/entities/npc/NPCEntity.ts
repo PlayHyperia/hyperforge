@@ -91,12 +91,66 @@ const NPC_IMPOSTOR_DISTANCES = {
   hysteresis: 5,
 } as const;
 
+// Continue releasing independent owners if a synchronous dispose listener
+// throws, then report the first failure. No shared texture/cache is released.
+function runNPCCleanup(actions: Array<() => void>): void {
+  let failed = false;
+  let firstError: unknown;
+  for (const action of actions) {
+    try {
+      action();
+    } catch (error) {
+      if (!failed) firstError = error;
+      failed = true;
+    }
+  }
+  if (failed) throw firstError;
+}
+
+class NPCModelResources {
+  private readonly owned = new Set<{ dispose(): void }>();
+  private released = false;
+
+  constructor(
+    readonly scene: THREE.Object3D,
+    ownership: "cached-glb" | "vrm" | "placeholder",
+  ) {
+    // Snapshot ownership at acquisition, before interaction/effects can change
+    // a material reference. Both loaders share geometry; only the VRM factory
+    // makes fresh instance materials. SkeletonUtils clones own their skeletons.
+    scene.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      if (node instanceof THREE.SkinnedMesh) this.owned.add(node.skeleton);
+      if (ownership === "placeholder") this.owned.add(node.geometry);
+      if (ownership !== "cached-glb") {
+        for (const material of Array.isArray(node.material)
+          ? node.material
+          : [node.material]) {
+          this.owned.add(material);
+        }
+      }
+    });
+  }
+
+  dispose(): void {
+    if (this.released) return;
+    this.released = true;
+    const resources = [...this.owned];
+    this.owned.clear();
+    runNPCCleanup([
+      () => this.scene.removeFromParent(),
+      ...resources.map((resource) => () => resource.dispose()),
+    ]);
+  }
+}
+
 export class NPCEntity extends Entity {
   public config: NPCEntityConfig;
 
   // VRM avatar instance (for VRM models with emote support)
   private _avatarInstance: VRMAvatarInstance | null = null;
   private _currentEmote: string | null = null;
+  private _modelResources: NPCModelResources | null = null;
 
   // PERFORMANCE: Raycast proxy mesh for fast entity detection
   // VRM SkinnedMesh raycast is extremely slow (~700-1800ms) because THREE.js
@@ -375,13 +429,18 @@ export class NPCEntity extends Entity {
       );
       return;
     }
+    const instanceScene = instance.raw?.scene;
+    const resources = instanceScene
+      ? new NPCModelResources(instanceScene, "vrm")
+      : null;
     // Scene attachment can synchronously notify listeners which retire this
     // entity before create returns. Only this new instance belongs to us.
     if (this.destroyed) {
-      instance.destroy();
+      runNPCCleanup([() => instance.destroy(), () => resources?.dispose()]);
       return;
     }
     this._avatarInstance = instance;
+    this._modelResources = resources;
 
     // Set initial emote to idle (service NPCs should stand still)
     this._currentEmote = Emotes.IDLE;
@@ -485,6 +544,7 @@ export class NPCEntity extends Entity {
 
     // Add directly to THREE.Scene (bypasses Node system for performance)
     scene.add(this._raycastProxy);
+    if (this.destroyed) return;
 
     // Sync initial position
     this._raycastProxy.position.copy(this.node.position);
@@ -499,6 +559,7 @@ export class NPCEntity extends Entity {
     // PERFORMANCE: Create invisible raycast proxy FIRST for instant click detection
     // This bypasses expensive VRM SkinnedMesh raycast (~700-1800ms per click)
     this.createRaycastProxy();
+    if (this.destroyed) return;
 
     // Try to load 3D model if available
     if (this.config.model && this.world.loader) {
@@ -515,20 +576,14 @@ export class NPCEntity extends Entity {
           this.config.model,
           this.world,
         );
+        const resources = new NPCModelResources(scene, "cached-glb");
 
         if (this.destroyed) {
-          // SkeletonUtils gives this result its own skeletons, but shares the
-          // cached geometry/materials. Do not dispose the shared model/cache.
-          const skeletons = new Set<THREE.Skeleton>();
-          scene.traverse((child) => {
-            if (child instanceof THREE.SkinnedMesh) {
-              skeletons.add(child.skeleton);
-            }
-          });
-          for (const skeleton of skeletons) skeleton.dispose();
+          resources.dispose();
           return;
         }
 
+        this._modelResources = resources;
         this.mesh = scene;
         this.mesh.name = `NPC_${this.config.npcType}_${this.id}`;
 
@@ -580,6 +635,7 @@ export class NPCEntity extends Entity {
         this.mesh.position.set(0, 0, 0);
         this.mesh.quaternion.identity();
         this.node.add(this.mesh);
+        if (this.destroyed) return;
 
         // Setup animations if available (NPCs usually have idle animations)
         let impostorClip: THREE.AnimationClip | null = null;
@@ -604,6 +660,9 @@ export class NPCEntity extends Entity {
 
         return;
       } catch (error) {
+        // A synchronous setup/attachment failure after acquisition must not
+        // leave the old clone mounted behind its fallback or mixer retained.
+        this.takeModelCleanup()();
         // A rejected pending load must not resurrect a retired placeholder.
         if (this.destroyed) return;
         console.warn(
@@ -621,6 +680,7 @@ export class NPCEntity extends Entity {
     material.roughness = 0.8;
     material.metalness = 0.0;
     this.mesh = new THREE.Mesh(geometry, material);
+    this._modelResources = new NPCModelResources(this.mesh, "placeholder");
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     this.mesh.name = `NPC_${this.config.npcType}_${this.id}`;
@@ -791,37 +851,46 @@ export class NPCEntity extends Entity {
   }
 
   /**
-   * Override destroy to clean up animations, avatar, and raycast proxy
+   * Relinquish references before callbacks can reenter destruction. The base
+   * Entity teardown must never receive a borrowed loader/cache geometry.
    */
+  private takeModelCleanup(): () => void {
+    const avatar = this._avatarInstance;
+    const resources = this._modelResources;
+    const mixer = (this as { mixer?: THREE.AnimationMixer }).mixer;
+    this._avatarInstance = null;
+    this._currentEmote = null;
+    this._modelResources = null;
+    (this as { mixer?: THREE.AnimationMixer }).mixer = undefined;
+    if (resources && this.mesh === resources.scene) this.mesh = null;
+    return () =>
+      runNPCCleanup([
+        () => mixer?.stopAllAction(),
+        () => {
+          if (mixer) mixer.uncacheRoot(mixer.getRoot());
+        },
+        () => avatar?.destroy(),
+        () => resources?.dispose(),
+      ]);
+  }
+
+  /** Override destroy to release only this NPC's render resources. */
   override destroy(): void {
     this.world.setHot(this, false);
     if (this.destroyed) return;
-
-    // Clean up raycast proxy (added directly to scene)
-    if (this._raycastProxy) {
-      const scene = this.world.stage?.scene;
-      if (scene) {
-        scene.remove(this._raycastProxy);
-      }
-      this._raycastProxy.geometry.dispose();
-      (this._raycastProxy.material as THREE.Material).dispose();
-      this._raycastProxy = null;
-    }
-
-    // Clean up VRM avatar instance
-    if (this._avatarInstance) {
-      this._avatarInstance.destroy();
-      this._avatarInstance = null;
-    }
-
-    // Clean up animation mixer (for GLB models)
-    const mixer = (this as { mixer?: THREE.AnimationMixer }).mixer;
-    if (mixer) {
-      mixer.stopAllAction();
-      (this as { mixer?: THREE.AnimationMixer }).mixer = undefined;
-    }
-
-    // Parent will handle mesh removal (mesh is child of node)
-    super.destroy();
+    const releaseModel = this.takeModelCleanup();
+    const proxy = this._raycastProxy;
+    this._raycastProxy = null;
+    runNPCCleanup([
+      // Sets destroyed before any disposal callbacks, and cleans normal entity
+      // ownership. takeModelCleanup excluded the loader-owned mesh above.
+      () => super.destroy(),
+      releaseModel,
+      () => proxy?.removeFromParent(),
+      () => proxy?.geometry.dispose(),
+      () => {
+        if (proxy) (proxy.material as THREE.Material).dispose();
+      },
+    ]);
   }
 }
