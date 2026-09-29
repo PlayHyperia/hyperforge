@@ -1122,8 +1122,9 @@ export function applyCompactPondRockContactWeights(
 }
 
 export function createCompactWornTurfWeights(input: {
-  /** Omission keeps the historical non-local graph used by existing callers. */
+  /** World position is used only by the existing pond-contact soil field. */
   worldPosition?: Node<"vec3">;
+  /** Retained caller contract; locality no longer remaps the visual road. */
   bankVergeLocality?: Node<"float">;
   meadowNoise: Node<"float">;
   distortNoise: Node<"float">;
@@ -1172,34 +1173,13 @@ export function createCompactWornTurfWeights(input: {
   )
     .mul(land)
     .toVar("compactWornTurfSoil");
-  const edge = smoothstep(
-    mix(float(c.turfEdgeStartLow), float(c.turfEdgeStartHigh), patch),
-    mix(float(c.turfEdgeEndLow), float(c.turfEdgeEndHigh), patch),
-    input.road,
-  );
-  const locality =
-    input.bankVergeLocality ??
-    (input.worldPosition
-      ? createCompactBankVergeLocality(input.worldPosition, input.field)
-      : float(0));
   return {
     soil,
-    road: mix(
-      input.road,
-      edge,
-      float(1)
-        .sub(
-          smoothstep(
-            float(c.turfCoreStart),
-            float(c.turfCoreEnd),
-            input.rawRoadInfluence,
-          ),
-        )
-        .mul(land)
-        // Keep the first continuous road blend through this bank verge. The
-        // second artistic threshold otherwise pinches its shoulder into lobes.
-        .mul(float(1).sub(locality)),
-    ).toVar("compactWornTurfRoad"),
+    // The shared road weight already resolves its world-anchored worn edge.
+    // Thresholding it again compressed the shoulder into a hard silhouette,
+    // while physical grass clearance still followed the original road field.
+    // Keep the complete first blend, including partial wear and junctions.
+    road: input.road.toVar("compactWornTurfRoad"),
   };
 }
 

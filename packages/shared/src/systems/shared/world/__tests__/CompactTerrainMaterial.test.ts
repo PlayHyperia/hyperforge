@@ -9649,6 +9649,104 @@ describe("candidate coastal mineral-to-meadow ground", () => {
           }
     });
 
+    it("preserves historical coastal grass eligibility while visual road shoulders use one blend", () => {
+      const ops = createCompactTerrainColorOperations();
+      const profile = candidateProfile();
+      const field = ops.macroField(profile, "distribution-v1")!;
+      const withoutDistribution = ops.macroField(profile)!;
+      const pond = ALL_WORLD_AREAS.haven_pond.waterBodies![0];
+      const clamp = (v: number) => Math.max(0, Math.min(1, v));
+      const smooth = numericMath.smoothstep;
+      const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+      let distinctSupport = 0;
+      let partialLocality = 0;
+      // Actual bank, feather, coast and pond positions exercise all retained
+      // eligibility terms; literal thresholds independently pin the old rule.
+      for (const [x, z] of [
+        [420, 470],
+        [348, 318],
+        [341, 311],
+        [pond.centerX, pond.centerZ],
+      ])
+        for (const height of [22, 25, 28])
+          for (const slope of [0.025, 0.065, 0.1])
+            for (const roadInfluence of [0, 0.2, 0.4, 0.6, 0.7, 0.8, 1])
+              for (const noise of [0, 0.5, 1]) {
+                const input = {
+                  noiseValue: 0.5,
+                  distortNoise: noise,
+                  meadowNoise: 1 - noise,
+                  slope,
+                  roadInfluence,
+                  surface: { x, z, height, pond, macroField: field },
+                };
+                const baseRoad = ops.weights(input).road;
+                const pondSoil = ops.pondWeights({
+                  ...input.surface,
+                  noiseValue: noise,
+                }).soil;
+                const coast =
+                  ops.coastalGroundCover({
+                    height,
+                    noiseValue: input.noiseValue,
+                    distortNoise: noise,
+                    field,
+                  }) *
+                  (1 - pondSoil);
+                const patch = smooth(
+                  0.35,
+                  0.65,
+                  clamp(input.meadowNoise) * 0.55 + clamp(noise) * (1 - 0.55),
+                );
+                const locality = ops.bankVergeLocality(x, z, field);
+                if (locality > 0 && locality < 1) partialLocality++;
+                const historicalRoad = mix(
+                  baseRoad,
+                  smooth(
+                    mix(0.12, 0.36, patch),
+                    mix(0.64, 0.88, patch),
+                    baseRoad,
+                  ),
+                  (1 - smooth(0.7, 0.8, roadInfluence)) *
+                    (1 - clamp(pondSoil)) *
+                    (1 - clamp(coast)) *
+                    (1 - locality),
+                );
+                const distribution = ops.coastalDistributionAt(
+                  input,
+                  historicalRoad,
+                );
+                expect(ops.coastalDistributionAt(input)).toEqual(distribution);
+                const priorSupport = ops.grassSupport({
+                  ...input,
+                  surface: {
+                    ...input.surface,
+                    macroField: withoutDistribution,
+                  },
+                });
+                expect(ops.grassSupport(input)).toBe(
+                  priorSupport * distribution.turfRetention,
+                );
+                const visualRoad = ops.wornTurfWeights({
+                  ...input,
+                  x,
+                  z,
+                  field,
+                  road: baseRoad,
+                  pondSoil,
+                  coastalCoverage: coast,
+                }).road;
+                expect(visualRoad).toBe(baseRoad);
+                const visualSupport =
+                  priorSupport *
+                  ops.coastalDistributionAt(input, visualRoad).turfRetention;
+                if (Math.abs(visualSupport - ops.grassSupport(input)) > 1e-9)
+                  distinctSupport++;
+              }
+      expect(partialLocality).toBeGreaterThan(0);
+      expect(distinctSupport).toBeGreaterThan(0);
+    });
+
     it("updates actual root mean colors and post-coastal support using the same material reassignment", () => {
       const ops = createCompactTerrainColorOperations(),
         profile = candidateProfile(),
@@ -12365,15 +12463,10 @@ describe("candidate coastal mineral-to-meadow ground", () => {
     });
   });
 
-  it("removes only the bank's second road-edge remap with exact CPU/TSL locality and unchanged soil support", () => {
+  it("keeps one road-edge blend across bank locality boundaries with unchanged soil support", () => {
     const ops = createCompactTerrainColorOperations();
     const field = ops.macroField(candidateProfile())!;
     const { bankVerge: _verge, ...previousField } = field;
-    const smooth = (a: number, b: number, value: number) => {
-      const t = Math.max(0, Math.min(1, (value - a) / (b - a)));
-      return t * t * (3 - 2 * t);
-    };
-    let changed = 0;
     for (const x of [339, 340, 341, 342, 348, 355, 356, 357, 358])
       for (const z of [309, 310, 311, 312, 318, 322, 323, 324, 325])
         for (const raw of [0, 0.1, 0.25, 0.5, 0.7, 0.79, 0.8, 1]) {
@@ -12400,12 +12493,6 @@ describe("candidate coastal mineral-to-meadow ground", () => {
             field: previousField,
           });
           const after = ops.wornTurfWeights(input);
-          const locality =
-            smooth(340, 342, x) *
-            (1 - smooth(355, 357, x)) *
-            smooth(310, 312, z) *
-            (1 - smooth(322, 324, z));
-          const expected = before.road + (road - before.road) * locality;
           const nodes = createCompactWornTurfWeights({
             worldPosition: vec3(x, 28, z),
             meadowNoise: float(0.6),
@@ -12417,13 +12504,11 @@ describe("candidate coastal mineral-to-meadow ground", () => {
             coastalCoverage: float(0),
             field,
           });
-          expect(after.road).toBeCloseTo(expected, 14);
-          expect(vectorValue(nodes.road)[0]).toBeCloseTo(expected, 14);
+          expect(after.road).toBe(road);
+          expect(vectorValue(nodes.road)[0]).toBe(road);
           expect(after.soil).toBe(before.soil);
           expect(vectorValue(nodes.soil)[0]).toBe(after.soil);
-          if (locality === 0) expect(after).toEqual(before);
-          if (locality === 1) expect(after.road).toBe(road);
-          if (Math.abs(after.road - before.road) > 0.001) changed++;
+          expect(after).toEqual(before);
           const surface = { x, z, height: 28, pond: null, macroField: field };
           const colors = { noiseValue: 0.6, ...input, surface };
           expect(ops.grassSupport(colors)).toBe(
@@ -12432,7 +12517,7 @@ describe("candidate coastal mineral-to-meadow ground", () => {
               surface: { ...surface, macroField: previousField },
             }),
           );
-          if (locality === 0)
+          if (ops.bankVergeLocality(x, z, field) === 0)
             expect(ops.sample(colors)).toEqual(
               ops.sample({
                 ...colors,
@@ -12440,7 +12525,6 @@ describe("candidate coastal mineral-to-meadow ground", () => {
               }),
             );
         }
-    expect(changed).toBeGreaterThan(0);
     const material = createTerrainMaterial(undefined, {
       compactPbr: true,
       compactProfile: candidateProfile(),
@@ -12451,7 +12535,7 @@ describe("candidate coastal mineral-to-meadow ground", () => {
       );
       expect(
         names.filter((name) => name === "compactBankVergeLocality"),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
       expect(material.positionNode).toBeNull();
       expect(material.displacementMap).toBeNull();
     } finally {
@@ -12469,8 +12553,6 @@ describe("candidate coastal mineral-to-meadow ground", () => {
       const t = clamp((value - a) / (b - a));
       return t * t * (3 - 2 * t);
     };
-    const mix = THREE.MathUtils.lerp;
-    let changed = 0;
     for (const meadowNoise of [-1, 0, 0.35, 0.65, 1, 2])
       for (const distortNoise of [-1, 0, 0.35, 0.65, 1, 2])
         for (const slope of [0, 0.04, 0.11, 0.18, 1])
@@ -12512,11 +12594,7 @@ describe("candidate coastal mineral-to-meadow ground", () => {
             const land = 0.8 * 0.7;
             const expected = {
               soil: patch * (1 - smooth(0.04, 0.18, clamp(slope))) * 0.3 * land,
-              road: mix(
-                road,
-                smooth(mix(0.12, 0.36, patch), mix(0.64, 0.88, patch), road),
-                (1 - smooth(0.7, 0.8, roadInfluence)) * land,
-              ),
+              road,
             };
             for (const key of ["soil", "road"] as const) {
               expect(actual[key]).toBeCloseTo(expected[key], 14);
@@ -12527,14 +12605,13 @@ describe("candidate coastal mineral-to-meadow ground", () => {
             if (roadInfluence === 0) expect(actual.road).toBe(0);
             if (roadInfluence >= 0.8) expect(actual.road).toBe(road);
             if (slope >= 0.18) expect(actual.soil).toBe(0);
-            if (Math.abs(actual.road - road) > 0.01) changed++;
+            expect(actual.road).toBe(road);
             for (const oldField of [null, historicalField]) {
               expect(
                 ops.wornTurfWeights({ ...input, field: oldField }),
               ).toEqual({ soil: 0, road });
             }
           }
-    expect(changed).toBeGreaterThan(100);
     const road = float(0.43);
     const absent = createCompactWornTurfWeights({
       meadowNoise: float(1),
@@ -12548,6 +12625,77 @@ describe("candidate coastal mineral-to-meadow ground", () => {
     });
     expect(absent.road).toBe(road);
     expect(vectorValue(absent.soil)).toEqual([0]);
+  });
+
+  it("preserves continuous monotonic road shoulders and maximum unions without another threshold", () => {
+    const ops = createCompactTerrainColorOperations();
+    const field = ops.macroField(candidateProfile())!;
+    for (const distortNoise of [0, 0.35, 0.5, 0.65, 1]) {
+      let previous = 0;
+      for (let i = 0; i <= 200; i++) {
+        const raw = i / 200;
+        const first = createCompactTerrainLayerWeights(
+          float(0.5),
+          float(0),
+          float(raw),
+          float(distortNoise),
+        );
+        const expected = ops.weights({
+          noiseValue: 0.5,
+          slope: 0,
+          roadInfluence: raw,
+          distortNoise,
+        }).road;
+        for (const meadowNoise of [0, 0.5, 1]) {
+          const input = {
+            meadowNoise,
+            distortNoise,
+            slope: 0,
+            roadInfluence: raw,
+            road: expected,
+            pondSoil: 0,
+            coastalCoverage: 0,
+            field,
+          };
+          const cpu = ops.wornTurfWeights(input);
+          const tsl = createCompactWornTurfWeights({
+            meadowNoise: float(meadowNoise),
+            distortNoise: float(distortNoise),
+            geometricSlope: float(0),
+            rawRoadInfluence: float(raw),
+            road: first.road,
+            pondSoil: float(0),
+            coastalCoverage: float(0),
+            field,
+          });
+          expect(cpu.road).toBe(expected);
+          expect(vectorValue(tsl.road)[0]).toBeCloseTo(expected, 13);
+          expect(cpu.road).toBeGreaterThanOrEqual(previous);
+          expect(cpu.road - previous).toBeLessThanOrEqual(0.011);
+          if (raw === 0 || raw === 1) expect(cpu.road).toBe(raw);
+          const nodes = [...graph(tsl.road)];
+          expect(
+            nodes.filter(
+              (node) => Reflect.get(node, "method") === "smoothstep",
+            ),
+          ).toHaveLength(1);
+        }
+        previous = expected;
+      }
+      // Composition is monotonic, so crossing/partial routes retain a max
+      // union: they never sum into an artificially full-wear junction.
+      const road = (raw: number) =>
+        ops.weights({
+          noiseValue: 0.5,
+          slope: 0,
+          roadInfluence: raw,
+          distortNoise,
+        }).road;
+      for (const a of [0, 0.12, 0.4, 0.68, 0.8, 1])
+        for (const b of [0, 0.25, 0.5, 0.68, 1])
+          expect(road(Math.max(a, b))).toBe(Math.max(road(a), road(b)));
+      expect(road(0.68)).toBeLessThan(1);
+    }
   });
 
   it("suppresses worn turf using the actual authored pond annulus and coastal coverage without expanding road support", () => {

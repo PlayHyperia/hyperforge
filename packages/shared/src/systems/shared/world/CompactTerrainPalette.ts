@@ -502,14 +502,15 @@ export function createCompactTerrainColorOperations() {
     pathEdgeStartHigh: 0.26,
     pathEdgeEndLow: 0.74,
     pathEdgeEndHigh: 0.96,
-    // Appearance only. The selected meadow reuses the existing broad/edge
-    // noise; these values never enter grass eligibility or route geometry.
+    // The selected meadow reuses broad/edge noise for soil appearance.
+    // The historical patch also remains in coastal grass eligibility.
     turfMeadowFraction: 0.55,
     turfPatchStart: 0.35,
     turfPatchEnd: 0.65,
     turfFlatStart: 0.04,
     turfFlatEnd: 0.18,
     turfSoilStrength: 0.3,
+    // Retained only by coastal grass eligibility, not the visual road blend.
     turfEdgeStartLow: 0.12,
     turfEdgeStartHigh: 0.36,
     turfEdgeEndLow: 0.64,
@@ -1977,25 +1978,54 @@ export function createCompactTerrainColorOperations() {
           slope: input.slope,
           roadInfluence: input.roadInfluence ?? 0,
         }).road;
-        road = operations.wornTurfWeights({
-          x: input.surface.x,
-          z: input.surface.z,
-          meadowNoise: input.meadowNoise ?? input.noiseValue,
-          distortNoise: input.distortNoise,
-          slope: input.slope,
-          roadInfluence: input.roadInfluence ?? 0,
-          road: baseRoad,
-          pondSoil: pond.soil,
-          coastalCoverage:
+        road = baseRoad;
+        if (field.coastalMeadow) {
+          // Omitted resolvedRoad is the seeded grass-support path. Preserve
+          // its historical eligibility exactly; appearance callers supply the
+          // single visual road blend explicitly and never take this branch.
+          const c = composition;
+          const patch = math.smooth(
+            c.turfPatchStart,
+            c.turfPatchEnd,
+            Math.max(0, Math.min(1, input.meadowNoise ?? input.noiseValue)) *
+              c.turfMeadowFraction +
+              Math.max(0, Math.min(1, input.distortNoise)) *
+                (1 - c.turfMeadowFraction),
+          );
+          const coastalCoverage =
             operations.coastalGroundCover({
               height: input.surface.height,
               noiseValue: input.noiseValue,
               distortNoise: input.distortNoise,
               field,
             }) *
-            (1 - pond.soil),
-          field,
-        }).road;
+            (1 - pond.soil);
+          const land =
+            (1 - Math.max(0, Math.min(1, pond.soil))) *
+            (1 - Math.max(0, Math.min(1, coastalCoverage)));
+          const edge = math.smooth(
+            math.mix(c.turfEdgeStartLow, c.turfEdgeStartHigh, patch),
+            math.mix(c.turfEdgeEndLow, c.turfEdgeEndHigh, patch),
+            baseRoad,
+          );
+          road = math.mix(
+            baseRoad,
+            edge,
+            (1 -
+              math.smooth(
+                c.turfCoreStart,
+                c.turfCoreEnd,
+                input.roadInfluence ?? 0,
+              )) *
+              land *
+              (1 -
+                operations.bankVergeLocality(
+                  input.surface.x,
+                  input.surface.z,
+                  field,
+                )),
+          );
+        }
       }
       return operations.coastalDistribution(
         {
@@ -2901,23 +2931,11 @@ export function createCompactTerrainColorOperations() {
             input.field,
           ),
         ) * land;
-      const edge = math.smooth(
-        math.mix(c.turfEdgeStartLow, c.turfEdgeStartHigh, patch),
-        math.mix(c.turfEdgeEndLow, c.turfEdgeEndHigh, patch),
-        input.road,
-      );
       return {
         soil,
-        // Keep the fully worn core and all paint beyond the grass cutoff
-        // exactly as before. Only the already-partial shoulder is reshaped.
-        road: math.mix(
-          input.road,
-          edge,
-          (1 -
-            math.smooth(c.turfCoreStart, c.turfCoreEnd, input.roadInfluence)) *
-            land *
-            (1 - operations.bankVergeLocality(input.x, input.z, input.field)),
-        ),
+        // Match the material's single continuous road blend. A second edge
+        // threshold must not leave bare bright turf beside unchanged roots.
+        road: input.road,
       };
     },
     /** Original acceptance field, retained for the worker's seeded RNG stream. */

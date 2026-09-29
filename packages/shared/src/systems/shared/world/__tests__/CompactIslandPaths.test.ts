@@ -58,6 +58,7 @@ import {
   createCompactTerrainColorOperations,
   type CompactTerrainBankVerge,
 } from "../CompactTerrainPalette";
+import { sampleNoiseCPU, TERRAIN_SHADER_CONSTANTS } from "../TerrainShader";
 import { TownSystem } from "../TownSystem";
 import { modelBounds } from "./fixtures/StaticGlbBounds";
 import { getExternalResource } from "../../../../utils/ExternalAssetUtils";
@@ -641,6 +642,195 @@ function expectPondBankServiceClearance(
 }
 
 describe("inland pond opt-in circulation with actual terrain and road owner", () => {
+  it.runIf(
+    /\/inland-pond-integration01-UNQUALIFIED\/assets-v10$/.test(
+      process.env.ASSETS_DIR ?? "",
+    ),
+  )(
+    "keeps the current served road lattice and clearance while recovering continuous worn shoulders",
+    async () => {
+      await withRoads((roads, terrain) => {
+        const networkBytes = JSON.stringify(roads.getRoads());
+        const published = roads.getRoadInfluenceTextureData()!;
+        const maskHash = createHash("sha256")
+          .update(published.data)
+          .digest("hex");
+        expect(published).toMatchObject({
+          worldSize: 146,
+          centerX: 379.5,
+          centerZ: 375,
+          width: 512,
+          height: 512,
+        });
+        const ops = createCompactTerrainColorOperations();
+        const field = ops.macroField(DataManager.getWorldTerrainProfile())!;
+        expect(field.coastalMeadow).toBe(true);
+        const clamp = (x: number) => Math.max(0, Math.min(1, x));
+        const smooth = (a: number, b: number, x: number) => {
+          const t = clamp((x - a) / (b - a));
+          return t * t * (3 - 2 * t);
+        };
+        const evaluate = (x: number, z: number) => {
+          const raw = sampleLinearMask(published.data, published, x, z);
+          const distort = sampleNoiseCPU(
+            x,
+            z,
+            TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+          );
+          const meadow = sampleNoiseCPU(
+            x,
+            z,
+            ops.getComposition().meadowNoiseScale,
+          );
+          const road = ops.weights({
+            noiseValue: 0.5,
+            slope: 0,
+            roadInfluence: raw,
+            distortNoise: distort,
+          }).road;
+          const patch = smooth(
+            0.35,
+            0.65,
+            clamp(meadow) * 0.55 + clamp(distort) * 0.45,
+          );
+          const second = smooth(0.12 + 0.24 * patch, 0.64 + 0.24 * patch, road);
+          const previous =
+            road +
+            (second - road) *
+              (1 - smooth(0.7, 0.8, raw)) *
+              (1 - ops.bankVergeLocality(x, z, field));
+          const current = ops.wornTurfWeights({
+            x,
+            z,
+            meadowNoise: meadow,
+            distortNoise: distort,
+            slope: 0,
+            roadInfluence: raw,
+            road,
+            pondSoil: 0,
+            coastalCoverage: 0,
+            field,
+          }).road;
+          expect(current).toBe(road);
+          if (raw === 0 || raw === 1) expect(current).toBe(raw);
+          if (raw >= 0.8) expect(current).toBe(previous);
+          return { raw, previous, current };
+        };
+        const selected = [
+          "compact-path-lobby-arena",
+          "compact-path-bank-lobby",
+          "compact-clearing-bank-apron",
+        ].map((id) => {
+          const road = roads.getRoads().find((row) => row.id === id);
+          if (!road) throw new Error("Missing actual route: " + id);
+          return road;
+        });
+        const measurements = selected.map((road) => {
+          const i = Math.floor((road.path.length - 1) * 0.5);
+          const a = road.path[i],
+            b = road.path[i + 1];
+          const dx = b.x - a.x,
+            dz = b.z - a.z,
+            length = Math.hypot(dx, dz);
+          expect(length).toBeGreaterThan(0);
+          const centerX = (a.x + b.x) / 2,
+            centerZ = (a.z + b.z) / 2;
+          const step = 0.005,
+            reach = road.width / 2 + (road.blendWidth ?? 0.5) + 0.5;
+          const sides = [-1, 1].map((side) => {
+            let previousWidth = 0,
+              currentWidth = 0,
+              clearanceEdge: number | null = null;
+            let finalRaw = 0;
+            for (let d = 0; d <= reach; d += step) {
+              const x = centerX - (dz / length) * d * side,
+                z = centerZ + (dx / length) * d * side;
+              const weights = evaluate(x, z);
+              finalRaw = weights.raw;
+              if (weights.previous > 0.1 && weights.previous < 0.9)
+                previousWidth += step;
+              if (weights.current > 0.1 && weights.current < 0.9)
+                currentWidth += step;
+              if (roads.getRoadInfluenceAt(x, z) > 0.8) clearanceEdge = d;
+            }
+            return {
+              side,
+              previous10to90Width: previousWidth,
+              current10to90Width: currentWidth,
+              lastAnalyticallyExcludedPointInWindow: clearanceEdge,
+              shoulderLeavesWindow: finalRaw > 0.1,
+              sampledReach: reach,
+            };
+          });
+          return {
+            id: road.id,
+            center: [centerX, centerZ],
+            width: road.width,
+            blendWidth: road.blendWidth,
+            sides,
+          };
+        });
+        // The actual arena-route junction and every stone-entry capsule retain
+        // their input field. MAX unions are not replaced by summed road paint.
+        let junctionSamples = 0,
+          apronSamples = 0;
+        const arena = selected[0];
+        for (const point of [arena.path[0], arena.path.at(-1)!])
+          for (let dx = -2; dx <= 2; dx += 0.2)
+            for (let dz = -2; dz <= 2; dz += 0.2) {
+              evaluate(point.x + dx, point.z + dz);
+              junctionSamples++;
+            }
+        const authored = createCompactIslandPaths(
+          DataManager.getWorldTerrainProfile(),
+          ALL_WORLD_AREAS,
+          getDuelArenaConfig(),
+          (x, z) => terrain.getHeightAt(x, z),
+          DataManager.getWorldConfig()!,
+        );
+        for (const road of authored)
+          for (const entry of road.platformEntries ?? [])
+            for (const point of entry.approach) {
+              evaluate(point.x, point.z);
+              apronSamples++;
+            }
+        expect(junctionSamples).toBeGreaterThan(0);
+        expect(apronSamples).toBeGreaterThan(0);
+        expect(
+          measurements.some((row) =>
+            row.sides.some(
+              (side) =>
+                side.current10to90Width > side.previous10to90Width + 0.02,
+            ),
+          ),
+        ).toBe(true);
+        expect(JSON.stringify(roads.getRoads())).toBe(networkBytes);
+        expect(roads.getRoadInfluenceTextureData()).toBe(published);
+        expect(createHash("sha256").update(published.data).digest("hex")).toBe(
+          maskHash,
+        );
+        process.stdout.write(
+          "PATH_SHOULDER_COMPOSITION " +
+            JSON.stringify({
+              scope:
+                "Dry road-weight cross-sections before material-height competition; not native visual or swept-blade clearance proof",
+              domain: {
+                worldSize: published.worldSize,
+                resolution: published.width,
+                pixelMetres: published.worldSize / published.width,
+                preservedTexelPhaseMetres:
+                  published.worldSize / published.width / 2,
+              },
+              maskHash,
+              measurements,
+              junctionSamples,
+              apronSamples,
+            }) +
+            "\n",
+        );
+      });
+    },
+  );
   it.each([false, true])(
     "starts the moved basin and joins the landing, guide and bank without floor, dock or wet-ground paint (outpost=%s)",
     async (withOutpost) => {
