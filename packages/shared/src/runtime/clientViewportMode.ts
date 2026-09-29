@@ -138,6 +138,7 @@ export type GrassLightingCandidate = "canopy-normal-v1" | "leaf-volume-v1";
 export type GrassGeometryCandidate =
   "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
 export type GrassInstancingCandidate = "attributes-v1";
+export type GrassFarGeometryCandidate = "triangle-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -320,6 +321,23 @@ export function resolveGrassInstancingCandidate(
   if (resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1")
     throw new Error("Grass instancing requires the explicit meadow field");
   return "attributes-v1";
+}
+
+/** Ordinary-view trial only; omission keeps every existing LOD index buffer. */
+export function resolveGrassFarGeometryCandidate(
+  win?: Window,
+): GrassFarGeometryCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("grassFarGeometry") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "triangle-v1")
+    throw new Error("Unknown or duplicate far grass geometry candidate");
+  if (isStreamingLikeViewport(windowRef))
+    throw new Error("Far grass geometry requires an ordinary player viewport");
+  if (resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1")
+    throw new Error("Far grass geometry requires the explicit meadow field");
+  return "triangle-v1";
 }
 
 /** Explicit dirt-material preview; its terrain owner also admits the sculpt profile. */
@@ -773,6 +791,8 @@ export type StreamingGrassProfileReceipt = {
   geometryLayout?: import("../systems/shared/world/GrassBladeLayout").FineGrassGeometryLayout;
   /** Opt-in authored composition; historical receipts omit this identity. */
   geometryCandidate?: GrassGeometryCandidate;
+  /** Ordinary-only far index trial; source clearance stations stay intact. */
+  farGeometryCandidate?: GrassFarGeometryCandidate;
   profileId:
     | "ordinary-v1"
     | "fixed-arena-v1"

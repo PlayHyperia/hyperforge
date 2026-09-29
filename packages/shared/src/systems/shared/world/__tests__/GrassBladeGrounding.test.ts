@@ -42,6 +42,7 @@ import {
   FINE_GRASS_MEADOW_FIELD_SHAPE,
   GRASS_CONFIG,
   createClumpGeometry,
+  createFarMeadowTriangleGeometry,
   createPairedMeadowClumpGeometry,
 } from "../GrassVisualManager";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
@@ -75,6 +76,7 @@ import {
   getGrassBladeLayout,
   isMeadowGrassBladeLayout,
   isPairedGrassBladeLayout,
+  isFarTriangleGrassBladeLayout,
   usesGrassBladeHeightFlex,
   usesGrassCloseDetailLods,
 } from "../GrassBladeLayout";
@@ -337,6 +339,7 @@ function appendOriginalScalarSweep(
       request.geometryLayout === "fine-folded-lancet-v1" ||
       request.geometryLayout === "fine-folded-sheath-near5-v1" ||
       request.geometryLayout === "fine-meadow-ribbon-v1" ||
+      request.geometryLayout === "fine-meadow-far-triangle-v1" ||
       request.geometryLayout === "fine-meadow-paired-near-v1";
     // Independent policy algebra; never call the production wind/cache helper.
     const fraction = b / 0.95;
@@ -2009,11 +2012,16 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
   );
 
   it.each(
-    (["fine-meadow-ribbon-v1", "fine-meadow-paired-near-v1"] as const).flatMap(
-      (geometryLayout) =>
-        ([0, 1, 2] as const).flatMap((lod) =>
-          [false, true].map((slope) => ({ geometryLayout, lod, slope })),
-        ),
+    (
+      [
+        "fine-meadow-ribbon-v1",
+        "fine-meadow-paired-near-v1",
+        "fine-meadow-far-triangle-v1",
+      ] as const
+    ).flatMap((geometryLayout) =>
+      ([0, 1, 2] as const).flatMap((lod) =>
+        [false, true].map((slope) => ({ geometryLayout, lod, slope })),
+      ),
     ),
   )(
     "freshly fits $geometryLayout LOD$lod on slope=$slope",
@@ -2030,11 +2038,13 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
         const layout = getGrassBladeLayout(lod, geometryLayout);
         const geometry = isPairedGrassBladeLayout(lod, geometryLayout)
           ? createPairedMeadowClumpGeometry()
-          : createClumpGeometry(
-              layout.bladesPerClump,
-              layout.bladeSegments,
-              FINE_GRASS_MEADOW_FIELD_SHAPE,
-            );
+          : isFarTriangleGrassBladeLayout(lod, geometryLayout)
+            ? createFarMeadowTriangleGeometry()
+            : createClumpGeometry(
+                layout.bladesPerClump,
+                layout.bladeSegments,
+                FINE_GRASS_MEADOW_FIELD_SHAPE,
+              );
         f.geometries.push(geometry);
         const data = f.dataAt(surface, [
           [0, 0, 0.8],
@@ -2089,6 +2099,26 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
         // Actual meadow vertices pass the height-scaled wind/fade envelope.
         // Using the legacy t^1.8 wind policy would produce different bounds.
         expect(actual.sweptBounds).toEqual(expected);
+        if (geometryLayout === "fine-meadow-far-triangle-v1") {
+          const originalGeometry = createClumpGeometry(
+            layout.bladesPerClump,
+            layout.bladeSegments,
+            FINE_GRASS_MEADOW_FIELD_SHAPE,
+          );
+          f.geometries.push(originalGeometry);
+          const original = groundGrassBlades({
+            ...request,
+            geometry: originalGeometry,
+            geometryLayout: "fine-meadow-ribbon-v1",
+          });
+          expect(withoutGroundingElapsed(actual)).toEqual({
+            ...withoutGroundingElapsed(original),
+            receipt: {
+              ...withoutGroundingElapsed(original).receipt,
+              geometryLayout,
+            },
+          });
+        }
         if (geometryLayout === "fine-meadow-paired-near-v1" && lod !== 0) {
           const original = groundGrassBlades({
             ...request,
@@ -2190,6 +2220,93 @@ describe("CPU per-blade grounding prototype (no renderer/GPU)", () => {
       expect(() => groundGrassBlades(request)).toThrow(
         /paired blade topology|blade root|triangle (order|layout)|vertex attributes/,
       );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retains unindexed far middle stations in exact per-blade road clearance", () => {
+    const f = analyticOwner("fine");
+    const geometry = createFarMeadowTriangleGeometry();
+    const originalGeometry = createClumpGeometry(
+      12,
+      2,
+      FINE_GRASS_MEADOW_FIELD_SHAPE,
+    );
+    f.geometries.push(geometry, originalGeometry);
+    try {
+      const surface = f.makeSurface();
+      const request: GrassBladeGroundingRequest = {
+        ...f.request(surface, undefined, 2),
+        geometry,
+        geometryLayout: "fine-meadow-far-triangle-v1",
+        wind: { x: 0, z: 0 },
+        roadClearance: "per-blade-v1",
+      };
+      let target:
+        | { blade: number; point: THREE.Vector3; rendered: THREE.Box3 }
+        | undefined;
+      for (let blade = 0; blade < 12 && !target; blade++) {
+        const points = [0, 1, 2, 3, 4].map((v) =>
+          transformedVertex(request.data, surface, geometry, 0, blade * 5 + v),
+        );
+        const rendered = new THREE.Box3().setFromPoints([
+          points[0],
+          points[1],
+          points[4],
+        ]);
+        rendered.min.y = -Infinity;
+        rendered.max.y = Infinity;
+        for (const point of points.slice(2, 4)) {
+          if (rendered.distanceToPoint(point) > 1e-4) {
+            target = { blade, point, rendered };
+            break;
+          }
+        }
+      }
+      if (!target)
+        throw new Error("Expected an unindexed source-only clearance extent");
+      const road = {
+        startX: target.point.x,
+        endX: target.point.x,
+        startZ: target.point.z,
+        endZ: target.point.z,
+        width: 1e-5,
+        blendWidth: 0,
+      };
+      expect(independentRoadMask([target.rendered], [road])).toBe(1);
+      const expectedMask = independentRoadMask(independentBladeBoxes(request), [
+        road,
+      ]);
+      expect(expectedMask).toBeGreaterThan(0);
+      expect(expectedMask & (1 << target.blade)).toBe(0);
+      const candidate = groundGrassBlades({ ...request, roadSegments: [road] });
+      const original = groundGrassBlades({
+        ...request,
+        geometry: originalGeometry,
+        geometryLayout: "fine-meadow-ribbon-v1",
+        roadSegments: [road],
+      });
+      if (candidate.status !== "ready" || original.status !== "ready")
+        throw new Error("Expected both conservative fits to retain the clump");
+      expect(candidate.bladeVisibility).toEqual(
+        new Uint32Array([expectedMask]),
+      );
+      expect(candidate.bladeVisibility).toEqual(original.bladeVisibility);
+      expect(candidate.rootDeltas).toEqual(original.rootDeltas);
+      expect(candidate.sweptBounds).toEqual(original.sweptBounds);
+      expect(candidate.data).toEqual(original.data);
+      expect(candidate.sourceIndices).toEqual(original.sourceIndices);
+      // The old layout must not admit the new index stream, or vice versa.
+      expect(() =>
+        groundGrassBlades({
+          ...request,
+          geometryLayout: "fine-meadow-ribbon-v1",
+        }),
+      ).toThrow("triangle layout");
+      expect(() =>
+        groundGrassBlades({ ...request, geometry: originalGeometry }),
+      ).toThrow("triangle layout");
     } finally {
       f.close();
     }

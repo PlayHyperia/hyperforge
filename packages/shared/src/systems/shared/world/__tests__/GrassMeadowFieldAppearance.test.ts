@@ -10,6 +10,7 @@ import {
 } from "../GrassBladeLayout";
 import {
   createClumpGeometry,
+  createFarMeadowTriangleGeometry,
   createPairedMeadowClumpGeometry,
   FINE_GRASS_MEADOW_CANOPY_SHAPE,
   FINE_GRASS_MEADOW_FIELD_COMPOSITION,
@@ -87,6 +88,71 @@ function widthEnvelope(t: number) {
 }
 
 describe("explicit dense meadow ribbon source geometry", () => {
+  it("indexes one far triangle while retaining the exact conservative source stations", () => {
+    const candidate = createFarMeadowTriangleGeometry();
+    const baseline = createClumpGeometry(12, 2, FINE_GRASS_MEADOW_FIELD_SHAPE);
+    const single = createClumpGeometry(12, 1, FINE_GRASS_MEADOW_FIELD_SHAPE);
+    try {
+      expect(getGrassBladeLayout(2, "fine-meadow-far-triangle-v1")).toEqual({
+        geometryLayout: "fine-meadow-far-triangle-v1",
+        lod: 2,
+        bladesPerClump: 12,
+        bladeSegments: 2,
+        verticesPerBlade: 5,
+        verticesPerClump: 60,
+        trianglesPerClump: 12,
+        rootComponents: 2,
+        renderedBladeSegments: 1,
+      });
+      expect(candidate.index!.count).toBe(36);
+      expect(new Set(candidate.index!.array).size).toBe(36);
+      for (const name of ["position", "normal", "uv"]) {
+        const actual = candidate.getAttribute(name);
+        expect(actual.array).toEqual(baseline.getAttribute(name).array);
+        for (let blade = 0; blade < 12; blade++) {
+          for (const [local, source] of [0, 1, 4].entries()) {
+            const index = candidate.index!.getX(blade * 3 + local);
+            expect(index).toBe(blade * 5 + source);
+            for (let component = 0; component < actual.itemSize; component++)
+              expect(actual.array[index * actual.itemSize + component]).toBe(
+                single.getAttribute(name).array[
+                  (blade * 3 + local) * actual.itemSize + component
+                ],
+              );
+          }
+        }
+      }
+      for (let blade = 0; blade < 12; blade++) {
+        const a = vector(candidate, "position", blade * 5);
+        const b = vector(candidate, "position", blade * 5 + 1);
+        const tip = vector(candidate, "position", blade * 5 + 4);
+        const face = b.sub(a).cross(tip.sub(a));
+        expect(face.lengthSq()).toBeGreaterThan(1e-12);
+        expect(
+          face.dot(vector(candidate, "normal", blade * 5)),
+        ).toBeGreaterThan(0);
+      }
+      expect(candidate.userData).toEqual(baseline.userData);
+      for (const lod of [0, 1]) {
+        const layout = getGrassBladeLayout(lod, "fine-meadow-far-triangle-v1");
+        expect(layout).toEqual({
+          ...getGrassBladeLayout(lod, LAYOUT),
+          geometryLayout: "fine-meadow-far-triangle-v1",
+        });
+      }
+      expect(usesGrassBladeHeightFlex("fine-meadow-far-triangle-v1")).toBe(
+        true,
+      );
+      expect(usesGrassCloseDetailLods("fine-meadow-far-triangle-v1")).toBe(
+        true,
+      );
+    } finally {
+      candidate.dispose();
+      baseline.dispose();
+      single.dispose();
+    }
+  });
+
   it("freezes the independent dimensions without rewriting historical recipes", () => {
     expect(FINE_GRASS_MEADOW_FIELD_COMPOSITION).toEqual({
       id: "meadow-field-v1",

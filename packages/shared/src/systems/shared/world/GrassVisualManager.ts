@@ -48,6 +48,7 @@ import type {
   GrassLightingCandidate,
   GrassGeometryCandidate,
   GrassInstancingCandidate,
+  GrassFarGeometryCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -107,6 +108,7 @@ import {
 import {
   getGrassBladeLayout,
   isMeadowGrassBladeLayout,
+  isFarTriangleGrassBladeLayout,
   isFoldedGrassBladeLayout,
   usesGrassBladeHeightFlex,
   usesGrassCloseDetailLods,
@@ -1112,6 +1114,26 @@ export function createClumpGeometry(
   return geo;
 }
 
+/** One indexed triangle per far blade. Keep both middle source vertices for
+ * unchanged conservative grounding/clearance and five-vertex root addressing.
+ * No new random draws or position/normal/UV edits; native coverage is unproven.
+ */
+export function createFarMeadowTriangleGeometry(): THREE.BufferGeometry {
+  const layout = getGrassBladeLayout(2, "fine-meadow-far-triangle-v1");
+  const geometry = createClumpGeometry(
+    layout.bladesPerClump,
+    layout.bladeSegments,
+    FINE_GRASS_MEADOW_FIELD_SHAPE,
+  );
+  const indices = new Uint16Array(layout.trianglesPerClump * 3);
+  for (let blade = 0; blade < layout.bladesPerClump; blade++) {
+    const first = blade * layout.verticesPerBlade;
+    indices.set([first, first + 1, first + 4], blade * 3);
+  }
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  return geometry;
+}
+
 /** Source-only near-template study: two finer leaves share each original root
  * edge and grounding slot. No live layout, material or LOD selects this factory.
  * Summed triangle area is conserved; visible union coverage is NOT implied.
@@ -1880,6 +1902,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly geometryCandidate?: GrassGeometryCandidate,
     private readonly grassVergeEvaluation?: GrassVergeEvaluation,
     private readonly instancingCandidate?: GrassInstancingCandidate,
+    private readonly farGeometryCandidate?: GrassFarGeometryCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1972,6 +1995,16 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error(
         "Grass instancing requires the explicit leaf-volume meadow field",
+      );
+    if (
+      farGeometryCandidate !== undefined &&
+      (farGeometryCandidate !== "triangle-v1" ||
+        !this.fineMeadow ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
+    )
+      throw new Error(
+        "Far grass geometry requires the explicit leaf-volume meadow field",
       );
     const coverageField = Object.getOwnPropertyDescriptor(
       profile,
@@ -2157,7 +2190,9 @@ export class GrassVisualManager implements QuadTreeListener {
 
     this.geometryLayout = this.fineMeadow
       ? geometryCandidate === FINE_GRASS_MEADOW_FIELD_COMPOSITION.id
-        ? FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
+        ? farGeometryCandidate
+          ? "fine-meadow-far-triangle-v1"
+          : FINE_GRASS_MEADOW_FIELD_SHAPE.GEOMETRY_LAYOUT
         : geometryCandidate === FINE_GRASS_CLOSE_DETAIL.id ||
             geometryCandidate === FINE_GRASS_ROOTED_FAN_COMPOSITION.id ||
             geometryCandidate === FINE_GRASS_MEADOW_CANOPY_COMPOSITION.id
@@ -2167,6 +2202,8 @@ export class GrassVisualManager implements QuadTreeListener {
             : FINE_MEADOW_APPEARANCE.GEOMETRY_LAYOUT
       : undefined;
     this.lodGeometries = GRASS_CONFIG.LOD_TIERS.map((_, lod) => {
+      if (isFarTriangleGrassBladeLayout(lod, this.geometryLayout))
+        return createFarMeadowTriangleGeometry();
       const layout = getGrassBladeLayout(lod, this.geometryLayout);
       const folded = isFoldedGrassBladeLayout(lod, this.geometryLayout);
       return createClumpGeometry(
@@ -2270,7 +2307,10 @@ export class GrassVisualManager implements QuadTreeListener {
               : "inactive"
         : `<${t.maxDistance === Infinity ? "inf" : t.maxDistance}m`;
       return (
-        `LOD${i}(${layout.bladesPerClump}b/${layout.bladeSegments}s, ` +
+        `LOD${i}(${layout.bladesPerClump}b/${layout.bladeSegments}s` +
+        (layout.renderedBladeSegments === undefined
+          ? ", "
+          : ` source/${layout.renderedBladeSegments}s indexed, `) +
         `${g.attributes.position.count}v, ${g.index!.count / 3}t, ` +
         `${range}, ` +
         `×${this.spacingMultiplierForLod(i)})`
@@ -2325,6 +2365,9 @@ export class GrassVisualManager implements QuadTreeListener {
       ...(this.geometryCandidate === undefined
         ? {}
         : { geometryCandidate: this.geometryCandidate }),
+      ...(this.farGeometryCandidate === undefined
+        ? {}
+        : { farGeometryCandidate: this.farGeometryCandidate }),
       eligibility: this.grassEligibility,
       terrainProfileIdentity: this.terrainProfileIdentity,
       minimumLodLevel: this.minimumLodLevel,

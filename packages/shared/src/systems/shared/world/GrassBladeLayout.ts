@@ -6,6 +6,7 @@ export type FineGrassGeometryLayout =
   | "fine-folded-lancet-v1"
   | "fine-folded-sheath-near5-v1"
   | "fine-meadow-ribbon-v1"
+  | "fine-meadow-far-triangle-v1"
   | "fine-meadow-paired-near-v1";
 
 /** Explicit meadow family; paired leaves are a near-only study, not a default. */
@@ -14,8 +15,17 @@ export function isMeadowGrassBladeLayout(
 ): boolean {
   return (
     geometryLayout === "fine-meadow-ribbon-v1" ||
+    geometryLayout === "fine-meadow-far-triangle-v1" ||
     geometryLayout === "fine-meadow-paired-near-v1"
   );
+}
+
+/** Far-only indexed triangle; all five source vertices remain ground-swept. */
+export function isFarTriangleGrassBladeLayout(
+  lod: number,
+  geometryLayout?: FineGrassGeometryLayout,
+): boolean {
+  return geometryLayout === "fine-meadow-far-triangle-v1" && lod === 2;
 }
 
 /** Two leaves share one root pair and visibility bit only in the near tier. */
@@ -172,6 +182,16 @@ const layouts = Object.freeze({
     tier("fine-meadow-ribbon-v1", 1, 21, 2),
     tier("fine-meadow-ribbon-v1", 2, 12, 2),
   ]),
+  "fine-meadow-far-triangle-v1": Object.freeze([
+    tier("fine-meadow-far-triangle-v1", 0, 21, 3),
+    tier("fine-meadow-far-triangle-v1", 1, 21, 2),
+    Object.freeze({
+      // bladeSegments/vertices describe source storage and clearance, not
+      // indexed GPU invocations. The middle pair remains conservative input.
+      ...tier("fine-meadow-far-triangle-v1", 2, 12, 2, 5, 1),
+      renderedBladeSegments: 1 as const,
+    }),
+  ]),
   // Near-only study: middle/far retain the original unpaired ribbon budgets.
   "fine-meadow-paired-near-v1": Object.freeze([
     tier("fine-meadow-paired-near-v1", 0, 21, 2, 8, 6),
@@ -180,7 +200,9 @@ const layouts = Object.freeze({
   ]),
 });
 
-export type GrassBladeLayout = ReturnType<typeof tier>;
+export type GrassBladeLayout = ReturnType<typeof tier> & {
+  readonly renderedBladeSegments?: 1;
+};
 
 /** Conforming refinement of the retained LOD0 meadow ribbon, not another
  * whole-cell LOD. Each original triangle is partitioned into three children.
@@ -254,6 +276,7 @@ export function getGrassBladeLayout(
       geometryLayout !== "fine-folded-lancet-v1" &&
       geometryLayout !== "fine-folded-sheath-near5-v1" &&
       geometryLayout !== "fine-meadow-ribbon-v1" &&
+      geometryLayout !== "fine-meadow-far-triangle-v1" &&
       geometryLayout !== "fine-meadow-paired-near-v1")
   )
     throw new Error("Invalid grass blade layout");
