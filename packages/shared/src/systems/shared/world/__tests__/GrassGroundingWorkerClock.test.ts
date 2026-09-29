@@ -3,9 +3,25 @@ import {
   captureGrassGroundingWorkerClock,
   translateGrassGroundingWorkerExecution,
   GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+  GRASS_GROUNDING_CLOCK_STARTUP_MS,
 } from "../../../../utils/workers/GrassGroundingWorkerClock";
 
 describe("grounding worker conservative clock translation", () => {
+  it("bounds startup attempts by the original deadline and rejected sample cost", () => {
+    expect(GRASS_GROUNDING_CLOCK_STARTUP_MS).toBe(10_000);
+    expect(GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS).toBe(250);
+    expect(GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS).toBe(40);
+    expect(
+      (GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS - 1) *
+        GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+    ).toBeLessThan(GRASS_GROUNDING_CLOCK_STARTUP_MS);
+    expect(
+      GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS *
+        GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+    ).toBeGreaterThanOrEqual(GRASS_GROUNDING_CLOCK_STARTUP_MS);
+  });
+
   it("handles observed and larger realm offsets without extending the original lifetime", () => {
     const epoch = 1_790_704_353_391.7;
     for (const offset of [-5000, -44.4, 0, 44.4, 5000]) {

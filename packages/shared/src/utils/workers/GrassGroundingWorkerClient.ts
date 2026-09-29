@@ -650,8 +650,17 @@ export class GrassGroundingWorkerClient {
   }
 
   private sendClockProbe(): void {
+    if (this.stopped || this.clock !== null) return;
+    const sentEpochMs = performance.timeOrigin + performance.now();
+    if (
+      sentEpochMs - this.clockStartupEpochMs >=
+      GRASS_GROUNDING_CLOCK_STARTUP_MS
+    ) {
+      this.fail("timeout", "Grounding worker clock startup timed out");
+      return;
+    }
     this.clockProbeId++;
-    this.clockSentEpochMs = performance.timeOrigin + performance.now();
+    this.clockSentEpochMs = sentEpochMs;
     try {
       this.port.postMessage(
         {

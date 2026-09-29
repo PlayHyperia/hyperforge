@@ -32,6 +32,11 @@ import {
   grassGroundingWorkerSemanticResult as semanticResult,
 } from "./fixtures/GrassGroundingWorkerHarness";
 import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
+import {
+  GRASS_GROUNDING_CLOCK_STARTUP_MS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+} from "../../../../utils/workers/GrassGroundingWorkerClock";
 
 let bundledSource = "";
 const sessions: {
@@ -228,7 +233,9 @@ describe("actual grounding worker client", () => {
       expect(client.busy).toBe(false);
       expect(client.transportFailure).toBeNull();
       expect(port.clockPostCalls).toBeGreaterThanOrEqual(1);
-      expect(port.clockPostCalls).toBeLessThanOrEqual(3);
+      expect(port.clockPostCalls).toBeLessThanOrEqual(
+        GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+      );
       expect(client.submit(withoutId(packet))).toBe(1);
       expect(
         (await settledResponse(client, port, "result", 1)).state.status,
@@ -237,6 +244,85 @@ describe("actual grounding worker client", () => {
       fixture.dispose();
       await port.close();
     }
+  });
+
+  it("recovers after three delayed actual clock replies within the original startup deadline and completes a real job", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    const delayed = GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25;
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      delayed,
+      delayed,
+      delayed,
+    ]);
+    try {
+      await port.ready();
+      const client = new GrassGroundingWorkerClient(port);
+      sessions.push({ client, port });
+      const startupEpoch: unknown = Reflect.get(client, "clockStartupEpochMs");
+      await port.readyFor(client);
+      expect(port.clockPostCalls).toBe(4);
+      expect(client.transportFailure).toBeNull();
+      expect(client.terminated).toBe(false);
+      expect(port.pendingClockDeliveries).toBe(0);
+      expect(Reflect.get(client, "clockStartupEpochMs")).toBe(startupEpoch);
+      expect(Reflect.get(client, "timer")).toBeNull();
+      expect(port.postCalls).toBe(0);
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      });
+      if (!execution) throw new Error("Missing original execution envelope");
+      const originalDeadline = execution.deadlineEpochMs;
+      const packet = { ...workerRequest(fixture.request), execution };
+      expect(client.submit(withoutId(packet))).toBe(1);
+      expect(
+        (await settledResponse(client, port, "result", 1)).state.status,
+      ).toBe("ready");
+      expect(packet.execution).toBe(execution);
+      expect(execution.deadlineEpochMs).toBe(originalDeadline);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+      await port.close();
+    }
+  });
+
+  it("expires the original startup deadline after delayed actual replies without renewing it", async () => {
+    const delayed = GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25;
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      delayed,
+      delayed,
+      delayed,
+      GRASS_GROUNDING_CLOCK_STARTUP_MS + 100,
+    ]);
+    await port.ready();
+    const started = performance.now();
+    const client = new GrassGroundingWorkerClient(port);
+    sessions.push({ client, port });
+    const startupTimer: unknown = Reflect.get(client, "timer");
+    const untilFourth = performance.now() + 5_000;
+    while (port.clockPostCalls < 4 && !client.terminated) {
+      if (performance.now() >= untilFourth)
+        throw new Error("Actual fourth clock probe was not sent");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    expect(port.clockPostCalls).toBe(4);
+    expect(Reflect.get(client, "timer")).toBe(startupTimer);
+    await expect(port.readyFor(client)).rejects.toThrow(
+      "Grounding worker clock startup timed out",
+    );
+    expect(performance.now() - started).toBeGreaterThanOrEqual(
+      GRASS_GROUNDING_CLOCK_STARTUP_MS - 1,
+    );
+    expect(client.terminated).toBe(true);
+    expect(client.busy).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.clockPostCalls).toBe(4);
+    expect(port.pendingClockDeliveries).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+    expect(Reflect.get(client, "timer")).toBeNull();
   });
 
   it("fails closed on an unsolicited actual worker clock reply after startup", async () => {
@@ -266,11 +352,19 @@ describe("actual grounding worker client", () => {
   });
 
   it("destroys an actual client during startup without retaining timers or listeners", async () => {
-    const port = new ActualGrassGroundingClientPort(bundledSource);
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25,
+    ]);
     await port.ready();
     const client = new GrassGroundingWorkerClient(port);
     sessions.push({ client, port });
     expect(client.busy).toBe(true);
+    const deadline = performance.now() + 2_000;
+    while (port.pendingClockDeliveries === 0) {
+      if (performance.now() >= deadline)
+        throw new Error("Actual clock sample was not queued for delivery");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
     client.destroy();
     client.destroy();
     await port.close();
@@ -281,6 +375,7 @@ describe("actual grounding worker client", () => {
     expect(port.postCalls).toBe(0);
     expect(port.listenerCount).toBe(0);
     expect(port.terminateCalls).toBe(1);
+    expect(port.pendingClockDeliveries).toBe(0);
     expect(Reflect.get(client, "timer")).toBeNull();
     await expect(port.readyFor(client)).rejects.toThrow(/terminated/);
   });

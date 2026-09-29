@@ -29,12 +29,17 @@ export class ActualGrassGroundingClientPort implements GrassGroundingWorkerPort 
   private readonly readiness: Promise<void>;
   private closing = false;
   private termination: Promise<number> | null = null;
+  private readonly clockDeliveries = new Set<ReturnType<typeof setTimeout>>();
+  private clockSamplesReceived = 0;
   /** Gameplay/cancellation traffic, excluding bounded startup calibration. */
   postCalls = 0;
   clockPostCalls = 0;
   terminateCalls = 0;
 
-  constructor(source: string) {
+  constructor(
+    source: string,
+    private readonly clockSampleDelaysMs: readonly number[] = [],
+  ) {
     this.worker = new Worker(
       `const {parentPort, MessageChannel} = require("node:worker_threads");
 globalThis.MessageChannel = MessageChannel;
@@ -64,8 +69,8 @@ parentPort.postMessage({testTransportReady: true});`,
           resolve();
           return;
         }
+        if (this.closing) return;
         const event = new MessageEvent<unknown>("message", { data });
-        for (const listener of this.messages) listener(event);
         // Deliver the actual startup sample to the client, but never cast it
         // into a job response or let it satisfy a gameplay response waiter.
         if (
@@ -73,8 +78,23 @@ parentPort.postMessage({testTransportReady: true});`,
           typeof data === "object" &&
           "type" in data &&
           data.type === "clock_sample"
-        )
+        ) {
+          // Delay only delivery of the actual worker reply. Its timestamp,
+          // protocol, clocks and worker implementation remain unchanged.
+          const delay =
+            this.clockSampleDelaysMs[this.clockSamplesReceived++] ?? 0;
+          if (delay > 0) {
+            const timer = setTimeout(() => {
+              this.clockDeliveries.delete(timer);
+              for (const listener of this.messages) listener(event);
+            }, delay);
+            this.clockDeliveries.add(timer);
+          } else {
+            for (const listener of this.messages) listener(event);
+          }
           return;
+        }
+        for (const listener of this.messages) listener(event);
         const response = data as GrassGroundingWorkerResponse;
         if (this.received.length >= 128)
           throw new Error("Actual client worker reply bound exceeded");
@@ -116,6 +136,10 @@ parentPort.postMessage({testTransportReady: true});`,
 
   get listenerCount(): number {
     return this.messages.size + this.errors.size + this.messageErrors.size;
+  }
+
+  get pendingClockDeliveries(): number {
+    return this.clockDeliveries.size;
   }
 
   addEventListener(type: "message", listener: MessageListener): void;
@@ -214,6 +238,8 @@ parentPort.postMessage({testTransportReady: true});`,
   terminate(): void {
     this.terminateCalls++;
     this.closing = true;
+    for (const timer of this.clockDeliveries) clearTimeout(timer);
+    this.clockDeliveries.clear();
     this.termination ??= this.worker.terminate();
   }
 

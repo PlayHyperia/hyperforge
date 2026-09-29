@@ -2,9 +2,15 @@ import type { GrassGroundingExecution } from "../../systems/shared/world/GrassBl
 
 /** Startup transport budget only; it never renews a grounding context. */
 export const GRASS_GROUNDING_CLOCK_STARTUP_MS = 10_000;
-export const GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS = 3;
 /** At most 2.5% conservative shortening of a fresh 10-second context. */
 export const GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS = 250;
+/** Every rejected sample consumes more than the maximum round trip. This
+ * finite protocol bound therefore cannot end calibration before its original
+ * startup deadline; retries never restart that deadline. */
+export const GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS = Math.ceil(
+  GRASS_GROUNDING_CLOCK_STARTUP_MS /
+    GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+);
 
 export type GrassGroundingWorkerClock = Readonly<{
   mainReceivedEpochMs: number;
