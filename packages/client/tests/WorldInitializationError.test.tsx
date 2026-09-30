@@ -1,5 +1,7 @@
 import React from "react";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
   RendererPreparationQueue,
@@ -23,6 +25,142 @@ function render(error: unknown, entryRecoveryPresent = false): string {
     />,
   );
 }
+
+// Source wiring only: these checks inspect the actual component's AST. They
+// do not mount a game, replace a world/renderer, or prove browser lifecycle.
+describe("canonical GameClient failure and ownership wiring", () => {
+  const source = ts.createSourceFile(
+    "GameClient.tsx",
+    readFileSync(
+      new URL("../src/screens/GameClient.tsx", import.meta.url),
+      "utf8",
+    ),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node) => {
+    nodes.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const text = (node: ts.Node) => node.getText(source).replace(/\s+/g, " ");
+  const initialization = nodes.find(
+    (node): node is ts.TryStatement =>
+      ts.isTryStatement(node) &&
+      node.tryBlock.statements.some(
+        (statement) => text(statement) === "await world.init(config);",
+      ),
+  );
+
+  it("forwards initial explicit selection without coalescing null into legacy fallback", () => {
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isPropertySignature(node) &&
+          text(node) === "selectedCharacterId?: string | null;",
+      ),
+    ).toBe(true);
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isVariableDeclaration(node) &&
+          text(node) ===
+            "initialSelectedCharacterIdRef = useRef(selectedCharacterId)",
+      ),
+    ).toBe(true);
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isPropertyAssignment(node) &&
+          text(node) ===
+            "selectedCharacterId: initialSelectedCharacterIdRef.current",
+      ),
+    ).toBe(true);
+  });
+
+  it("uses the structured failure helper and a full-page reload presentation", () => {
+    const imports = nodes.filter(ts.isImportDeclaration);
+    expect(
+      imports.some(
+        (node) =>
+          node.moduleSpecifier.getText(source) ===
+          '"./WorldInitializationError"',
+      ),
+    ).toBe(true);
+    expect(initialization?.catchClause?.block.getText(source)).toContain(
+      "normalizeWorldInitializationFailure(error)",
+    );
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isJsxSelfClosingElement(node) &&
+          node.tagName.getText(source) === "WorldInitializationError" &&
+          text(node).includes("failure={initError}") &&
+          text(node).includes("entryRetryState"),
+      ),
+    ).toBe(true);
+    expect(source.text).not.toContain("CriticalErrorScreen");
+    expect(source.text).not.toContain('includes("webgpu")');
+  });
+
+  it("keeps success and failure presentation inside the live-effect guard", () => {
+    expect(initialization).toBeDefined();
+    for (const [block, expected] of [
+      [
+        initialization!.tryBlock,
+        ["setInitializedWorld(world)", "onInitErrorRef.current?.(null)"],
+      ],
+      [
+        initialization!.catchClause!.block,
+        [
+          "setInitError(failure)",
+          "onInitErrorRef.current?.(message)",
+          "win.__HYPERIA_STREAM_READY__",
+          "win.__HYPERIA_STREAM_RENDERER_HEALTH__",
+        ],
+      ],
+    ] as const) {
+      const guard = block.statements.find(
+        (node): node is ts.IfStatement =>
+          ts.isIfStatement(node) &&
+          text(node.expression) === "!cleanedUp && !needsCleanup",
+      );
+      expect(guard).toBeDefined();
+      for (const target of expected) {
+        expect(text(guard!.thenStatement)).toContain(target);
+        expect(
+          block.statements
+            .filter((node) => node !== guard)
+            .map(text)
+            .join(" "),
+        ).not.toContain(target);
+      }
+    }
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isJsxAttribute(node) &&
+          text(node) === "worldInitialized={initializedWorld === world}",
+      ),
+    ).toBe(true);
+    // A late rejection still logs and reaches the existing deferred disposal.
+    expect(text(initialization!.catchClause!.block)).toContain(
+      "console.error(",
+    );
+    expect(
+      nodes.some(
+        (node) =>
+          ts.isIfStatement(node) &&
+          text(node.expression) === "needsCleanup" &&
+          text(node.thenStatement).includes("doCleanup()") &&
+          node.elseStatement &&
+          text(node.elseStatement).includes("initComplete = true"),
+      ),
+    ).toBe(true);
+  });
+});
 
 describe("world initialization failure classification", () => {
   it("presents an actual queue timeout while its underlying work remains owned", async () => {

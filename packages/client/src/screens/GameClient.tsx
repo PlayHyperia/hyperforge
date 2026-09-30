@@ -6,15 +6,22 @@ import {
 import type { PublicRuntimeEnv, StreamingWindow } from "@/lib/streamingWindow";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { THREE, createClientWorld, System } from "@hyperforge/shared";
-import { World } from "@hyperforge/shared";
+import { World, type ClientNetwork } from "@hyperforge/shared";
 import { CoreUI } from "../game/CoreUI";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { ThreeResourceManager } from "@/lib/ThreeResourceManager";
+import {
+  normalizeWorldInitializationFailure,
+  WorldInitializationError,
+  type WorldInitializationFailure,
+} from "./WorldInitializationError";
 
 export { System };
 
 interface GameClientProps {
   wsUrl?: string;
+  /** Explicit choice; null disables legacy reload selection fallback. */
+  selectedCharacterId?: string | null;
   onSetup?: (world: InstanceType<typeof World>, config: unknown) => void;
   onInitError?: (error: string | null) => void;
   /** Hide standard game UI (for streaming/spectator modes) */
@@ -75,120 +82,9 @@ const loadRuntimeEnv = async (): Promise<PublicRuntimeEnv | undefined> => {
   });
 };
 
-/**
- * Full-screen error display for critical initialization failures (e.g., WebGPU unavailable)
- */
-function CriticalErrorScreen({ error }: { error: string }) {
-  const isWebGPUError =
-    error.toLowerCase().includes("webgpu") ||
-    error.toLowerCase().includes("renderer");
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        backgroundColor: "#0a0a0a",
-        color: "#fff",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-        padding: "24px",
-        textAlign: "center",
-      }}
-    >
-      <div style={{ maxWidth: "500px" }}>
-        <h1
-          style={{
-            fontSize: "24px",
-            fontWeight: 600,
-            marginBottom: "16px",
-            color: "#ff6b6b",
-          }}
-        >
-          {isWebGPUError ? "WebGPU Required" : "Initialization Failed"}
-        </h1>
-
-        {isWebGPUError ? (
-          <>
-            <p style={{ fontSize: "16px", marginBottom: "24px", opacity: 0.9 }}>
-              Hyperia requires WebGPU for rendering. Your browser or device does
-              not support WebGPU.
-            </p>
-            <div
-              style={{
-                backgroundColor: "rgba(255,255,255,0.05)",
-                borderRadius: "8px",
-                padding: "16px",
-                marginBottom: "24px",
-                textAlign: "left",
-              }}
-            >
-              <p
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 500,
-                  marginBottom: "12px",
-                }}
-              >
-                Supported Browsers:
-              </p>
-              <ul
-                style={{
-                  fontSize: "14px",
-                  opacity: 0.8,
-                  margin: 0,
-                  paddingLeft: "20px",
-                }}
-              >
-                <li>Chrome 113+ (recommended)</li>
-                <li>Edge 113+</li>
-                <li>Safari 17+ (macOS Sonoma / iOS 17)</li>
-                <li>Firefox (requires enabling in about:config)</li>
-              </ul>
-            </div>
-            <p style={{ fontSize: "13px", opacity: 0.6, marginBottom: "24px" }}>
-              Make sure hardware acceleration is enabled in your browser
-              settings and your GPU drivers are up to date.
-            </p>
-          </>
-        ) : (
-          <p
-            style={{
-              fontSize: "14px",
-              marginBottom: "24px",
-              opacity: 0.8,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {error}
-          </p>
-        )}
-
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            padding: "12px 24px",
-            fontSize: "14px",
-            fontWeight: 500,
-            backgroundColor: "#4a9eff",
-            color: "white",
-            border: "none",
-            borderRadius: "6px",
-            cursor: "pointer",
-          }}
-        >
-          Retry
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function GameClient({
   wsUrl,
+  selectedCharacterId,
   onSetup,
   onInitError,
   hideUI = false,
@@ -197,10 +93,14 @@ export function GameClient({
   const viewportRef = useRef<HTMLDivElement>(null);
   const uiRef = useRef<HTMLDivElement>(null);
   const initialWsUrlRef = useRef(wsUrl);
+  // Account/character changes require a new keyed GameClient/world instance.
+  const initialSelectedCharacterIdRef = useRef(selectedCharacterId);
   const initialStreamingModeRef = useRef(streamingMode);
   const onSetupRef = useRef(onSetup);
   const onInitErrorRef = useRef(onInitError);
-  const [initError, setInitError] = useState<string | null>(null);
+  const [initError, setInitError] = useState<WorldInitializationFailure | null>(
+    null,
+  );
   const [initializedWorld, setInitializedWorld] = useState<World | null>(null);
 
   onSetupRef.current = onSetup;
@@ -367,6 +267,7 @@ export function GameClient({
         viewport,
         ui,
         wsUrl: finalWsUrl,
+        selectedCharacterId: initialSelectedCharacterIdRef.current,
         baseEnvironment,
         assetsUrl, // This will be overridden by server snapshot
       };
@@ -386,25 +287,25 @@ export function GameClient({
           onInitErrorRef.current?.(null);
         }
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Unknown initialization error";
+        const failure = normalizeWorldInitializationFailure(error);
+        const { message } = failure;
         console.error("[GameClient] World initialization failed:", message);
-        const normalizedMessage = message.toLowerCase();
-        const degradedReason = normalizedMessage.includes("webgpu")
-          ? "renderer_unavailable"
-          : "initialization_failed";
-        const win = window as StreamingWindow;
-        win.__HYPERIA_STREAM_READY__ = false;
-        win.__HYPERIA_STREAM_RENDERER_HEALTH__ = {
-          ready: false,
-          degradedReason,
-          updatedAt: Date.now(),
-          phase: null,
-        };
-        onInitErrorRef.current?.(message);
-        setInitError(message);
+        if (!cleanedUp && !needsCleanup) {
+          const degradedReason =
+            failure.kind === "renderer-preparation-timeout"
+              ? "renderer_preparation_timeout"
+              : "initialization_failed";
+          const win = window as StreamingWindow;
+          win.__HYPERIA_STREAM_READY__ = false;
+          win.__HYPERIA_STREAM_RENDERER_HEALTH__ = {
+            ready: false,
+            degradedReason,
+            updatedAt: Date.now(),
+            phase: null,
+          };
+          onInitErrorRef.current?.(message);
+          setInitError(failure);
+        }
       }
 
       // If cleanup fired while we were initializing, execute it now.
@@ -436,9 +337,16 @@ export function GameClient({
     };
   }, [world]);
 
-  // Show full-screen error for critical initialization failures (WebGPU, etc.)
+  // Startup has aborted: entry recovery cannot safely reuse this partial world.
   if (initError) {
-    return <CriticalErrorScreen error={initError} />;
+    return (
+      <WorldInitializationError
+        failure={initError}
+        entryRecoveryPresent={Boolean(
+          (world.network as ClientNetwork).entryRetryState,
+        )}
+      />
+    );
   }
 
   return (
