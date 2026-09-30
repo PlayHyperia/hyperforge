@@ -326,6 +326,9 @@ export class TerrainSystem extends System {
   private _terrainInitialized = false;
   private _initialTilesReady = false; // Track when initial tiles are loaded
   private initialTileLoading: Promise<void> | null = null;
+  private startup: Promise<void> | null = null;
+  private readinessFailure: Error | null = null;
+  private readonly readinessWaiters = new Set<(error?: Error) => void>();
   private destroyed = false;
   private canonicalGroundInitialized = false;
   private canonicalHeightRevision = 0;
@@ -2240,9 +2243,15 @@ export class TerrainSystem extends System {
   init(): Promise<void> {
     if (this.destroyed)
       return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
     // Start synchronously through the existing first await; concurrent callers
     // share one owner rather than replacing a still-initializing WaterSystem.
-    return (this.initialization ??= this.initialize());
+    return (this.initialization ??= this.initialize().catch(
+      (error: unknown) => {
+        this.failReadiness(error);
+        throw error;
+      },
+    ));
   }
 
   private async initialize(): Promise<void> {
@@ -2435,7 +2444,27 @@ export class TerrainSystem extends System {
     this.canonicalGroundInitialized = true;
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
+    if (this.startup) return this.startup;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    // Publish before synchronous tile events can re-enter start. The server
+    // still assembles its initial tiles synchronously before this method returns.
+    this.startup = new Promise<void>((onReady, onFailure) => {
+      resolve = onReady;
+      reject = onFailure;
+    });
+    void this.startTerrain().then(resolve, (error: unknown) => {
+      this.failReadiness(error);
+      reject(error);
+    });
+    return this.startup;
+  }
+
+  private async startTerrain(): Promise<void> {
     if (this.destroyed) throw new Error("Terrain is destroyed");
     this.ensureNoiseInitialized();
 
@@ -3998,8 +4027,13 @@ export class TerrainSystem extends System {
     const steps = this.generateInitialTileSteps();
     if (!this.runtimeIsClient) {
       // Authoritative walkability and content remain synchronous on the server.
-      for (const _step of steps) {
-        // Drain the same ordered tile assembly without introducing task yields.
+      try {
+        for (const _step of steps) {
+          // Drain the same ordered tile assembly without introducing task yields.
+        }
+      } catch (error) {
+        this.failReadiness(error);
+        throw error;
       }
       return;
     }
@@ -4012,7 +4046,13 @@ export class TerrainSystem extends System {
       reject = rejectLoading;
     });
     this.initialTileLoading = loading;
-    void this.loadInitialTilesCooperatively(steps).then(resolve, reject);
+    void this.loadInitialTilesCooperatively(steps).then(
+      resolve,
+      (error: unknown) => {
+        this.failReadiness(error);
+        reject(error);
+      },
+    );
     return loading;
   }
 
@@ -4137,6 +4177,9 @@ export class TerrainSystem extends System {
     // Mark initial tiles as ready
     this.lastPlayerTile = { x: centerTileX, z: centerTileZ };
     this._initialTilesReady = true;
+    if (this.isReady()) {
+      for (const settle of this.readinessWaiters) settle();
+    }
   }
 
   private generateTile(
@@ -9220,6 +9263,7 @@ export class TerrainSystem extends System {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.failReadiness(new Error("Terrain is destroyed"));
     this.canonicalGroundInitialized = false;
     this.recordCanonicalHeightChange();
     this.grassSurfaceRevision++;
@@ -9951,7 +9995,45 @@ export class TerrainSystem extends System {
    * Check if terrain system is ready for players to spawn
    */
   public isReady(): boolean {
-    return this._initialTilesReady && this.noise !== undefined;
+    return (
+      !this.destroyed &&
+      !this.readinessFailure &&
+      this._initialTilesReady &&
+      this.noise !== undefined
+    );
+  }
+
+  /** Observe startup without starting it; cancellation belongs only to this caller. */
+  public waitUntilReady(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
+    if (this.isReady()) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        this.readinessWaiters.delete(settle);
+        signal?.removeEventListener("abort", abort);
+      };
+      const settle = (error?: Error) => {
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+      const abort = () => {
+        cleanup();
+        reject(signal?.reason);
+      };
+      this.readinessWaiters.add(settle);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  private failReadiness(error: unknown): Error {
+    this.readinessFailure ??=
+      error instanceof Error ? error : new Error(String(error));
+    for (const settle of this.readinessWaiters) settle(this.readinessFailure);
+    return this.readinessFailure;
   }
 
   /**

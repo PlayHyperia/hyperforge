@@ -1,10 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Worker } from "node:worker_threads";
 import { createHash } from "node:crypto";
+import { JSDOM } from "jsdom";
 import THREE from "../../../../extras/three/three";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
+import type { Entity } from "../../../../entities/Entity";
 import { PlayerEntity } from "../../../../entities/player/PlayerEntity";
+import { PlayerLocal } from "../../../../entities/player/PlayerLocal";
 import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
 import { EventType } from "../../../../types/events";
 import type { Resource } from "../../../../types/core/core";
@@ -292,6 +295,200 @@ function workerJob(setup: GrassWorkerSetup, tileX: number, tileZ: number) {
 }
 
 describe("actual terrain content residency", () => {
+  it("readiness lifecycle waits before init and resolves only after actual initial tiles", async () => {
+    const world = new CpuServerWorld();
+    worlds.push(world);
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    let settled = false;
+    const ready = terrain.waitUntilReady().then(() => {
+      settled = true;
+    });
+    await terrain.init();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(terrain.getTiles().size).toBe(0);
+    await terrain.start();
+    await ready;
+    expect(terrain.isReady()).toBe(true);
+    expect(terrain.getTiles().size).toBeGreaterThan(0);
+    await expect(terrain.waitUntilReady()).resolves.toBeUndefined();
+  });
+
+  it("readiness lifecycle cancellation removes only its own waiter", async () => {
+    const f = await initialClientFixture();
+    const controller = new AbortController();
+    const reason = new Error("Cancelled terrain consumer");
+    const cancelled = f.terrain.waitUntilReady(controller.signal);
+    const cancelledResult = expect(cancelled).rejects.toBe(reason);
+    const survivor = f.terrain.waitUntilReady();
+    controller.abort(reason);
+    await cancelledResult;
+    expect(f.terrain["readinessWaiters"].size).toBe(1);
+    await f.internal.loadInitialTiles();
+    await survivor;
+    expect(f.terrain["readinessWaiters"].size).toBe(0);
+    await expect(f.terrain.waitUntilReady(controller.signal)).rejects.toBe(
+      reason,
+    );
+  });
+
+  it.each([false, true])(
+    "readiness lifecycle rejects retired terrain (previously ready=%s)",
+    async (complete) => {
+      const f = await initialClientFixture();
+      if (complete) await f.internal.loadInitialTiles();
+      const pending = complete ? undefined : f.terrain.waitUntilReady();
+      const rejected = pending
+        ? expect(pending).rejects.toThrow("Terrain is destroyed")
+        : undefined;
+      f.terrain.destroy();
+      await rejected;
+      expect(f.terrain.isReady()).toBe(false);
+      await expect(f.terrain.waitUntilReady()).rejects.toThrow(
+        "Terrain is destroyed",
+      );
+      expect(f.terrain["readinessWaiters"].size).toBe(0);
+    },
+  );
+
+  it("readiness lifecycle propagates real init selection failure before tile loading", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const dom = new JSDOM("", {
+      url: "http://localhost:3333/?dirtProjection=invalid",
+    });
+    const world = new CpuServerWorld();
+    worlds.push(world);
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    Object.defineProperty(globalThis, "window", {
+      value: dom.window,
+      configurable: true,
+    });
+    try {
+      const ready = terrain.waitUntilReady().catch((error: unknown) => error);
+      const failure = await terrain.init().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(await ready).toBe(failure);
+      expect(terrain.isReady()).toBe(false);
+      expect(terrain["initialTileLoading"]).toBeNull();
+      await expect(terrain.waitUntilReady()).rejects.toBe(failure);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      dom.window.close();
+    }
+  });
+
+  it("readiness lifecycle propagates actual generation failure and refuses startup retry", async () => {
+    const f = await initialClientFixture();
+    const revised = new Promise<void>((resolve) =>
+      setTimeout(() => {
+        f.terrain.registerFlatZone({
+          id: "readiness-revision",
+          centerX: 10000,
+          centerZ: 10000,
+          width: 2,
+          depth: 2,
+          height: 10,
+          blendRadius: 1,
+        });
+        resolve();
+      }, 0),
+    );
+    const ready = f.terrain.waitUntilReady().catch((error: unknown) => error);
+    const failure = await Promise.resolve(f.internal.loadInitialTiles()).catch(
+      (error: unknown) => error,
+    );
+    await revised;
+    expect(failure).toEqual(
+      new Error("Terrain changed during initial tile generation"),
+    );
+    expect(await ready).toBe(failure);
+    expect(f.terrain.isReady()).toBe(false);
+    await expect(f.terrain.waitUntilReady()).rejects.toBe(failure);
+    await expect(f.terrain.start()).rejects.toBe(failure);
+  });
+
+  it("player terrain wait shares one init owner and cleans every cancelled waiter", async () => {
+    const f = await initialClientFixture();
+    const player = new PlayerLocal(
+      f.world,
+      { id: "readiness-shared", position: [385, 28, 374] },
+      true,
+    );
+    f.world.entities.items.set(player.id, player);
+    f.world.entities.player = player as Entity as NonNullable<
+      typeof f.world.entities.player
+    >;
+    const first = player.init();
+    const rejected = expect(first).rejects.toThrow("Player was destroyed");
+    expect(player.init()).toBe(first);
+    expect(f.terrain["readinessWaiters"].size).toBe(1);
+    player.destroy();
+    await rejected;
+    expect(f.terrain["readinessWaiters"].size).toBe(0);
+    expect(f.world.hot.has(player)).toBe(false);
+    expect(player.base).toBeUndefined();
+    expect(player["positionValidationInterval"]).toBeUndefined();
+  });
+
+  it("player terrain wait never succeeds merely because ten seconds elapsed", async () => {
+    const f = await fixture();
+    const player = new PlayerLocal(
+      f.world,
+      { id: "readiness-delay", position: [385, 28, 374] },
+      true,
+    );
+    f.world.entities.items.set(player.id, player);
+    f.world.entities.player = player as Entity as NonNullable<
+      typeof f.world.entities.player
+    >;
+    let settled = false;
+    const waiting = player["waitForTerrain"]().then(() => {
+      settled = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10300));
+      expect(settled).toBe(false);
+      expect(player["positionValidationInterval"]).toBeUndefined();
+    } finally {
+      await f.terrain.start();
+      await waiting;
+      player.destroy();
+    }
+  }, 20000);
+
+  it.each(["destroy", "replace"] as const)(
+    "player terrain wait cannot activate a %s owner",
+    async (operation) => {
+      const f = await initialClientFixture();
+      const player = new PlayerLocal(
+        f.world,
+        { id: "readiness-retired", position: [385, 28, 374] },
+        true,
+      );
+      f.world.entities.items.set(player.id, player);
+      f.world.entities.player = player as Entity as NonNullable<
+        typeof f.world.entities.player
+      >;
+      const initializing = player.init().catch((error: unknown) => error);
+      try {
+        if (operation === "destroy") player.destroy();
+        else {
+          f.world.entities.items.delete(player.id);
+          f.world.entities.player = undefined;
+        }
+        await f.internal.loadInitialTiles();
+        expect(await initializing).toBeInstanceOf(Error);
+        expect(f.world.hot.has(player)).toBe(false);
+        expect(player.base).toBeUndefined();
+        expect(player.capsule).toBeNull();
+        expect(player["positionValidationInterval"]).toBeUndefined();
+      } finally {
+        player.destroy();
+      }
+    },
+  );
+
   it("yields actual client initial tiles to a task before publishing readiness", async () => {
     const f = await initialClientFixture();
     let complete = false;

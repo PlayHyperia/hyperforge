@@ -696,6 +696,10 @@ export class PlayerLocal extends Entity implements HotReloadable {
   serverPosition: THREE.Vector3; // Track server's authoritative position - NEVER undefined
   lastServerUpdate: number = 0; // Time of last server position update
   private positionValidationInterval?: NodeJS.Timeout;
+  private readonly initializationAbort = new AbortController();
+  private initialization: Promise<void> | null = null;
+  private initialTerrain?: TerrainSystem;
+  private cameraRetryTimeout?: ReturnType<typeof setTimeout>;
   // Add pendingMoves array
   private pendingMoves: { seq: number; pos: THREE.Vector3 }[] = [];
   private _tempVec3 = new THREE.Vector3();
@@ -809,14 +813,18 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
     this.lastServerUpdate = performance.now();
 
-    // Start aggressive position validation
-    this.startPositionValidation();
+    // Terrain-dependent validation starts only after this owner's readiness wait.
   }
 
   private startPositionValidation(): void {
     // Validate position every 100ms initially, then slower
     let checkCount = 0;
     this.positionValidationInterval = setInterval(() => {
+      if (!this.isInitializationOwner(this.initialTerrain)) {
+        clearInterval(this.positionValidationInterval);
+        this.positionValidationInterval = undefined;
+        return;
+      }
       checkCount++;
 
       // Call terrain validation more frequently in first 5 seconds
@@ -963,7 +971,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
     ) as TerrainSystem;
 
     // Check if terrain system exists before using it
-    if (!terrain) {
+    if (!terrain || !terrain.isReady()) {
       // Terrain system not loaded yet, skip validation
       return;
     }
@@ -992,45 +1000,56 @@ export class PlayerLocal extends Entity implements HotReloadable {
     // Do not call super.initializeVisuals()
   }
 
+  private isInitializationOwner(terrain: TerrainSystem | undefined): boolean {
+    return (
+      !this.destroyed &&
+      !this.initializationAbort.signal.aborted &&
+      this.world.entities.items.get(this.id) === this &&
+      (this.world.entities.player as Entity | undefined) === this &&
+      this.data.owner === this.world.network?.id &&
+      terrain !== undefined &&
+      this.world.getSystem("terrain") === terrain
+    );
+  }
+
+  private assertInitializationOwner(): void {
+    if (!this.isInitializationOwner(this.initialTerrain)) {
+      throw new Error(
+        "[PlayerLocal] Initialization owner was retired or replaced",
+      );
+    }
+  }
+
+  private assertInitializationReady(): void {
+    this.assertInitializationOwner();
+    if (!this.initialTerrain?.isReady()) {
+      throw new Error("[PlayerLocal] Terrain readiness was retired");
+    }
+  }
+
   private async waitForTerrain(): Promise<void> {
-    // Get terrain system with proper type
-    const terrainSystem = this.world.getSystem(
-      "terrain",
-    ) as TerrainSystem | null;
-
-    if (!terrainSystem) {
-      // No terrain system, proceed without wait
-      return;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
+    if (!terrain) throw new Error("[PlayerLocal] Terrain system is required");
+    this.initialTerrain = terrain;
+    this.assertInitializationOwner();
+    const started = performance.now();
+    const warning = setTimeout(() => {
+      if (this.isInitializationOwner(terrain)) {
+        console.warn(
+          "[PlayerLocal] Still waiting for terrain after",
+          performance.now() - started,
+          "ms; player activation remains blocked",
+        );
+      }
+    }, 10000);
+    try {
+      await terrain.waitUntilReady(this.initializationAbort.signal);
+      this.assertInitializationOwner();
+      if (!terrain.isReady())
+        throw new Error("[PlayerLocal] Terrain readiness was retired");
+    } finally {
+      clearTimeout(warning);
     }
-
-    // Strong type assumption - TerrainSystem has isReady() method
-    // Check if terrain is already initialized
-    if (terrainSystem.isReady()) {
-      return;
-    }
-
-    // Wait for terrain initialization with timeout
-    const maxWaitTime = 10000; // 10 seconds timeout
-    const startTime = Date.now();
-
-    await new Promise<void>((resolve) => {
-      const checkInterval = setInterval(() => {
-        const elapsed = Date.now() - startTime;
-        if (terrainSystem.isReady()) {
-          clearInterval(checkInterval);
-          resolve();
-        } else if (elapsed > maxWaitTime) {
-          // Timeout - proceed anyway
-          console.warn(
-            "[PlayerLocal] Terrain wait timeout after",
-            elapsed,
-            "ms - proceeding anyway",
-          );
-          clearInterval(checkInterval);
-          resolve();
-        }
-      }, 100); // Check every 100ms
-    });
   }
 
   // Override modify to handle shorthand network keys like PlayerRemote does
@@ -1222,7 +1241,38 @@ export class PlayerLocal extends Entity implements HotReloadable {
     super.modify(data);
   }
 
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    if (this.destroyed || this.initializationAbort.signal.aborted) {
+      return Promise.reject(
+        new Error("[PlayerLocal] Cannot initialize a retired player"),
+      );
+    }
+    if (this.initialization) return this.initialization;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    this.initialization = new Promise<void>((onReady, onFailure) => {
+      resolve = onReady;
+      reject = onFailure;
+    });
+    void this.initializePlayer().then(resolve, (error: unknown) => {
+      try {
+        // Retire only this instance; never remove an entity by its reused id.
+        if (!this.destroyed) this.destroy();
+      } catch (cleanupError) {
+        reject(
+          new AggregateError(
+            [error, cleanupError],
+            "Player initialization and cleanup failed",
+          ),
+        );
+        return;
+      }
+      reject(error);
+    });
+    return this.initialization;
+  }
+
+  private async initializePlayer(): Promise<void> {
     // Make sure we're added to the world's entities
     if (!this.world.entities.has(this.id)) {
       this.world.entities.items.set(this.id, this);
@@ -1230,6 +1280,8 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
     // Wait for terrain to be ready before proceeding
     await this.waitForTerrain();
+    this.assertInitializationReady();
+    this.startPositionValidation();
 
     // Register for physics updates
     this.world.setHot(this, true);
@@ -1443,13 +1495,16 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
     // Initialize physics capsule
     await this.initCapsule();
+    this.assertInitializationReady();
     this.initControl();
 
     // Initialize camera system
     this.initCameraSystem();
 
     // Retry camera initialization after a delay in case systems aren't ready yet
-    setTimeout(() => {
+    this.cameraRetryTimeout = setTimeout(() => {
+      this.cameraRetryTimeout = undefined;
+      if (!this.isInitializationOwner(this.initialTerrain)) return;
       const _cameraSystem = getSystem(this.world, "client-camera-system");
       this.world.emit(EventType.CAMERA_SET_TARGET, { target: this });
     }, 1000);
@@ -1543,6 +1598,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
     allowFallback: boolean,
     inheritedPresentationRequest?: number,
   ): Promise<void> {
+    if (!this.isInitializationOwner(this.initialTerrain) || !this.base) return;
     const defaultAvatarUrl = DEFAULT_AVATAR_URL;
     const avatarUrl = avatarUrlOverride ?? this.getAvatarUrl();
 
@@ -1590,6 +1646,14 @@ export class PlayerLocal extends Entity implements HotReloadable {
     this.pendingAvatarPresentationLoads++;
     this.completedAvatarPresentation = undefined;
     this.loadingAvatarUrl = avatarUrl;
+    let ownedAvatar: AvatarNode | undefined;
+    const stopRetiredOwner = () => {
+      if (this.isInitializationOwner(this.initialTerrain)) return false;
+      // A pending mount belongs to this captured node, never a replacement.
+      ownedAvatar?.deactivate?.();
+      if (ownedAvatar && this._avatar === ownedAvatar) this._avatar = undefined;
+      return true;
+    };
 
     try {
       // Only destroy if we're loading a different avatar
@@ -1618,6 +1682,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
         "avatar",
         avatarUrl,
       )) as LoadedAvatar;
+      if (stopRetiredOwner()) return;
 
       if (this._avatar && this._avatar.deactivate) {
         this._avatar.deactivate();
@@ -1650,6 +1715,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
       // Store the node - it's an Avatar node that needs mounting
       this._avatar = nodeToUse as unknown as AvatarNode;
+      ownedAvatar = this._avatar;
 
       // IMPORTANT: For Avatar nodes to work, they need their context set and to be mounted
       // Set the context for the avatar node
@@ -1689,6 +1755,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
       // Mount the avatar node to create its instance
       await avatarAsNode.mount!();
+      if (stopRetiredOwner()) return;
 
       // The Avatar node handles its own Three.js representation
       // We don't need to manually add anything since the node is already added to base
@@ -1731,6 +1798,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
         // Fallback to regular setEmote (may show brief T-pose)
         vrmInstance.setEmote(Emotes.IDLE);
       }
+      if (stopRetiredOwner()) return;
 
       // NOW make avatar visible - idle animation is guaranteed to be playing
       (this._avatar as { visible: boolean }).visible = true;
@@ -1781,6 +1849,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
         avatar: this._avatar,
         camHeight: this.camHeight,
       });
+      if (stopRetiredOwner()) return;
 
       // Ensure avatar starts at ground height (0) if terrain height is unavailable
       if ((this._avatar as AvatarNode).position.y < 0) {
@@ -1794,14 +1863,17 @@ export class PlayerLocal extends Entity implements HotReloadable {
         entity: { id: this.data.id, mesh: this.mesh as object | null },
         camHeight: this.camHeight,
       });
+      if (stopRetiredOwner()) return;
       // Also set as camera target for immediate orbit control readiness
       this.world.emit(EventType.CAMERA_SET_TARGET, { target: this });
+      if (stopRetiredOwner()) return;
 
       // Emit success
       this.world.emit(EventType.AVATAR_LOAD_COMPLETE, {
         playerId: this.id,
         success: true,
       });
+      if (stopRetiredOwner()) return;
 
       // Create silhouette effect for x-ray visibility (classic fantasy MMORPG-style)
       this.createPlayerSilhouette();
@@ -1836,6 +1908,7 @@ export class PlayerLocal extends Entity implements HotReloadable {
         };
       }
     } catch (error) {
+      if (stopRetiredOwner()) return;
       console.error(
         `[PlayerLocal] Avatar load failed for ${avatarUrl}:`,
         error,
@@ -1946,7 +2019,13 @@ export class PlayerLocal extends Entity implements HotReloadable {
     // Wait for PhysX to be ready - required for player physics
     // By this point, Physics system should have already loaded PhysX,
     // but we wait with a generous timeout just in case of race conditions
-    await waitForPhysX("PlayerLocal", 60000); // 60 second timeout
+    await waitForPhysX("PlayerLocal", 60000, this.initializationAbort.signal);
+    this.assertInitializationOwner();
+    if (!this.initialTerrain?.isReady()) {
+      throw new Error(
+        "[PlayerLocal] Terrain readiness was retired before physics",
+      );
+    }
 
     // Get the global PHYSX object - required
     const PHYSX = getPhysX();
@@ -3120,8 +3199,16 @@ export class PlayerLocal extends Entity implements HotReloadable {
 
   // Required System lifecycle methods
   override destroy(): void {
+    if (this.destroyed) return;
     // Mark as inactive to prevent further operations
     this.active = false;
+    this.initializationAbort.abort(
+      new Error("[PlayerLocal] Player was destroyed"),
+    );
+    if (this.cameraRetryTimeout !== undefined) {
+      clearTimeout(this.cameraRetryTimeout);
+      this.cameraRetryTimeout = undefined;
+    }
     this.avatarPresentationRequest++;
     this.completedAvatarPresentation = undefined;
 
