@@ -1727,6 +1727,39 @@ describe("WaterSystem conservative reflection footprint", () => {
     },
   );
 
+  it.each([1, 2])(
+    "rejects %s manually supplied mip levels without changing the texture",
+    (levels) => {
+      const h = createFootprintHarness();
+      const texture = new THREE.Texture();
+      texture.generateMipmaps = false;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      const emptyMipmaps = texture.mipmaps;
+      const mipmaps = Array.from({ length: levels }, (_, level) => ({
+        data: new Uint8Array(4 * (2 >> level) ** 2),
+        width: 2 >> level,
+        height: 2 >> level,
+      }));
+      const version = texture.version;
+      try {
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(true);
+        texture.mipmaps = mipmaps;
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(
+          false,
+        );
+        expect(texture.mipmaps).toBe(mipmaps);
+        expect(texture.generateMipmaps).toBe(false);
+        expect(texture.version).toBe(version);
+        texture.mipmaps = emptyMipmaps;
+        expect(h.water["hasBilinearLakeReflectionSampler"](texture)).toBe(true);
+      } finally {
+        texture.dispose();
+        h.water.destroy();
+      }
+    },
+  );
+
   it("rejects mipmapped, nearest or repeating reflection samplers", () => {
     const h = createFootprintHarness();
     const target = new THREE.RenderTarget(32, 16);

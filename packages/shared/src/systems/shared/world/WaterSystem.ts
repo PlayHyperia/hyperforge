@@ -810,6 +810,7 @@ export class WaterSystem {
     // Check the effective sampling mode without changing the texture settings.
     return (
       !texture.generateMipmaps &&
+      texture.mipmaps.length === 0 &&
       texture.minFilter === THREE.LinearFilter &&
       texture.magFilter === THREE.LinearFilter &&
       texture.wrapS === THREE.ClampToEdgeWrapping &&
