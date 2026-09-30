@@ -22,8 +22,9 @@ type WorkerTask<T, R> = {
 interface PoolWorker<TInput = unknown, TOutput = unknown> {
   worker: Worker;
   busy: boolean;
-  taskCount: number;
   activeTask?: WorkerTask<TInput, TOutput>;
+  removeTaskListeners?: () => void;
+  removeWorkerListeners?: () => void;
 }
 
 export class WorkerPool<TInput = unknown, TOutput = unknown> {
@@ -31,6 +32,9 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
   private taskQueue: WorkerTask<TInput, TOutput>[] = [];
   private nextWorkerIndex = 0;
   private terminated = false;
+  private drainingQueue = false;
+  private totalTasksProcessed = 0;
+  private workerFailure: Error | null = null;
   /** Fallback function for synchronous execution when workers unavailable */
   private fallbackFn?: (input: TInput) => TOutput | Promise<TOutput>;
   /** True if workers are available and working */
@@ -106,14 +110,27 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
     for (let i = 0; i < poolSize; i++) {
       try {
         const worker = new Worker(url);
-        this.workers.push({
+        const poolWorker: PoolWorker<TInput, TOutput> = {
           worker,
           busy: false,
-          taskCount: 0,
-        });
-        worker.onerror = (e) => {
-          console.error(`[WorkerPool] Worker ${i} error:`, e.message);
         };
+        const handleError = (e: ErrorEvent) => {
+          console.error(`[WorkerPool] Worker ${i} error:`, e.message);
+          this.retireWorker(poolWorker, new Error(e.message || "Worker error"));
+        };
+        const handleMessageError = () => {
+          this.retireWorker(
+            poolWorker,
+            new Error("Worker message could not be deserialized"),
+          );
+        };
+        worker.addEventListener("error", handleError);
+        worker.addEventListener("messageerror", handleMessageError);
+        poolWorker.removeWorkerListeners = () => {
+          worker.removeEventListener("error", handleError);
+          worker.removeEventListener("messageerror", handleMessageError);
+        };
+        this.workers.push(poolWorker);
       } catch (e) {
         console.warn(`[WorkerPool] Failed to create worker ${i}:`, e);
       }
@@ -168,7 +185,8 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
         }
       }
       return Promise.reject(
-        new Error("WorkerPool has no workers and no fallback function"),
+        this.workerFailure ??
+          new Error("WorkerPool has no workers and no fallback function"),
       );
     }
 
@@ -180,14 +198,8 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
         reject,
       };
 
-      // Find an available worker
-      const availableWorker = this.getAvailableWorker();
-      if (availableWorker) {
-        this.runTask(availableWorker, task);
-      } else {
-        // Queue the task
-        this.taskQueue.push(task);
-      }
+      this.taskQueue.push(task);
+      this.processQueue();
     });
   }
 
@@ -214,15 +226,12 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
     initError: string | null;
   } {
     const busyCount = this.workers.filter((w) => w.busy).length;
-    const totalTasksProcessed = this.workers.reduce(
-      (sum, w) => sum + w.taskCount,
-      0,
-    );
     return {
       workerCount: this.workers.length,
       busyCount,
       queuedTasks: this.taskQueue.length,
-      totalTasksProcessed,
+      // Retiring a worker does not erase already completed replies.
+      totalTasksProcessed: this.totalTasksProcessed,
       workersAvailable: this.workersAvailable,
       initError: this.initError?.message ?? null,
     };
@@ -232,11 +241,14 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
    * Terminate all workers and clean up
    */
   terminate(): void {
+    if (this.terminated) return;
     this.terminated = true;
+    this.workersAvailable = false;
     for (const pw of this.workers) {
+      pw.removeWorkerListeners?.();
+      pw.removeWorkerListeners = undefined;
       if (pw.activeTask) {
-        pw.activeTask.reject(new Error("WorkerPool terminated"));
-        pw.activeTask = undefined;
+        this.settleTask(pw, pw.activeTask, new Error("WorkerPool terminated"));
       }
       pw.worker.terminate();
     }
@@ -270,50 +282,107 @@ export class WorkerPool<TInput = unknown, TOutput = unknown> {
     poolWorker.activeTask = task;
 
     const handleMessage = (e: MessageEvent) => {
-      poolWorker.worker.removeEventListener("message", handleMessage);
-      poolWorker.worker.removeEventListener("error", handleError);
-      poolWorker.busy = false;
-      poolWorker.activeTask = undefined;
-      poolWorker.taskCount++;
-
-      if (e.data.error) {
-        task.reject(new Error(e.data.error));
-      } else {
-        task.resolve(e.data.result as TOutput);
+      if (poolWorker.activeTask !== task) return;
+      try {
+        const error = e.data.error ? new Error(e.data.error) : null;
+        const result = e.data.result as TOutput;
+        this.totalTasksProcessed++;
+        this.settleTask(poolWorker, task, error, result);
+      } catch (error) {
+        this.retireWorker(poolWorker, this.asError(error));
       }
-
       this.processQueue();
     };
-
-    const handleError = (e: ErrorEvent) => {
+    poolWorker.removeTaskListeners = () => {
       poolWorker.worker.removeEventListener("message", handleMessage);
-      poolWorker.worker.removeEventListener("error", handleError);
-      poolWorker.busy = false;
-      poolWorker.activeTask = undefined;
-
-      task.reject(new Error(e.message || "Worker error"));
-
-      this.processQueue();
     };
-
     poolWorker.worker.addEventListener("message", handleMessage);
-    poolWorker.worker.addEventListener("error", handleError);
 
-    // Send task to worker
-    if (task.transfers && task.transfers.length > 0) {
-      poolWorker.worker.postMessage(task.data, task.transfers);
-    } else {
-      poolWorker.worker.postMessage(task.data);
+    try {
+      if (task.transfers && task.transfers.length > 0) {
+        poolWorker.worker.postMessage(task.data, task.transfers);
+      } else {
+        poolWorker.worker.postMessage(task.data);
+      }
+    } catch (error) {
+      const failure = this.asError(error);
+      if (failure.name === "DataCloneError") {
+        // Serialization rejected this request before enqueueing it. The
+        // worker is still healthy; release only this task's ownership.
+        this.settleTask(poolWorker, task, failure);
+      } else {
+        // Unknown transport failure: preserve neither its capacity nor a
+        // speculative retry of possibly transferred input.
+        this.retireWorker(poolWorker, failure);
+      }
     }
   }
 
-  private processQueue(): void {
-    if (this.taskQueue.length === 0) return;
+  private asError(error: unknown): Error {
+    if (error instanceof Error) return error;
+    const result = new Error(String(error));
+    // DOMExceptions from another realm need not inherit this realm's Error.
+    // Preserve the classification of genuine structured-clone rejection.
+    if (
+      error &&
+      typeof error === "object" &&
+      "name" in error &&
+      typeof error.name === "string"
+    ) {
+      result.name = error.name;
+    }
+    return result;
+  }
 
-    const availableWorker = this.getAvailableWorker();
-    if (availableWorker) {
-      const task = this.taskQueue.shift()!;
-      this.runTask(availableWorker, task);
+  private settleTask(
+    worker: PoolWorker<TInput, TOutput>,
+    task: WorkerTask<TInput, TOutput>,
+    error: Error | null,
+    result?: TOutput,
+  ): void {
+    if (worker.activeTask !== task) return;
+    worker.removeTaskListeners?.();
+    worker.removeTaskListeners = undefined;
+    worker.activeTask = undefined;
+    worker.busy = false;
+    if (error) task.reject(error);
+    else task.resolve(result as TOutput);
+  }
+
+  private retireWorker(
+    worker: PoolWorker<TInput, TOutput>,
+    error: Error,
+  ): void {
+    const index = this.workers.indexOf(worker);
+    if (index < 0) return;
+    this.workers.splice(index, 1);
+    this.nextWorkerIndex %= Math.max(1, this.workers.length);
+    this.workersAvailable = this.workers.length > 0;
+    this.workerFailure = error;
+    worker.removeWorkerListeners?.();
+    worker.removeWorkerListeners = undefined;
+    if (worker.activeTask) this.settleTask(worker, worker.activeTask, error);
+    worker.worker.terminate();
+    this.processQueue();
+  }
+
+  private processQueue(): void {
+    if (this.terminated || this.drainingQueue) return;
+    this.drainingQueue = true;
+    try {
+      while (this.taskQueue.length > 0) {
+        if (!this.workersAvailable) {
+          const error =
+            this.workerFailure ?? new Error("WorkerPool has no usable workers");
+          for (const task of this.taskQueue.splice(0)) task.reject(error);
+          break;
+        }
+        const availableWorker = this.getAvailableWorker();
+        if (!availableWorker) break;
+        this.runTask(availableWorker, this.taskQueue.shift()!);
+      }
+    } finally {
+      this.drainingQueue = false;
     }
   }
 }

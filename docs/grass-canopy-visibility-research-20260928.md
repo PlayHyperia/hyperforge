@@ -1,5 +1,15 @@
 # Grass canopy visibility: research checkpoint
 
+## Source187: failed worker tasks settle without losing healthy capacity
+
+The shared WorkerPool now releases a request rejected by structured clone without stranding its healthy worker. Genuine worker errors retire that worker, reject its active task and any queue left without capacity, and preserve surviving workers. Queue draining is iterative, listeners and tasks are settled once, termination is idempotent, and completed-reply counters survive retirement. Already admitted failed work is never automatically retried or sent to the fallback; a new explicit request may still use the caller's existing fallback. No pool size, deadline, generation algorithm, content or quality setting changes.
+
+Meaningful baseline RED reproduces `busyCount=1` after a real uncloneable submission. The final ten checks use actual Node worker threads and structured clone behind a browser-API adapter, plus a separately identified genuine foreign-realm error-normalization check. Root independently repeats them and the actual vegetation/terrain lifecycle suites: **78/78 pass**. Production vegetation output is deterministic in the candidate fixture, SHA256 `827b11270dbf914d2796ed02f18d00cbb1d3a7c298f8b8a8f7f1690bcbdfb122`; the baseline fixture also passed, but its retained log has no output hash, so this is not a baseline byte-comparison claim. Strict lint/format/diff checks and independent review pass. Matched semantic checking covers729 roots and2,631 stable inputs, with one identical inherited flower-export diagnostic and no added diagnostics. The new test file is identical in both type-check graphs; this is not whole-project green.
+
+Evidence: `workerpool187-red01`, `workerpool187-green03`, `workerpool187-root-tests01`, `workerpool187-root-lifecycle01`, `workerpool187-lint01` and `workerpool187-root-types02` in the service-layout evidence directory. The failed GREEN02 test-realm setup and root types01 module-URL harness error remain retained; their corrections do not alter production behavior. Browser `messageerror` retirement is source-reviewed, not reproduced natively. Native loading causation, silent-worker lifetime policy, repeatable entry and 2× performance remain open. Public3333/build174 is not promoted by this source checkpoint.
+
+The next startup run must use existing `traceInit=1` from first entry:100% asset/system progress is emitted before `World.start()` completes. The last unmatched start trace identifies the awaited system; unfinished vegetation counts or deferred LOD queues alone do not prove a pending startup promise.
+
 ## Native186: initial tiles finish; world entry still unqualified
 
 The exact private build186 admission passes seven positive/negative checks, including rejection of missing/invalid readiness opt-in and rejection of the build185-only adaptive controller on186. The previous183/184 census and185 adaptive admissions remain valid. Runtime report/framework pins match the built bytes; the bootstrap is unchanged. No adaptive controller, shader census, quality reduction or automatic benchmark is enabled.
