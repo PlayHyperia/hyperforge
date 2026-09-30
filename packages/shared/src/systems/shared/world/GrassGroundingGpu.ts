@@ -1053,26 +1053,53 @@ export class AdaptiveGrassDrawOwner {
     this.material = mesh.material;
     this.materialVersion = mesh.material.version;
     this.positionNode = mesh.material.positionNode;
-    const records = new Uint32Array((prepared.quadrants.length + 1) * 5);
-    records.set([index.count, prepared.data.count, 0, 0, 0]);
+    const records = [index.count, prepared.data.count, 0, 0, 0];
+    const rangeOffsets: number[][] = prepared.quadrants.map(() => []);
     prepared.quadrants.forEach((quadrant, i) => {
-      records.set(
-        [index.count, quadrant.count, 0, 0, quadrant.start],
-        (i + 1) * 5,
-      );
+      rangeOffsets[i][i] = records.length * 4;
+      records.push(index.count, quadrant.count, 0, 0, quadrant.start);
     });
-    this.indirect = new IndirectStorageBufferAttribute(records, 5);
+    // Preserve singleton offsets; append only contiguous multi-range records.
+    // All-selected still uses record zero. At most ten immutable records cover
+    // four quadrants, with no per-camera uploads or changes to instance order.
+    for (let start = 0; start < prepared.quadrants.length; start++) {
+      for (let end = start + 1; end < prepared.quadrants.length; end++) {
+        const first = prepared.quadrants[start],
+          last = prepared.quadrants[end];
+        if (start === 0 && end === prepared.quadrants.length - 1) {
+          rangeOffsets[start][end] = 0;
+        } else {
+          rangeOffsets[start][end] = records.length * 4;
+          records.push(
+            index.count,
+            last.start + last.count - first.start,
+            0,
+            0,
+            first.start,
+          );
+        }
+      }
+    }
+    this.indirect = new IndirectStorageBufferAttribute(
+      new Uint32Array(records),
+      5,
+    );
     // r186 only releases indirect GPU storage via registered geometry attrs.
     geometry.setAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE, this.indirect);
     geometry.setIndirect(this.indirect, 0);
     const all = (1 << prepared.quadrants.length) - 1;
-    this.offsets = Array.from({ length: all + 1 }, (_, mask) =>
-      mask === all
-        ? [0]
-        : prepared.quadrants.flatMap((_, i) =>
-            mask & (1 << i) ? [(i + 1) * 20] : [],
-          ),
-    );
+    this.offsets = Array.from({ length: all + 1 }, (_, mask) => {
+      if (mask === all) return [0];
+      const offsets: number[] = [];
+      for (let start = 0; start < prepared.quadrants.length; start++) {
+        if (!(mask & (1 << start))) continue;
+        let end = start;
+        while (mask & (1 << (end + 1))) end++;
+        offsets.push(rangeOffsets[start][end]);
+        start = end;
+      }
+      return offsets;
+    });
     this.offsets.forEach(Object.freeze);
     this.localBounds = prepared.quadrants.map((q) =>
       paddedGrassBounds(q.bounds).translate(

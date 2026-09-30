@@ -64,7 +64,18 @@ function drain<T>(steps: Generator<string, T, void>): T {
 }
 
 describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
-  function fixture(lod: 0 | 1 | 2 = 0, partialRoad = false) {
+  function fixture(
+    lod: 0 | 1 | 2 = 0,
+    partialRoad = false,
+    points: readonly (readonly [number, number])[] = [
+      [6, 6],
+      [-6, -6],
+      [6, -6],
+      [-6, 6],
+      [7, 7],
+      [-7, -7],
+    ],
+  ) {
     const f = createSameFaceCase("fine-dense-plane");
     const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
     const template = createClumpGeometry(
@@ -72,21 +83,17 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
       layout.bladeSegments,
       FINE_GRASS_MEADOW_FIELD_SHAPE,
     );
-    const points = [
-      [6, 6],
-      [-6, -6],
-      [6, -6],
-      [-6, 6],
-      [7, 7],
-      [-7, -7],
-    ];
     const data = {
       count: points.length,
       offsets: new Float32Array(
         points.flatMap(([x, z]) => [x, 20 + x * 0.12 - z * 0.07, z]),
       ),
       rotScaleHash: new Float32Array(
-        points.flatMap((_, i) => [i * 0.7, 0.8 + i * 0.05, i / 10]),
+        points.flatMap((_, i) => [
+          (i * 0.7) % (Math.PI * 2),
+          0.8 + i * 0.05,
+          i / 10,
+        ]),
       ),
       groundColors: new Float32Array(
         points.flatMap((_, i) => [i / 20, 0.3, 0.2]),
@@ -222,6 +229,107 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
       "hex",
     );
 
+  // Read the real owner's immutable CPU table, not a fake camera/GPU result.
+  // Camera selection and transformed bounds are exercised separately below.
+  function commandsAtOffsets(
+    owner: AdaptiveGrassDrawOwner,
+    offsets: readonly number[],
+  ) {
+    return offsets.map((offset) => {
+      expect(offset % 20).toBe(0);
+      expect(offset).toBeGreaterThanOrEqual(0);
+      expect(offset + 20).toBeLessThanOrEqual(owner.indirect.array.byteLength);
+      return Array.from({ length: 5 }, (_, component) =>
+        owner.indirect.getComponent(offset / 20, component),
+      );
+    });
+  }
+  function commandsForMask(owner: AdaptiveGrassDrawOwner, mask: number) {
+    const offsets = Reflect.get(
+      owner,
+      "offsets",
+    ) as readonly (readonly number[])[];
+    return commandsAtOffsets(owner, offsets[mask]);
+  }
+
+  it.each([1, 2, 3, 4])(
+    "coalesces all masks of %s unequal-count quadrants without changing instance order",
+    (quadrantCount) => {
+      const anchors = [
+        [-6, -6],
+        [-6, 6],
+        [6, -6],
+        [6, 6],
+      ] as const;
+      const points = anchors
+        .slice(0, quadrantCount)
+        .flatMap(([x, z], i) =>
+          Array.from({ length: i + 1 }, (_, j) => [x + j * 0.2, z] as const),
+        )
+        .reverse();
+      const f = fixture(0, false, points);
+      try {
+        const owner = f.install(),
+          original = bytes(owner.indirect.array),
+          indexCount = f.geometry.index!.count;
+        expect(f.prepared.quadrants.map((q) => q.count)).toEqual(
+          Array.from({ length: quadrantCount }, (_, i) => i + 1),
+        );
+        for (let mask = 0; mask < 1 << quadrantCount; mask++) {
+          const selected = f.prepared.quadrants.filter(
+            (_, i) => mask & (1 << i),
+          );
+          const expectedInstances = selected.flatMap((q) =>
+            Array.from({ length: q.count }, (_, i) => q.start + i),
+          );
+          const commands = commandsForMask(owner, mask);
+          const actualInstances = commands.flatMap((command) => {
+            expect(command.slice(0, 1)).toEqual([indexCount]);
+            expect(command.slice(2, 4)).toEqual([0, 0]);
+            return Array.from({ length: command[1] }, (_, i) => command[4] + i);
+          });
+          expect(actualInstances).toEqual(expectedInstances);
+          expect(
+            actualInstances.map((i) => f.prepared.renderSourceIndices[i]),
+          ).toEqual(
+            expectedInstances.map(
+              (i) => f.result.sourceIndices[f.prepared.renderOrder[i]],
+            ),
+          );
+          const runCount = selected.filter(
+            (q, i) =>
+              i === 0 ||
+              q.start !== selected[i - 1].start + selected[i - 1].count,
+          ).length;
+          expect(commands).toHaveLength(runCount);
+          expect(commandsForMask(owner, mask)).toEqual(commands);
+        }
+        expect(bytes(owner.indirect.array)).toBe(original);
+        expect(owner.indirect.version).toBe(0);
+        expect(owner.indirect.array.byteLength).toBeLessThanOrEqual(200);
+      } finally {
+        f.close();
+      }
+    },
+  );
+
+  it("coalesces adjacent ranges but retains a gap in mixed selection commands", () => {
+    const f = fixture();
+    try {
+      const owner = f.install(),
+        indexCount = f.geometry.index!.count;
+      expect(commandsForMask(owner, 0b1011)).toEqual([
+        [indexCount, 3, 0, 0, 0],
+        [indexCount, 2, 0, 0, 4],
+      ]);
+      expect(commandsForMask(owner, 0b1110)).toEqual([
+        [indexCount, 4, 0, 0, 2],
+      ]);
+    } finally {
+      f.close();
+    }
+  });
+
   it.each([0, 1, 2] as const)(
     "LOD%s stable permutation preserves every attribute/root/mask byte and original provenance",
     (lod) => {
@@ -320,8 +428,33 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
           0,
           0,
           4,
+          indexCount,
+          3,
+          0,
+          0,
+          0,
+          indexCount,
+          4,
+          0,
+          0,
+          0,
+          indexCount,
+          2,
+          0,
+          0,
+          2,
+          indexCount,
+          4,
+          0,
+          0,
+          2,
+          indexCount,
+          3,
+          0,
+          0,
+          3,
         ]);
-        expect(owner.indirect.array.byteLength).toBe(100);
+        expect(owner.indirect.array.byteLength).toBe(200);
         expect(f.geometry.getAttribute(GRASS_ADAPTIVE_INDIRECT_ATTRIBUTE)).toBe(
           owner.indirect,
         );
@@ -419,8 +552,8 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
       const owner = f.install(),
         original = bytes(owner.indirect.array);
       expect(owner.selectCamera(camera())).toEqual([0]);
-      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
-      expect(owner.selectCamera(camera(1, 20))).toEqual([60, 80]);
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([100]);
+      expect(owner.selectCamera(camera(1, 20))).toEqual([180]);
       expect(owner.selectCamera(camera(30, 40))).toEqual([]);
       const held = owner.selectCamera(camera(-20, -1));
       expect(owner.selectCamera(camera(-20, -1))).toBe(held);
@@ -472,7 +605,7 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
         view.coordinateSystem,
         view.reversedDepth,
       );
-      const expected = f.prepared.quadrants.flatMap((q, i) => {
+      const expected = f.prepared.quadrants.flatMap((q) => {
         const b = q.bounds,
           pad = Math.max(
             0.001,
@@ -484,11 +617,18 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
         )
           .expandByScalar(pad)
           .applyMatrix4(f.mesh.matrixWorld);
-        return frustum.intersectsBox(box) ? [(i + 1) * 20] : [];
+        return frustum.intersectsBox(box)
+          ? Array.from({ length: q.count }, (_, i) => q.start + i)
+          : [];
       });
-      expect(owner.selectCamera(view)).toEqual(
-        expected.length === 4 ? [0] : expected,
-      );
+      const selected = owner.selectCamera(view);
+      if (!Array.isArray(selected))
+        throw Error("Expected current immutable ranges");
+      expect(
+        commandsAtOffsets(owner, selected).flatMap((command) =>
+          Array.from({ length: command[1] }, (_, i) => command[4] + i),
+        ),
+      ).toEqual(expected);
       view.projectionMatrix.elements[0] = NaN;
       expect(owner.selectCamera(view)).toBe(0);
       expect(owner.selectCamera(new THREE.ArrayCamera())).toBe(0);
@@ -508,14 +648,14 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
       mirror.lookAt(0, 20, 0);
       mirror.setViewOffset(200, 100, 0, 0, 100, 100);
       mirror.updateMatrixWorld(true);
-      expect(owner.selectCamera(mirror)).toEqual([20, 40]);
+      expect(owner.selectCamera(mirror)).toEqual([100]);
       // Oblique near-plane row, as used by planar reflection cameras.
       mirror.projectionMatrix.elements[2] = 0.02;
       mirror.projectionMatrix.elements[6] = -0.01;
-      expect(owner.selectCamera(mirror)).toEqual([20, 40]);
+      expect(owner.selectCamera(mirror)).toEqual([100]);
       expect(owner.selectCamera(camera())).toEqual([0]);
       mirror.setViewOffset(200, 100, 100, 0, 100, 100);
-      expect(owner.selectCamera(mirror)).toEqual([60, 80]);
+      expect(owner.selectCamera(mirror)).toEqual([180]);
     } finally {
       f.close();
     }
@@ -589,7 +729,7 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
     const f = fixture();
     try {
       const owner = f.install();
-      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([100]);
       f.geometry.getAttribute("instanceOffset").needsUpdate = true;
       expect(owner.selectCamera(camera(-20, -1))).toBeNull();
       const foreign = () => {};
@@ -674,7 +814,7 @@ describe("adaptive indirect grounded grass (actual Three CPU objects)", () => {
     const f = fixture();
     try {
       const owner = f.install();
-      expect(owner.selectCamera(camera(-20, -1))).toEqual([20, 40]);
+      expect(owner.selectCamera(camera(-20, -1))).toEqual([100]);
       f.material.positionNode = attribute("position", "vec3");
       expect(owner.selectCamera(camera(-20, -1))).toBeNull();
       owner.resetAfterRender();
