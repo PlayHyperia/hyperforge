@@ -7,6 +7,7 @@ import { PlayerEntity } from "../../../entities/player/PlayerEntity";
 import THREE from "../../../extras/three/three";
 import { resolveZoneNavigationMode } from "../../../runtime/clientViewportMode";
 import type { WorldArea } from "../../../types/core/core";
+import type { ZoneProperties } from "../../../types/death";
 import { ZoneDetectionSystem } from "../../shared/death/ZoneDetectionSystem";
 import { Entities } from "../../shared/entities/Entities";
 import { Chat } from "../../shared/presentation/Chat";
@@ -110,6 +111,95 @@ type ZoneVisualInspection = {
 // No renderer or canvas implementation is substituted; this is not native
 // GPU, minimap-layout or ordinary marker-art qualification.
 describe("minimap navigation preserves actual zone safety warnings", () => {
+  it("preserves repeated boundary and smallest-overlap lookups", async () => {
+    const areas: WorldArea[] = (
+      [
+        ["test_boundary_pvp", 10001, 10005, 10002, 10008, false, true],
+        ["test_boundary_wild", 10002, 10004, 10004, 10006, false, false],
+        ["test_boundary_safe", 10000, 10040, 10000, 10020, true, false],
+      ] as const
+    ).map(([id, minX, maxX, minZ, maxZ, safeZone, pvpEnabled]) => ({
+      id,
+      name: id,
+      description: "Overlapping boundary CPU regression input",
+      difficultyLevel: 0,
+      bounds: { minX, maxX, minZ, maxZ },
+      biomeType: "plains",
+      safeZone,
+      pvpEnabled,
+      npcs: [],
+      resources: [],
+      mobSpawns: [],
+    }));
+    const originalAreas = areas.map((area) => ALL_WORLD_AREAS[area.id]);
+    const world = new World();
+    // An external runner can inspect actual stdout between these markers;
+    // no console replacement or fake world/zone implementation is installed.
+    const traceStdout = process.env.HYPERIA_ZONE_LOOKUP_STDOUT_PROBE === "1";
+    try {
+      for (const area of areas) ALL_WORLD_AREAS[area.id] = area;
+      const detection = world.register(
+        "zone-detection",
+        ZoneDetectionSystem,
+      ) as ZoneDetectionSystem;
+      await detection.init();
+
+      const inside = { x: 10004.9, z: 10003 };
+      const outside = { x: 10005.1, z: 10003 };
+      // The boundary bisects one cache cell: caching either result would be
+      // incorrect for its neighbour, even during repeated stationary checks.
+      expect(Math.floor(inside.x / 2)).toBe(Math.floor(outside.x / 2));
+      const cases = [
+        [inside, "test_boundary_pvp", false, true, true],
+        [outside, "test_boundary_safe", true, false, false],
+        [{ x: 10001, z: 10003 }, "test_boundary_safe", true, false, false],
+        [{ x: 10005, z: 10003 }, "test_boundary_pvp", false, true, true],
+        [{ x: 10003, z: 10005 }, "test_boundary_wild", false, false, true],
+      ] as const;
+      const results: ZoneProperties[] = [];
+      if (traceStdout) process.stdout.write("ZONE_LOOKUP_STDOUT_BEGIN\n");
+      try {
+        for (let repeat = 0; repeat < 4; repeat++) {
+          for (const [
+            position,
+            id,
+            isSafe,
+            isPvPEnabled,
+            isWilderness,
+          ] of cases) {
+            const result = detection.getZoneProperties(position);
+            expect(result).toMatchObject({
+              id,
+              isSafe,
+              isPvPEnabled,
+              isWilderness,
+            });
+            results.push(result);
+          }
+        }
+        const interior = detection.getZoneProperties({ x: 10020, z: 10010 });
+        expect(interior.id).toBe("test_boundary_safe");
+        expect(detection.getZoneProperties({ x: 10020, z: 10010 })).toBe(
+          interior,
+        );
+      } finally {
+        if (traceStdout) process.stdout.write("ZONE_LOOKUP_STDOUT_END\n");
+      }
+      if (traceStdout) {
+        process.stdout.write(
+          `ZONE_LOOKUP_RESULTS ${JSON.stringify(results)}\n`,
+        );
+      }
+    } finally {
+      world.destroy();
+      areas.forEach((area, index) => {
+        const original = originalAreas[index];
+        if (original) ALL_WORLD_AREAS[area.id] = original;
+        else delete ALL_WORLD_AREAS[area.id];
+      });
+    }
+  });
+
   it("allocates no world markers and retains safe/PvP/wilderness transition messages", async () => {
     visit("/play?zoneNavigation=minimap-v1");
     const areas: WorldArea[] = (

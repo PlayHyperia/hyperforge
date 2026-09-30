@@ -186,14 +186,6 @@ export class ZoneDetectionSystem extends SystemBase {
     let bestMatch: { area: WorldArea; size: number } | null = null;
     const allAreas = Object.values(ALL_WORLD_AREAS) as WorldArea[];
 
-    // Debug: log all available zones
-    console.log(
-      `[ZoneDetection] Checking ${allAreas.length} zones for position (${position.x.toFixed(1)}, ${position.z.toFixed(1)})`,
-    );
-    console.log(
-      `[ZoneDetection] Available zones: ${allAreas.map((a) => a.id).join(", ")}`,
-    );
-
     for (const area of allAreas) {
       const isDuelArena = area.id === "duel_arena";
       const boundsList = isDuelArena
@@ -215,20 +207,12 @@ export class ZoneDetectionSystem extends SystemBase {
         if (inBounds) {
           // Compare the actual matching component, not its enclosing rectangle.
           const zoneSize = (maxX - minX) * (maxZ - minZ);
-          console.log(`[ZoneDetection] MATCH: ${area.id} (size: ${zoneSize})`);
-
           // Keep the smallest matching zone
           if (!bestMatch || zoneSize < bestMatch.size) {
             bestMatch = { area, size: zoneSize };
           }
         }
       }
-    }
-
-    if (bestMatch) {
-      console.log(
-        `[ZoneDetection] Selected: ${bestMatch.area.id} (smallest match)`,
-      );
     }
 
     // Return the smallest matching zone
