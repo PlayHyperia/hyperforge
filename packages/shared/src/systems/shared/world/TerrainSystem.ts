@@ -325,6 +325,7 @@ export class TerrainSystem extends System {
   public instancedMeshManager!: InstancedMeshManager;
   private _terrainInitialized = false;
   private _initialTilesReady = false; // Track when initial tiles are loaded
+  private initialTileLoading: Promise<void> | null = null;
   private destroyed = false;
   private canonicalGroundInitialized = false;
   private canonicalHeightRevision = 0;
@@ -2521,7 +2522,8 @@ export class TerrainSystem extends System {
     // Road influence can be refreshed later when the road network finishes.
     // This keeps first entry into the world off the critical path for roads/towns.
     if (!this._initialTilesReady) {
-      this.loadInitialTiles();
+      const initialTiles = this.loadInitialTiles();
+      if (initialTiles) await initialTiles;
     }
     if (
       this.runtimeIsClient &&
@@ -3989,7 +3991,76 @@ export class TerrainSystem extends System {
     return centers;
   }
 
-  private loadInitialTiles(): void {
+  private loadInitialTiles(): void | Promise<void> {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
+    if (this._initialTilesReady) return;
+    if (this.initialTileLoading) return this.initialTileLoading;
+    const steps = this.generateInitialTileSteps();
+    if (!this.runtimeIsClient) {
+      // Authoritative walkability and content remain synchronous on the server.
+      for (const _step of steps) {
+        // Drain the same ordered tile assembly without introducing task yields.
+      }
+      return;
+    }
+
+    // Publish the owner before assembly can emit re-entrant tile events.
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const loading = new Promise<void>((resolveLoading, rejectLoading) => {
+      resolve = resolveLoading;
+      reject = rejectLoading;
+    });
+    this.initialTileLoading = loading;
+    void this.loadInitialTilesCooperatively(steps).then(resolve, reject);
+    return loading;
+  }
+
+  private async loadInitialTilesCooperatively(
+    steps: Generator<void, void, unknown>,
+  ): Promise<void> {
+    const maxTiles = this.maxTilesPerFrame;
+    const budgetMs = this.generationBudgetMsPerFrame;
+    let processed = 0;
+    let sliceStart = performance.now();
+    try {
+      for (;;) {
+        if (steps.next().done) return;
+        processed++;
+        if (
+          processed >= maxTiles ||
+          performance.now() - sliceStart >= budgetMs
+        ) {
+          // A task boundary lets worker messages, input and retirement run.
+          // One tile stays atomic; its geometry/physics publication is unchanged.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          processed = 0;
+          sliceStart = performance.now();
+        }
+      }
+    } finally {
+      steps.return();
+    }
+  }
+
+  private *generateInitialTileSteps(): Generator<void, void, unknown> {
+    const profile = this.activeTerrainProfile;
+    const revision = this.canonicalHeightRevision;
+    const tileSize = this.CONFIG.TILE_SIZE;
+    const tileResolution = this.CONFIG.TILE_RESOLUTION;
+    const assertCurrent = () => {
+      if (this.destroyed)
+        throw new Error("Terrain destroyed during initial tile generation");
+      if (
+        this.activeTerrainProfile !== profile ||
+        this.canonicalHeightRevision !== revision ||
+        this.CONFIG.TILE_SIZE !== tileSize ||
+        this.CONFIG.TILE_RESOLUTION !== tileResolution
+      ) {
+        throw new Error("Terrain changed during initial tile generation");
+      }
+    };
+    assertCurrent();
     let _tilesGenerated = 0;
 
     // Generate initial grid around the active terrain center.
@@ -4011,6 +4082,7 @@ export class TerrainSystem extends System {
 
     for (let dx = -ringRange; dx <= ringRange; dx++) {
       for (let dz = -ringRange; dz <= ringRange; dz++) {
+        assertCurrent();
         const generateContent =
           Math.abs(dx) <= coreRange && Math.abs(dz) <= coreRange;
         const tile = this.generateTile(
@@ -4021,6 +4093,8 @@ export class TerrainSystem extends System {
         _tilesGenerated++;
         if (generateContent) fullTiles++;
         else terrainOnlyTiles++;
+        assertCurrent();
+        yield;
       }
     }
 
@@ -4034,6 +4108,7 @@ export class TerrainSystem extends System {
     const preparationTileKeys = new Set<string>();
     this.addServerLaunchPreparationTiles(preparationTileKeys);
     for (const key of preparationTileKeys) {
+      assertCurrent();
       const resident = this.terrainTiles.get(key);
       if (resident) {
         this.enqueueTileForGeneration(resident.x, resident.z, true);
@@ -4044,9 +4119,12 @@ export class TerrainSystem extends System {
       _tilesGenerated++;
       fullTiles++;
       launchPreparationTiles++;
+      assertCurrent();
+      yield;
     }
 
     // Debug: Log flat zone statistics
+    assertCurrent();
     console.log(
       `[TerrainSystem] Initial tiles generated around (${centerTileX}, ${centerTileZ}). ` +
         `Tiles: ${_tilesGenerated} (full=${fullTiles}, terrain-only=${terrainOnlyTiles}). ` +
