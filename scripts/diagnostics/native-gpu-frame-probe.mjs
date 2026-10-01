@@ -1683,3 +1683,808 @@ export function summarizeNativePhysicalGpuFrames(raw) {
     observerReadbackBatches: raw.batches.length,
   };
 }
+
+// Independent CPU-only diagnostic. Historical GPU schemas above stay intact.
+// Self-contained so native console delivery does not need the Node summarizers.
+export function installNativeCpuFrameObserver({
+  durationMs = 30000,
+  maxRows = 12000,
+  label = "metal-cpu",
+} = {}) {
+  const key = "__HYPERIA_NATIVE_CPU_FRAME_OBSERVER01__";
+  const need = (ok, message) => {
+    if (!ok) throw Error("Native CPU observer: " + message);
+  };
+  need(
+    Number.isFinite(durationMs) && durationMs >= 1000 && durationMs <= 60000,
+    "duration must be 1–60 seconds",
+  );
+  need(
+    Number.isSafeInteger(maxRows) && maxRows >= 2 && maxRows <= 20000,
+    "bounded row capacity required",
+  );
+  need(
+    typeof label === "string" && /^[\w-]{1,64}$/.test(label),
+    "bounded label required",
+  );
+  const w = window.world,
+    g = w?.graphics,
+    r = g?.renderer,
+    b = r?.backend;
+  const device = b?.device,
+    camera = w?.camera,
+    scene = w?.stage?.scene;
+  const runtime = w?.getSystem("client-runtime"),
+    cameraSystem = w?.getSystem("client-camera-system");
+  const player = w?.entities?.player,
+    terrain = w?.getSystem("terrain");
+  const gate = g?.opaqueLoadingRenderGate,
+    water = terrain?.waterSystem;
+  need(
+    !Object.hasOwn(window, key) &&
+      w &&
+      g &&
+      r &&
+      b?.isWebGPUBackend &&
+      device &&
+      !r._isDeviceLost,
+    "exclusive live WebGPU owner required",
+  );
+  const noGpuObserver = () =>
+    b.trackTimestamp === false &&
+    b.timestampQueryPool.render === null &&
+    b.timestampQueryPool.compute === null &&
+    !window.__HYPERIA_GPU_FRAME_PROBE01__ &&
+    !window.__HYPERIA_GPU_PHYSICAL_PROBE02__ &&
+    !window.__HYPERIA_NORMAL_PLAYER_PASS_TIMING235__ &&
+    !window.__pondReview?.nativePassTiming;
+  need(noGpuObserver(), "CPU-only capture requires no active GPU observer");
+  need(
+    player &&
+      w.entities.get(player.id) === player &&
+      player.data.owner === w.network.id,
+    "registered local player required",
+  );
+  need(
+    runtime && cameraSystem && camera && scene && terrain && water && gate,
+    "actual runtime, camera, terrain and gate owners required",
+  );
+  need(
+    typeof w.tick === "function" &&
+      typeof g.render === "function" &&
+      typeof r.getAnimationLoop === "function",
+    "ordinary native loop required",
+  );
+  need(
+    [
+      "owner",
+      "destroyed",
+      "generation",
+      "successfulPrimarySubmissions",
+      "skippedSubmissions",
+    ].every((name) => Object.hasOwn(gate, name)),
+    "source-owned loading gate fields required",
+  );
+  need(
+    [
+      "streamRenderFramePacer",
+      "forcedTickInterval",
+      "disableVisibilityThrottle",
+    ].every((name) => Object.hasOwn(runtime, name)),
+    "source-owned runtime pacing fields required",
+  );
+  const columns = Object.freeze([
+    "tickStartMs",
+    "tickEndMs",
+    "tickCpuMs",
+    "tickStartIntervalMs",
+    "tickCompletionIntervalMs",
+    "graphicsRenderCpuMs",
+    "graphicsRenderCalls",
+    "firstRenderStartMs",
+    "lastRenderEndMs",
+    "worldFrameBefore",
+    "worldFrameAfter",
+    "rendererFrameBefore",
+    "rendererFrameAfter",
+    "rendererRenderCallsDelta",
+    "successfulPrimarySubmissionsDelta",
+    "inputTimestampMs",
+    "visible",
+    "focused",
+    "nativeThrew",
+  ]);
+  const stride = columns.length,
+    rows = new Float64Array(maxRows * stride);
+  const hooks = [],
+    errors = [],
+    clockAlignments = [];
+  const installedAt = performance.now(),
+    installDeadline = installedAt + 120000;
+  const timeOrigin = performance.timeOrigin,
+    href = location.href;
+  const originalRendererRender = r.render,
+    originalBackendDraw = b.draw,
+    originalBackendBegin = b.beginRender;
+  const composer = g.composer,
+    composerRender = composer?.render,
+    cameraParent = camera.parent;
+  const animationLoop = r.getAnimationLoop(),
+    pacer = runtime.streamRenderFramePacer;
+  const pacerInterval = pacer?.intervalMs ?? null,
+    disableThrottle = runtime.disableVisibilityThrottle;
+  const gateGeneration = gate.generation;
+  const quality = () => [
+    r.getPixelRatio(),
+    r.domElement.width,
+    r.domElement.height,
+    g.width,
+    g.height,
+    r.samples,
+    r.shadowMap.enabled,
+    r.shadowMap.type,
+    w.prefs?.shadows,
+    g.usePostprocessing,
+    w.prefs?.postprocessing,
+    w.prefs?.bloom,
+    w.prefs?.colorGrading,
+    w.prefs?.colorGradingIntensity,
+    w.prefs?.depthBlur,
+    w.prefs?.depthBlurIntensity,
+    w.prefs?.depthBlurDistance,
+    w.prefs?.waterReflections,
+    water.reflectionsEnabled,
+    r.toneMapping,
+    r.outputColorSpace,
+    composer?.getCurrentLUT?.() ?? null,
+    composer?.isLUTEnabled?.() ?? null,
+    composer?.isDepthBlurEnabled?.() ?? null,
+  ];
+  const initialQuality = quality();
+  need(
+    initialQuality[0] === 2 &&
+      r.domElement.width === Math.floor(g.width * 2) &&
+      r.domElement.height === Math.floor(g.height * 2) &&
+      r.samples === 4,
+    "native 2x/MSAA4 quality required",
+  );
+  need(
+    typeof animationLoop === "function" && runtime.forcedTickInterval === null,
+    "ordinary active animation loop required",
+  );
+  const qualityNames = [
+    "pixelRatio",
+    "canvasWidth",
+    "canvasHeight",
+    "logicalWidth",
+    "logicalHeight",
+    "samples",
+    "shadowsEnabled",
+    "shadowMapType",
+    "shadowPreference",
+    "postprocessingRoute",
+    "postprocessingPreference",
+    "bloom",
+    "colorGrading",
+    "colorGradingIntensity",
+    "depthBlur",
+    "depthBlurIntensity",
+    "depthBlurDistance",
+    "waterReflectionsPreference",
+    "waterReflectionsEnabled",
+    "toneMapping",
+    "outputColorSpace",
+    "lut",
+    "lutEnabled",
+    "depthBlurEnabled",
+  ];
+  const routeParams = new URLSearchParams(location.search);
+  const route = {
+    origin: location.origin,
+    pathname: location.pathname,
+    parameters: Object.fromEntries(
+      [
+        "page",
+        "mode",
+        "embedded",
+        "streamFps",
+        "streamRenderProfile",
+        "disableVisibilityThrottle",
+      ]
+        .filter((name) => routeParams.has(name))
+        .map((name) => [name, routeParams.get(name)]),
+    ),
+  };
+  let state = "installed",
+    count = 0,
+    activeTick = null,
+    renderDepth = 0,
+    startedAt = null,
+    finishedAt = null;
+  let lastStart = null,
+    lastEnd = null,
+    lastWorldFrame = null,
+    lastRendererFrame = null;
+  let stopReason = null,
+    errorOverflow = 0,
+    cleanup = null,
+    finalMetadata = null;
+  let initialMetadata = null,
+    startTimer = null,
+    runTimer = null,
+    watchdog = null,
+    registered = false;
+  let listenersInstalled = false,
+    observeDeviceLoss = true,
+    deviceLoss = null;
+  let resolveDone;
+  const done = new Promise((resolve) => {
+    resolveDone = resolve;
+  });
+  const errorText = (error) => {
+    try {
+      return String(error instanceof Error ? error.message : error);
+    } catch {
+      return "Unprintable diagnostic/native error";
+    }
+  };
+  const note = (error) => {
+    if (errors.length < 16) errors.push(errorText(error));
+    else errorOverflow++;
+  };
+  const alignment = (phase) => {
+    const before = performance.now(),
+      unixMs = Date.now(),
+      after = performance.now();
+    clockAlignments.push({
+      phase,
+      performanceBeforeMs: before,
+      unixMs,
+      performanceAfterMs: after,
+      timeOriginMs: performance.timeOrigin,
+    });
+  };
+  const metadata = () => {
+    const currentQuality = quality();
+    return {
+      atMs: performance.now(),
+      visibility: document.visibilityState,
+      focused: document.hasFocus(),
+      worldFrame: w.frame,
+      rendererFrame: r.info.frame,
+      gate: gate.getStatus(),
+      camera: {
+        id: camera.id,
+        parentId: camera.parent?.id ?? null,
+        position: camera.position.toArray(),
+        quaternion: camera.quaternion.toArray(),
+        fov: camera.fov,
+        near: camera.near,
+        far: camera.far,
+      },
+      player: { id: player.id, position: player.position.toArray() },
+      exposure: r.toneMappingExposure,
+      phase: w.getSystem("environment")?.skySystem?.dayPhase ?? null,
+      pacing: {
+        streamPacerActive: runtime.streamRenderFramePacer !== null,
+        intervalMs: runtime.streamRenderFramePacer?.intervalMs ?? null,
+        forcedTickIntervalActive: runtime.forcedTickInterval !== null,
+        disableVisibilityThrottle: runtime.disableVisibilityThrottle,
+      },
+      quality: Object.fromEntries(
+        qualityNames.map((name, index) => [name, currentQuality[index]]),
+      ),
+    };
+  };
+  const sameDescriptor = (a, z) =>
+    a === undefined
+      ? z === undefined
+      : Boolean(
+          z &&
+          [
+            "value",
+            "writable",
+            "enumerable",
+            "configurable",
+            "get",
+            "set",
+          ].every((name) => a[name] === z[name]),
+        );
+  const guard = () => {
+    need(noGpuObserver(), "GPU observer appeared during CPU-only capture");
+    need(
+      window.world === w &&
+        w.graphics === g &&
+        g.renderer === r &&
+        r.backend === b &&
+        b.device === device &&
+        !r._isDeviceLost,
+      "renderer owner/device changed",
+    );
+    need(
+      w.entities.player === player &&
+        w.entities.get(player.id) === player &&
+        player.data.owner === w.network.id &&
+        w.camera === camera &&
+        camera.parent === cameraParent &&
+        w.stage.scene === scene &&
+        w.getSystem("client-camera-system") === cameraSystem,
+      "player/camera/scene owner changed",
+    );
+    need(
+      w.getSystem("terrain") === terrain &&
+        terrain.waterSystem === water &&
+        g.opaqueLoadingRenderGate === gate &&
+        w.getSystem("client-runtime") === runtime,
+      "system owner changed",
+    );
+    need(
+      r.render === originalRendererRender &&
+        b.draw === originalBackendDraw &&
+        b.beginRender === originalBackendBegin &&
+        g.composer === composer &&
+        composer?.render === composerRender &&
+        r.getAnimationLoop() === animationLoop,
+      "render/loop owner changed",
+    );
+    need(
+      hooks.every((hook) => hook.owner[hook.name] === hook.wrapper) &&
+        (!registered || window[key] === controller),
+      "diagnostic hook owner changed",
+    );
+    need(
+      location.href === href &&
+        performance.timeOrigin === timeOrigin &&
+        runtime.streamRenderFramePacer === pacer &&
+        (pacer?.intervalMs ?? null) === pacerInterval &&
+        runtime.disableVisibilityThrottle === disableThrottle &&
+        runtime.forcedTickInterval === null,
+      "route/pacing changed",
+    );
+    need(
+      !document.hidden &&
+        document.visibilityState === "visible" &&
+        document.hasFocus(),
+      "document hidden or unfocused",
+    );
+    need(
+      gate.owner === null &&
+        gate.destroyed === false &&
+        gate.generation === gateGeneration,
+      "loading cover changed",
+    );
+    need(
+      quality().every((value, index) =>
+        Object.is(value, initialQuality[index]),
+      ),
+      "quality changed",
+    );
+  };
+  const snapshot = ({ includeRows = false } = {}) => {
+    need(
+      !includeRows || state === "finished",
+      "raw rows available only after cleanup",
+    );
+    return {
+      schemaVersion: "cpu-only-1",
+      label,
+      state,
+      durationMs,
+      maxRows,
+      rowsRecorded: count,
+      columns,
+      installedAtMs: installedAt,
+      startedAtMs: startedAt,
+      finishedAtMs: finishedAt,
+      stopReason,
+      clockAlignments: [...clockAlignments],
+      route,
+      initialMetadata,
+      finalMetadata,
+      cleanup,
+      errors: [...errors],
+      errorOverflow,
+      deviceLoss,
+      ...(includeRows
+        ? { rows: Array.from(rows.subarray(0, count * stride)) }
+        : {}),
+      scope:
+        "Complete synchronous world.tick and graphics.render CPU call spans with instrumentation overhead; successful primary CPU submissions, not GPU completion or physical presentation FPS. Camera and time remain live. No per-draw observer, GPU query, readback, wait, manual render, or quality mutation. Timestamp alignment is a bracketed wall-clock observation, not a proven cross-process Metal clock mapping.",
+    };
+  };
+  const finish = (reason) => {
+    if (state === "finished") return;
+    stopReason ??= reason;
+    if (activeTick || renderDepth) {
+      state = "stopping";
+      return;
+    }
+    if (startedAt !== null) {
+      try {
+        guard();
+      } catch (error) {
+        note(error);
+        stopReason =
+          stopReason === "duration" ? "invalid-evidence" : stopReason;
+      }
+    }
+    state = "finished";
+    clearTimeout(startTimer);
+    clearTimeout(runTimer);
+    clearTimeout(watchdog);
+    observeDeviceLoss = false;
+    try {
+      finalMetadata = metadata();
+      alignment("finished");
+    } catch (error) {
+      note(error);
+    }
+    let restored = true;
+    for (const hook of hooks.slice().reverse()) {
+      try {
+        if (hook.owner[hook.name] !== hook.wrapper) {
+          restored = false;
+          note("Foreign hook not overwritten: " + hook.name);
+          continue;
+        }
+        if (hook.descriptor)
+          Object.defineProperty(hook.owner, hook.name, hook.descriptor);
+        else delete hook.owner[hook.name];
+        if (
+          !sameDescriptor(
+            Object.getOwnPropertyDescriptor(hook.owner, hook.name),
+            hook.descriptor,
+          ) ||
+          hook.owner[hook.name] !== hook.original
+        ) {
+          restored = false;
+          note("Descriptor restoration failed: " + hook.name);
+        }
+      } catch (error) {
+        restored = false;
+        note(error);
+      }
+    }
+    if (listenersInstalled) {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("pagehide", onPageHide);
+      device.removeEventListener("uncapturederror", onGpuError);
+      listenersInstalled = false;
+    }
+    if (registered && window[key] === controller) {
+      delete window[key];
+      registered = false;
+    } else if (registered) {
+      restored = false;
+      note("Foreign diagnostic owner not overwritten");
+    }
+    cleanup = {
+      hooksRestored: restored,
+      exactDescriptors: hooks.every((hook) =>
+        sameDescriptor(
+          Object.getOwnPropertyDescriptor(hook.owner, hook.name),
+          hook.descriptor,
+        ),
+      ),
+      ownerAbsent: !Object.hasOwn(window, key),
+      listenersRemoved: !listenersInstalled,
+      deviceLossObservationStopped: !observeDeviceLoss,
+    };
+    finishedAt = performance.now();
+    resolveDone(snapshot({ includeRows: true }));
+  };
+  const fail = (error) => {
+    note(error);
+    try {
+      finish("invalid-evidence");
+    } catch (cleanupError) {
+      note(cleanupError);
+    }
+  };
+  const onVisibility = () => {
+    if (
+      state === "running" &&
+      (document.hidden || document.visibilityState !== "visible")
+    )
+      fail("document-hidden");
+  };
+  const onBlur = () => {
+    if (state === "running") fail("document-unfocused");
+  };
+  const onPageHide = () => finish("pagehide");
+  const onGpuError = (event) =>
+    fail("uncaptured GPU error: " + errorText(event.error));
+  const patch = (owner, name, make) => {
+    const original = owner[name],
+      descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    need(
+      typeof original === "function" &&
+        (descriptor
+          ? descriptor.configurable === true
+          : Object.isExtensible(owner)),
+      "restorable method required: " + name,
+    );
+    const wrapper = make(original);
+    Object.defineProperty(owner, name, {
+      value: wrapper,
+      configurable: true,
+      writable: true,
+      enumerable: descriptor?.enumerable ?? false,
+    });
+    hooks.push({ owner, name, original, descriptor, wrapper });
+  };
+  const controller = Object.freeze({
+    done,
+    snapshot,
+    stop: (reason = "requested") => {
+      finish(reason);
+      return done;
+    },
+    start({ delayMs = 0 } = {}) {
+      need(state === "installed", "one run per installation");
+      need(
+        Number.isFinite(delayMs) &&
+          delayMs >= 0 &&
+          delayMs <= 30000 &&
+          performance.now() + delayMs + durationMs + 1000 < installDeadline,
+        "bounded delayed start must fit installation lifetime",
+      );
+      state = "armed";
+      const begin = () => {
+        if (state !== "armed") return;
+        try {
+          guard();
+          need(
+            g.isPrecompileIdle() &&
+              terrain.getStreamingVisualReadiness().ready &&
+              window.__HYPERIA_LOADING__?.ready,
+            "fully admitted warm world required",
+          );
+          initialMetadata = metadata();
+          alignment("started");
+          startedAt = performance.now();
+          state = "running";
+          runTimer = setTimeout(() => finish("duration"), durationMs);
+        } catch (error) {
+          fail(error);
+        }
+      };
+      if (delayMs) startTimer = setTimeout(begin, delayMs);
+      else begin();
+      return {
+        armed: state === "armed" || state === "running",
+        delayMs,
+        durationMs,
+        installDeadlineMs: installDeadline,
+      };
+    },
+  });
+  try {
+    alignment("installed");
+    patch(
+      g,
+      "render",
+      (original) =>
+        function (...args) {
+          if (state !== "running" && !activeTick)
+            return Reflect.apply(original, this, args);
+          const row = activeTick,
+            start = performance.now();
+          renderDepth++;
+          if (!row || renderDepth !== 1 || this !== g)
+            fail("off-tick, nested or foreign-this graphics render");
+          if (row) {
+            row.renderCalls++;
+            row.firstRenderStart ??= start;
+          }
+          try {
+            return Reflect.apply(original, this, args);
+          } catch (error) {
+            fail("graphics.render threw: " + errorText(error));
+            throw error;
+          } finally {
+            const end = performance.now();
+            if (row) {
+              row.renderCpuMs += end - start;
+              row.lastRenderEnd = end;
+            }
+            renderDepth--;
+            if (state === "stopping" && !activeTick) finish(stopReason);
+          }
+        },
+    );
+    patch(
+      w,
+      "tick",
+      (original) =>
+        function (...args) {
+          if (state !== "running") return Reflect.apply(original, this, args);
+          if (performance.now() - startedAt >= durationMs) {
+            finish("duration");
+            return Reflect.apply(original, this, args);
+          }
+          if (activeTick) {
+            fail("nested world tick");
+            return Reflect.apply(original, this, args);
+          }
+          try {
+            guard();
+            need(
+              this === w && count < maxRows,
+              "tick ownership or row capacity exceeded",
+            );
+          } catch (error) {
+            fail(error);
+            return Reflect.apply(original, this, args);
+          }
+          const beforeFrame = w.frame,
+            beforeRenderer = r.info.frame,
+            beforeCalls = r.info.render.calls;
+          const beforePrimary = gate.successfulPrimarySubmissions;
+          const row = {
+            renderCalls: 0,
+            renderCpuMs: 0,
+            firstRenderStart: null,
+            lastRenderEnd: null,
+            threw: false,
+          };
+          activeTick = row;
+          const start = performance.now();
+          try {
+            return Reflect.apply(original, this, args);
+          } catch (error) {
+            row.threw = true;
+            fail("world.tick threw: " + errorText(error));
+            throw error;
+          } finally {
+            const end = performance.now();
+            activeTick = null;
+            try {
+              const values = [
+                start,
+                end,
+                end - start,
+                lastStart === null ? NaN : start - lastStart,
+                lastEnd === null ? NaN : end - lastEnd,
+                row.renderCpuMs,
+                row.renderCalls,
+                row.firstRenderStart ?? NaN,
+                row.lastRenderEnd ?? NaN,
+                beforeFrame,
+                w.frame,
+                beforeRenderer,
+                r.info.frame,
+                r.info.render.calls - beforeCalls,
+                gate.successfulPrimarySubmissions - beforePrimary,
+                typeof args[0] === "number" ? args[0] : NaN,
+                !document.hidden && document.visibilityState === "visible"
+                  ? 1
+                  : 0,
+                document.hasFocus() ? 1 : 0,
+                row.threw ? 1 : 0,
+              ];
+              rows.set(values, count++ * stride);
+              guard();
+              need(
+                Number.isSafeInteger(w.frame) &&
+                  w.frame === beforeFrame + 1 &&
+                  (lastWorldFrame === null || w.frame === lastWorldFrame + 1),
+                "world frame discontinuity",
+              );
+              need(
+                Number.isSafeInteger(beforeRenderer) &&
+                  r.info.frame === beforeRenderer &&
+                  (lastRendererFrame === null ||
+                    beforeRenderer > lastRendererFrame),
+                "renderer frame discontinuity",
+              );
+              need(
+                row.renderCalls === 1 && values[13] > 0 && values[14] === 1,
+                "expected one successful ordinary primary submission",
+              );
+              lastStart = start;
+              lastEnd = end;
+              lastWorldFrame = w.frame;
+              lastRendererFrame = r.info.frame;
+              if (count === maxRows) fail("row capacity reached");
+            } catch (error) {
+              fail(error);
+            }
+            if (state === "stopping") finish(stopReason);
+          }
+        },
+    );
+    Object.defineProperty(window, key, {
+      value: controller,
+      configurable: true,
+    });
+    registered = true;
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("pagehide", onPageHide);
+    device.addEventListener("uncapturederror", onGpuError);
+    listenersInstalled = true;
+    watchdog = setTimeout(() => finish("installation-watchdog"), 120000);
+    device.lost.then(
+      (info) => {
+        if (observeDeviceLoss) {
+          deviceLoss = { reason: info.reason, message: info.message };
+          fail("GPU device lost");
+        }
+      },
+      (error) => {
+        if (observeDeviceLoss) fail(error);
+      },
+    );
+    return controller;
+  } catch (error) {
+    fail(error);
+    throw error;
+  }
+}
+
+// Pure arithmetic only. This does not manufacture or certify native evidence.
+export function summarizeNativeCpuFrameRows(columns, rows) {
+  assert(Array.isArray(columns) && Array.isArray(rows));
+  assert.equal(new Set(columns).size, columns.length);
+  assert(columns.length > 0 && rows.length % columns.length === 0);
+  const index = (name) => {
+    const value = columns.indexOf(name);
+    assert(value >= 0, "Missing CPU column: " + name);
+    return value;
+  };
+  const field = (name) => {
+    const at = index(name);
+    return Array.from(
+      { length: rows.length / columns.length },
+      (_, i) => rows[i * columns.length + at],
+    );
+  };
+  const distribution = (values) => {
+    assert(values.every((value) => Number.isFinite(value) && value >= 0));
+    const ordered = [...values].sort((a, b) => a - b);
+    const pick = (p) =>
+      ordered.length ? ordered[Math.ceil(p * ordered.length) - 1] : null;
+    return {
+      samples: ordered.length,
+      min: ordered[0] ?? null,
+      p50: pick(0.5),
+      p95: pick(0.95),
+      p99: pick(0.99),
+      max: ordered.at(-1) ?? null,
+    };
+  };
+  const starts = field("tickStartMs"),
+    ends = field("tickEndMs"),
+    ticks = field("tickCpuMs"),
+    renders = field("graphicsRenderCpuMs");
+  for (let i = 0; i < starts.length; i++) {
+    assert(
+      Number.isFinite(starts[i]) &&
+        starts[i] >= 0 &&
+        Number.isFinite(ends[i]) &&
+        ends[i] >= starts[i],
+    );
+    assert.equal(ticks[i], ends[i] - starts[i]);
+    assert(
+      renders[i] <= ticks[i],
+      "Render CPU span cannot exceed its enclosing tick",
+    );
+    if (i) assert(starts[i] >= ends[i - 1] && ends[i] >= ends[i - 1]);
+  }
+  return {
+    frames: starts.length,
+    tickCpuMs: distribution(ticks),
+    graphicsRenderCpuMs: distribution(renders),
+    startCadenceMs: distribution(
+      starts.slice(1).map((value, i) => value - starts[i]),
+    ),
+    completionCadenceMs: distribution(
+      ends.slice(1).map((value, i) => value - ends[i]),
+    ),
+    performanceApproved: false,
+    scope:
+      "CPU row arithmetic only; no lifecycle, visibility, native capture or GPU/presentation certification.",
+  };
+}

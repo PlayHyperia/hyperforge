@@ -375,3 +375,115 @@ test(
     }
   },
 );
+
+// CPU-only arithmetic/source contracts; no simulated browser or native receipt.
+test("CPU frame arithmetic separates full tick, render submission and cadence without mutation", () => {
+  const columns = [
+    "tickStartMs",
+    "tickEndMs",
+    "tickCpuMs",
+    "graphicsRenderCpuMs",
+  ];
+  const rows = [100, 110, 10, 4, 140, 155, 15, 7, 210, 230, 20, 12];
+  const before = [...rows];
+  const summary = study.summarizeNativeCpuFrameRows(columns, rows);
+  assert.deepEqual(rows, before);
+  assert.equal(summary.frames, 3);
+  assert.equal(summary.tickCpuMs.p50, 15);
+  assert.equal(summary.graphicsRenderCpuMs.p50, 7);
+  assert.equal(summary.startCadenceMs.p50, 40);
+  assert.equal(summary.startCadenceMs.max, 70);
+  assert.equal(summary.completionCadenceMs.p50, 45);
+  assert.equal(summary.completionCadenceMs.max, 75);
+  assert.equal(summary.performanceApproved, false);
+  const empty = study.summarizeNativeCpuFrameRows(columns, []);
+  assert.equal(empty.frames, 0);
+  assert.equal(empty.tickCpuMs.p50, null);
+});
+
+test("CPU row arithmetic refuses malformed spans and never interprets missing data as zero", () => {
+  const columns = [
+    "tickStartMs",
+    "tickEndMs",
+    "tickCpuMs",
+    "graphicsRenderCpuMs",
+  ];
+  for (const rows of [
+    [1, 2, 1],
+    [2, 1, -1, 0],
+    [1, 3, 1, 0],
+    [1, 2, 1, 2],
+    [1, 2, 1, NaN],
+    [1, 2, 1, null],
+    [1, Infinity, Infinity, 0],
+    [1, 3, 2, 1, 2, 4, 2, 1],
+  ])
+    assert.throws(() => study.summarizeNativeCpuFrameRows(columns, rows));
+  assert.throws(() =>
+    study.summarizeNativeCpuFrameRows(["tickCpuMs", "tickCpuMs"], []),
+  );
+  assert.throws(() => study.summarizeNativeCpuFrameRows(["tickCpuMs"], []));
+});
+
+test("CPU observer is browser-serializable, measures original complete calls and cannot issue GPU work", async () => {
+  const source = study.installNativeCpuFrameObserver.toString();
+  const serialized = new Function("return (" + source + ");")();
+  assert.equal(serialized.name, "installNativeCpuFrameObserver");
+  const compact = source.replace(/\s+/g, "").replace(/,\)/g, ")");
+  for (const forbidden of [
+    "assert(",
+    "patch(b,",
+    "patch(device,",
+    "patch(r,",
+    "setAnimationLoop(",
+    "onSubmittedWorkDone(",
+    "mapAsync(",
+    "createQuerySet(",
+    "createBuffer(",
+    "queue.submit(",
+    "requestAnimationFrame(",
+    "setPixelRatio(",
+    "g.render(",
+    "r.render(",
+    "w.tick(",
+    'preTick"',
+    'postTick"',
+  ])
+    assert(!compact.includes(forbidden), forbidden);
+  for (const required of [
+    'patch(w,"tick"',
+    'patch(g,"render"',
+    "Reflect.apply(original,this,args)",
+    "finally{",
+    "throwerror",
+    "newFloat64Array(maxRows*stride)",
+    "performance.timeOrigin",
+    "Date.now()",
+    "document.hasFocus()",
+    "gate.successfulPrimarySubmissions-beforePrimary",
+    "runtime.streamRenderFramePacer",
+    "Object.defineProperty(hook.owner,hook.name,hook.descriptor)",
+    "deletehook.owner[hook.name]",
+    'removeEventListener("blur",onBlur)',
+    "clearTimeout(watchdog)",
+  ])
+    assert(compact.includes(required), required);
+  const world = await readFile(
+    path.join(repo, "packages/shared/src/core/World.ts"),
+    "utf8",
+  );
+  const tick = world.slice(
+    world.indexOf("tick = ("),
+    world.indexOf("private _measureSystemTiming"),
+  );
+  assert(tick.includes("this.frameBudget.beginFrame()"));
+  assert(tick.includes("this.frameBudget.endFrame()"));
+  assert(
+    tick.indexOf("this.frameBudget.beginFrame()") <
+      tick.indexOf("this.preTick()"),
+  );
+  assert(
+    tick.indexOf("this.postTick()") <
+      tick.indexOf("this.frameBudget.endFrame()"),
+  );
+});
