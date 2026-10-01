@@ -1,5 +1,26 @@
 # Grass canopy visibility: research checkpoint
 
+## Native193 native-2x filter timing: no demonstrated gain
+
+The second private193 session tests the candidate's full-PCF branch against its distance filter in A/B/B/A order, with eight seconds of excluded settling and twelve seconds of measurement per block. All 48 samples come from the actual Chrome/Metal island at 3840×1926/DPR2/MSAA4, High PCF shadows, held phase 0.56 and exposure 0.850240084. Post-processing, bloom, water reflections, sun/shadow-map/depth ownership, primary camera, grass transforms/bounds/materials/buffers and streaming readiness are pinned. Wind and NPC motion remain live. This compares filter paths inside the candidate shader, **not the default shader against the candidate**.
+
+| Block | Filter | Samples | Median observed GPU-pass union | Observed range |
+| --- | --- | ---: | ---: | ---: |
+| A1 | Full PCF | 12 | 129.466 ms | 104.333–146.014 ms |
+| B1 | Distance | 12 | 139.362 ms | 103.809–150.274 ms |
+| B2 | Distance | 12 | 126.812 ms | 114.491–155.648 ms |
+| A2 | Full PCF | 12 | 124.256 ms | 99.156–148.242 ms |
+
+Root and independent review recompute BigInt timestamp interval unions, without summing overlapping passes. Pooled medians are 129.303 ms full-PCF / 131.236 ms distance: the candidate is about 1.50% slower in this observation, with broad overlap and substantial block drift. This establishes **no performance benefit**, not a reliable regression magnitude or displayed FPS. The Mac remains on AC; this is an instrumented shared-host sample, not sustained shipping acceptance.
+
+All 66 grass draws retain identical complete submitted geometry signatures across the comparison. Full-PCF uses near mode on all draws; distance uses main 2 near/17 far/15 transition and mirror 2/14/16. Both 4096² shadow passes stay at 84 draws/602,100 triangle slots each. However, the whole scene is **not invariant**: the mirror pass varies between 262/264/266 draws and 3,817,379/3,823,379/3,829,379 triangle slots; the other seven passes are stable. The varying non-grass reflection work is an additional confound, not something to hide or attribute to this filter. Nine quantized zero-duration pass segments are not free-work evidence.
+
+All four timers restore, errors and GPU errors are empty, no device loss is observed, and 144/144 owned query resources are destroyed. Original 40–70 m thresholds restore, post-check resident mode counts return to 2/53/39, and camera/clock/exposure controls are removed. Root inspects the restored daytime image but does not claim a moving-boundary qualification. Owned game/DevTools windows close while the pre-existing New Tab remains. Runtime stops at 2026-10-01T02:53:48.008Z with errors[], protected state unchanged, disposable database removed and all four private ports free. Public3333/build174 and unrelated work are unchanged.
+
+**Decision:** keep the experimental filter off by default; do not spend further visual-acceptance time or promote it on this result. Retain the option and its shader tests for future evidence, but prioritize the existing coverage-preserving LOD/work-reduction queue. Any future claim for this filter needs a repeatable matched full-scene workload, a fresh-page default comparison and the still-open moving/day-night/reflection gates. Do not blanket-disable distant grass reception: the earlier test visibly lost tree shade.
+
+Evidence: service-layout `grass-shadow193-native-runtime02` and `grass-shadow193-timing-evidence01` (receipt validation passes; explicitly no performance acceptance); inland-pond `runtime-grass-shadow193-native02/client.log`, markers `SHADOW193_TIMING_CONTROL_SOURCE_V2`, `BLOCK`, `RESULT`, `POSTCHECK`, `CLEANUP` and `EXPOSURE_RESTORED` with the same prefix. Client log SHA256:`cbfe01e8448ed38f9decfaa72c1869676127821551e67dc5fe394eefa465650b`; stopped process receipt:`fd37ed78ef865590588bf3ab063f8a361d650611a43cf9994399558eed75b75f`.
+
 ## Native193: distance-filter candidate in the actual island
 
 Canonical build193 contains exactly four production-input changes from192 (shadow helper, viewport selector, terrain wiring and grass manager); all976 input keys and nine bundles/maps are verified. Report SHA `abb10eb3e4a34e003e716f6b36b32f47cc3f2f3ba227eaa39dbac9053faf6bbf`, client framework `f2a5a46610319415569a16fa72cea3f74f716fb19d387b5f2b857a0b46d4349f`. Public174, baseline192, public listener owners and saved database mounts remain unchanged. The existing private runtime admits only the exact193 tuple;164 admission tests preserve all prior replay inverses and the unchanged ordinary bootstrap/golden query. The candidate is selected by the URL, not a default change.
