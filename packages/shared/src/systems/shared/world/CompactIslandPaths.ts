@@ -1,6 +1,7 @@
 import type {
   WorldArea,
   RoadPathPoint,
+  RoadSegmentSurface,
   WorldConfigManifest,
 } from "../../../types/world/world-types";
 import {
@@ -9,6 +10,7 @@ import {
 } from "./WorldTerrainProfile";
 import type { DuelArenaConfig } from "../../../data/duel-manifest";
 import { HOSPITAL_CENTER_X, HOSPITAL_WIDTH } from "../../../data/arena-layout";
+import pondPathProfile from "../../../data/compact-pond-path-profile-v1.json";
 import {
   createDuelArenaFloorZones,
   getDuelArenaGradeHeight,
@@ -37,6 +39,7 @@ export type CompactIslandPath = Readonly<{
   /** Explicit worn shoulders share one bounded field with terrain and grass. */
   blendWidth?: number;
   maxInfluence?: number;
+  segmentSurfaces?: readonly Readonly<RoadSegmentSurface>[];
   path: readonly Readonly<RoadPathPoint>[];
   length: number;
   /** Candidate-only paint capsules beneath specific opaque stone aprons. */
@@ -739,6 +742,35 @@ export function createCompactIslandPaths(
       );
     }
   }
+  const admitSurfaceSegment = (
+    a: Point,
+    b: Point,
+    padding: number,
+    id: string,
+  ) => {
+    if (
+      exclusions.some((bounds) =>
+        compactPathIntersectsBounds(a, b, bounds, padding),
+      )
+    )
+      throw new Error("Compact path would paint an authored floor: " + id);
+    if (
+      dockExclusions.some((bounds) =>
+        compactPathIntersectsBounds(a, b, bounds, padding),
+      )
+    )
+      throw new Error("Compact path would paint a dock: " + id);
+    if (paintsWater(a, b, padding))
+      throw new Error("Compact path would paint water: " + id);
+    const bounds = profile.bounds;
+    if (
+      Math.min(a.x, b.x) - padding < bounds.minX ||
+      Math.max(a.x, b.x) + padding > bounds.maxX ||
+      Math.min(a.z, b.z) - padding < bounds.minZ ||
+      Math.max(a.z, b.z) + padding > bounds.maxZ
+    )
+      throw new Error("Compact path leaves dry admitted terrain: " + id);
+  };
   const buildPath = (
     definition: (typeof definitions)[number],
     preserveSamples = false,
@@ -790,22 +822,7 @@ export function createCompactIslandPaths(
     for (let i = 1; i < sampled.length; i++) {
       const a = sampled[i - 1],
         b = sampled[i];
-      if (
-        exclusions.some((bounds) =>
-          compactPathIntersectsBounds(a, b, bounds, padding),
-        )
-      )
-        throw new Error(
-          "Compact path would paint an authored floor: " + definition.id,
-        );
-      if (
-        dockExclusions.some((bounds) =>
-          compactPathIntersectsBounds(a, b, bounds, padding),
-        )
-      )
-        throw new Error("Compact path would paint a dock: " + definition.id);
-      if (paintsWater(a, b, padding))
-        throw new Error("Compact path would paint water: " + definition.id);
+      admitSurfaceSegment(a, b, padding, definition.id);
       length += Math.hypot(b.x - a.x, b.z - a.z);
     }
     const path = sampled.map((point) => {
@@ -1271,8 +1288,129 @@ export function createCompactIslandPaths(
     // prefix: floating-point one-metre lengths can otherwise split old samples.
     const approach = buildPath({ ...definition, points }, true);
     const dockJunction = closestPoint(approach, pondArrival, false).point;
+    const style = pondPathProfile;
+    if (
+      style.version !== 1 ||
+      style.routeId !== approach.id ||
+      style.knots.length < 4 ||
+      style.knots.length > 6 ||
+      style.knots[0].fraction !== 0 ||
+      style.knots.at(-1)!.fraction !== 1 ||
+      ![
+        style.protectedStartMeters,
+        style.protectedEndMeters,
+        style.protectedDockMeters,
+        style.transitionMeters,
+      ].every(
+        (value) => Number.isFinite(value) && value > 0 && value <= 1024,
+      ) ||
+      style.knots.some(
+        (knot, index) =>
+          ![knot.fraction, knot.width, knot.blendWidth].every(
+            Number.isFinite,
+          ) ||
+          knot.width <= 0 ||
+          knot.width > 1024 ||
+          knot.blendWidth < 0 ||
+          knot.width / 2 + knot.blendWidth > 1024 ||
+          (index > 0 && knot.fraction <= style.knots[index - 1].fraction),
+      )
+    )
+      throw new Error("Invalid compact pond path surface style");
+    const arc = [0];
+    let dockArc = 0,
+      dockDistance = Infinity;
+    for (let i = 1; i < approach.path.length; i++) {
+      const a = approach.path[i - 1],
+        b = approach.path[i];
+      const distance = Math.hypot(b.x - a.x, b.z - a.z);
+      if (!(distance > 0 && Number.isFinite(distance)))
+        throw new Error(
+          "Pond surface profile requires nonzero finite segments",
+        );
+      arc.push(arc[i - 1] + distance);
+      const candidateDistance = compactPathSegmentDistance(dockJunction, a, b);
+      if (candidateDistance < dockDistance) {
+        dockDistance = candidateDistance;
+        const t = Math.max(
+          0,
+          Math.min(
+            1,
+            ((dockJunction.x - a.x) * (b.x - a.x) +
+              (dockJunction.z - a.z) * (b.z - a.z)) /
+              (distance * distance),
+          ),
+        );
+        dockArc = arc[i - 1] + t * distance;
+      }
+    }
+    const holds = [
+      { point: approach.path[0], arc: 0, radius: style.protectedStartMeters },
+      { point: dockJunction, arc: dockArc, radius: style.protectedDockMeters },
+      {
+        point: approach.path.at(-1)!,
+        arc: approach.length,
+        radius: style.protectedEndMeters,
+      },
+    ];
+    const maximumRadius = Math.max(
+      supportRadius,
+      ...style.knots.map((knot) => knot.width / 2 + knot.blendWidth),
+    );
+    const smooth = (t: number) => {
+      const bounded = Math.max(0, Math.min(1, t));
+      return bounded * bounded * (3 - 2 * bounded);
+    };
+    const surfaces = approach.path.slice(1).map((b, index) => {
+      const a = approach.path[index],
+        start = arc[index],
+        end = arc[index + 1];
+      const fraction = (start + end) / (2 * approach.length);
+      const next = style.knots.findIndex((knot) => knot.fraction >= fraction);
+      const low = style.knots[next - 1],
+        high = style.knots[next];
+      const t = smooth(
+        (fraction - low.fraction) / (high.fraction - low.fraction),
+      );
+      // Pin the complete service neighbourhood, including neighbouring round
+      // caps. Arc and geometric distance guards also cover a returning curve.
+      let weight = 1;
+      for (const hold of holds) {
+        const arcGap = Math.max(
+          hold.arc - hold.radius - end,
+          start - hold.arc - hold.radius,
+          0,
+        );
+        const geometricGap =
+          compactPathSegmentDistance(hold.point, a, b) - hold.radius;
+        weight = Math.min(
+          weight,
+          smooth(
+            (Math.min(arcGap, geometricGap) - maximumRadius) /
+              style.transitionMeters,
+          ),
+        );
+      }
+      const surface = Object.freeze({
+        width:
+          width + (low.width + (high.width - low.width) * t - width) * weight,
+        blendWidth:
+          blendWidth +
+          (low.blendWidth +
+            (high.blendWidth - low.blendWidth) * t -
+            blendWidth) *
+            weight,
+      });
+      admitSurfaceSegment(
+        a,
+        b,
+        surface.width / 2 + surface.blendWidth,
+        approach.id,
+      );
+      return surface;
+    });
     paths.push(
-      approach,
+      Object.freeze({ ...approach, segmentSurfaces: Object.freeze(surfaces) }),
       buildPath({
         id: pondJunction.layoutId + "-arrival",
         fromId: "pond-shore",

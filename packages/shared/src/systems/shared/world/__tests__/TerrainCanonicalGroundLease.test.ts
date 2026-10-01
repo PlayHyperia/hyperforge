@@ -702,6 +702,53 @@ describe("complete cooperative terrain preparation leases", () => {
     expect(provider.capturePreparationLease().isCurrent()).toBe(false);
   });
 
+  it("invalidates the actual terrain provider on segment-surface replacement and in-place edits", async () => {
+    const { terrain, world } = await fixture(true);
+    const roads = world.register(
+      "roads",
+      RoadNetworkSystem,
+    ) as RoadNetworkSystem;
+    await roads.init();
+    await roads.start();
+    const road = roads.getRoads()[0];
+    const provider = preparationProvider(terrain);
+    const before = provider.capturePreparationLease();
+    road.segmentSurfaces = road.path.slice(1).map(() => ({
+      width: road.width,
+      blendWidth: road.blendWidth ?? 0.5,
+    }));
+    expect(before.isCurrent()).toBe(false);
+    const surfaces = road.segmentSurfaces;
+    const arrayLease = provider.capturePreparationLease();
+    road.segmentSurfaces = surfaces.map((surface) => ({ ...surface }));
+    expect(arrayLease.isCurrent()).toBe(false);
+    road.segmentSurfaces = surfaces;
+    expect(arrayLease.isCurrent()).toBe(false);
+    const row = surfaces[0];
+    const rowLease = provider.capturePreparationLease();
+    surfaces[0] = { ...row };
+    expect(rowLease.isCurrent()).toBe(false);
+    surfaces[0] = row;
+    expect(rowLease.isCurrent()).toBe(false);
+    for (const field of ["width", "blendWidth"] as const) {
+      const value = row[field];
+      const scalarLease = provider.capturePreparationLease();
+      row[field] += 0.1;
+      expect(scalarLease.isCurrent()).toBe(false);
+      row[field] = value;
+      expect(scalarLease.isCurrent()).toBe(false);
+    }
+    const lengthLease = provider.capturePreparationLease();
+    const removed = surfaces.pop()!;
+    expect(lengthLease.isCurrent()).toBe(false);
+    surfaces.push(removed);
+    expect(lengthLease.isCurrent()).toBe(false);
+    const stable = provider.capturePreparationLease();
+    expect(stable.isCurrent()).toBe(true);
+    delete road.segmentSurfaces;
+    expect(stable.isCurrent()).toBe(false);
+  });
+
   it("owns shared road query publications and detects authoritative segment and boundary edits", async () => {
     const { terrain, world } = await fixture(true);
     const roads = world.register(

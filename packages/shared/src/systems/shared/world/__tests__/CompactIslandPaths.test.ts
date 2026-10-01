@@ -94,6 +94,8 @@ import { RetainedTerrainSurface } from "../TerrainGridSurface";
 import { gridGeometry } from "./terrain-grid.fixture";
 import { BankEntity } from "../../../../entities/world/BankEntity";
 import { EntityType, InteractionType } from "../../../../types/entities";
+import pondPathStyle from "../../../../data/compact-pond-path-profile-v1.json";
+import { packRoadSegments } from "../../../../utils/compute/TerrainComputeContext";
 
 // Independently declared surface recipe; centerlines and outer support remain
 // those of the previously captured fourteen-path world, not a wider network.
@@ -989,9 +991,8 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         expect(maximumShift).toBeGreaterThan(0.75);
         expect(maximumShift).toBeLessThan(1);
         expect(trunk.width / 2 + trunk.blendWidth!).toBe(0.8 / 2 + 0.65);
-        // At fixed distance the softer recipe never increases the old field;
-        // MAX unions remain unchanged. More admitted grass is possible, so this
-        // is not a grass-population or GPU-cost parity assertion.
+        // Historical unprofiled core/shoulder recipe. The separately tested
+        // segment profile can now intentionally expand or contract this field.
         for (const [path, oldWidth, oldBlend] of [
           [trunk, 0.8, 0.65],
           [spine, 1.4, 0.9],
@@ -1103,6 +1104,376 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
   );
 
   it.runIf(servedV10)(
+    "bakes broad pond width variation into existing segments while retaining service fields and the shared mask domain",
+    async () => {
+      await withRoads((roads, terrain) => {
+        const { paths } = currentServedPaths(terrain);
+        // Pre-profile actual-v10 receipt, retained before this implementation.
+        // Removing only the new field must reproduce every original road byte,
+        // including every centerline sample, height, length and service record.
+        expect(
+          createHash("sha256")
+            .update(
+              JSON.stringify(
+                paths.map(({ segmentSurfaces: _surface, ...path }) => path),
+              ),
+            )
+            .digest("hex"),
+        ).toBe(
+          "2750f821cef622f7c853f1a0f201567b938a348e1ae12134b252a6eaabc4c6b0",
+        );
+        const authored = paths.find(
+          (path) => path.id === pondPathStyle.routeId,
+        )!;
+        const route = roads.getRoads().find((path) => path.id === authored.id)!;
+        const surfaces = route.segmentSurfaces!;
+        expect(surfaces).toHaveLength(route.path.length - 1);
+        expect(surfaces).toEqual(authored.segmentSurfaces);
+        expect(surfaces).not.toBe(authored.segmentSurfaces);
+        expect(Object.isFrozen(authored.segmentSurfaces)).toBe(true);
+        expect(authored.segmentSurfaces!.every(Object.isFrozen)).toBe(true);
+        expect(route.path).toEqual(authored.path);
+        const identity = JSON.stringify(
+          roads
+            .getRoads()
+            .map(({ segmentSurfaces: _surface, ...road }) => road),
+        );
+        const candidateSegments = roads.getRoadSegmentsForGPU();
+        expect(candidateSegments).toHaveLength(556);
+        expect(packRoadSegments(candidateSegments).byteLength).toBe(556 * 32);
+        let index = 0,
+          variedLength = 0,
+          maximumStep = 0;
+        const radii = surfaces.map(
+          (surface) => surface.width / 2 + surface.blendWidth,
+        );
+        for (const road of roads.getRoads()) {
+          for (let i = 1; i < road.path.length; i++, index++) {
+            const surface = road.segmentSurfaces?.[i - 1] ?? road;
+            expect(candidateSegments[index]).toEqual({
+              startX: road.path[i - 1].x,
+              startZ: road.path[i - 1].z,
+              endX: road.path[i].x,
+              endZ: road.path[i].z,
+              width: surface.width,
+              ...(surface.blendWidth === undefined
+                ? {}
+                : { blendWidth: surface.blendWidth }),
+              ...(road.maxInfluence === undefined
+                ? {}
+                : { maxInfluence: road.maxInfluence }),
+            });
+          }
+        }
+        for (let i = 0; i < surfaces.length; i++) {
+          if (Math.abs(radii[i] - 1.05) > 0.15)
+            variedLength += Math.hypot(
+              route.path[i + 1].x - route.path[i].x,
+              route.path[i + 1].z - route.path[i].z,
+            );
+          if (i)
+            maximumStep = Math.max(
+              maximumStep,
+              Math.abs(radii[i] - radii[i - 1]),
+            );
+        }
+        expect(Math.max(...radii)).toBeGreaterThan(1.5);
+        expect(Math.min(...radii)).toBeLessThan(0.9);
+        expect(variedLength).toBeGreaterThan(8);
+        const candidate = roads.getRoadInfluenceTextureData()!;
+        expect(candidate).toMatchObject({
+          width: 512,
+          height: 512,
+          worldSize: 146,
+          centerX: 379.5,
+          centerZ: 375,
+        });
+        expect(maximumStep).toBeLessThan(candidate.worldSize / candidate.width);
+        const bounds = {
+          worldSize: candidate.worldSize,
+          centerX: candidate.centerX,
+          centerZ: candidate.centerZ,
+        };
+        const internal = roads as unknown as RoadInternals;
+        let baseline: ReturnType<
+          RoadNetworkSystem["generateRoadInfluenceTexture"]
+        >;
+        try {
+          delete route.segmentSurfaces;
+          internal.buildTileCache();
+          baseline = roads.generateRoadInfluenceTexture(
+            512,
+            bounds.worldSize,
+            0.5,
+            bounds.centerX,
+            bounds.centerZ,
+          )!;
+        } finally {
+          route.segmentSurfaces = surfaces;
+          internal.buildTileCache();
+        }
+        expect(baseline!).toMatchObject({ width: 512, height: 512, ...bounds });
+        expect(
+          JSON.stringify(
+            roads
+              .getRoads()
+              .map(({ segmentSurfaces: _surface, ...road }) => road),
+          ),
+        ).toBe(identity);
+        let raised = 0,
+          lowered = 0,
+          addedSupport = 0,
+          removedSupport = 0;
+        const changedCells = new Set<number>();
+        for (let i = 0; i < candidate.data.length; i++) {
+          const before = baseline!.data[i],
+            after = candidate.data[i];
+          if (after > before) raised++;
+          if (after < before) lowered++;
+          if (!before && after) addedSupport++;
+          if (before && !after) removedSupport++;
+          if (after !== before) {
+            const x = i % 512,
+              z = Math.floor(i / 512);
+            for (const dx of [-1, 0])
+              for (const dz of [-1, 0])
+                if (x + dx >= 0 && x + dx < 511 && z + dz >= 0 && z + dz < 511)
+                  changedCells.add((z + dz) * 512 + x + dx);
+          }
+        }
+        expect(raised).toBeGreaterThan(0);
+        expect(lowered).toBeGreaterThan(0);
+        expect(addedSupport).toBeGreaterThan(0);
+        expect(removedSupport).toBeGreaterThan(0);
+        const pixel = candidate.worldSize / candidate.width;
+        let addedClearanceSamples = 0,
+          recoveredClearanceSamples = 0;
+        // Midpoint quadrature is disclosed as an estimate, not a root census or
+        // conservative bound. There is no artificial zero-clearance art gate.
+        for (const cell of changedCells)
+          for (let iz = 0; iz < 8; iz++)
+            for (let ix = 0; ix < 8; ix++) {
+              const x =
+                candidate.centerX -
+                candidate.worldSize / 2 +
+                ((cell % 512) + 0.5 + (ix + 0.5) / 8) * pixel;
+              const z =
+                candidate.centerZ -
+                candidate.worldSize / 2 +
+                (Math.floor(cell / 512) + 0.5 + (iz + 0.5) / 8) * pixel;
+              const before =
+                sampleLinearMask(baseline!.data, candidate, x, z) > 0.8;
+              const after =
+                sampleLinearMask(candidate.data, candidate, x, z) > 0.8;
+              if (after && !before) addedClearanceSamples++;
+              if (before && !after) recoveredClearanceSamples++;
+            }
+        const dock = paths.find(
+          (path) => path.id === "compact-path-haven-pond-bank-v1-arrival",
+        )!;
+        const holds = [
+          [route.path[0], pondPathStyle.protectedStartMeters],
+          [route.path.at(-1)!, pondPathStyle.protectedEndMeters],
+          [dock.path.at(-1)!, pondPathStyle.protectedDockMeters],
+        ] as const;
+        for (const [point, radius] of holds)
+          for (let r = 0; r <= radius; r += 0.25)
+            for (let i = 0; i < 32; i++) {
+              const x = point.x + Math.cos((i * Math.PI) / 16) * r;
+              const z = point.z + Math.sin((i * Math.PI) / 16) * r;
+              expect(sampleLinearMask(candidate.data, candidate, x, z)).toBe(
+                sampleLinearMask(baseline!.data, candidate, x, z),
+              );
+            }
+        process.stdout.write(
+          "POND_SEGMENT_PROFILE " +
+            JSON.stringify({
+              style: pondPathStyle,
+              segments: candidateSegments.length,
+              profiledSegments: surfaces.length,
+              radiusRange: [Math.min(...radii), Math.max(...radii)],
+              maximumStep,
+              variedLength,
+              raised,
+              lowered,
+              addedSupport,
+              removedSupport,
+              changedCells: changedCells.size,
+              quadratureSubdivisions: 8,
+              estimatedAddedClearanceM2:
+                (addedClearanceSamples * pixel * pixel) / 64,
+              estimatedRecoveredClearanceM2:
+                (recoveredClearanceSamples * pixel * pixel) / 64,
+              scope:
+                "Actual authored data and production fields; no rendered art, grass-root census, startup or GPU performance acceptance",
+            }) +
+            "\n",
+        );
+      });
+    },
+  );
+
+  it.runIf(servedV10)(
+    "keeps original segment profiles through both real cache builders, halo queries and uncached evaluation",
+    async () => {
+      await withRoads(async (roads) => {
+        const road = roads
+          .getRoads()
+          .find((row) => row.id === pondPathStyle.routeId)!;
+        const surfaces = road.segmentSurfaces!;
+        const gpu = roads.getRoadSegmentsForGPU();
+        const sample = (x: number, z: number) =>
+          gpu.reduce(
+            (value, segment) =>
+              Math.max(
+                value,
+                roadSegmentInfluence(
+                  x,
+                  z,
+                  segment.startX,
+                  segment.startZ,
+                  segment.endX,
+                  segment.endZ,
+                  segment.width,
+                  segment.blendWidth ?? 0.5,
+                  segment.maxInfluence ?? 1,
+                ),
+              ),
+            0,
+          );
+        const queries: [number, number][] = [];
+        for (let i = 1; i < road.path.length; i++) {
+          const a = road.path[i - 1],
+            b = road.path[i];
+          const length = Math.hypot(b.x - a.x, b.z - a.z);
+          for (const offset of [-1.75, -1, -0.5, 0, 0.5, 1, 1.75])
+            queries.push([
+              (a.x + b.x) / 2 - ((b.z - a.z) / length) * offset,
+              (a.z + b.z) / 2 + ((b.x - a.x) / length) * offset,
+            ]);
+        }
+        const check = () => {
+          for (const [x, z] of queries)
+            expect(roads.getRoadInfluenceAt(x, z)).toBeCloseTo(
+              sample(x, z),
+              10,
+            );
+        };
+        const cached = () =>
+          [...roads["tileRoadCache"]].flatMap(([tile, segments]) =>
+            segments
+              .filter((segment) => segment.roadId === road.id)
+              .map((segment) => ({ tile, ...segment })),
+          );
+        const original = cached();
+        expect(original.length).toBeGreaterThan(surfaces.length); // Real z=400 clip.
+        for (const segment of original) {
+          const [tx, tz] = segment.tile.split("_").map(Number);
+          const start = new THREE.Vector3(
+            segment.start.x + tx * 100,
+            0,
+            segment.start.z + tz * 100,
+          );
+          const end = new THREE.Vector3(
+            segment.end.x + tx * 100,
+            0,
+            segment.end.z + tz * 100,
+          );
+          expect(
+            road.path.slice(1).some((b, index) => {
+              const a = road.path[index];
+              const line = new THREE.Line3(
+                new THREE.Vector3(a.x, 0, a.z),
+                new THREE.Vector3(b.x, 0, b.z),
+              );
+              return (
+                line
+                  .closestPointToPoint(start, true, new THREE.Vector3())
+                  .distanceTo(start) < 1e-8 &&
+                line
+                  .closestPointToPoint(end, true, new THREE.Vector3())
+                  .distanceTo(end) < 1e-8 &&
+                segment.width === surfaces[index].width &&
+                segment.blendWidth === surfaces[index].blendWidth
+              );
+            }),
+          ).toBe(true);
+        }
+        check();
+        roads["tileRoadCache"].clear();
+        check(); // Same field through the real no-cache branch.
+        await roads["buildTileCacheAsync"]();
+        expect(cached()).toEqual(original);
+        check();
+        const boundary = roads
+          .getAllBoundaryExits()
+          .find((entry) => entry.roadId === road.id)!;
+        expect(boundary).toBeDefined();
+        const destinationX =
+          boundary.tileX +
+          (boundary.edge === "east" ? 1 : boundary.edge === "west" ? -1 : 0);
+        const destinationZ =
+          boundary.tileZ +
+          (boundary.edge === "north" ? 1 : boundary.edge === "south" ? -1 : 0);
+        expect(() =>
+          roads["generateEntryStubSegments"](destinationX, destinationZ, [
+            boundary,
+          ]),
+        ).toThrow(/authored continuations/);
+        roads["boundaryExits"] = [];
+        const saved = surfaces[0];
+        try {
+          surfaces[0] = { width: 1000, blendWidth: 400 };
+          roads["buildTileCache"]();
+          expect(roads["cachedMaxExplicitRoadInfluenceRadius"]).toBe(900);
+          expect(
+            roads
+              .getRoadSegmentsForTile(12, 4)
+              .some(
+                (segment) =>
+                  segment.roadId === road.id &&
+                  segment.width === 1000 &&
+                  segment.blendWidth === 400,
+              ),
+          ).toBe(true);
+          surfaces[0] = { width: 0.05, blendWidth: 0.025 };
+          roads["buildTileCache"]();
+          expect(roads["getNarrowestRoadWidth"]()).toBe(0.05);
+          expect(roads["getNarrowestRoadInfluenceRadius"](0.5)).toBe(0.05);
+          for (const invalid of [
+            { width: 0, blendWidth: 0.5 },
+            { width: NaN, blendWidth: 0.5 },
+            { width: 1, blendWidth: -1 },
+            { width: 1, blendWidth: Infinity },
+            { width: 1025, blendWidth: 0 },
+            { width: 1000, blendWidth: 525 },
+          ]) {
+            surfaces[0] = invalid;
+            expect(() => roads.getRoadSegmentsForGPU()).toThrow(
+              /segment surfaces/,
+            );
+            expect(() => roads["buildTileCache"]()).toThrow(/segment surfaces/);
+          }
+          surfaces[0] = saved;
+          const last = surfaces.pop()!;
+          expect(() => roads.getRoadSegmentsForGPU()).toThrow(
+            /every original segment/,
+          );
+          surfaces.push(last);
+          delete surfaces[0];
+          expect(() => roads.getRoadSegmentsForGPU()).toThrow(
+            /segment surfaces/,
+          );
+        } finally {
+          surfaces[0] = saved;
+          roads["buildTileCache"]();
+        }
+        expect(roads.getRoadSegmentsForGPU()).toEqual(gpu);
+      });
+    },
+  );
+
+  it.runIf(servedV10)(
     "keeps the current v10 new full-width branches dry and outside actual floors and dock support",
     async () => {
       await withRoads((roads, terrain) => {
@@ -1135,12 +1506,14 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         let dryBankSamples = 0,
           fullCoreSamples = 0;
         for (const path of changed) {
-          const radius =
-            path.width / 2 + (path.blendWidth ?? COMPACT_PATH_BLEND_WIDTH);
           expect(path.platformEntries).toBeUndefined();
           for (let i = 1; i < path.path.length; i++) {
             const a = path.path[i - 1],
               b = path.path[i];
+            const surface = path.segmentSurfaces?.[i - 1] ?? path;
+            const radius =
+              surface.width / 2 +
+              (surface.blendWidth ?? COMPACT_PATH_BLEND_WIDTH);
             expect(Math.hypot(b.x - a.x, b.z - a.z)).toBeLessThanOrEqual(
               1 + 1e-12,
             );
@@ -1229,12 +1602,13 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
               b = road.path[i];
             const length = Math.hypot(b.x - a.x, b.z - a.z);
             if (!length) continue;
-            const blend = road.blendWidth ?? COMPACT_PATH_BLEND_WIDTH;
+            const surface = road.segmentSurfaces?.[i - 1] ?? road;
+            const blend = surface.blendWidth ?? COMPACT_PATH_BLEND_WIDTH;
             for (const distance of [
               0,
-              road.width / 2,
-              road.width / 2 + blend / 2,
-              road.width / 2 + blend + 0.1,
+              surface.width / 2,
+              surface.width / 2 + blend / 2,
+              surface.width / 2 + blend + 0.1,
             ])
               for (const offset of distance === 0
                 ? [0]
@@ -3027,6 +3401,9 @@ describe("actual compact preparation paths and centered road mask", () => {
           ...native23.map((path, i) => ({
             ...current[i],
             ...path,
+            segmentSurfaces: path.segmentSurfaces?.map((surface) => ({
+              ...surface,
+            })),
             path: path.path.map((point) => ({ ...point })),
           })),
         );
@@ -3263,6 +3640,9 @@ describe("actual compact preparation paths and centered road mask", () => {
           ...beforeShoulders.map((path, i) => ({
             ...current[i],
             ...path,
+            segmentSurfaces: path.segmentSurfaces?.map((surface) => ({
+              ...surface,
+            })),
             path: path.path.map((point) => ({ ...point })),
           })),
         );
@@ -3864,6 +4244,9 @@ describe("actual compact preparation paths and centered road mask", () => {
           ...preBankForecourt.map((path, index) => ({
             ...current[index],
             ...path,
+            segmentSurfaces: path.segmentSurfaces?.map((surface) => ({
+              ...surface,
+            })),
             path: path.path.map((point) => ({ ...point })),
           })),
         );
@@ -4091,6 +4474,9 @@ describe("actual compact preparation paths and centered road mask", () => {
           ...selected.map((path, index) => ({
             ...current[index],
             ...path,
+            segmentSurfaces: path.segmentSurfaces?.map((surface) => ({
+              ...surface,
+            })),
             path: path.path.map((point) => ({ ...point })),
           })),
         );
@@ -5735,6 +6121,9 @@ describe("bank pavilion admitted architecture and real path owners", () => {
             ...paths.map((row) => ({
               ...saved[0],
               ...row,
+              segmentSurfaces: row.segmentSurfaces?.map((surface) => ({
+                ...surface,
+              })),
               path: row.path.map((point) => ({ ...point })),
             })),
           );

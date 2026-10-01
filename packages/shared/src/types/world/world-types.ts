@@ -1129,6 +1129,12 @@ export type RoadMaterial = "dirt" | "cobblestone" | "stone";
  */
 export type RoadEndpointType = "town" | "poi";
 
+/** Baked surface dimensions for one original, unclipped road segment. */
+export interface RoadSegmentSurface {
+  width: number;
+  blendWidth: number;
+}
+
 /**
  * A road connection between two locations (towns and/or POIs)
  */
@@ -1155,6 +1161,8 @@ export interface ProceduralRoad {
   blendWidth?: number;
   /** Optional peak mask influence in [0, 1]; omission retains a full-strength road. */
   maxInfluence?: number;
+  /** Optional dimensions aligned exactly with path[i] → path[i + 1]. */
+  segmentSurfaces?: RoadSegmentSurface[];
   /** Road material for visual rendering */
   material: RoadMaterial;
   /** Total road length in meters */

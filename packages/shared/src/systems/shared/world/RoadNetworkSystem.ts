@@ -161,6 +161,36 @@ const roadSurfaceFields = ({
   ...(maxInfluence === undefined ? {} : { maxInfluence }),
 });
 
+/** Resolve on the original segment, before clipping it into terrain tiles. */
+const roadSegmentSurface = (road: ProceduralRoad, index: number) => {
+  const surfaces = road.segmentSurfaces;
+  if (surfaces === undefined) return road;
+  if (surfaces.length !== road.path.length - 1)
+    throw new Error("Road segment surfaces must match every original segment");
+  const surface = surfaces[index];
+  if (
+    !surface ||
+    !Number.isFinite(surface.width) ||
+    surface.width <= 0 ||
+    surface.width > 1024 ||
+    !Number.isFinite(surface.blendWidth) ||
+    surface.blendWidth < 0 ||
+    surface.width / 2 + surface.blendWidth > 1024
+  )
+    throw new Error(
+      "Road segment surfaces require finite positive dimensions and support at most 1024m",
+    );
+  return surface;
+};
+
+function validateRoadSegmentSurfaces(road: ProceduralRoad): void {
+  if (road.segmentSurfaces === undefined) return;
+  if (road.segmentSurfaces.length !== road.path.length - 1)
+    throw new Error("Road segment surfaces must match every original segment");
+  for (let i = 0; i < road.segmentSurfaces.length; i++)
+    roadSegmentSurface(road, i);
+}
+
 /** Simple BFS path node */
 interface BFSNode {
   x: number;
@@ -319,6 +349,13 @@ export class RoadNetworkSystem extends System {
         toPOIId: path.toId,
         width: path.width,
         ...roadSurfaceFields(path),
+        ...(path.segmentSurfaces
+          ? {
+              segmentSurfaces: path.segmentSurfaces.map((surface) => ({
+                ...surface,
+              })),
+            }
+          : {}),
         material: "dirt",
         path: path.path.map((point) => ({ ...point })),
         length: path.length,
@@ -2287,11 +2324,14 @@ export class RoadNetworkSystem extends System {
   private resetRoadInfluenceBounds(): void {
     this.cachedMaxRoadHalfWidth = 0;
     this.cachedMaxExplicitRoadInfluenceRadius = 0;
-    for (const road of this.roads)
-      this.includeRoadInfluenceBounds(
-        road.width || this.config.roadWidth,
-        road.blendWidth,
-      );
+    for (const road of this.roads) {
+      validateRoadSegmentSurfaces(road);
+      for (const surface of road.segmentSurfaces ?? [road])
+        this.includeRoadInfluenceBounds(
+          surface.width || this.config.roadWidth,
+          surface.blendWidth,
+        );
+    }
   }
 
   private buildTileCache(): void {
@@ -2303,6 +2343,7 @@ export class RoadNetworkSystem extends System {
       for (let i = 0; i < road.path.length - 1; i++) {
         const p1 = road.path[i];
         const p2 = road.path[i + 1];
+        const surface = roadSegmentSurface(road, i);
 
         const minTileX = Math.floor(Math.min(p1.x, p2.x) / TILE_SIZE);
         const maxTileX = Math.floor(Math.max(p1.x, p2.x) / TILE_SIZE);
@@ -2331,8 +2372,11 @@ export class RoadNetworkSystem extends System {
               const segment: RoadTileSegment = {
                 start: { x: clipped.x1 - tileMinX, z: clipped.z1 - tileMinZ },
                 end: { x: clipped.x2 - tileMinX, z: clipped.z2 - tileMinZ },
-                width: road.width,
-                ...roadSurfaceFields(road),
+                width: surface.width,
+                ...roadSurfaceFields({
+                  blendWidth: surface.blendWidth,
+                  maxInfluence: road.maxInfluence,
+                }),
                 roadId: road.id,
               };
               if (!this.tileRoadCache.has(tileKey))
@@ -2386,6 +2430,7 @@ export class RoadNetworkSystem extends System {
         for (let i = 0; i < road.path.length - 1; i++) {
           const p1 = road.path[i];
           const p2 = road.path[i + 1];
+          const surface = roadSegmentSurface(road, i);
 
           const minTileX = Math.floor(Math.min(p1.x, p2.x) / TILE_SIZE);
           const maxTileX = Math.floor(Math.max(p1.x, p2.x) / TILE_SIZE);
@@ -2415,8 +2460,11 @@ export class RoadNetworkSystem extends System {
                 const segment: RoadTileSegment = {
                   start: { x: clipped.x1 - tileMinX, z: clipped.z1 - tileMinZ },
                   end: { x: clipped.x2 - tileMinX, z: clipped.z2 - tileMinZ },
-                  width: road.width,
-                  ...roadSurfaceFields(road),
+                  width: surface.width,
+                  ...roadSurfaceFields({
+                    blendWidth: surface.blendWidth,
+                    maxInfluence: road.maxInfluence,
+                  }),
                   roadId: road.id,
                 };
                 if (!this.tileRoadCache.has(tileKey)) {
@@ -2961,13 +3009,17 @@ export class RoadNetworkSystem extends System {
         for (let i = 1; i < road.path.length; i++) {
           const a = road.path[i - 1],
             b = road.path[i];
+          const surface = roadSegmentSurface(road, i - 1);
           appendHalo(
             {
               start: { x: a.x, z: a.z },
               end: { x: b.x, z: b.z },
-              width: road.width,
+              width: surface.width,
               roadId: road.id,
-              ...roadSurfaceFields(road),
+              ...roadSurfaceFields({
+                blendWidth: surface.blendWidth,
+                maxInfluence: road.maxInfluence,
+              }),
             },
             -tileX * TILE_SIZE,
             -tileZ * TILE_SIZE,
@@ -3005,6 +3057,12 @@ export class RoadNetworkSystem extends System {
       width: road.width,
       blendWidth: road.blendWidth,
       maxInfluence: road.maxInfluence,
+      surfaces: road.segmentSurfaces,
+      surfaceSnapshots: road.segmentSurfaces?.map((surface) => ({
+        owner: surface,
+        width: surface.width,
+        blendWidth: surface.blendWidth,
+      })),
       path: road.path,
       points: road.path.map((point) => ({ ...point })),
     }));
@@ -3056,10 +3114,22 @@ export class RoadNetworkSystem extends System {
           road.width !== snapshot.width ||
           road.blendWidth !== snapshot.blendWidth ||
           road.maxInfluence !== snapshot.maxInfluence ||
+          road.segmentSurfaces !== snapshot.surfaces ||
+          road.segmentSurfaces?.length !== snapshot.surfaceSnapshots?.length ||
           road.path !== snapshot.path ||
           road.path.length !== snapshot.points.length
         )
           return false;
+        for (let j = 0; j < (snapshot.surfaceSnapshots?.length ?? 0); j++) {
+          const surface = road.segmentSurfaces![j],
+            before = snapshot.surfaceSnapshots![j];
+          if (
+            surface !== before.owner ||
+            surface.width !== before.width ||
+            surface.blendWidth !== before.blendWidth
+          )
+            return false;
+        }
         for (let j = 0; j < road.path.length; j++) {
           const point = road.path[j],
             before = snapshot.points[j];
@@ -3170,6 +3240,10 @@ export class RoadNetworkSystem extends System {
         dz = endZ - localZ;
       if (dx * dx + dz * dz > 1) {
         const road = this.getRoadById(entry.roadId);
+        if (road?.segmentSurfaces)
+          throw new Error(
+            "Profiled roads require authored continuations, not inferred entry stubs",
+          );
         segments.push({
           start: { x: localX, z: localZ },
           end: { x: endX, z: endZ },
@@ -3350,10 +3424,10 @@ export class RoadNetworkSystem extends System {
     // Evaluate each segment's own width: nearest centerline is not necessarily
     // the most influential road when a narrow spur meets a wider approach.
     for (const road of this.roads) {
-      const width = road.width || this.config.roadWidth;
       for (let i = 1; i < road.path.length; i++) {
         const a = road.path[i - 1],
           b = road.path[i];
+        const surface = roadSegmentSurface(road, i - 1);
         influence = Math.max(
           influence,
           roadSegmentInfluence(
@@ -3363,8 +3437,8 @@ export class RoadNetworkSystem extends System {
             a.z,
             b.x,
             b.z,
-            width,
-            road.blendWidth ?? extraBlendWidth,
+            surface.width || this.config.roadWidth,
+            surface.blendWidth ?? extraBlendWidth,
             road.maxInfluence ?? 1,
           ),
         );
@@ -3375,20 +3449,30 @@ export class RoadNetworkSystem extends System {
   }
 
   private getNarrowestRoadWidth(): number {
-    return this.roads.reduce(
-      (width, road) => Math.min(width, road.width || this.config.roadWidth),
-      this.config.roadWidth,
-    );
+    return this.roads.reduce((width, road) => {
+      validateRoadSegmentSurfaces(road);
+      return (road.segmentSurfaces ?? [road]).reduce(
+        (minimum, surface) =>
+          Math.min(minimum, surface.width || this.config.roadWidth),
+        width,
+      );
+    }, this.config.roadWidth);
   }
 
   private getNarrowestRoadInfluenceRadius(defaultBlendWidth: number): number {
     return this.roads.reduce(
-      (radius, road) =>
-        Math.min(
+      (radius, road) => {
+        validateRoadSegmentSurfaces(road);
+        return (road.segmentSurfaces ?? [road]).reduce(
+          (minimum, surface) =>
+            Math.min(
+              minimum,
+              (surface.width || this.config.roadWidth) / 2 +
+                (surface.blendWidth ?? defaultBlendWidth),
+            ),
           radius,
-          (road.width || this.config.roadWidth) / 2 +
-            (road.blendWidth ?? defaultBlendWidth),
-        ),
+        );
+      },
       this.config.roadWidth / 2 + defaultBlendWidth,
     );
   }
@@ -3401,17 +3485,21 @@ export class RoadNetworkSystem extends System {
     const segments: GPURoadSegment[] = [];
 
     for (const road of this.roads) {
-      const width = road.width || this.config.roadWidth;
+      validateRoadSegmentSurfaces(road);
       for (let i = 0; i < road.path.length - 1; i++) {
         const p1 = road.path[i];
         const p2 = road.path[i + 1];
+        const surface = roadSegmentSurface(road, i);
         segments.push({
           startX: p1.x,
           startZ: p1.z,
           endX: p2.x,
           endZ: p2.z,
-          width,
-          ...roadSurfaceFields(road),
+          width: surface.width || this.config.roadWidth,
+          ...roadSurfaceFields({
+            blendWidth: surface.blendWidth,
+            maxInfluence: road.maxInfluence,
+          }),
         });
       }
     }

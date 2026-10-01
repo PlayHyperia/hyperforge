@@ -1,5 +1,37 @@
 # Grass canopy visibility: research checkpoint
 
+## Native202 variable-width pond trail — contour improvement retained
+
+The replacement uses authored broad width/shoulder knots on the **existing original segments**, rather than additive wear overlays. Original centerline coordinates, heights, lengths and default road records reproduce the retained pre-profile actual-assets-v10 SHA256 `2750f821cef622f7c853f1a0f201567b938a348e1ae12134b252a6eaabc4c6b0` after removing only the new optional profile field. All other paths are unchanged. The road owner resolves profiles before tile clipping and carries them through cached/direct queries, influence bounds, mask resolution, GPU export and preparation leases. Complete varying-radius capsules are checked against water, authored floors, docks and admitted terrain; service neighbourhoods include adjacent cap support.
+
+Root and independent reviewers retain the **modest but visible contour improvement**: a broader worn middle tapers into the narrower approach, breaking the prior uniform strip. These daylight views show no conspicuous cracks, repeated segment steps or disconnected edges. This is not finished path art: widening exposes more uniform brown material, and the smooth bright-green border remains artificial. The additional dawn still also retains harsh blade contrast. Motion, night, vegetation-root census, startup cost, sustained 2× performance and whole-island acceptance remain open.
+
+### Source and build evidence
+
+- Author and independent root runs each pass **246 tests in four path/road suites**; the cooperative terrain-preparation group passes **7 tests**, with 11 unrelated tests not selected. Evidence: service-layout `pond-width202-{paths06,root-tests01,lease03,root-leases01}`.
+- `identity05` verifies exact retained road identity. `lint03`, `format-check02` and `diffcheck01` pass. Matched `types02` retains 13 identical inherited diagnostics (one in a target), with **zero new** across 730 roots. Initial `types01` had five readonly-to-owned test-mapping errors, repaired by copying rows; its failed receipt is retained.
+- Combined `tests02` retains two historical assets-v10 fixture-count failures (19 versus20 supports;3 versus2 arena floors). They are not relabelled passes, and their expectations were not changed. Focused profile/lease tests and the final full path/road suites pass.
+- The mask stays **512×512**, world domain146, with **556 segments / 32-byte records** and no new texture, shader, road mesh or render pass. The approach has79 profiled segments; native and source support radii span0.8645718966–1.6476545646m. Coverage intentionally changes:774 raw texels differ;8×8 filtered-field quadrature estimates12.21m² extra >0.8 clearance and0.77m² recovered. These are not grass-root counts, strict area bounds or performance gains.
+- Canonical build201 contains9 verified bundles/977 source inputs, zero overrides, stable sources and182 protected artifacts unchanged. Report SHA `1c394a6d9bdd1b53085dfad751ffa46cc1f2e60b85e7889f84bda06a2ec3d66a`; client framework SHA `9b4a0d7a64cfa4def8e5eb49d619834b7e7bd52c6db1182a79c099d34bc34fc9`. Relative to baseline199, the compiled changes are the four profile production inputs plus the separately checkpointed vegetation scan cleanup—not an isolated performance comparison.
+- Runtime admission syntax, all recorded artifact/source pins, no-output preflight and exact inverse pass; helper SHA `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. Root independently verifies the inverse. Evidence: `pond-width202-runtime201-admission01`.
+
+### Native evidence and limits
+
+Baseline199 images from Native201 remain the daylight reference. Candidate201 uses the same3024×1724/DPR2, FOV70, exact wide/close cameras, phase0.56 and production exposure0.850240084; the native road owner confirms the79-segment profile. Wind, water, clouds and NPCs remain live. Downloads use one ordinary completed-frame subscription and canvas PNG encoding, with no extra render; callbacks and blob URLs retire.
+
+| Candidate capture | Frame | SHA256 |
+| --- | --- | --- |
+| [Wide day](/Users/lucid/Downloads/hyperia-pond202-candidate-wide-day.png) | 2827 | `adfb95fca9a06af41e05f616b8a6f1199777ca960af6226602e8c58d7f1ba81b` |
+| [Close day](/Users/lucid/Downloads/hyperia-pond202-candidate-close-day.png) | 3685 | `68d007d023f52a5d7d0afca7669fe2d7f785eea43da6db4af38ecdf51f49cfc7` |
+| [Close dawn](/Users/lucid/Downloads/hyperia-pond202-candidate-close-dawn.png) | 5851 | `0619801f9399f4cd19350addf2dfa9c7525e886203a948c824d86b628df35f0c` |
+
+The dawn image is a **candidate-only spot check**, phase0.30 with naturally settled exposure0.8525919999999982, not a matched dawn comparison. Normal startup displayed a preparation warning before reaching the ordinary HUD without reloading; this run does not qualify loading latency. Camera/clock restoration and environment/renderer exposure restoration each report true. Owned game/DevTools windows close, leaving the pre-existing New Tab.
+
+`runtime-pond202-candidate01` stops at `2026-10-01T21:29:24.500Z`: errors empty, protected state unchanged, disposable database removed and ports3344/5565/5566/57841 free. Receipt SHA `cd3560ba5f05297269bb23be25a2f362d6db8b121e85af98af68436490e790d2`. Public3333/build174 and saved state remain unchanged. The source contour change is retained for the compact pond route; no public deployment or FPS claim.
+
+**Next:** preserve this contour work; address dirt/turf material integration and the green border using the existing shared road field and available material signals. Do not restart tiny-overlay or width sweeps. Require a visible material improvement, then broader all-day/moving-camera and full-quality performance qualification.
+
+
 ## Native201 pond-shoulder art comparison — rejected
 
 Fresh private build199 baseline and build200 candidate both render normally at 3024×1724 / DPR2 with High shadows, postprocessing and bloom retained. Two exact matched cameras use FOV70: wide `[398,43,380] → [380,27,420]` and close `[387,31,405] → [381.5,26.1,411.8]`. The production exposure initializer establishes phase0.56/exposure0.850240084 in both pages. Candidate road data contains all three expected wear IDs. Native completed-frame PNG downloads add no render; wind, water, clouds and NPCs remain live, so these are artistic comparisons, not pixel-equality or performance evidence.
