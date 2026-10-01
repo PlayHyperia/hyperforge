@@ -1,5 +1,42 @@
 # Grass canopy visibility: research checkpoint
 
+## Native194 reflection footprint: measured lead, default still off
+
+Private `runtime-reflection194-native01` resumes the existing raster-only footprint candidate on canonical build194. It does not select grass footprint culling, adaptive submission, shared environment lighting or the experimental distance-shadow filter. The ordinary grass shader retains eight static PMREM sampling sites. Full native WebGPU settings remain 3840×1926/DPR2/MSAA4/High PCF, with postprocessing and bloom enabled, phase0.56 and held exposure0.850240084. Terrain28/28, grass123/123 logical regions and water reach readiness; 94 actual grass mesh owners are retained.
+
+### What was observed
+
+Held wide and low-angle full→raster→full still sequences show no obvious loss of reflected trees, docks or shoreline in the visible pond, and no obvious black crop strip. Actual native scissor observation verifies wide `[565,389,790,235]` and low-angle `[40,440,1880,523]` on the unchanged1920×963 reflection target. Shadow contexts remain full4096×4096. A subsequent bounded20-second yaw takes the pond out of view and returns; the completion marker records227 callbacks/20,087.4ms, and the returned pond is visually inspected with a valid restored one-frame raster record. That callback count is diagnostic motion coverage, not a gameplay FPS benchmark.
+
+These are unedited native screenshots retained in the chat and correlated client-log records, not exported pixel pairs or a continuous inspected video. Live wind, clouds, water and NPC motion remain; UI obscures portions of the scene. Six one-frame captures finish valid with temporary observers restored and errors empty. All six record the page visible but unfocused while inspecting DevTools; they are separate from the focused timing run. The final return uses native scissor `[40,441,1880,522]`. These records establish the sampled draw/scissor state, not every resumed pass, GPU completion, exhaustive shoreline coverage or final-water pixel parity.
+
+### Matched native timing
+
+A trusted, focused full→raster→raster→full comparison completes all48 samples, twelve per block after at least8s settling and12s measurement. The root independently unions overlapping GPU timestamp intervals with BigInt arithmetic; a separate read-only reviewer reproduces the results. These measured pass unions are not isolated grass/reflection cost or displayed FPS.
+
+| Block | Footprint | GPU-pass union median, ms | Range, ms | Mirror interval median, ms |
+| --- | --- | ---: | ---: | ---: |
+| A1 | Full | 139.624448 | 103.219200–160.169984 | 26.705920 |
+| B1 | Raster | 120.782848 | 106.102784–140.836864 | 40.009728 |
+| B2 | Raster | 126.287872 | 113.967104–146.079744 | 23.265280 |
+| A2 | Full | 133.070848 | 112.721920–157.351936 | 33.554432 |
+
+Pooled full median is136.085504ms versus125.894656ms raster: **7.49% lower observed union**, with broad overlap and block drift. The mirror interval is not consistently improved across blocks and is not exclusive cost.
+
+Every sampled raster mirror pass proves an actual native `setScissorRect(565,389,790,236)`, correlated by timer sample, pass/context and mirror camera. This is186,440 pixels,10.0835% of the unchanged target area—not an89.9% GPU saving. Target size, viewport, capture cadence, shading, full shadow maps and grass content are unchanged. All66 canonicalized grass draw signatures match (34 main,32 mirror;5,549,313 total submitted triangle slots); sorting by view/object does not prove unchanged native submission order. This geometry differs from the preceding environment comparison after camera/LOD history; do not compare absolute timings across those runs.
+
+**Whole-scene draw counts are not invariant:** non-grass mirror work varies between266/268 total mirror draws and3,940,358/3,946,358 triangle slots, while the other seven pass counts remain fixed. This, live animation, instrumentation and shared-host conditions prevent causal/general speedup or shipping acceptance. All144/144 query resources retire and301/301 short-lived scissor observers restore; GPU errors, device loss and query errors are absent. Nine zero-duration segments are timer quantization, not proof of free work.
+
+### Rejected attempts and cleanup
+
+The first pre-hook attempt refuses a changed grass-owner/flags predicate immediately after changing from the low-angle camera to the wide view. Actual flags remain normal; camera-triggered mesh/LOD replacement is a plausible explanation, not an established cause. The next attempt records one full block and a partial raster block before failing its draw-signature/capacity guard. Its observer overwrote the first error, so the original cause is unknown. Both attempts restore; neither contributes to the accepted four blocks. A diagnostic-only correction preserves the first error and records expected/actual geometry and crop details; no quality setting, acceptance gate, duration or timing threshold is relaxed.
+
+Before shutdown, the cleanup marker verifies in-page camera/clock and environment/renderer exposure restoration, with raster and grass-footprint selectors both false. Root closes only the owned DevTools and3344 game window, preserving the pre-existing New Tab. The private runtime exits0 at2026-10-01T05:26:12Z, statusSTOPPED, errors empty, disposable database removed, all four private ports free and protected public state unchanged. The owned ignored review module is removed; the external evidence source/logs remain. All42 unrelated dirty/untracked file hashes are unchanged. Public3333 remains canonical174.
+
+**Decision:** retain a positive measured lead, keep the footprint default-off, and close neither sustained2× FPS nor whole-island visual acceptance. Next qualify final-water pixels and reflection fallback during moving/grazing views, then obtain a bounded repeat with the observed non-grass variation explicitly accounted for. Do not repeat environment/distance-shadow tests already showing no demonstrated gain.
+
+Evidence: service-layout `reflection194-native-runtime01`, `reflection194-native-timing-evidence01` and `reflection194-cleanup-evidence01`; inland-pond `runtime-reflection194-native01/client.log` and `process.json`. Existing `env194-timing-control.js` now includes the reflection controller/one-frame observer; final SHA256 `85535dce5ff7b7182754a7729cf507c5b79a39bf17668dbc523fe828743cfb92`, original environment-controller prefix unchanged. Frozen runtime/admission helpers and build194 provenance remain as recorded below. This checkpoint changes no production rendering source or default.
+
 ## Grass environment sharing: guarded source integration and build194
 
 `grassEnvironment=shared-max-roughness-v1` now selects the production candidate explicitly, with the existing fine-meadow/leaf-volume pair and sculpted terrain admission. Ordinary startup is unchanged. Terrain captures the choice once; both actual grounded meshes and all three precompile representatives install the object callback before the adaptive submission wrapper. Installed Three calls that callback before pipeline selection for compilation and rendering; it does not call the material callback. Placement, density, geometry, wind, normals, color, AO, direct SSS and shadow flags remain unchanged.
