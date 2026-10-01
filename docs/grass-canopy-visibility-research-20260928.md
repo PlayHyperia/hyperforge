@@ -1,5 +1,38 @@
 # Grass canopy visibility: research checkpoint
 
+## Native203 road-shoulder material trial — rejected
+
+A default-off `pathBlend=trampled-v1` trial used the existing distortion and land fields to increase only partial visual-road soil coverage: `R′ = R + 0.8(1−E)L·R(1−R)`. The shared serialized CPU/TSL arithmetic retained pure endpoints, all-PBR weight ownership and existing physical grass support; it added no texture samples, mesh or render pass. [Tidewater's terrain source](https://github.com/dgreenheck/tidewater/blob/main/src/world/Terrain.js) informed the separation of coverage and local material detail; no distance fade, density reduction or external code was imported.
+
+**Disposition: reject.** Root and independent review of exact-camera wide/close daylight pairs find no meaningful halo improvement. The close view has at most a slightly earthier immediate edge; the continuous bright-green strip and smooth ribbon-like boundary remain. No obvious new seam or speckle is seen, but that is not sufficient artistic value. All ten candidate production/test files are restored byte-identically to checkpoint `443a9ce7b`; the improved Native202 width profiles remain. The rejected patch is preserved at service-layout `path-shoulder203-rejected.patch`, SHA256 `b54b1955aad6e6bb9ef0265f8488fe415373af125477bb01d98244fccfb7cf5f`, with restoration receipt `path-shoulder203-restored01`. No candidate default or public promotion.
+
+### Actual native comparison
+
+Baseline is retained build201/Native202. Candidate build202 uses 3024×1724/DPR2, High shadows, postprocessing and bloom, phase0.56/exposure0.850240084, and the same wide/close poses and FOV70 recorded in Native201 below. Native inspection confirms the candidate on all52 resident terrain-mesh materials and the grass owner; this is not a draw count. Wind, water, clouds and NPCs remain live.
+
+| Candidate raw PNG | Ordinary completed frame | SHA256 |
+| --- | --- | --- |
+| [Wide day](/Users/lucid/Downloads/hyperia-pond203-candidate-wide-day.png) | 3616 | `3df9859e1c0de9f1eac00c2dd469c5bbcd7db354bf11a488c2eae02e73a954f7` |
+| [Close day](/Users/lucid/Downloads/hyperia-pond203-candidate-close-day.png) | 4546 | `6a20095fcfe3b69634c9aa27075498a48d60fdeb945c3d4f5b2a0efe96465cf0` |
+
+The native world reaches the ordinary HUD without reloading after displaying its existing preparation warning. This does not qualify startup latency. Completed-frame PNG subscriptions and blob URLs retire; camera/clock and environment/renderer exposure each restore true. Owned game/DevTools windows close, retaining the pre-existing New Tab. Runtime `runtime-pond203-candidate01` stops at `2026-10-01T22:18:36.938Z`, errors empty, protected state unchanged, disposable database removed and all four private ports free. Process receipt SHA256 `6c8009d61c6637a3f97b72c0458b949432db372b84857451b51f0f042ef12d59`. Public3333/build174 and saved state remain untouched.
+
+### Source evidence and limits
+
+- Author `path-shoulder203-focused07` passes all7 new tests across3 existing files: default/captured selector, serialized CPU/TSL and shared-PBR arithmetic, real worker/synchronous placement parity, unchanged non-color arrays, stale-result rejection and genuine empty results. The actual terrain fixture uses25m retained leaves, not a fabricated surface. Earlier incorrect test assumptions and oversized-fixture refusals remain in failed receipts.
+- `types02` retains5 baseline/current diagnostics with zero new before the final fixture-only test adjustments; scoped `lint01` passes. No final broad candidate-suite or performance acceptance is claimed. Root's parsed-source comparison separately proves the four historical support/weight method bodies unchanged (`pond-shoulder203-root-support01`).
+- Canonical202 builds9 bundles/977 inputs with zero overrides and182 protected artifacts unchanged. Root verifies exactly the seven expected production-input differences from201 and all current input/artifact hashes (`pond-shoulder203-root-build01`). Report SHA `c86bec5e585627acf65e0c6a427d1d6ea796602acab915ba3450b3abad41fea3`; client framework SHA `fad927d9847ade7b4610bb6404d758f291e1b40b8fbb39302a82dbfc9f6ae2f5`.
+- Private helper syntax, explicit selection/duplicate rejection, historical normalization, source pins and no-output preflight pass. Root's first inverse-check command accidentally removed an entire normalizer line in memory; corrected `pond-path-blend203-root-inverse02` passes without product changes. Helpers are restored after cleanup; frozen trial artifacts/receipts remain.
+
+**Next action changes:** stop blend-strength and tiny-overlay sweeps. The polynomial cannot change an already-zero resolved road weight even where raw-road placement has begun thinning blades. That is a source-supported limitation, not attribution of every photographed green pixel. Inspect the exposed turf's actual material response and raw-versus-resolved road coverage at representative native shoulder points before another art change. Preserve the useful path contours and all navigation/vegetation support. Dawn/night/motion, reliable loading and sustained2×/60FPS remain open.
+
+### Performance prioritization — retained trace, no optimization claim
+
+A read-only, namespace-checked recount of `/Users/lucid/Downloads/hyperia-native198-chrome-cpu01-20261001.json.gz` (SHA `d91557eb770cae9b581391960ccaedbde9c8f49384fc42dd6cfd1d6b1a91d1f3`) finds22,428 raw samples with `updateMatrixWorld` ancestry:17,564 have `_renderScene` above the outermost matrix call,4,063 `move`,801 other. The only populated node/sample stream is PID8316/TID13708998/profile0x1 (6,363 chunks,5,372 nodes,626,263 samples); TID13708998 emits profile events, while main TID13684354 has the header and two empty chunks. Browser metadata maps PID8316 to the private game. No conflicting IDs, missing ancestors or cycles are found.
+
+These are sample counts, not milliseconds, call counts or removable frame cost. No identifiable mob skeleton callback appears, so the repeated per-bone source loop is **not selected as a demonstrated current-world bottleneck**. Investigate repeated renderer transform traversal with explicit transform-writer/ownership safety; do not revive blanket Stage freezing or skip reflection updates globally. The prior trace's focus/timing limitations remain unchanged.
+
+
 ## Native202 variable-width pond trail — contour improvement retained
 
 The replacement uses authored broad width/shoulder knots on the **existing original segments**, rather than additive wear overlays. Original centerline coordinates, heights, lengths and default road records reproduce the retained pre-profile actual-assets-v10 SHA256 `2750f821cef622f7c853f1a0f201567b938a348e1ae12134b252a6eaabc4c6b0` after removing only the new optional profile field. All other paths are unchanged. The road owner resolves profiles before tile clipping and carries them through cached/direct queries, influence bounds, mask resolution, GPU export and preparation leases. Complete varying-radius capsules are checked against water, authored floors, docks and admitted terrain; service neighbourhoods include adjacent cap support.
