@@ -1,5 +1,30 @@
 # Grass canopy visibility: research checkpoint
 
+## Native194 balanced reflection pairs: narrower pass benefit, whole-frame result mixed
+
+Private `runtime-reflection194-pairs01` completes one bounded native Chrome/Metal comparison at unchanged3840×1926/DPR2/MSAA4/High PCF, held wide camera/light/exposure and live world animation. Seed26484774 schedules six adjacent pairs (BA,BA,BA,AB,AB,AB; A=full, B=raster-plus-grass footprint). Each arm excludes at least2s settling and requires five consecutive validated completed frames, then records five actual1Hz timing samples over about5s. “Validated” does not require identical wind-dependent crops. There is no video, manual render or animation freeze. All12 arms/60 samples complete in86.912s.
+
+Root and independent review reproduce these **nonexclusive native GPU interval-union arm medians**, using BigInt timestamp arithmetic rather than summing overlapping passes:
+
+| Pair/order |    Full ms | Combined ms | Combined minus full ms |
+| ---------- | ---------: | ----------: | ---------------------: |
+| 1/BA       | 117.506048 |  105.644032 |             −11.862016 |
+| 2/BA       | 112.132096 |  127.533056 |             +15.400960 |
+| 3/BA       | 129.040384 |  111.738880 |             −17.301504 |
+| 4/AB       | 129.040384 |  122.486784 |              −6.553600 |
+| 5/AB       | 131.268608 |  113.115136 |             −18.153472 |
+| 6/AB       |  99.942400 |  119.078912 |             +19.136512 |
+
+Four pairs improve and two regress. Median paired difference is−9.207808ms; median paired relative difference is−7.5868%, ranging from−13.8293% to+19.1475%. These six comparisons are not60 independent replicates, a pooled speedup, exclusive GPU-busy time or displayed FPS. The mirror interval median is lower in all six pairs (median paired difference−7.897088ms), a useful narrower signal; overlapping main/output intervals do not establish exclusive costs. CPU render medians range24.4–29.2ms with detailed submission observers active. Ordinary uninstrumented smoothness remains unqualified.
+
+Every candidate sample removes the same12 reflected-grass owners/1,168,641 submitted triangle slots. Main grass remains34draws/2,592,507slots. Whole-scene reported draws/slots change701/8,738,748→689/7,570,107. Non-grass mirror submissions retain one exact source/pipeline/buffer/layout variant,230draws/1,082,531slots. Source-defined nine-pool/39-dynamic-attribute ownership is pinned; raw revisions and emitter state are retained instead of incrementally waiving counters. All nine pools retain18draws/8,000slots in each main/mirror view. Eight fish-emitter positions still move; water, wind and particle contents advance. Equal submissions therefore do not imply equal fragment work or pixels. Candidate native crops are790×235 in12 samples and790×236 in18, on the unchanged1920×963 target.
+
+Independent raw audit passes3,839 assertions. GPU/error lists are empty, no device loss is recorded,180/180 owned query resources retire and349/349 native scissor hooks restore. Camera/clock/exposure and both selectors restore. Owned game/DevTools windows close, preserving the existing New Tab; runtime exits0/STOPPED at2026-10-01T08:15:26.468Z. Protected state remains equal, disposable database is removed, all four private ports are free, ignored review module is removed and42 unrelated hashes are unchanged. Public3333/build174 and production defaults remain untouched.
+
+**Decision:** retain reflection footprint as a default-off candidate with proved submission reduction and a narrower pass signal consistent within this run, not an accepted whole-frame improvement. Do not repeat the same counter/census/timing loop. Next prioritize a distinct main-scene candidate: screen existing projected tree LOD at2× with unchanged population, silhouettes, wind and interactions; it is not yet a measured bottleneck. Wider reflection routes/low-angle parity, ordinary frame pacing and island art acceptance remain open.
+
+Evidence: inland-pond `runtime-reflection194-pairs01/client.log` (`REFLECTION194_TIMING_BLOCK`, `REFLECTION194_TIMING_RESULT`, `REF194P_CLEANUP`); service-layout `reflection194-pairs-evidence01` and `reflection194-pairs-cleanup01`. Final log SHA256 `4f75cdbb2724dc86179a5640041fa35847cd7407342de7a10b5eb71e2c4ef60b`; stopped process `b2c467369a94d595a27f9fa93cf9f74996bbbbd876d667aa0505d6484028045d`; result payload `efc53bd96ae9109e369784213287485f5a761315e8ea70658e8362af5261b41e`. Reviewed external helper SHA256 `aba3be1c04d2f2eb5bf79e268d496a2841d0fa44df02f3c1771f2f176133ac3e`; only its timing-controller range changes, with Node22 syntax and independent source-contract review passing.
+
 ## Native194 moving reflection fallback verified with native 2x recording
 
 Private `runtime-reflection194-motion01` completes two ordinary fixed-eye pitch paths at unchanged 3840×1926 / DPR2 / MSAA4 / High PCF. The eye stays at [370,34,388], FOV70; the target rises from [401,25,411] to [401,34,411] and returns. Full reflection runs first, then raster-plus-grass footprint culling. World animation remains live. There are 196 completed frames over 24.077 seconds, with no extra renders or GPU timing.
