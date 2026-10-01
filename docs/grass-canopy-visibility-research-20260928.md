@@ -1,5 +1,64 @@
 # Grass canopy visibility: research checkpoint
 
+## Native192 grass shadow reception: measured lead, blanket-off rejected
+
+The requested shadow question is tested in the actual private game, not a demo: native Chrome/Metal WebGPU, 3840×1926, DPR2, MSAA4, High shadows with PCF, unchanged 94 resident grass owners, held phase 0.56 and initialized stable exposure. Eye [370,34,388], target [401,25,411], FOV70. Only grass `receiveShadow` changes; casting stays off, geometry/density/material versions and reflection settings stay unchanged. No production default or public build changes.
+
+The existing native-pass timer is reused for on/off/off/on blocks, each with at least eight seconds of excluded settling and twelve seconds of measurement. The controller requires stable complete main/mirror grass draw signatures, original owners, exact camera/player/quality, ready streaming, foreground focus and native pipeline readiness. Two setup attempts correctly refuse before sampling: first browser focus, then one chunk replaced after moving to the held view. Raising the owned game window and pinning the settled view resolves those preconditions without weakening guards.
+
+| Block | Grass reception | Samples | Median observed GPU-pass union | Observed range |
+| --- | --- | ---: | ---: | ---: |
+| A1 | On | 11 | 157.221 ms | 117.178–164.692 ms |
+| B1 | Off | 12 | 143.262 ms | 110.297–176.488 ms |
+| B2 | Off | 12 | 145.490 ms | 117.375–161.350 ms |
+| A2 | On | 12 | 152.273 ms | 120.455–172.622 ms |
+
+Independent analysis recomputes interval unions from absolute timestamps rather than summing overlapping passes. Pooled medians are 156.238 ms on / 144.540 ms off: an observed 7.49% reduction in this small instrumented experiment. The distributions overlap broadly and A1→A2 drifts by about 4.95 ms. This is a receiver-cost lead, not isolated grass GPU cost, displayed FPS, sustained performance, a reliable general speedup or a quality-preserving optimization. The view differs from earlier native187 captures; their absolute timings are not comparable as a regression test.
+
+All 47 samples preserve 711 reported draws / 8,768,748 triangle slots across eight native passes. Main grass contributes 34 draws / 60,253 clumps / 2,592,507 triangle slots; mirror grass 32 / 61,169 / 2,734,848. Both shadow-map passes remain 84 draws / 602,100 triangles each, with no grass draws. Compact per-sample grass signatures match; the running controller additionally checks UUID/index/range/effective-parameter invariance. Positive ordered timestamps and exact duration arithmetic validate; eight quantized zero-duration segments are not proof of free work.
+
+Untimed native on→off→on images visibly lose broad tree shade across the grass when reception is disabled and regain it on return. **Blanket-off is rejected visually.** The next candidate must retain nearby detail and cheaper broad distant shade, with terrain/grass agreement and smooth motion/day/night/reflection transitions. Distance reduction remains unimplemented and unaccepted; this test does not prescribe an arbitrary cutoff.
+
+All four timers restore with errors[], no GPU errors/device loss, and 141/141 owned query resources destroyed. After the visual return, the first checked completed frame matches the original full grass draw signature. Camera/clock, both exposure fields and all 94 receiver flags restore; observers and owned controls are removed. Owned game/DevTools windows close, preserving the pre-existing New Tab. Runtime stops at 2026-10-01T01:18:56.516Z with errors[], protected state unchanged, disposable database removed and all four private ports free. Public3333/build174 and saved state remain unchanged.
+
+Evidence: inland-pond `runtime-grass-receiver192-native01/client.log` actual console markers `GRASS_RECEIVER192_BLOCK/RESULT`, `VISUAL_OFF/RETURN`, `RESTORED_DRAW`, `CLEANUP` (the latter markers share the same prefix), and `process.json`; service-layout `grass-receiver192-native-runtime01`. Root retained-data validation passes in `grass-receiver192-root-evidence02`; the first validator stops on a local variable naming error before validation and is retained, not treated as a game failure. This advances diagnosis and rejects a visible shortcut; the 2× smoothness and AAA-quality gates remain open.
+
+## September 30 research: grass quality, distance shading and measured cost
+
+Research-only decision; no rendering settings, materials, density or public build changed. Primary references support a layered approach, not a universal blade count or a replacement engine:
+
+- [AMD procedural grass](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/) demonstrates curved blades, gradual blade removal with width compensation, root darkening and softened normals. These are useful design principles, not a browser-ready implementation: its geometry generation uses mesh shaders.
+- [Standard WGSL](https://gpuweb.github.io/gpuweb/wgsl/#shader-stage-attributes) exposes vertex, fragment and compute stages, not that mesh-shader pipeline. [Three's official instancing example](https://threejs.org/examples/webgpu_instance_mesh.html) and [indirect-draw source](https://github.com/mrdoob/three.js/blob/dev/examples/webgpu_struct_drawindirect.html) are implementation references; neither proves a grass speedup on this Mac.
+- [Grassworks' author update](https://discourse.threejs.org/t/i-built-a-real-time-grass-system-for-three-js-webgpu/94175/4) describes persistent surviving-blade positions and spatially distributed LOD transitions for forthcoming v1.1.0. Its [performance guide](https://grassworks.techredux.co/docs/performance) explicitly balances finer tiles against management/draw overhead. This is a commercial reference, not assumed open-source code or a measured Hyperia benchmark. Stable transitions still need our moving-camera noise test.
+- [Sucker Punch's environment breakdown](https://blog.playstation.com/2021/01/12/how-stunning-visual-effects-bring-ghost-of-tsushima-to-life/) describes shared large-scale gusts across vegetation with smaller grass motion layered on top. Cohesive motion matters alongside blade detail; this is not an instruction to introduce per-blade CPU simulation.
+
+### What Hyperia already has
+
+The retained `fine-meadow-ribbon-v1` has 105/63/36 triangles per clump at near/middle/far tiers, respectively. It already uses cell instancing, wind-swept per-camera frustum bounds, rooted GPU wind, deformed normals, indirect root occlusion and thin-leaf lighting. Fine-profile placement density stays full through its 140 m horizon; geometry tiers use 12 m/40 m distances to 25 m cell bounds with hysteresis. These are source facts, not projected coverage or frame-time measurements. See `GrassBladeLayout.ts`, `GrassVisualManager.ts` and `GrassGroundingGpu.ts`.
+
+Do not repeat “add instancing/LOD/wind” as missing work. One-triangle far grass lost coverage; matrix-free, clump-cache and adaptive-command candidates have not established reliable improvement. Native174's 7,174,707 grass triangle slots include both main and mirror rendering, not unique visible blades or exclusive grass GPU cost.
+
+### Shadow reception is a separate optimization candidate
+
+The user's suggestion is supported by [Unity's SpeedTree receiver-LOD guidance](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/SpeedTreeImporter-receiveShadows.html): sufficiently distant vegetation can omit shadow reception when the difference is not noticeable. [Unity's shadow-distance guide](https://docs.unity3d.com/Manual/shadow-distance.html) also distinguishes real-time range from cheaper distant shadow representations.
+
+Current Hyperia grass sets `castShadow=false` and `receiveShadow=true` in both creation paths. Disabling casting is therefore not a new saving. Receiving shadows adds lighting/shadow-filter work during grass rendering, even though grass itself is absent from shadow-caster draws. The installed Three 0.186.0 `AnalyticLightNode` includes shadow setup only for receiving objects; its `ShadowNode` supplies the filtering operation.
+
+**Research proposal, subsequently measured in native192 above:** measure receiver cost at unchanged geometry/resolution, then assess detailed reception nearby and a cheaper broad shade representation in the distance. Preserve tree/pavilion shade, root contact, terrain consistency and the moving sun; static ambient darkening is not an equivalent replacement for direct-light occlusion. No arbitrary distance is approved. Avoid abrupt bright rings, cell boundaries, dawn/night contrast and reflection disagreement. Simply fading an already-computed shadow to white does not establish fewer texture samples; verify emitted WGSL and actual GPU cost. Turning reception off does not remove grass triangles or eliminate the shadow map still needed by other objects.
+
+### Implementation priority and acceptance
+
+1. Reuse existing timing tools to separate main/mirror receiver-shading cost from geometry/overdraw and CPU work; retain the existing reflection-footprint candidate as a separate comparison.
+2. Trial coverage-preserving, projected-size-aware LOD with persistent placement. Compare width compensation or a distant representation only if the full meadow remains convincing; wider blades/cards may increase covered pixels. Reject shimmer, sparse horizons and flat silhouettes.
+3. Tune terrain/blade palette, normal response and broad wind together at noon, dawn, dusk and night. More random color or micro-motion is not the desired soft meadow.
+4. Require matched actual 3840×1926/DPR2/MSAA4 native WebGPU runs, warm frame-time distributions, moving/grazing views, reflected water views, loading/reload/memory checks and exact restoration. Triangle savings alone cannot pass. Sustained 60 FPS and AAA-quality acceptance remain open.
+
+## Native192 reflection review stopped for requested research
+
+The private192 run reaches ready gameplay at native 2×. The same held low-angle pond view at phase 0.56 is inspected with the existing footprint off and on; neither inspected image shows obvious clipping, but animated water differs. There is no off-return comparison, current scissor receipt, continuous traversal or GPU/FPS measurement. This is not parity or promotion evidence.
+
+Camera/clock and both exposure fields restore; footprint and grass-footprint are off, with no review owner or GPU timer. Owned game/DevTools windows close while the pre-existing New Tab remains. Runtime stops at 2026-10-01T00:46:13.801Z with errors[], protected state unchanged, disposable database removed and all four private ports free. Public3333/build174 is untouched. Evidence: `runtime-reflection192-native01/client.log` markers `REFLECTION192_GRAZING_OFF/ON`, `REFLECTION192_RESTORED_FOR_RESEARCH`, and its `process.json`.
+
 ## Native192: rounded pond approach and exported shoreline correction
 
 Canonical192 compiles nine bundles/maps with976 inputs and zero source substitutions. Only `CompactIslandPaths.ts` changes from191;975 production inputs remain identical. The curve replaces only the final approximately10.7m of the pond approach, preserving upstream/dock anchors and all22 unrelated routes. Its arrival turns from90° to47.85° and stays within0.943m of the previous centerline. Both the approach and entire lobby–arena dirt spine redistribute hard core into softer shoulders without expanding their outer support; navigation/collider widths are unchanged. Segment count rises531→556, with new curve steps≤0.5m and the existing256-point cap. More grass can be admitted by softer masks; this is not a cost-neutrality claim.
