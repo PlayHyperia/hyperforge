@@ -1,8 +1,21 @@
 # Duel Arena, Streaming, and Hyperbet Launch Checklist
 
-## Active world-first work
+## Active performance-first work — 60 FPS at 2×
 
-This is the execution queue, not a claim that the island already meets the visual or performance target. Avatar/equipment polish remains deferred.
+October 1 direction: performance is the sole active priority. World, terrain-material and avatar/equipment art polish are deferred until the performance methods are established. The full launch scope below remains open.
+
+- [x] **Rank the largest measured contributions:** Native206 independently verifies 1,340 ticks / 1,071 measured at 3800×1886, DPR2/MSAA4/High. Terrain omission improves ordinary cadence by 29.1–29.8 ms; grass omission by 25.45–26.3 ms, against both adjacent full-scene blocks. Full scene remains 82.0–82.9 ms median; this is not displayed FPS or a shipping gain. All hooks/content restore with no errors. Only these two are causally ranked; separate CPU, GPU and geometry evidence. [Ranked queue, raw receipt and limits](grass-canopy-visibility-research-20260928.md#native206--current-build-performance-ranking-at-2).
+- [x] **Bound current transform cost:** Native205 records ten real build201 ticks at 3800×1886, DPR2/MSAA4/High shadows. Scene matrix traversal averages 2.06 ms/tick; separate direct calls add 0.64 ms. Animated actors account for 1.94 ms of the combined scope; grass hierarchy is only 0.12 ms and terrain hierarchy 0.03 ms. All 42 hooks restore. Visible but unfocused/instrumented: not an FPS benchmark. Do not prioritize static-leaf matrix caching.
+- [x] **Current-build terrain/grass contribution screen:** two omission repetitions each and five restored full-scene blocks complete at unchanged 2× quality. Focus/pose/owner guards pass. Natural lighting remains live; omission changes occlusion/overdraw. Do not add deltas or promote absent content as optimization.
+- [ ] **Qualify the existing exact-zero ground candidate first:** terrain now leads. Verify the live selector, then compare the existing `groundSampling=exact-zero-v1` at full content with reverse-order repetitions and matched views/lighting. It is not the separate rock selector. Preserve exact layer contributions, texture detail, geometry and quality; retain native shader/visual checks and ordinary frame timing. Earlier single-pair evidence is not current acceptance.
+- [ ] **Complete reflection and remaining time attribution:** measure the actual planar-capture pathway without toggling the public flag that also changes vegetation LOD. Separately attribute shadows, postprocessing, actors/trees and renderer CPU work. The current report must distinguish measured ordering from provisional investigation priority; never add overlapping intervals.
+- [ ] **Admit existing mushroom LOD conservatively:** preserve hero close-up detail and population; include finalized main/mirror/sun-shadow projected error with unknown-view fallback. Existing 1,500-triangle LOD is 70.08% smaller than the 5,013-triangle hero. Record qualifying coverage, all-view parity and actual complete-content timings; triangle savings alone do not establish FPS.
+- [ ] **Implement and verify the largest supported improvement:** prioritize terrain/grass/reflection work over tiny UI/matrix savings. Verify actual savings with normal complete content restored; retain before/after evidence and checkpoint the result.
+- [ ] **60 FPS acceptance:** use the same hardware, exact canvas dimensions, 2× resolution, quality, camera routes and scene population; retain ordinary gameplay and rendering. Target 16.67 ms/frame, reporting p50/p95/p99 and long hitches during sustained meadow, pond, town and arena traversal. A fast altered-content diagnostic or CPU-submission rate is not proof of displayed 60 FPS. No silent quality/resolution reduction.
+
+### Deferred visual work and historical evidence
+
+The following is retained visual scope and historical evidence, not the active execution order or a claim that the island meets its targets. The performance-first queue above takes precedence; world and avatar/equipment art polish remain deferred.
 
 ### Grass research follow-through
 

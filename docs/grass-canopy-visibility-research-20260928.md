@@ -1,5 +1,77 @@
 # Grass canopy visibility: research checkpoint
 
+## Native206 — current-build performance ranking at 2×
+
+Performance is the sole active priority. This completed diagnostic replaces the historical grass-first ordering below: **terrain beauty drawing has the largest measured marginal effect in this view, followed by grass**. It does not establish an exclusive GPU-cost breakdown or a shipping improvement.
+
+The ordinary private build201 scene ran nine 10-second blocks: full / omit grass / full / omit terrain / full / omit grass / full / omit terrain / full. Each block excludes its first two seconds. The raw receipt contains 1,340 ticks, including 1,071 measured ticks; an independent recount verifies block ownership, cadence arithmetic, all 88 grass and 37 terrain draw attempts per tick, and exact omission counts. `complete`, `restored` and `ownerAbsent` are true, with no errors. Both original method descriptors restore; all content is present after the test.
+
+Conditions: Apple M5 / 24 GB, AC power, Chrome WebGPU, actual **3800×1886**, DPR2, MSAA4, High shadows, reflections, postprocessing and bloom enabled. The page remains visible/focused; DevTools is closed during measurement. The camera, player, geometry, material owners and settings remain unchanged. Background host load is not isolated. Natural lighting advances from phase 0.76885 through midnight to 0.14305, with exposure 1.034→1.10; this is not a fixed-lighting benchmark.
+
+| Condition | Full-content adjacent medians | Diagnostic median, repeats | Marginal cadence reduction | Synchronous tick median, repeats |
+| --- | --- | --- | --- | --- |
+| Terrain beauty draws omitted | 82.2–82.9 ms | 53.10 / 53.10 ms | **29.10–29.80 ms** | 16.60 / 16.80 ms |
+| Grass beauty draws omitted | 82.0–82.8 ms | 56.30 / 56.75 ms | **25.45–26.30 ms** | 17.20 / 17.00 ms |
+| Full scene restored | — | 82.0–82.9 ms across five blocks | — | 18.75–19.30 ms |
+
+Medians use the midpoint of the two central samples for even-length arrays. Full-scene p95 wall cadence is 85.5–86.4 ms; grass omission is 62.1 ms; terrain omission is 56.9–57.2 ms (nearest-rank p95). Cadence measures ordinary `world.tick` wall-start intervals, **not GPU completion or physical presentation**. CPU spans cover the synchronous original tick with the diagnostic draw gate, excluding guard bookkeeping. No GPU timers, fences, extra renders, gameplay mutation or quality reduction are installed. Shadow-override draws remain; main/reflected original-material draws are omitted. Changed occlusion/overdraw and scheduling make these marginal effects non-additive, and neither is a promise of recoverable milliseconds. Neither diagnostic reaches the 16.67 ms target.
+
+### Ranked optimization queue and remaining attribution
+
+1. **Terrain shading/drawing — strongest current measured lead.** Qualify the existing `groundSampling=exact-zero-v1` candidate before inventing another shader. It avoids grass/dirt appearance work only where the resolved layer weight is exactly zero. This is separate from `rockSampling=exact-zero-v1`. Runtime206's canonical plan omits the ground selector; verify the live material selector before the comparison. Earlier Native246 compile/WGSL and one timing pair are not current-build or repeatability acceptance. Preserve layer weights, texture detail, geometry, shadows and reflections; require full-content paired timing and pixel/visual parity.
+2. **Grass drawing — second current measured lead.** Investigate actual main/reflection submitted work and the already-authored per-view candidate; retain density and appearance. The historical 61% triangle share is not 61% of GPU time. Avoid tiny road-mask or matrix-cache work as the next primary optimization.
+3. **Planar reflection duplication — next attribution target, not a measured third-place time.** Measure capture-path omission with the reflector's exact `getUpdateBeforeType` lease while retaining the public reflection flag, which otherwise also changes vegetation LOD. Count actual capture calls, bracket both omission arms with full scene, restore descriptors, and qualify a complete-content optimization separately. Existing reflected-grass footprint results are mixed at whole-frame level.
+4. **Repeated renderer CPU preparation/submission and animated transforms.** Native205 bounds all measured matrix work at 2.70 ms/tick, dominated by actors at 1.94 ms. The broader binding/submission CPU work remains incompletely attributed; these CPU spans must not be added to overlapping cadence deltas. Blanket hierarchy freezing is rejected.
+5. **Mushroom/flower geometry — concrete asset-budget opportunity, timing rank unknown.** Existing mushroom LOD cuts model triangles by 70.08%, but active reflections currently force the hero model. Extend conservative main/mirror/shadow projected-error admission rather than remove its guard. Historical geometry ceiling is 744,756 fewer submitted slots if every mushroom qualifies, not a demonstrated speedup.
+6. **Lower-priority measured work:** minimap callbacks and grass/terrain transform traversal are small in the retained CPU evidence. Remaining actors, trees, water surface, postprocessing, shadows and other systems still need defensible time attribution; no invented most-to-least ordering is assigned to them.
+
+This ordering is an **action priority**, with only the first two directly ranked by the new causal screen. Main/reflection/shadow work overlaps object categories. Do not turn the list into a percentage pie chart or assume that the unmeasured remainder is free.
+
+[Raw Native206 receipt](/Users/lucid/Downloads/hyperia-native206-performance-contributions.json), SHA256 `86f56c7c0e9d810bea15cd546ca1919d920b7448fcdf1bd7e130e7bc244859bd`. Two independent reviewers reproduce the ranking and arithmetic. The Mac locked after successful restoration/download; reflection timing and native tab closure have not yet run. The private runtime stops normally at `2026-10-01T23:47:47.762Z`, errors empty, protected state unchanged and disposable database removed; all three private processes and four private listeners are absent. Process receipt SHA256 `768d1eb552165af224739a3cd347de697cdd1cb0aeca75cfe46a3aaef4bab64a`. All 42 unrelated working-file hashes and checklist-mirror equality pass. Public3333/build174 and production source/defaults remain unchanged.
+
+## Performance-first priority and Native205 CPU attribution
+
+October 1 user direction supersedes the art-first queue: focus solely on sustained60FPS at2× before further visual polish. Target frame time is16.67ms. Keep the exact viewport, quality and population explicit; altered-content diagnostics are not shippable performance results.
+
+Native205, retained canonical build201, records ten ordinary ticks at3800×1886/DPR2/MSAA4, High shadows and postprocessing. The page is visible but unfocused. Full synchronous tick averages15.04ms; scene matrix-traversal union averages2.06ms and separate selected direct-call union0.64ms. These are instrumented CPU wall spans, not GPU time or display FPS. All40 selected top-level branches and the scene/tick hooks restore (42/42); errors are empty. [Raw receipt](/Users/lucid/Downloads/hyperia-native205-matrix-branches.json), SHA256 `1335f937132e26620c69e5d947eae747dc95c42d2aceb3c355fcf51a55d321d0`.
+
+| Within the measured matrix scope | Mean ms/tick |
+| --- | ---: |
+| Animated actors, including direct updates | 1.94 |
+| Other scene branches/scene work/observer remainder | 0.42 |
+| Grass hierarchy | 0.12 |
+| Water hierarchy | 0.06 |
+| Sky, including direct updates | 0.06 |
+| Arena hierarchy | 0.03 |
+| Terrain hierarchy | 0.03 |
+| Rocks hierarchy | 0.02 |
+| Vegetation hierarchy | 0.02 |
+
+The rows partition 2.70 ms, subject to timer precision. Do not add the containing 2.06 ms scene total again. Four scene traversals occur per tick; target sizes alone are not semantic pass identification. The remaining 12.34 ms is outside the measured matrix scopes, not automatically GPU or renderer cost. 33 animated roots/1,684 nodes dominate this scope. A redundant second mob-root update has only a fraction of the observed 0.40 ms/tick mob-direct ceiling; it is secondary and insufficient by itself to close the measured frame-cadence deficit. Static grass/terrain matrix caches and minimap tuning are not leading targets.
+
+### Historical investigation priorities — superseded by Native206 above
+
+1. Grass rendering: the historical build153 draw-omission screen reduced ordinary tick cadence from roughly54ms to34.1ms. Re-measure on currentbuild201 before assigning a current cost or saving.
+2. Terrain rendering: the same historical screen reached36.2ms without terrain beauty draws. Occlusion/overdraw changes mean these marginal deltas are not additive subsystem shares.
+3. Reflected scene duplication: Native194's footprint candidate removes1.169M reflected grass triangle slots, with a lower mirror interval in all six pairs; whole-frame results remain mixed. No accepted FPS improvement.
+4. Repeated renderer CPU submission, traversal and binding work: Native198 identifies these hot paths; current205 bounds the smaller matrix subset above.
+5. Mushroom/flower geometry: Native194's actual same-frame census gives mushrooms1,062,756 slots, larger than terrain923,466; flowers428,952. Investigate the existing cheaper mushroom LOD before creating replacement assets.
+6. Lower-priority measured work: historical minimap callback median0.102ms; road-mask compaction affects at most about0.17–0.24% of grass slots. Neither explains the major deficit.
+
+The retained Native194701-draw/8,738,748-slot census ranks geometry as grass60.96%, mushrooms12.16%, terrain10.57%, other models/props/effects7.75%, flowers4.91%, pond plants2.62%, water surfaces0.66%, sky0.37%. This is a historical **submission-count ranking, not a GPU-time ranking**. Raw source: `runtime-reflection194-pairs01/client.log`, SHA256 `4f75cdbb2724dc86179a5640041fa35847cd7407342de7a10b5eb71e2c4ef60b`.
+
+Native194 timestamp intervals overlap substantially: the one-draw output transform's long interval must not be presented as exclusive postprocessing cost. Do not sum those intervals into a performance pie chart. Use repeated, bracketed current-build contribution screens to select the next change, then verify normal complete-content frame pacing separately.
+
+### Concrete existing-asset opportunity
+
+The53 mushrooms in nine chunks account for212 instance-pass submissions across main, reflection and two shadow passes—not212 distinct mushrooms. The existing model has5,013 triangles; its already-authored LOD1 has1,500 (70.08% fewer). Both served models match the workspace assets. The projected-size LOD guard currently falls back to hero geometry whenever water reflections are enabled (`VegetationSystem.selectScreenSpaceLodForRender`). Do not simply remove that safety guard: admit the existing LOD only after finalized main, mirror and sun-shadow projected error is satisfied, retaining unknown-view fallback. If every instance qualified,744,756 fewer slots would be the geometric ceiling, not an expected or measured FPS saving. Preserve the existing [asset and validation recipe](/Users/lucid/Documents/hyperia/asset-studio/mushroom-lod01/README.md).
+
+### Native204 material diagnostic retired; art work deferred
+
+The raw-road/visual-road gap diagnostic finds a real field mismatch at the green border. A temporary live `max(rawRoad, visualRoad)` material experiment makes that diagnostic gap black but leaves a conspicuous green border in the ordinary image. It is rejected as insufficient art; no production source/default or public build changes. The six `hyperia-pond204-*.png` native captures remain in Downloads. Grass CPU root colors were unchanged, so this was a causal material test, not a complete candidate.
+
+The Mac locked during restoration. There is **no successful explicit material/camera/exposure restoration receipt**: the runtime was stopped and the original page later retired to an error document; its owned tab/DevTools closed after unlock. Runtime204 records STOPPED, errors empty, protected state unchanged and disposable database removed. Native205's CPU hooks restored before the later turn interruption; its server/client/controller were then absent while its disposable database remained. Root stopped that exact mount-free, auto-removing test container and closed the owned error tab/DevTools. The stale205 RUNNING receipt is not treated as a graceful shutdown record. No saved/public database was removed.
+
 ## Native203 road-shoulder material trial — rejected
 
 A default-off `pathBlend=trampled-v1` trial used the existing distortion and land fields to increase only partial visual-road soil coverage: `R′ = R + 0.8(1−E)L·R(1−R)`. The shared serialized CPU/TSL arithmetic retained pure endpoints, all-PBR weight ownership and existing physical grass support; it added no texture samples, mesh or render pass. [Tidewater's terrain source](https://github.com/dgreenheck/tidewater/blob/main/src/world/Terrain.js) informed the separation of coverage and local material detail; no distance fade, density reduction or external code was imported.
