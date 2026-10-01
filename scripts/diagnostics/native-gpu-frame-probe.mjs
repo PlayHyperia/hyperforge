@@ -1686,12 +1686,41 @@ export function summarizeNativePhysicalGpuFrames(raw) {
 
 // Independent CPU-only diagnostic. Historical GPU schemas above stay intact.
 // Self-contained so native console delivery does not need the Node summarizers.
-export function installNativeCpuFrameObserver({
-  durationMs = 30000,
-  maxRows = 12000,
-  label = "metal-cpu",
-} = {}) {
-  const key = "__HYPERIA_NATIVE_CPU_FRAME_OBSERVER01__";
+export function installNativeCpuFrameObserver(
+  { durationMs = 30000, maxRows = 12000, label = "metal-cpu" } = {},
+  // Default-parameter scope cannot reference observer-body bindings. Creating
+  // these reactions in a body-local factory could retain that body's context.
+  createDeviceLossCallbacks = function createNativeCpuDeviceLossCallbacks() {
+    // No handler argument: the factory's own arguments cannot retain it either.
+    const cell = { handler: null, retired: false };
+    return Object.freeze({
+      attach(handler) {
+        if (
+          cell.retired ||
+          cell.handler !== null ||
+          typeof handler !== "function"
+        ) {
+          throw Error("Device-loss handler requires an unused live cell");
+        }
+        cell.handler = handler;
+      },
+      fulfilled(value) {
+        cell.handler?.("fulfilled", value);
+      },
+      rejected(error) {
+        cell.handler?.("rejected", error);
+      },
+      clear() {
+        cell.handler = null;
+        cell.retired = true;
+      },
+      isCleared() {
+        return cell.retired && cell.handler === null;
+      },
+    });
+  },
+) {
+  const key = "__HYPERIA_NATIVE_CPU_FRAME_OBSERVER02__";
   const need = (ok, message) => {
     if (!ok) throw Error("Native CPU observer: " + message);
   };
@@ -1722,6 +1751,7 @@ export function installNativeCpuFrameObserver({
     water = terrain?.waterSystem;
   need(
     !Object.hasOwn(window, key) &&
+      !Object.hasOwn(window, "__HYPERIA_NATIVE_CPU_FRAME_OBSERVER01__") &&
       w &&
       g &&
       r &&
@@ -1799,6 +1829,7 @@ export function installNativeCpuFrameObserver({
   const hooks = [],
     errors = [],
     clockAlignments = [];
+  const deviceLossCallbacks = createDeviceLossCallbacks();
   const installedAt = performance.now(),
     installDeadline = installedAt + 120000;
   const timeOrigin = performance.timeOrigin,
@@ -1915,7 +1946,6 @@ export function installNativeCpuFrameObserver({
     watchdog = null,
     registered = false;
   let listenersInstalled = false,
-    observeDeviceLoss = true,
     deviceLoss = null;
   let resolveDone;
   const done = new Promise((resolve) => {
@@ -2066,7 +2096,9 @@ export function installNativeCpuFrameObserver({
       "raw rows available only after cleanup",
     );
     return {
-      schemaVersion: "cpu-only-1",
+      schemaVersion: "cpu-only-2",
+      diagnosticRevision: "detached-device-loss-cell-2",
+      ownerKey: key,
       label,
       state,
       durationMs,
@@ -2090,6 +2122,8 @@ export function installNativeCpuFrameObserver({
         : {}),
       scope:
         "Complete synchronous world.tick and graphics.render CPU call spans with instrumentation overhead; successful primary CPU submissions, not GPU completion or physical presentation FPS. Camera and time remain live. No per-draw observer, GPU query, readback, wait, manual render, or quality mutation. Timestamp alignment is a bracketed wall-clock observation, not a proven cross-process Metal clock mapping.",
+      retentionScope:
+        "Pending device-loss reactions retain a small retired handler cell and may retain the default-parameter options/arguments, but cannot lexically access observer-body rows/world. Supply only scalar duration/maxRows/label options. Clearing the cell detaches the body handler; retained controller/done receipts still intentionally retain their own data. No heap collection or full-memory-release claim.",
     };
   };
   const finish = (reason) => {
@@ -2112,7 +2146,8 @@ export function installNativeCpuFrameObserver({
     clearTimeout(startTimer);
     clearTimeout(runTimer);
     clearTimeout(watchdog);
-    observeDeviceLoss = false;
+    // Break the only reaction-to-observer reference before cleanup resolves.
+    deviceLossCallbacks.clear();
     try {
       finalMetadata = metadata();
       alignment("finished");
@@ -2169,7 +2204,8 @@ export function installNativeCpuFrameObserver({
       ),
       ownerAbsent: !Object.hasOwn(window, key),
       listenersRemoved: !listenersInstalled,
-      deviceLossObservationStopped: !observeDeviceLoss,
+      deviceLossObservationStopped: deviceLossCallbacks.isCleared(),
+      deviceLossHandlerCleared: deviceLossCallbacks.isCleared(),
     };
     finishedAt = performance.now();
     resolveDone(snapshot({ includeRows: true }));
@@ -2406,16 +2442,15 @@ export function installNativeCpuFrameObserver({
     device.addEventListener("uncapturederror", onGpuError);
     listenersInstalled = true;
     watchdog = setTimeout(() => finish("installation-watchdog"), 120000);
+    deviceLossCallbacks.attach((kind, value) => {
+      if (kind === "fulfilled") {
+        deviceLoss = { reason: value.reason, message: value.message };
+        fail("GPU device lost");
+      } else fail(value);
+    });
     device.lost.then(
-      (info) => {
-        if (observeDeviceLoss) {
-          deviceLoss = { reason: info.reason, message: info.message };
-          fail("GPU device lost");
-        }
-      },
-      (error) => {
-        if (observeDeviceLoss) fail(error);
-      },
+      deviceLossCallbacks.fulfilled,
+      deviceLossCallbacks.rejected,
     );
     return controller;
   } catch (error) {

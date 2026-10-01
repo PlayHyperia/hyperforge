@@ -377,6 +377,156 @@ test(
 );
 
 // CPU-only arithmetic/source contracts; no simulated browser or native receipt.
+async function cpuDeviceLossFactoryFromActualSource() {
+  const ts = await import("typescript");
+  const source = ts.createSourceFile(
+    "cpu-observer.js",
+    study.installNativeCpuFrameObserver.toString(),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  assert.equal(source.parseDiagnostics.length, 0);
+  const installer = source.statements[0];
+  assert(ts.isFunctionDeclaration(installer));
+  assert.equal(installer.name.text, "installNativeCpuFrameObserver");
+  assert.equal(installer.parameters.length, 2);
+  const parameter = installer.parameters[1];
+  assert.equal(parameter.name.getText(source), "createDeviceLossCallbacks");
+  const factory = parameter.initializer;
+  assert(ts.isFunctionExpression(factory));
+  assert.equal(factory.name.text, "createNativeCpuDeviceLossCallbacks");
+  assert.equal(factory.parameters.length, 0);
+  assert(factory.end < installer.body.pos);
+  // Compile the actual initializer, not a copied implementation. This test-only
+  // extraction also refuses dependencies hidden in the observer-body scope.
+  return new Function("return (" + factory.getText(source) + ");")();
+}
+
+test("CPU device-loss parameter-scope reactions forward real Promise fulfillment and rejection", async () => {
+  const factory = await cpuDeviceLossFactoryFromActualSource();
+  for (const kind of ["fulfilled", "rejected"]) {
+    const callbacks = factory();
+    assert(Object.isFrozen(callbacks));
+    assert.equal(callbacks.isCleared(), false);
+    const actual = [];
+    const value =
+      kind === "fulfilled"
+        ? { reason: "pure-promise-test" }
+        : Error("pure rejection");
+    callbacks.attach((...args) => actual.push(args));
+    const source =
+      kind === "fulfilled" ? Promise.resolve(value) : Promise.reject(value);
+    await source.then(callbacks.fulfilled, callbacks.rejected);
+    assert.deepEqual(actual, [[kind, value]]);
+    callbacks.clear();
+    assert.equal(callbacks.isCleared(), true);
+  }
+});
+
+test("CPU device-loss cleanup detaches handlers before pending real Promises settle", async () => {
+  const factory = await cpuDeviceLossFactoryFromActualSource();
+  for (const settle of ["resolve", "reject"]) {
+    const callbacks = factory();
+    let deliveries = 0;
+    callbacks.attach(() => deliveries++);
+    const source = Promise.withResolvers();
+    const reaction = source.promise.then(
+      callbacks.fulfilled,
+      callbacks.rejected,
+    );
+    callbacks.clear();
+    assert.equal(callbacks.isCleared(), true);
+    source[settle](Error("settled after cleanup"));
+    await reaction;
+    assert.equal(deliveries, 0);
+  }
+});
+
+test("CPU device-loss cleanup also suppresses already-queued real Promise reactions", async () => {
+  const factory = await cpuDeviceLossFactoryFromActualSource();
+  for (const settle of ["resolve", "reject"]) {
+    const callbacks = factory();
+    let deliveries = 0;
+    callbacks.attach(() => deliveries++);
+    const source = Promise.withResolvers();
+    const reaction = source.promise.then(
+      callbacks.fulfilled,
+      callbacks.rejected,
+    );
+    source[settle](Error("queued before cleanup"));
+    callbacks.clear();
+    await reaction;
+    assert.equal(deliveries, 0);
+    assert.equal(callbacks.isCleared(), true);
+  }
+});
+
+test("CPU device-loss cells reject reuse, permit idempotent cleanup, and stay independent", async () => {
+  const factory = await cpuDeviceLossFactoryFromActualSource();
+  const retired = factory();
+  assert.throws(() => retired.attach(null), /unused live cell/);
+  retired.clear();
+  retired.clear();
+  assert.equal(retired.isCleared(), true);
+  assert.throws(() => retired.attach(() => {}), /unused live cell/);
+  const live = factory();
+  let deliveries = 0;
+  live.attach(() => deliveries++);
+  assert.throws(() => live.attach(() => {}), /unused live cell/);
+  await Promise.resolve().then(retired.fulfilled, retired.rejected);
+  await Promise.resolve().then(live.fulfilled, live.rejected);
+  assert.equal(deliveries, 1);
+  assert.equal(live.isCleared(), false);
+  live.clear();
+  assert.equal(live.isCleared(), true);
+});
+
+test("CPU device-loss callbacks retain real Promise throw semantics and can retire during delivery", async () => {
+  const factory = await cpuDeviceLossFactoryFromActualSource();
+  const callbacks = factory();
+  const expected = Error("handler failure");
+  callbacks.attach(() => {
+    callbacks.clear();
+    throw expected;
+  });
+  await assert.rejects(
+    Promise.resolve().then(callbacks.fulfilled, callbacks.rejected),
+    (actual) => actual === expected,
+  );
+  assert.equal(callbacks.isCleared(), true);
+  await Promise.resolve().then(callbacks.fulfilled, callbacks.rejected);
+});
+
+test("CPU2 source clears the detached cell before resolving cleanup and identifies its revision", () => {
+  const source = study.installNativeCpuFrameObserver.toString();
+  const compact = source.replace(/\s+/g, "").replace(/,\)/g, ")");
+  for (const required of [
+    'schemaVersion:"cpu-only-2"',
+    'diagnosticRevision:"detached-device-loss-cell-2"',
+    'constkey="__HYPERIA_NATIVE_CPU_FRAME_OBSERVER02__"',
+    '!Object.hasOwn(window,"__HYPERIA_NATIVE_CPU_FRAME_OBSERVER01__")',
+    "device.lost.then(deviceLossCallbacks.fulfilled,deviceLossCallbacks.rejected)",
+    "deviceLossHandlerCleared:deviceLossCallbacks.isCleared()",
+    "default-parameteroptions/arguments",
+  ])
+    assert(compact.includes(required), required);
+  assert(!compact.includes("observeDeviceLoss"));
+  assert(!compact.includes("newFunction("));
+  assert(!compact.includes("eval("));
+  const finish = compact.slice(
+    compact.indexOf("constfinish="),
+    compact.indexOf("constfail="),
+  );
+  assert(finish.includes("deviceLossCallbacks.clear()"));
+  assert(finish.includes("resolveDone(snapshot({includeRows:true}))"));
+  assert(
+    finish.indexOf("deviceLossCallbacks.clear()") <
+      finish.indexOf("resolveDone("),
+  );
+  assert(compact.includes("catch(error){fail(error);throwerror;}"));
+});
+
 test("CPU frame arithmetic separates full tick, render submission and cadence without mutation", () => {
   const columns = [
     "tickStartMs",
