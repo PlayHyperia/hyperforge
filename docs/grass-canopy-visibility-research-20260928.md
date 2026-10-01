@@ -1,5 +1,26 @@
 # Grass canopy visibility: research checkpoint
 
+## Native194 tree LOD round trip and same-view canopy comparison
+
+Private `runtime-tree194-visual01` loads the existing `treeLod=projected-v1` candidate from initialization, without changing production defaults. Native Chrome/Metal retains 3840×1926, DPR2, MSAA4, High PCF, phase 0.56 and initialized exposure 0.850240084. Wind and world animation stay live. The three focused viewport/LOD/tree-integration suites pass **638/638** with Node22/Vitest4.1.10; their CPU/source coverage is not GPU visual acceptance.
+
+The first 27.041-second translating route proves General05 LOD0→1→0, but passes through nearby foliage and obscures the view. General06 stays at LOD0. Retain that limitation; the route does not qualify continuous transition appearance.
+
+A fixed-eye zoom avoids the obstruction: eye [360,34,350], target [453,31,410], FOV58→90→58. Both eight-second legs complete with 17 sampled states and no reported errors. Both real trees switch to their shipped LOD1 geometry and return to LOD0:
+
+- General05 (`tree_449_410`): 3,617→2,193→3,617 selected triangles.
+- General06 (`tree_458_411`): 3,208→1,903→3,208 selected triangles.
+
+Using the existing hysteresis, subsequent held full/low views share the exact eye, target and FOV84. The two trees total 6,825 versus 4,096 selected triangles: 2,729 fewer, about 40% for **these two trees only**. Root inspects the native near, distant, returned and same-framing stills; no obvious large canopy silhouette loss, missing trunk or separated material part appears in those inspected views. Wind/clouds/actors continue changing, so this is not pixel parity or frame-by-frame popping approval. No recording or GPU timer is used.
+
+Root and independent review verify 66 sampled states/264 material-part rows retain both trees' exact recorded transforms, variants, proxy identities, legacy wind mode, shadow flags and enabled-instance state. Each tree retains two parts. Enabled slots are not proof of primary-view frustum inclusion or native GPU submission; selected geometry counts are not measured GPU savings. No exact historical 150/167px crossing is reconstructed from these records, and unchanged proxy identity does not prove live chopping/depletion behavior. Connected-wind compatibility is still a separate gate; this run does not silently change wind mode.
+
+Both motion observers retire; camera/clock and both exposure fields restore, both reflection selectors remain false, and native 2× quality remains unchanged. Owned game/DevTools windows close while the existing New Tab remains. Runtime exits 0/STOPPED at 2026-10-01T08:45:19.169Z, with errors empty, protected state unchanged, disposable database removed and all four private ports free. All 42 unrelated file hashes remain unchanged; public3333/build174 stays untouched.
+
+**Decision:** the existing General05/06 geometry is viable for further visual qualification at this inspected scale; no replacement assets or threshold changes are justified by these views. Do not repeat this two-tree membership census. Next close continuous transition, Palm01/Oak02, shadow/reflection and actual resource-interaction gates; only then use a bounded matched cost screen. The candidate stays default-off. Whole-island art, ordinary frame pacing, sustained 60 FPS and production acceptance remain open.
+
+Evidence: inland-pond `runtime-tree194-visual01/client.log` (`TREE194_MOTION_RESULT`, `TREE194_ZOOM_RESULT`, `TREE194_STATE`, `TREE194_CLEANUP`); service-layout `tree194-focused01`, `tree194-evidence01`, `tree194-cleanup01`. Final log SHA256 `aabb16b229a7d390d6fac2b4e1db21193aaf7a4bec863bd120cd61b18753ae0a`; stopped process `d2de5803bb3c4771781b473cf690017880e1466821cb4933102fe2d5127bcb01`; outward/return zoom payloads `81bafaf05e9bf2d68a64e9095fd79b1ee307f9d624ded8773af8b6fa71e5e21b` / `50db5f22249a8dbc92ad69e653d541334f0c3991d7b73170c2407a5fa6f12a64`.
+
 ## Native194 balanced reflection pairs: narrower pass benefit, whole-frame result mixed
 
 Private `runtime-reflection194-pairs01` completes one bounded native Chrome/Metal comparison at unchanged3840×1926/DPR2/MSAA4/High PCF, held wide camera/light/exposure and live world animation. Seed26484774 schedules six adjacent pairs (BA,BA,BA,AB,AB,AB; A=full, B=raster-plus-grass footprint). Each arm excludes at least2s settling and requires five consecutive validated completed frames, then records five actual1Hz timing samples over about5s. “Validated” does not require identical wind-dependent crops. There is no video, manual render or animation freeze. All12 arms/60 samples complete in86.912s.
