@@ -783,11 +783,16 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
           id.includes(court.layoutId) || id === "compact-path-pond-approach";
         expect(noOutpost.filter((row) => retired.has(row.id))).toHaveLength(3);
         expect(paths.filter((row) => retired.has(row.id))).toHaveLength(0);
-        // This real alternate architecture selects the prior branch. Every
-        // unrelated route, including all three terminal stone entries, is
-        // byte-identical; no route widths or general shoulders are relaxed.
-        const stable = paths.filter((row) => !outpost(row.id));
-        expect(stable).toEqual(noOutpost.filter((row) => !retired.has(row.id)));
+        // This real alternate architecture selects the prior branch. Only the
+        // pond trunk and spine core/shoulder recipe change; the other 22 paths
+        // and all stone-entry support/positions remain byte-identical.
+        const spineId = "compact-path-lobby-arena";
+        const stable = paths.filter(
+          (row) => !outpost(row.id) && row.id !== spineId,
+        );
+        expect(stable).toEqual(
+          noOutpost.filter((row) => !retired.has(row.id) && row.id !== spineId),
+        );
         const spine = paths.find(
           (row) => row.id === "compact-path-lobby-arena",
         )!;
@@ -797,6 +802,15 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         const dock = paths.find(
           (row) => row.id === `compact-path-${court.layoutId}-arrival`,
         )!;
+        const previousSpine = noOutpost.find((row) => row.id === spineId)!;
+        expect(spine).toEqual({
+          ...previousSpine,
+          width: 0.9,
+          blendWidth: 1.6 - 0.9 / 2,
+        });
+        expect(spine.width / 2 + spine.blendWidth!).toBe(
+          previousSpine.width / 2 + previousSpine.blendWidth!,
+        );
         const entries = paths.flatMap((row) => row.platformEntries ?? []);
         expect(entries).toHaveLength(3);
         expect(entries.map((row) => row.to)).toEqual([
@@ -807,8 +821,8 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         expect(trunk).toMatchObject({
           fromId: court.layoutId,
           toId: "lobby-arena-junction",
-          width: 0.8,
-          blendWidth: 0.65,
+          width: 0.6,
+          blendWidth: 0.75,
         });
         expect(trunk.path[0]).toMatchObject(court.position);
         expect(dock).toMatchObject({
@@ -848,6 +862,168 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
         });
         expect(trunk.path.at(-1)!.x).toBeCloseTo(expectedSpine.x, 12);
         expect(trunk.path.at(-1)!.z).toBeCloseTo(expectedSpine.z, 12);
+        // Independently reconstruct the former three-anchor sampled approach
+        // with Three vectors, then require exact upstream and dock continuity.
+        // This is a mathematical comparison, not native visual acceptance.
+        let controls = [
+          new THREE.Vector2(court.position.x, court.position.z),
+          new THREE.Vector2(guide.position.x - 2.5, guide.position.z),
+          new THREE.Vector2(expectedSpine.x, expectedSpine.z),
+        ];
+        for (let pass = 0; pass < 2; pass++) {
+          const next = [controls[0]];
+          for (let index = 1; index < controls.length; index++)
+            for (const t of [0.25, 0.75])
+              next.push(
+                controls[index - 1]
+                  .clone()
+                  .multiplyScalar(1 - t)
+                  .addScaledVector(controls[index], t),
+              );
+          next.push(controls.at(-1)!);
+          controls = next;
+        }
+        const original = [controls[0]];
+        for (let index = 1; index < controls.length; index++) {
+          const a = controls[index - 1],
+            b = controls[index];
+          const steps = Math.max(1, Math.ceil(a.distanceTo(b)));
+          for (let step = 1; step <= steps; step++)
+            original.push(
+              a.clone().add(
+                b
+                  .clone()
+                  .sub(a)
+                  .multiplyScalar(step / steps),
+              ),
+            );
+        }
+        let splice = original.length - 1,
+          removedLength = 0;
+        while (splice > 1 && removedLength < 10) {
+          removedLength += original[splice].distanceTo(original[splice - 1]);
+          splice--;
+        }
+        expect(removedLength).toBeGreaterThanOrEqual(10);
+        expect(removedLength).toBeLessThan(11);
+        for (let index = 0; index <= splice; index++) {
+          expect(trunk.path[index].x).toBeCloseTo(original[index].x, 12);
+          expect(trunk.path[index].z).toBeCloseTo(original[index].y, 12);
+          expect(trunk.path[index].y).toBe(
+            height(trunk.path[index].x, trunk.path[index].z),
+          );
+        }
+        const directions = trunk.path
+          .slice(1)
+          .map(
+            (point, index) =>
+              new THREE.Vector2(
+                point.x - trunk.path[index].x,
+                point.z - trunk.path[index].z,
+              ),
+          );
+        const angleBetween = (a: THREE.Vector2, b: THREE.Vector2) =>
+          (Math.acos(
+            THREE.MathUtils.clamp(
+              a.clone().normalize().dot(b.clone().normalize()),
+              -1,
+              1,
+            ),
+          ) *
+            180) /
+          Math.PI;
+        let maxTurn = 0;
+        for (let index = splice; index < directions.length; index++) {
+          expect(directions[index].length()).toBeLessThanOrEqual(0.5);
+          const angle = angleBetween(directions[index], directions[index - 1]);
+          expect(angle).toBeLessThan(index === splice ? 2 : 9);
+          maxTurn = Math.max(maxTurn, angle);
+        }
+        const previousTrunk = {
+          ...trunk,
+          path: original.map((point) => ({
+            x: point.x,
+            y: height(point.x, point.y),
+            z: point.y,
+          })),
+        };
+        const previousDock = closest(previousTrunk, dock.path[0]);
+        expect(dock.path.at(-1)!.x).toBeCloseTo(previousDock.x, 12);
+        expect(dock.path.at(-1)!.z).toBeCloseTo(previousDock.z, 12);
+        const spineSegment = spine.path
+          .slice(1)
+          .map((b, index) => {
+            const a = spine.path[index];
+            const line = new THREE.Line3(
+              new THREE.Vector3(a.x, 0, a.z),
+              new THREE.Vector3(b.x, 0, b.z),
+            );
+            return {
+              lobbyward: new THREE.Vector2(a.x - b.x, a.z - b.z),
+              distance: line
+                .closestPointToPoint(expectedSpine, true, new THREE.Vector3())
+                .distanceTo(expectedSpine),
+            };
+          })
+          .sort((a, b) => a.distance - b.distance)[0];
+        const oldArrivalAngle = angleBetween(
+          original.at(-1)!.clone().sub(original.at(-2)!),
+          spineSegment.lobbyward,
+        );
+        const arrivalAngle = angleBetween(
+          directions.at(-1)!,
+          spineSegment.lobbyward,
+        );
+        expect(oldArrivalAngle).toBeCloseTo(90, 10);
+        expect(arrivalAngle).toBeGreaterThan(40);
+        expect(arrivalAngle).toBeLessThan(50);
+        const maximumShift = Math.max(
+          ...trunk.path
+            .slice(splice)
+            .map((point) =>
+              closest(previousTrunk, point).distanceTo(
+                new THREE.Vector3(point.x, 0, point.z),
+              ),
+            ),
+        );
+        expect(maximumShift).toBeGreaterThan(0.75);
+        expect(maximumShift).toBeLessThan(1);
+        expect(trunk.width / 2 + trunk.blendWidth!).toBe(0.8 / 2 + 0.65);
+        // At fixed distance the softer recipe never increases the old field;
+        // MAX unions remain unchanged. More admitted grass is possible, so this
+        // is not a grass-population or GPU-cost parity assertion.
+        for (const [path, oldWidth, oldBlend] of [
+          [trunk, 0.8, 0.65],
+          [spine, 1.4, 0.9],
+        ] as const)
+          for (let distance = 0; distance <= 2; distance += 0.01) {
+            const before = roadSegmentInfluence(
+              0,
+              distance,
+              -1,
+              0,
+              1,
+              0,
+              oldWidth,
+              oldBlend,
+            );
+            const after = roadSegmentInfluence(
+              0,
+              distance,
+              -1,
+              0,
+              1,
+              0,
+              path.width,
+              path.blendWidth!,
+            );
+            expect(after).toBeLessThanOrEqual(before + 1e-12);
+            expect(after > 0).toBe(before > 0);
+          }
+        expect(trunk.path.length).toBeLessThanOrEqual(256);
+        expect(
+          paths.reduce((sum, row) => sum + row.path.length - 1, 0),
+        ).toBeLessThanOrEqual(600);
         const expectedDock = closest(trunk, dock.path[0]);
         expect(dock.path.at(-1)!.x).toBeCloseTo(expectedDock.x, 12);
         expect(dock.path.at(-1)!.z).toBeCloseTo(expectedDock.z, 12);
@@ -901,6 +1077,13 @@ describe("inland pond opt-in circulation with actual terrain and road owner", ()
                 (sum, row) => sum + row.path.length - 1,
                 0,
               ),
+              curve: {
+                removedLength,
+                maxTurn,
+                oldArrivalAngle,
+                arrivalAngle,
+                maximumShift,
+              },
               unaffectedRowsSha256: createHash("sha256")
                 .update(JSON.stringify(stable))
                 .digest("hex"),

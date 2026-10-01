@@ -501,8 +501,8 @@ export function createCompactIslandPaths(
       id: "lobby-arena",
       fromId: "duel-lobby",
       toId: "arena-approach",
-      width: bankCourt ? 1.4 : 2.2,
-      ...(bankCourt ? { blendWidth: 0.9 } : {}),
+      width: pondJunction ? 0.9 : bankCourt ? 1.4 : 2.2,
+      ...(bankCourt ? { blendWidth: pondJunction ? 1.6 - 0.9 / 2 : 0.9 } : {}),
       points: [
         southLobby,
         { x: (southLobby.x + arenaApproach.x) / 2, z: arenaApproach.z },
@@ -739,11 +739,14 @@ export function createCompactIslandPaths(
       );
     }
   }
-  const buildPath = (definition: (typeof definitions)[number]) => {
+  const buildPath = (
+    definition: (typeof definitions)[number],
+    preserveSamples = false,
+  ) => {
     let points = definition.points;
     if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.z)))
       throw new Error("Compact path requires finite anchors: " + definition.id);
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; !preserveSamples && pass < 2; pass++) {
       const smooth: Point[] = [points[0]];
       for (let i = 1; i < points.length; i++) {
         const a = points[i - 1],
@@ -756,8 +759,8 @@ export function createCompactIslandPaths(
       smooth.push(points[points.length - 1]);
       points = smooth;
     }
-    const sampled: Point[] = [points[0]];
-    for (let i = 1; i < points.length; i++) {
+    const sampled: Point[] = preserveSamples ? [...points] : [points[0]];
+    for (let i = 1; !preserveSamples && i < points.length; i++) {
       const a = points[i - 1],
         b = points[i],
         steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z)));
@@ -769,6 +772,8 @@ export function createCompactIslandPaths(
           z: a.z + ((b.z - a.z) * j) / steps,
         });
     }
+    if (sampled.length > 256)
+      throw new Error("Compact path point bound exceeded");
     let length = 0;
     const blendWidth = definition.blendWidth ?? COMPACT_PATH_BLEND_WIDTH;
     const maxInfluence = definition.maxInfluence ?? 1;
@@ -841,7 +846,7 @@ export function createCompactIslandPaths(
   };
   const paths: CompactIslandPath[] = definitions
     .filter((definition) => !(pondJunction && definition.id === "pond-bank"))
-    .map(buildPath);
+    .map((definition) => buildPath(definition));
   if (meadowPaths) {
     // Wear follows short, unequal portions of the actual curved route. A
     // tapered lateral offset joins each skirt back into its core instead of
@@ -1148,13 +1153,17 @@ export function createCompactIslandPaths(
     const spine = paths.find((path) => path.id === "compact-path-lobby-arena");
     if (!spine)
       throw new Error("Pond circulation requires the lobby-arena spine");
-    const supportRadius = 0.8 / 2 + 0.65;
+    // Redistribute the hard dirt core into a broader soft shoulder without
+    // growing the route's complete paint/exclusion support.
+    const width = 0.6,
+      blendWidth = 0.75,
+      supportRadius = width / 2 + blendWidth;
     const closestPoint = (
       route: CompactIslandPath,
       anchor: Point,
       avoidFloors: boolean,
-    ): Point => {
-      let closest: Point | undefined;
+    ): { point: Point; tangent: Point } => {
+      let closest: { point: Point; tangent: Point } | undefined;
       let minimum = Infinity;
       for (let index = 1; index < route.path.length; index++) {
         const a = route.path[index - 1],
@@ -1180,7 +1189,8 @@ export function createCompactIslandPaths(
           continue;
         const distance = Math.hypot(point.x - anchor.x, point.z - anchor.z);
         if (distance < minimum) {
-          closest = point;
+          const length = Math.sqrt(lengthSquared);
+          closest = { point, tangent: { x: dx / length, z: dz / length } };
           minimum = distance;
         }
       }
@@ -1188,16 +1198,79 @@ export function createCompactIslandPaths(
         throw new Error("Pond circulation requires an admitted route junction");
       return closest;
     };
-    const junction = closestPoint(spine, pondGuide, true);
-    const approach = buildPath({
+    const join = closestPoint(spine, pondGuide, true);
+    const junction = join.point;
+    const definition = {
       id: "pond-approach",
       fromId: pondJunction.layoutId,
       toId: "lobby-arena-junction",
-      width: 0.8,
-      blendWidth: 0.65,
+      width,
+      blendWidth,
       points: [pondJunction.position, pondGuide, junction],
-    });
-    const dockJunction = closestPoint(approach, pondArrival, false);
+    };
+    const trunk = buildPath(definition);
+    // Ease only the final ten metres into the lobby-facing spine direction.
+    // Preserve the upstream samples and dock branch; a second corner-cutting
+    // pass would move their shared anchors. Three-metre cubic handles distribute
+    // the turn instead of making a right-angle dirt junction.
+    let splice = trunk.path.length - 1,
+      removedLength = 0;
+    while (splice > 1 && removedLength < 10) {
+      removedLength += Math.hypot(
+        trunk.path[splice].x - trunk.path[splice - 1].x,
+        trunk.path[splice].z - trunk.path[splice - 1].z,
+      );
+      splice--;
+    }
+    const from = trunk.path[splice],
+      previous = trunk.path[splice - 1],
+      beforeJoin = trunk.path[trunk.path.length - 2];
+    const firstLength = Math.hypot(from.x - previous.x, from.z - previous.z);
+    const lastLength = Math.hypot(
+      junction.x - beforeJoin.x,
+      junction.z - beforeJoin.z,
+    );
+    const arrival = {
+      x: (junction.x - beforeJoin.x) / lastLength - join.tangent.x,
+      z: (junction.z - beforeJoin.z) / lastLength - join.tangent.z,
+    };
+    const arrivalLength = Math.hypot(arrival.x, arrival.z);
+    if (!(firstLength > 0 && lastLength > 0 && arrivalLength > 0))
+      throw new Error("Invalid compact pond junction tangent");
+    const c1 = {
+      x: from.x + ((from.x - previous.x) / firstLength) * 3,
+      z: from.z + ((from.z - previous.z) / firstLength) * 3,
+    };
+    const c2 = {
+      x: junction.x - (arrival.x / arrivalLength) * 3,
+      z: junction.z - (arrival.z / arrivalLength) * 3,
+    };
+    // A cubic's derivative is a convex blend of three scaled control edges.
+    // Bound each uniform-t interval, not merely total control-polygon length.
+    const steps = Math.ceil(
+      (3 * Math.max(3, Math.hypot(c2.x - c1.x, c2.z - c1.z))) / 0.5,
+    );
+    const points: Point[] = trunk.path.slice(0, splice + 1);
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps,
+        s = 1 - t;
+      points.push({
+        x:
+          s ** 3 * from.x +
+          3 * s * s * t * c1.x +
+          3 * s * t * t * c2.x +
+          t ** 3 * junction.x,
+        z:
+          s ** 3 * from.z +
+          3 * s * s * t * c1.z +
+          3 * s * t * t * c2.z +
+          t ** 3 * junction.z,
+      });
+    }
+    // Reuse complete capsule/height admission, but do not resample the retained
+    // prefix: floating-point one-metre lengths can otherwise split old samples.
+    const approach = buildPath({ ...definition, points }, true);
+    const dockJunction = closestPoint(approach, pondArrival, false).point;
     paths.push(
       approach,
       buildPath({
