@@ -2509,7 +2509,16 @@ export class TileMovementManager {
    * Clear any pending arrival emote for a player.
    * Called when gathering is cancelled or player moves to a different destination.
    */
-  clearArrivalEmote(playerId: string): void {
+  clearArrivalEmote(
+    playerId: string,
+    expectedResolver?: () => string | null,
+  ): void {
+    if (
+      expectedResolver &&
+      this.arrivalEmoteResolvers.get(playerId) !== expectedResolver
+    ) {
+      return;
+    }
     this.arrivalEmotes.delete(playerId);
     this.arrivalEmoteResolvers.delete(playerId);
   }

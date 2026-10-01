@@ -15,6 +15,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { PendingGatherManager } from "../PendingGatherManager";
+import type { TileMovementManager } from "../tile-movement";
 import { EventType } from "@hyperforge/shared";
 
 const AUTONOMY_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
@@ -85,7 +86,7 @@ const createMockWorld = () => {
 };
 
 const createMockTileMovementManager = () => ({
-  movePlayerToward: vi.fn(),
+  movePlayerToward: vi.fn<TileMovementManager["movePlayerToward"]>(() => true),
   getIsRunning: vi.fn(() => false),
   setArrivalEmote: vi.fn(),
   clearArrivalEmote: vi.fn(),
@@ -479,7 +480,7 @@ describe("PendingGatherManager", () => {
       expect(pendingGathers.has("player1")).toBe(false);
     });
 
-    it("should timeout after 20 ticks", () => {
+    it("should timeout after 20 ticks without progress", () => {
       // Setup
       mockWorld.addPlayer({
         id: "player1",
@@ -509,6 +510,8 @@ describe("PendingGatherManager", () => {
               resourcePosition: { x: number; y: number; z: number };
               completionAttemptId?: string;
               skill: string;
+              deadlineTick: number;
+              lastProgressTick: number;
             }
           >;
         }
@@ -526,6 +529,8 @@ describe("PendingGatherManager", () => {
         resourcePosition: { x: 100, y: 0, z: 100 },
         completionAttemptId: AUTONOMY_ATTEMPT_ID,
         skill: "unknown",
+        deadlineTick: 120,
+        lastProgressTick: 0,
       });
 
       // Act - process at tick 21 (timeout is 20)

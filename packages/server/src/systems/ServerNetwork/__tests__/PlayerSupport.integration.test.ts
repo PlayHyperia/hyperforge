@@ -3059,6 +3059,267 @@ describe.runIf(process.env.HYPERIA_POND_BANK_ROUTES === "1")(
   },
 );
 
+// Real route/admission owners; reward persistence and rendered harvesting are
+// separately verified in the ordinary native game.
+async function treeTravelFixture(start = { x: 385, z: 374 }) {
+  const f = await fishingFixture(true);
+  const size = f.terrain.getWorldTerrainProfile().terrainTileSize;
+  for (
+    let x = Math.floor((330 + size / 2) / size);
+    x <= Math.floor((390 + size / 2) / size);
+    x++
+  )
+    for (
+      let z = Math.floor((260 + size / 2) / size);
+      z <= Math.floor((380 + size / 2) / size);
+      z++
+    ) {
+      f.terrain["generateTile"](x, z, false);
+      f.terrain["bakeWalkabilityFlags"](x, z);
+    }
+  const position = {
+    x: 334.5,
+    y: f.terrain.getResourceGroundHeight(334.5, 265.5),
+    z: 265.5,
+  };
+  await f.resources["registerTerrainResources"]({
+    isManifest: true,
+    spawnPoints: [
+      {
+        type: "tree",
+        subType: "palm" as TerrainResourceSpawnPoint["subType"],
+        position,
+      },
+    ],
+  });
+  const resource = f.resources
+    .getAllResources()
+    .find((entry) => entry.id === "tree_335_266");
+  expect(resource).toBeDefined();
+  const player = f.addAngler("real-gather-traveler", start);
+  const inventory = f.world.getSystem<InventorySystem>("inventory")!;
+  await inventory["loadInventoryFromPayload"](player.id, [
+    { itemId: "bronze_hatchet", slotIndex: 0, quantity: 1 },
+  ]);
+  expect(
+    f.resources.playerHasRequiredToolForResource(player.id, resource!.id),
+  ).toBe(true);
+  return { ...f, player, resource: resource! };
+}
+
+describe("real pending gathering travel deadlines", () => {
+  it.each([false, true])(
+    "admits a legitimate longer-than-20-tick palm route (run=%s)",
+    async (run) => {
+      const f = await treeTravelFixture();
+      expect(
+        f.pending.queuePendingGather(f.player.id, f.resource.id, 0, run),
+      ).toBe(true);
+      const request = f.pending["pendingGathers"].get(f.player.id)!;
+      expect(request.deadlineTick).toBeGreaterThan(20);
+      let tick = 0;
+      while (
+        f.pending["pendingGathers"].has(f.player.id) &&
+        tick <= request.deadlineTick
+      ) {
+        f.world.currentTick = ++tick;
+        f.movement.onTick(tick);
+        f.pending.processTick(tick);
+      }
+      expect(tick).toBeGreaterThan(20);
+      expect(tick).toBeLessThanOrEqual(request.deadlineTick);
+      expect(
+        f.resources.isPlayerGatheringResource(f.player.id, f.resource.id),
+      ).toBe(true);
+      expect(f.pending["approachReservations"].size).toBe(0);
+      const ends = f.packets.filter(
+        (packet) => packet.name === "tileMovementEnd",
+      );
+      expect(ends.at(-1)?.data).toMatchObject({
+        id: f.player.id,
+        emote: "chopping",
+      });
+    },
+  );
+
+  it("expires a stalled long route once, clears its presentation, and later arrives idle", async () => {
+    const f = await treeTravelFixture();
+    const failures: unknown[] = [];
+    f.world.on(EventType.RESOURCE_GATHERING_COMPLETED, (event) =>
+      failures.push(event),
+    );
+    const attempt = "11111111-1111-4111-8111-111111111111";
+    expect(
+      f.pending.queuePendingGather(
+        f.player.id,
+        f.resource.id,
+        0,
+        true,
+        attempt,
+      ),
+    ).toBe(true);
+    expect(f.movement.hasMovementIntent(f.player.id)).toBe(true);
+    f.world.currentTick = 20;
+    f.pending.processTick(20);
+    expect(f.pending["pendingGathers"].has(f.player.id)).toBe(true);
+    f.world.currentTick = 21;
+    f.pending.processTick(21);
+    f.pending.processTick(22);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(f.movement["arrivalEmotes"].has(f.player.id)).toBe(false);
+    expect(f.movement["arrivalEmoteResolvers"].has(f.player.id)).toBe(false);
+    expect(failures).toEqual([
+      {
+        playerId: f.player.id,
+        resourceId: f.resource.id,
+        skill: "woodcutting",
+        successful: false,
+        operationId: `gathering-reward:${attempt}`,
+      },
+    ]);
+    for (
+      let tick = 23;
+      tick < 180 && f.movement.hasMovementIntent(f.player.id);
+      tick++
+    ) {
+      f.world.currentTick = tick;
+      f.movement.onTick(tick);
+      f.pending.processTick(tick);
+    }
+    expect(f.movement.hasMovementIntent(f.player.id)).toBe(false);
+    expect(
+      f.resources.isPlayerGatheringResource(f.player.id, f.resource.id),
+    ).toBe(false);
+    expect(
+      f.packets.filter((packet) => packet.name === "tileMovementEnd").at(-1)
+        ?.data,
+    ).toMatchObject({ emote: "idle" });
+  });
+
+  it.each([0, 1])(
+    "checks expiry before movement consumes arrival presentation (deadline+%s)",
+    async (late) => {
+      const f = await treeTravelFixture({ x: 334, z: 269 });
+      expect(
+        f.pending.queuePendingGather(f.player.id, f.resource.id, 0, false),
+      ).toBe(true);
+      const request = f.pending["pendingGathers"].get(f.player.id)!;
+      expect(request.deadlineTick).toBe(22);
+      f.world.currentTick = 2;
+      f.movement.onTick(2);
+      f.pending.processTick(2);
+      expect(f.pending["pendingGathers"].has(f.player.id)).toBe(true);
+      expect(
+        f.movement.getPlayerMovementDebug(f.player.id).remainingPathTiles,
+      ).toBe(1);
+      const arrivalTick = request.deadlineTick + late;
+      f.world.currentTick = arrivalTick;
+      f.movement.onTick(arrivalTick);
+      f.pending.processTick(arrivalTick);
+      expect(
+        f.resources.isPlayerGatheringResource(f.player.id, f.resource.id),
+      ).toBe(late === 0);
+      expect(
+        f.packets.filter((packet) => packet.name === "tileMovementEnd").at(-1)
+          ?.data,
+      ).toMatchObject({ emote: late === 0 ? "chopping" : "idle" });
+      expect(f.pending["pendingGathers"].size).toBe(0);
+    },
+  );
+
+  it("does not clear a newer presentation when the old pending owner retires", async () => {
+    const f = await treeTravelFixture();
+    expect(f.pending.queuePendingGather(f.player.id, f.resource.id, 0)).toBe(
+      true,
+    );
+    const old = f.pending["pendingGathers"].get(f.player.id)!;
+    const newer = () => "banking";
+    f.movement.setArrivalEmote(f.player.id, "banking", newer);
+    f.pending.cancelPendingGather(f.player.id);
+    expect(old.arrivalEmoteResolver!()).toBeNull();
+    expect(f.movement["arrivalEmotes"].get(f.player.id)).toBe("banking");
+    expect(f.movement["arrivalEmoteResolvers"].get(f.player.id)).toBe(newer);
+    f.pending.destroy();
+    expect(f.movement["arrivalEmoteResolvers"].get(f.player.id)).toBe(newer);
+  });
+
+  it("cannot extend its absolute budget by repeatedly moving between tiles", async () => {
+    const f = await treeTravelFixture({ x: 334, z: 269 });
+    expect(
+      f.pending.queuePendingGather(f.player.id, f.resource.id, 0, false),
+    ).toBe(true);
+    const request = f.pending["pendingGathers"].get(f.player.id)!;
+    const deadline = request.deadlineTick;
+    for (let tick = 1; tick <= deadline; tick++) {
+      const z = tick % 2 ? 270.5 : 269.5;
+      expect(
+        f.movement.movePlayerToward(
+          f.player.id,
+          { x: 334.5, y: f.terrain.getResourceGroundHeight(334.5, z), z },
+          false,
+          0,
+        ),
+      ).toBe(true);
+      f.world.currentTick = tick;
+      f.movement.onTick(tick);
+      f.pending.processTick(tick);
+      expect(f.pending["pendingGathers"].get(f.player.id)).toBe(request);
+      expect(request.deadlineTick).toBe(deadline);
+      expect(request.lastProgressTick).toBe(tick);
+    }
+    f.world.currentTick = deadline + 1;
+    f.pending.processTick(deadline + 1);
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(
+      f.resources.isPlayerGatheringResource(f.player.id, f.resource.id),
+    ).toBe(false);
+  });
+
+  it.each(["depleted", "disconnect", "cancel", "destroy"] as const)(
+    "retires only the owned queued emote on %s",
+    async (reason) => {
+      const f = await treeTravelFixture();
+      expect(f.pending.queuePendingGather(f.player.id, f.resource.id, 0)).toBe(
+        true,
+      );
+      const request = f.pending["pendingGathers"].get(f.player.id)!;
+      if (reason === "depleted") {
+        f.resource.isAvailable = false;
+        f.pending.processTick(1);
+      } else if (reason === "disconnect")
+        f.pending.onPlayerDisconnect(f.player.id);
+      else if (reason === "cancel") f.pending.cancelPendingGather(f.player.id);
+      else f.pending.destroy();
+      expect(f.pending["pendingGathers"].size).toBe(0);
+      expect(f.pending["approachReservations"].size).toBe(0);
+      expect(f.movement["arrivalEmotes"].has(f.player.id)).toBe(false);
+      expect(f.movement["arrivalEmoteResolvers"].has(f.player.id)).toBe(false);
+      expect(request.arrivalEmoteResolver!()).toBeNull();
+    },
+  );
+
+  it("rejects an enclosed non-fishing route without leaking reservation or emote", async () => {
+    const f = await treeTravelFixture();
+    const start = worldToTile(f.player.position.x, f.player.position.z);
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++)
+        if (dx || dz)
+          f.world.collision.addFlags(
+            start.x + dx,
+            start.z + dz,
+            CollisionFlag.BLOCKED,
+          );
+    expect(f.pending.queuePendingGather(f.player.id, f.resource.id, 0)).toBe(
+      false,
+    );
+    expect(f.pending["pendingGathers"].size).toBe(0);
+    expect(f.pending["approachReservations"].size).toBe(0);
+    expect(f.movement["arrivalEmotes"].has(f.player.id)).toBe(false);
+    expect(f.movement["arrivalEmoteResolvers"].has(f.player.id)).toBe(false);
+  });
+});
+
 describe("real fishing approach admission (CPU, not basin crowd/reward acceptance)", () => {
   it("rejects farther dry shore when every in-range approach is occupied", async () => {
     const f = await fishingFixture();
@@ -3258,6 +3519,7 @@ describe("real fishing approach admission (CPU, not basin crowd/reward acceptanc
     ).toBe(true);
     expect(f.movement["arrivalEmotes"].get(player.id)).toBe("fishing");
     expect(f.movement.isMoving(player.id)).toBe(true);
+    const originalTravel = f.pending["pendingGathers"].get(player.id)!;
     expect(
       f.resources.isPlayerGatheringResource(player.id, f.resource.id),
     ).toBe(false);
@@ -3281,6 +3543,9 @@ describe("real fishing approach admission (CPU, not basin crowd/reward acceptanc
     // A real random relocation may place its new legal shore under the actor;
     // that is immediate admission, not a failed or missing replan.
     if (next) {
+      expect(next.createdTick).toBe(originalTravel.createdTick);
+      expect(next.deadlineTick).toBe(originalTravel.deadlineTick);
+      expect(next.lastProgressTick).toBe(originalTravel.lastProgressTick);
       expect(next.resourcePosition).toEqual(f.resource.position);
       expect(next.completionAttemptId).toBe(attempt);
       expect(next.runMode).toBe(true);

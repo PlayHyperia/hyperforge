@@ -37,6 +37,7 @@ import {
   getGatheringRewardOperationIdForAttempt,
   calculateDistance2D,
   TILE_SIZE,
+  TILES_PER_TICK_WALK,
 } from "@hyperforge/shared";
 import type { TileMovementManager } from "./tile-movement";
 
@@ -55,6 +56,12 @@ interface PendingGather {
   lastPlayerTile: TileCoord;
   /** When this pending gather was created (for timeout) */
   createdTick: number;
+  /** Immutable travel budget; progress/replanning never extends this deadline. */
+  deadlineTick: number;
+  /** A valid route must keep moving, including while awaiting movement retries. */
+  lastProgressTick: number;
+  /** Exact presentation ownership, independent of subsequent player actions. */
+  arrivalEmoteResolver?: () => string | null;
   /** Whether this is a fishing spot (uses tile-based shore arrival) */
   isFishing: boolean;
   /** Resource world position (for face direction) */
@@ -87,7 +94,7 @@ interface ResourceData {
   type?: string;
 }
 
-/** Timeout for pending gathers (in ticks) - 20 ticks = 12 seconds at 600ms/tick */
+/** Startup/obstruction slack and maximum stalled interval: 12 seconds. */
 const PENDING_GATHER_TIMEOUT_TICKS = 20;
 
 export class PendingGatherManager {
@@ -114,6 +121,7 @@ export class PendingGatherManager {
       runMode: boolean;
       completionAttemptId?: string;
       skill: string;
+      previous: PendingGather;
     }
   >();
 
@@ -125,6 +133,63 @@ export class PendingGatherManager {
 
   private tileKey(tile: TileCoord): string {
     return `${tile.x},${tile.z}`;
+  }
+
+  private travelDeadline(from: TileCoord, to: TileCoord, tick: number): number {
+    // Cardinal distance is a conservative unobstructed route allowance, at
+    // walking speed even when a runner later slows down. The fixed slack also
+    // admits bounded detours/search deferral; it is not an unlimited route lease.
+    const distance = Math.abs(from.x - to.x) + Math.abs(from.z - to.z);
+    return (
+      tick +
+      Math.ceil(distance / TILES_PER_TICK_WALK) +
+      PENDING_GATHER_TIMEOUT_TICKS
+    );
+  }
+
+  private hasExpired(pending: PendingGather, tick: number): boolean {
+    // Arrival on either deadline is valid; the following tick is too late.
+    return (
+      tick > pending.deadlineTick ||
+      tick - pending.lastProgressTick > PENDING_GATHER_TIMEOUT_TICKS
+    );
+  }
+
+  private setGatherArrivalEmote(pending: PendingGather, emote: string): void {
+    const resolve = () => {
+      if (
+        this.destroyed ||
+        this.pendingGathers.get(pending.playerId) !== pending ||
+        this.hasExpired(pending, this.world.currentTick ?? pending.createdTick)
+      )
+        return null;
+      // Movement consumes presentation before this manager's tick callback.
+      // Never let an expired/replaced request animate at another destination.
+      const tile = this.tileMovementManager.getPlayerMovementDebug(
+        pending.playerId,
+      ).currentTile;
+      const target = pending.targetShoreTile ?? pending.targetApproachTile;
+      return tile && target && tile.x === target.x && tile.z === target.z
+        ? emote
+        : null;
+    };
+    pending.arrivalEmoteResolver = resolve;
+    this.tileMovementManager.setArrivalEmote(pending.playerId, emote, resolve);
+  }
+
+  private retirePendingGather(
+    pending: PendingGather,
+    publishFailure = true,
+  ): void {
+    if (this.pendingGathers.get(pending.playerId) !== pending) return;
+    this.pendingGathers.delete(pending.playerId);
+    this.releaseApproachReservation(pending.playerId);
+    if (pending.arrivalEmoteResolver)
+      this.tileMovementManager.clearArrivalEmote(
+        pending.playerId,
+        pending.arrivalEmoteResolver,
+      );
+    if (publishFailure) this.publishPendingGatherFailure(pending);
   }
 
   private releaseApproachReservation(playerId: string): void {
@@ -239,6 +304,7 @@ export class PendingGatherManager {
     resource: ResourceData,
     shoreTile: TileCoord,
     isRunning: boolean,
+    pending: PendingGather,
   ): boolean {
     const resourceSystem = this.world.getSystem("resource") as {
       playerHasRequiredToolForResource?: (
@@ -253,8 +319,12 @@ export class PendingGatherManager {
         resource.id,
       ) !== false
     )
-      this.tileMovementManager.setArrivalEmote(playerId, "fishing");
-    else this.tileMovementManager.clearArrivalEmote(playerId);
+      this.setGatherArrivalEmote(pending, "fishing");
+    else if (pending.arrivalEmoteResolver)
+      this.tileMovementManager.clearArrivalEmote(
+        playerId,
+        pending.arrivalEmoteResolver,
+      );
     const shoreWorld = tileToWorld(shoreTile);
     let accepted = false;
     try {
@@ -270,7 +340,11 @@ export class PendingGatherManager {
       // A dry tile may still be unreachable; rejected movement owns no shore.
       if (!accepted) {
         this.releaseApproachReservation(playerId);
-        this.tileMovementManager.clearArrivalEmote(playerId);
+        if (pending.arrivalEmoteResolver)
+          this.tileMovementManager.clearArrivalEmote(
+            playerId,
+            pending.arrivalEmoteResolver,
+          );
       }
     }
   }
@@ -555,11 +629,8 @@ export class PendingGatherManager {
       const isRunning =
         runMode ?? this.tileMovementManager.getIsRunning(playerId);
 
-      if (!this.moveToFishingApproach(playerId, resource, shoreTile, isRunning))
-        return false;
-
       // Store pending gather WITH target shore tile
-      this.pendingGathers.set(playerId, {
+      const pending: PendingGather = {
         playerId,
         resourceId,
         resourceAnchorTile: {
@@ -570,13 +641,33 @@ export class PendingGatherManager {
         footprintZ: size.z,
         lastPlayerTile: { x: this._playerTile.x, z: this._playerTile.z },
         createdTick: currentTick,
+        deadlineTick: this.travelDeadline(
+          this._playerTile,
+          shoreTile,
+          currentTick,
+        ),
+        lastProgressTick: currentTick,
         isFishing: true,
         resourcePosition: { ...resource.position },
         targetShoreTile: { x: shoreTile.x, z: shoreTile.z },
         runMode: isRunning,
         completionAttemptId,
         skill: resource.skillRequired ?? "unknown",
-      });
+      };
+      this.pendingGathers.set(playerId, pending);
+      let accepted = false;
+      try {
+        accepted = this.moveToFishingApproach(
+          playerId,
+          resource,
+          shoreTile,
+          isRunning,
+          pending,
+        );
+      } finally {
+        if (!accepted) this.retirePendingGather(pending, false);
+      }
+      if (!accepted) return false;
 
       console.log(
         `[PendingGather]   Queued fishing gather, waiting for player to arrive at shore`,
@@ -631,49 +722,7 @@ export class PendingGatherManager {
     const isRunning =
       runMode ?? this.tileMovementManager.getIsRunning(playerId);
 
-    // CRITICAL: Set arrival emote BEFORE pathing (like fishing)
-    // This bundles the emote with tileMovementEnd packet for atomic delivery
-    // Only set if player meets ALL requirements (level + tool) to prevent
-    // animation playing when gathering will fail validation
-    const meetsLevelNonFish = this.playerMeetsLevelRequirement(
-      playerId,
-      resource,
-    );
-    const hasToolNonFish =
-      resourceSystem?.playerHasRequiredToolForResource?.(
-        playerId,
-        resourceId,
-      ) !== false;
-    if (meetsLevelNonFish && hasToolNonFish) {
-      // Map skill to emote name
-      const skillToEmote: Record<string, string> = {
-        woodcutting: "chopping",
-        mining: "mining",
-      };
-      const emote = skillToEmote[resource.skillRequired ?? ""] ?? null;
-      if (emote) {
-        this.tileMovementManager.setArrivalEmote(playerId, emote);
-        console.log(
-          `[PendingGather]   🎬 Set arrival emote "${emote}" for ${resource.skillRequired}`,
-        );
-      }
-    } else {
-      console.log(
-        `[PendingGather]   Player ${playerId} doesn't meet requirements (level: ${meetsLevelNonFish}, tool: ${hasToolNonFish}) - no gathering emote`,
-      );
-    }
-
-    // Path to the exact cardinal approach reserved for this gatherer.
-    const approachWorld = tileToWorld(this._tempFootprintTile);
-    this.tileMovementManager.movePlayerToward(
-      playerId,
-      { x: approachWorld.x, y: resource.position.y, z: approachWorld.z },
-      isRunning,
-      0,
-    );
-
-    // Store pending gather (non-fishing only, fishing returns early)
-    this.pendingGathers.set(playerId, {
+    const pending: PendingGather = {
       playerId,
       resourceId,
       resourceAnchorTile: { x: this._resourceTile.x, z: this._resourceTile.z },
@@ -681,6 +730,12 @@ export class PendingGatherManager {
       footprintZ: size.z,
       lastPlayerTile: { x: this._playerTile.x, z: this._playerTile.z },
       createdTick: currentTick,
+      deadlineTick: this.travelDeadline(
+        this._playerTile,
+        this._tempFootprintTile,
+        currentTick,
+      ),
+      lastProgressTick: currentTick,
       isFishing: false,
       resourcePosition: { ...resource.position },
       targetApproachTile: {
@@ -690,7 +745,56 @@ export class PendingGatherManager {
       runMode: isRunning,
       completionAttemptId,
       skill: resource.skillRequired ?? "unknown",
-    });
+    };
+    this.pendingGathers.set(playerId, pending);
+
+    let accepted = false;
+    try {
+      // CRITICAL: Set arrival emote BEFORE pathing (like fishing)
+      // This bundles the emote with tileMovementEnd packet for atomic delivery
+      // Only set if player meets ALL requirements (level + tool) to prevent
+      // animation playing when gathering will fail validation
+      const meetsLevelNonFish = this.playerMeetsLevelRequirement(
+        playerId,
+        resource,
+      );
+      const hasToolNonFish =
+        resourceSystem?.playerHasRequiredToolForResource?.(
+          playerId,
+          resourceId,
+        ) !== false;
+      if (meetsLevelNonFish && hasToolNonFish) {
+        // Map skill to emote name
+        const skillToEmote: Record<string, string> = {
+          woodcutting: "chopping",
+          mining: "mining",
+        };
+        const emote = skillToEmote[resource.skillRequired ?? ""] ?? null;
+        if (emote) {
+          this.setGatherArrivalEmote(pending, emote);
+          console.log(
+            `[PendingGather]   🎬 Set arrival emote "${emote}" for ${resource.skillRequired}`,
+          );
+        }
+      } else {
+        console.log(
+          `[PendingGather]   Player ${playerId} doesn't meet requirements (level: ${meetsLevelNonFish}, tool: ${hasToolNonFish}) - no gathering emote`,
+        );
+      }
+
+      // Path to the exact cardinal approach reserved for this gatherer.
+      const approachWorld = tileToWorld(this._tempFootprintTile);
+      accepted =
+        this.tileMovementManager.movePlayerToward(
+          playerId,
+          { x: approachWorld.x, y: resource.position.y, z: approachWorld.z },
+          isRunning,
+          0,
+        ) === true;
+    } finally {
+      if (!accepted) this.retirePendingGather(pending, false);
+    }
+    if (!accepted) return false;
 
     console.log(
       `[PendingGather]   Queued pending gather, waiting for player to arrive`,
@@ -706,8 +810,7 @@ export class PendingGatherManager {
     this.releaseApproachReservation(playerId);
     const pending = this.pendingGathers.get(playerId);
     if (pending) {
-      this.pendingGathers.delete(playerId);
-      if (publishFailure) this.publishPendingGatherFailure(pending);
+      this.retirePendingGather(pending, publishFailure);
       console.log(`[PendingGather] Cancelled pending gather for ${playerId}`);
     }
   }
@@ -740,8 +843,7 @@ export class PendingGatherManager {
     this.releaseApproachReservation(playerId);
     const pending = this.pendingGathers.get(playerId);
     if (pending) {
-      this.pendingGathers.delete(playerId);
-      this.publishPendingGatherFailure(pending);
+      this.retirePendingGather(pending);
       console.log(
         `[PendingGather] Cleaned up pending gather for disconnected player ${playerId}`,
       );
@@ -757,20 +859,9 @@ export class PendingGatherManager {
 
     const pending = [...this.pendingGathers.values()];
     const replans = [...this.fishingReplans];
-    const owners = new Set([
-      ...this.pendingGathers.keys(),
-      ...this.fishingReplans.keys(),
-      ...[...this.approachReservations.values()].map(
-        (reservation) => reservation.playerId,
-      ),
-    ]);
-    this.pendingGathers.clear();
+    for (const attempt of pending) this.retirePendingGather(attempt);
     this.fishingReplans.clear();
     this.approachReservations.clear();
-    for (const playerId of owners) {
-      this.tileMovementManager.clearArrivalEmote(playerId);
-    }
-    for (const attempt of pending) this.publishPendingGatherFailure(attempt);
     for (const [playerId, attempt] of replans) {
       this.publishPendingGatherFailure({ playerId, ...attempt });
     }
@@ -795,9 +886,7 @@ export class PendingGatherManager {
           error,
         );
         // Fail-safe cleanup: remove from pending to prevent infinite error loops
-        this.pendingGathers.delete(playerId);
-        this.releaseApproachReservation(playerId);
-        this.publishPendingGatherFailure(pending);
+        this.retirePendingGather(pending);
       }
     }
 
@@ -812,6 +901,15 @@ export class PendingGatherManager {
           replan.runMode,
           replan.completionAttemptId,
         );
+        const next = this.pendingGathers.get(playerId);
+        if (accepted && next) {
+          // A moving spot changes the destination, not the original action's
+          // finite lease. Repeated relocations cannot keep it alive forever.
+          next.createdTick = replan.previous.createdTick;
+          next.deadlineTick = replan.previous.deadlineTick;
+          next.lastProgressTick = replan.previous.lastProgressTick;
+          next.lastPlayerTile = replan.previous.lastPlayerTile;
+        }
         if (!accepted) {
           this.publishPendingGatherFailure({
             playerId,
@@ -834,20 +932,16 @@ export class PendingGatherManager {
     currentTick: number,
   ): void {
     // Check timeout
-    if (currentTick - pending.createdTick > PENDING_GATHER_TIMEOUT_TICKS) {
+    if (this.hasExpired(pending, currentTick)) {
       console.log(`[PendingGather] Timeout for ${playerId}`);
-      this.pendingGathers.delete(playerId);
-      this.releaseApproachReservation(playerId);
-      this.publishPendingGatherFailure(pending);
+      this.retirePendingGather(pending);
       return;
     }
 
     // Get player entity
     const player = this.world.getPlayer?.(playerId);
     if (!player?.position) {
-      this.pendingGathers.delete(playerId);
-      this.releaseApproachReservation(playerId);
-      this.publishPendingGatherFailure(pending);
+      this.retirePendingGather(pending);
       return;
     }
 
@@ -861,10 +955,18 @@ export class PendingGatherManager {
       console.log(
         `[PendingGather] Resource ${pending.resourceId} no longer available`,
       );
-      this.pendingGathers.delete(playerId);
-      this.releaseApproachReservation(playerId);
-      this.publishPendingGatherFailure(pending);
+      this.retirePendingGather(pending);
       return;
+    }
+
+    worldToTileInto(player.position.x, player.position.z, this._playerTile);
+    if (
+      pending.lastPlayerTile.x !== this._playerTile.x ||
+      pending.lastPlayerTile.z !== this._playerTile.z
+    ) {
+      pending.lastPlayerTile.x = this._playerTile.x;
+      pending.lastPlayerTile.z = this._playerTile.z;
+      pending.lastProgressTick = currentTick;
     }
 
     if (pending.isFishing) {
@@ -879,21 +981,17 @@ export class PendingGatherManager {
         resource.position.x !== pending.resourcePosition.x ||
         resource.position.z !== pending.resourcePosition.z;
       if (moved) {
-        this.pendingGathers.delete(playerId);
-        this.releaseApproachReservation(playerId);
-        this.tileMovementManager.clearArrivalEmote?.(playerId);
+        this.retirePendingGather(pending, false);
         this.fishingReplans.set(playerId, {
           resourceId: pending.resourceId,
           runMode: pending.runMode,
           completionAttemptId: pending.completionAttemptId,
           skill: pending.skill,
+          previous: pending,
         });
         return;
       }
     }
-
-    // Get current player tile
-    worldToTileInto(player.position.x, player.position.z, this._playerTile);
 
     // Check arrival at target tile
     let hasArrived = false;
@@ -949,10 +1047,7 @@ export class PendingGatherManager {
         ? this.findFishingApproach(playerId, resource.position, failed)
         : null;
       if (!alternative) {
-        this.pendingGathers.delete(playerId);
-        this.releaseApproachReservation(playerId);
-        this.tileMovementManager.clearArrivalEmote(playerId);
-        this.publishPendingGatherFailure(pending);
+        this.retirePendingGather(pending);
         return;
       }
       // Keep the attempt and its original deadline. At most one different
@@ -969,10 +1064,10 @@ export class PendingGatherManager {
             resource,
             alternative,
             pending.runMode,
+            pending,
           )
         ) {
-          this.pendingGathers.delete(playerId);
-          this.publishPendingGatherFailure(pending);
+          this.retirePendingGather(pending);
         }
         return;
       }
@@ -1003,8 +1098,7 @@ export class PendingGatherManager {
       // failures such as timeout, disappearance, and failed replanning.
 
       // Remove from pending
-      this.pendingGathers.delete(playerId);
-      this.releaseApproachReservation(playerId);
+      this.retirePendingGather(pending, false);
     }
   }
 
