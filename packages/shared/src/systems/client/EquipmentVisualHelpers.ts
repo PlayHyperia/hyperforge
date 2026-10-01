@@ -1475,6 +1475,9 @@ export function createDynamicBowStringController(options: {
         arrowDirection.normalize();
         nockedArrow.position.copy(drawInAvatar);
         nockedArrow.quaternion.setFromUnitVectors(arrowForward, arrowDirection);
+        // This callback runs after scene traversal, before the arrow meshes.
+        // Publish the changed transform to every child in this render pass.
+        nockedArrow.updateWorldMatrix(false, true);
         nockedArrow.visible = true;
         nockedArrow.getWorldPosition(lastVisibleNockWorld);
         hasVisibleNockSample = true;

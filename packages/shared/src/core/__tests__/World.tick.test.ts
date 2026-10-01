@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from "vitest";
 import { World } from "../World";
+import THREE from "../../extras/three/three";
 
 // Create testable World instance
 function createTestWorld(): World {
@@ -29,6 +30,275 @@ function createServerTestWorld(): World {
   } as World["network"];
   return world;
 }
+
+describe("World stage - ordinary scene-root matrix propagation", () => {
+  async function createScenes() {
+    const world = new World();
+    await world.stage.init({});
+    const scene = world.stage.scene;
+    const reference = new THREE.Scene();
+    const referenceRig = world.rig.clone(true);
+    reference.add(referenceRig);
+    const update = () => {
+      // Match ordinary renderer calls: no explicit force argument. The normal
+      // root must propagate its dirtiness to clean static-local descendants.
+      scene.updateMatrixWorld();
+      reference.updateMatrixWorld();
+    };
+    return { world, scene, reference, referenceRig, update };
+  }
+
+  function expectMatricesMatch(
+    actual: THREE.Object3D,
+    reference: THREE.Object3D,
+  ) {
+    expect(actual.matrix.equals(reference.matrix)).toBe(true);
+    expect(actual.matrixWorld.equals(reference.matrixWorld)).toBe(true);
+  }
+
+  it("retains automatic root updates required by arbitrary static-local reparenting", async () => {
+    const { world, scene, reference, update } = await createScenes();
+    expect(world.getSystem("stage")).toBe(world.stage);
+    expect(scene.matrixAutoUpdate).toBe(true);
+    expect(scene.matrixWorldAutoUpdate).toBe(true);
+    expect(scene.matrixWorldNeedsUpdate).toBe(false);
+    expect(scene.matrix.elements).toEqual(new THREE.Matrix4().elements);
+    expect(world.rig.parent).toBe(scene);
+    expect(world.camera.parent).toBe(world.rig);
+    update();
+    expect(scene.matrixWorldNeedsUpdate).toBe(false);
+    expectMatricesMatch(scene, reference);
+    update();
+    expect(scene.matrixWorldNeedsUpdate).toBe(false);
+    expectMatricesMatch(scene, reference);
+  });
+
+  it("matches a normal scene for nested dynamic position, rotation and scale", async () => {
+    const { scene, reference, update } = await createScenes();
+    const parent = new THREE.Group();
+    const child = new THREE.Object3D();
+    const leaf = new THREE.Object3D();
+    parent.add(child);
+    child.add(leaf);
+    scene.add(parent);
+    const referenceParent = parent.clone(true);
+    const referenceChild = referenceParent.children[0];
+    const referenceLeaf = referenceChild.children[0];
+    reference.add(referenceParent);
+    for (let frame = 0; frame < 12; frame++) {
+      for (const node of [parent, referenceParent]) {
+        node.position.set(frame * 0.5, 2, -3);
+        node.rotation.set(0.1, frame * 0.03, -0.2);
+        node.scale.set(1.2, 1 + frame * 0.02, 0.7);
+      }
+      for (const node of [child, referenceChild]) {
+        node.position.set(-1, frame * 0.1, 4);
+        node.rotation.set(frame * -0.02, 0.4, 0.3);
+        node.scale.set(0.8, 1.4, 1.1);
+      }
+      for (const node of [leaf, referenceLeaf]) {
+        node.position.set(0.5, 1, frame * -0.05);
+        node.rotation.y = frame * 0.04;
+      }
+      update();
+      expectMatricesMatch(parent, referenceParent);
+      expectMatricesMatch(child, referenceChild);
+      expectMatricesMatch(leaf, referenceLeaf);
+    }
+  });
+
+  it("keeps the actual world camera inverse and animated bone palette current", async () => {
+    const { world, scene, reference, referenceRig, update } =
+      await createScenes();
+    const referenceCamera = referenceRig.children[0] as THREE.PerspectiveCamera;
+    expect(referenceCamera.isPerspectiveCamera).toBe(true);
+    const rootBone = new THREE.Bone();
+    const childBone = new THREE.Bone();
+    childBone.position.y = 2;
+    rootBone.add(childBone);
+    scene.add(rootBone);
+    const referenceRoot = rootBone.clone(true);
+    const referenceChild = referenceRoot.children[0] as THREE.Bone;
+    reference.add(referenceRoot);
+    update();
+    const skeleton = new THREE.Skeleton([rootBone, childBone]);
+    const referenceSkeleton = new THREE.Skeleton([
+      referenceRoot,
+      referenceChild,
+    ]);
+    for (let frame = 1; frame <= 8; frame++) {
+      for (const rig of [world.rig, referenceRig]) {
+        rig.position.set(frame, 3, -2);
+        rig.rotation.y = frame * 0.15;
+      }
+      for (const camera of [world.camera, referenceCamera]) {
+        camera.position.set(0.2, frame * 0.1, 5);
+        camera.rotation.x = -frame * 0.025;
+      }
+      for (const bone of [rootBone, referenceRoot]) {
+        bone.position.set(2, 0, frame * 0.2);
+        bone.rotation.y = frame * -0.1;
+      }
+      for (const bone of [childBone, referenceChild]) {
+        bone.rotation.z = frame * 0.1;
+        bone.scale.y = 1 + frame * 0.01;
+      }
+      update();
+      skeleton.update();
+      referenceSkeleton.update();
+      expectMatricesMatch(world.camera, referenceCamera);
+      expect(
+        world.camera.matrixWorldInverse.equals(
+          referenceCamera.matrixWorldInverse,
+        ),
+      ).toBe(true);
+      expectMatricesMatch(childBone, referenceChild);
+      expect(Array.from(skeleton.boneMatrices)).toEqual(
+        Array.from(referenceSkeleton.boneMatrices),
+      );
+    }
+    skeleton.dispose();
+    referenceSkeleton.dispose();
+  });
+
+  it("updates invisible descendants during ordinary scene traversal", async () => {
+    const { scene, reference, update } = await createScenes();
+    const hidden = new THREE.Group();
+    hidden.visible = false;
+    const child = new THREE.Object3D();
+    hidden.add(child);
+    scene.add(hidden);
+    const referenceHidden = hidden.clone(true);
+    const referenceChild = referenceHidden.children[0];
+    reference.add(referenceHidden);
+    update();
+    for (const node of [hidden, referenceHidden]) node.position.set(4, 2, -1);
+    for (const node of [child, referenceChild]) {
+      node.position.set(1, 2, 3);
+      node.rotation.y = 0.6;
+      node.scale.set(0.8, 1.2, 0.9);
+    }
+    update();
+    expectMatricesMatch(hidden, referenceHidden);
+    expectMatricesMatch(child, referenceChild);
+    hidden.visible = true;
+    referenceHidden.visible = true;
+    update();
+    expectMatricesMatch(child, referenceChild);
+  });
+
+  it("preserves late addition, removal, re-addition and reparenting", async () => {
+    const { scene, reference, update } = await createScenes();
+    const first = new THREE.Group();
+    const second = new THREE.Group();
+    first.position.set(3, 1, -2);
+    second.position.set(-4, 2, 5);
+    const referenceFirst = first.clone();
+    const referenceSecond = second.clone();
+    scene.add(first, second);
+    reference.add(referenceFirst, referenceSecond);
+    update();
+    update();
+    const child = new THREE.Object3D();
+    child.position.set(1, 2, 3);
+    const referenceChild = child.clone();
+    first.add(child);
+    referenceFirst.add(referenceChild);
+    update();
+    expectMatricesMatch(child, referenceChild);
+    first.remove(child);
+    referenceFirst.remove(referenceChild);
+    const detachedMatrix = child.matrixWorld.clone();
+    child.position.set(2, 3, 4);
+    referenceChild.position.copy(child.position);
+    update();
+    expect(child.matrixWorld.elements).toEqual(detachedMatrix.elements);
+    expectMatricesMatch(child, referenceChild);
+    first.add(child);
+    referenceFirst.add(referenceChild);
+    update();
+    expectMatricesMatch(child, referenceChild);
+    second.add(child);
+    referenceSecond.add(referenceChild);
+    update();
+    expect(child.parent).toBe(second);
+    expectMatricesMatch(child, referenceChild);
+  });
+
+  it("propagates an explicitly updated scene-root transform through static locals", async () => {
+    const { scene, reference, update } = await createScenes();
+    const group = new THREE.Group();
+    const child = new THREE.Object3D();
+    group.position.set(2, 0, 1);
+    child.position.set(0, 3, -2);
+    group.add(child);
+    for (const node of [group, child]) {
+      node.updateMatrix();
+      node.matrixAutoUpdate = false;
+    }
+    scene.add(group);
+    const referenceGroup = group.clone(true);
+    const referenceChild = referenceGroup.children[0];
+    reference.add(referenceGroup);
+    update();
+    update();
+    for (const root of [scene, reference]) {
+      root.position.set(10, -3, 4);
+      root.rotation.set(0.1, 0.4, -0.2);
+      root.scale.set(1.5, 0.8, 1.2);
+    }
+    // Explicit publication is also supported before an ordinary traversal.
+    scene.updateMatrix();
+    expect(scene.matrixWorldNeedsUpdate).toBe(true);
+    update();
+    expectMatricesMatch(scene, reference);
+    expectMatricesMatch(group, referenceGroup);
+    expectMatricesMatch(child, referenceChild);
+    expect(scene.matrixWorldNeedsUpdate).toBe(false);
+    update();
+    expectMatricesMatch(child, referenceChild);
+  });
+
+  it("refreshes a clean static-local subtree reparented into the scene and a frozen parent", async () => {
+    const { scene, reference, update } = await createScenes();
+    const parent = new THREE.Group();
+    parent.position.set(10, 2, -3);
+    const target = new THREE.Group();
+    target.position.set(-6, 7, 8);
+    target.rotation.y = 0.4;
+    const subtree = new THREE.Group();
+    subtree.position.set(1, 2, 3);
+    const child = new THREE.Object3D();
+    child.position.set(0, 4, 0);
+    subtree.add(child);
+    parent.add(subtree);
+    for (const node of [parent, target, subtree, child]) {
+      node.updateMatrix();
+      node.matrixAutoUpdate = false;
+    }
+    scene.add(parent, target);
+    const referenceParent = parent.clone(true);
+    const referenceSubtree = referenceParent.children[0];
+    const referenceChild = referenceSubtree.children[0];
+    const referenceTarget = target.clone();
+    reference.add(referenceParent, referenceTarget);
+    update();
+    update();
+    expect(subtree.matrixWorldNeedsUpdate).toBe(false);
+    scene.add(subtree);
+    reference.add(referenceSubtree);
+    update();
+    expectMatricesMatch(subtree, referenceSubtree);
+    expectMatricesMatch(child, referenceChild);
+    expect(target.matrixWorldNeedsUpdate).toBe(false);
+    expect(subtree.matrixWorldNeedsUpdate).toBe(false);
+    target.add(subtree);
+    referenceTarget.add(referenceSubtree);
+    update();
+    expectMatricesMatch(subtree, referenceSubtree);
+    expectMatricesMatch(child, referenceChild);
+  });
+});
 
 describe("World.tick - Dual Delta Architecture", () => {
   describe("event listener counting", () => {

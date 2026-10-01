@@ -4,6 +4,7 @@ import { VRM, VRMHumanoid } from "@pixiv/three-vrm";
 import {
   attachEquipmentVisualToVRM,
   cloneEquipmentVisualModel,
+  createDynamicBowStringController,
   disposeEquipmentVisualMaterials,
   isolateEquipmentVisualMaterials,
   removeEquipmentVisual,
@@ -97,6 +98,97 @@ function avatar() {
   });
   return { vrm, hand, hips, visuals };
 }
+
+describe("dynamic bow render-boundary matrix ownership", () => {
+  it.each(["range", "idle"])(
+    "publishes all arrow child matrices inside the string callback when initially %s",
+    (initialEmote) => {
+      const actor = avatar();
+      const stage = new THREE.Scene();
+      stage.add(actor.vrm.scene);
+      actor.vrm.scene.position.set(3, 2, -4);
+      actor.vrm.scene.rotation.set(0.1, 0.35, -0.15);
+      actor.vrm.scene.scale.set(1.2, 0.9, 1.1);
+      actor.hand.position.set(0.3, 1, 0.8);
+      const modelRoot = new THREE.Group();
+      const content = new THREE.Group();
+      content.name = "BowContent";
+      content.position.set(-0.3, 1, 0);
+      modelRoot.add(content);
+      actor.vrm.scene.add(modelRoot);
+      modelRoot.userData.hyperia = {
+        version: 2,
+        vrmBoneName: "leftHand",
+        relativeMatrix: new THREE.Matrix4().toArray(),
+        bowString: {
+          schemaVersion: 1,
+          contentNodeName: content.name,
+          upperTip: [0, 1, 0],
+          lowerTip: [0, -1, 0],
+          restNock: [0, 0, 0],
+          drawHandLocalOffset: [0.05, 0.025, -0.03],
+        },
+      };
+      let emote = initialEmote;
+      const controller = createDynamicBowStringController({
+        modelRoot,
+        vrm: actor.vrm,
+        getState: () => ({ emote }),
+      });
+      expect(controller).not.toBeNull();
+      if (!controller) throw new Error("Real bow controller was not created");
+      cleanup.push(() => controller.dispose());
+      expect(controller.line.renderOrder).toBe(102);
+      const arrow = controller.nockedArrow;
+      expect(arrow.visible).toBe(initialEmote === "range");
+      expect(arrow.children.map((child) => child.name)).toEqual([
+        "ArrowShaft",
+        "ArrowHead",
+        "ArrowFletchingHorizontal",
+        "ArrowFletchingVertical",
+      ]);
+      for (const child of arrow.children) {
+        expect(child).toBeInstanceOf(THREE.Mesh);
+        expect(child.renderOrder).toBe(103);
+      }
+
+      // The renderer's scene traversal precedes object callbacks. Do it once,
+      // then change the real hand pose before invoking the installed callback.
+      stage.updateMatrixWorld();
+      const originalChildWorlds = arrow.children.map((child) =>
+        child.matrixWorld.clone(),
+      );
+      emote = "range";
+      for (let pose = 1; pose <= 3; pose++) {
+        actor.hand.position.set(0.3 + pose * 0.2, 1.1, 0.8 - pose * 0.12);
+        actor.hand.rotation.set(pose * 0.1, -pose * 0.15, 0.2);
+        // The actual callback reads no renderer arguments; do not fabricate a
+        // renderer or trigger another scene traversal to repair the result.
+        Reflect.apply(controller.line.onBeforeRender, controller.line, []);
+        expect(arrow.visible).toBe(true);
+        const handAnchor = new THREE.Vector3(0.05, 0.025, -0.03).applyMatrix4(
+          actor.hand.matrixWorld,
+        );
+        const actualNock = new THREE.Vector3().setFromMatrixPosition(
+          arrow.matrixWorld,
+        );
+        expect(actualNock.distanceTo(handAnchor)).toBeLessThan(1e-10);
+        for (const [index, child] of arrow.children.entries()) {
+          const expectedWorld = new THREE.Matrix4().multiplyMatrices(
+            arrow.matrixWorld,
+            child.matrix,
+          );
+          // Reading matrixWorld directly cannot hide the bug by lazily
+          // updating the mesh, unlike getWorldPosition/updateWorldMatrix.
+          expect(child.matrixWorld.equals(expectedWorld)).toBe(true);
+          expect(child.matrixWorld.equals(originalChildWorlds[index])).toBe(
+            false,
+          );
+        }
+      }
+    },
+  );
+});
 
 describe("equipment-instance material ownership", () => {
   it("inherits the live scene environment for early and late equipment without private maps", () => {
