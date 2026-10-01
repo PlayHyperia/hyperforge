@@ -1,12 +1,47 @@
 # Grass canopy visibility: research checkpoint
 
+## Native201 pond-shoulder art comparison — rejected
+
+Fresh private build199 baseline and build200 candidate both render normally at 3024×1724 / DPR2 with High shadows, postprocessing and bloom retained. Two exact matched cameras use FOV70: wide `[398,43,380] → [380,27,420]` and close `[387,31,405] → [381.5,26.1,411.8]`. The production exposure initializer establishes phase0.56/exposure0.850240084 in both pages. Candidate road data contains all three expected wear IDs. Native completed-frame PNG downloads add no render; wind, water, clouds and NPCs remain live, so these are artistic comparisons, not pixel-equality or performance evidence.
+
+Root and independent visual review reject the candidate: neither wide nor close views demonstrate a meaningful improvement in naturalness. The path still reads as a continuous, fairly uniform dark strip with a green transition band. No conspicuous new defect is identified, but negligible benefit does not justify the extra 60 mask-input segments. Do not continue tiny-offset tuning or spend dawn/performance qualification on this rejected design. The two candidate source/test files are restored exactly to HEAD; build200 and failed-candidate evidence are retained, not promoted.
+
+| Raw native image | Completed world frame | SHA256 |
+| --- | --- | --- |
+| [Baseline wide](/Users/lucid/Downloads/hyperia-pond201-baseline-wide-day.png) | 3454 | `a45ca5ca66286a604b856124c2f7dcfc4b548794281ce3494a25fce3642861ac` |
+| [Baseline close](/Users/lucid/Downloads/hyperia-pond201-baseline-close-day.png) | 4020 | `4891f340643089a0653654c9d11923894cddd2d7bd554755b322d741bedd555b` |
+| [Candidate wide](/Users/lucid/Downloads/hyperia-pond201-candidate-wide-day.png) | 2021 | `215e8138df4520f5c4571e67c859a98554b112a8637e9070e465186dbc9304ca` |
+| [Candidate close](/Users/lucid/Downloads/hyperia-pond201-candidate-close-day.png) | 2325 | `6bb6508901463ee583c26b5b6e0b031319cb34e5f2c67653433862704da4c0b5` |
+
+Both pages explicitly restore camera, clock and environment/renderer exposure; one-shot frame subscribers and blob URLs retire. Owned World/DevTools windows close, preserving the pre-existing New Tab. Baseline/candidate controllers stop at `2026-10-01T20:36:48.861Z` / `2026-10-01T20:43:13.027Z`, with empty errors, protected state unchanged, disposable databases removed and all four private ports free. Their process receipts hash to `ac9df009a478e7bcdb096aeb586d9191caf1529444702b2f5d1add81f3d71c0d` / `1ea1ee158d3c0048d9c4258cf50dceede2899d1bd22b2520fd8bf52ef919fe2c`. All42 unrelated hashes pass; public3333/build174 and saved state remain unchanged. Checkpoint `e9fe404ac` is already pushed under the verified user identity.
+
+Restoration checks pass **244 tests across four actual-assets-v10 suites**, scoped lint/format and an empty two-file diff. Evidence: service-layout `pond-shoulder201-revert-{tests01,lint01,format01,source01}`. Restored production/test SHA256 values are `aa7f5270a390536c0b88706e9c7283dc74b38f30f8b2c804dce8b3c4c4f558b0` / `fba4de3b3eeea196db749409bf59b049ecd5d0bc738754e3417ef2baff0d68b0`.
+
+**Next art direction:** address actual contour/width variation and the dirt-to-meadow transition using a shared terrain/foliage mask. Preserve navigable routes, bank/dock access and safe clearances; identical outer support is not itself the artistic objective. Prefer existing segment work over additive wear overlays. Require a clearly visible wide/close improvement before expanded all-day, motion and loading/performance qualification. AAA and sustained2×/60FPS acceptance remain open.
+
 ## Native201 terrain timing refused; source work continues
+
+### Terrain render-bundle audit — not selected
+
+The [official BundleGroup API](https://threejs.org/docs/pages/BundleGroup.html) exposes WebGPU command reuse, but installed r186 source makes a simple terrain-group conversion unsafe to assume. `Renderer._renderBundle` sets and clears a single `_currentRenderBundle` rather than stacking it across nested shadow renders; `_renderScene` does not restore that field. Separately, `WebGPUBackend.addBundle` queues execution until `finishRender`, after ordinary transparent objects, unlike the original terrain-before-water ordering. Root confirms these exact local control paths after independent review. They are source-level integration risks, not reproduced native defects or measured performance results. Do not adopt the proposed terrain bundle or fork the renderer as a speculative small optimization. A dedicated renderer-level nested-shadow and water-compositing qualification would be required; no production edits were made.
 
 Fresh baseline build198 was opened at 3024×1724 / DPR2 / MSAA4, with High shadows, postprocessing and reflections unchanged. The existing CPU2 observer used a held camera `[385,33,368] → [385,29,395]`, phase 0.56 and the production exposure initializer, followed by ten seconds of settling. No GPU queries, readbacks, per-draw hooks or Metal profiler were enabled. The predeclared comparison was fresh 198 → 199 → 199 → 198, thirty seconds per sample.
 
 Baseline A1 recorded 67 rows before losing focus after 4.522 seconds; the single retry refused before starting. Both are **invalid timing evidence**; no candidate run, paired comparison, FPS result or speedup is claimed. Both restore the six CPU2 lifecycle checks, camera/clock and exposure. Console-delivery syntax failures before A1 changed no game state and are not product failures. Raw receipts: [A1](/Users/lucid/Downloads/hyperia-terrain201-A1.json), SHA256 `5fd91676a7f5a47890bec0d6f7e99bfb6df1b1f7647a0eb0ffe5772b2774c100`; [retry](/Users/lucid/Downloads/hyperia-terrain201-A1-r2.json), SHA256 `53dd1d023a2afbc1837b8558bb2967c2fb0d56a52f2f41ef85f0a41c9f3be584`. Independent review confirms every lifecycle flag, exclusion and runtime cleanup, including equality of the 1,143 protected file entries.
 
 Owned game/DevTools windows close, preserving the pre-existing tab. Private runtime `runtime-terrain201-a1` stops at `2026-10-01T19:58:01.831Z`, with empty lifecycle errors, protected state unchanged, disposable database removed and all four private ports free; process SHA256 `d4413ef460e0f7e5b068a038cabd13e723ca261b3f6b238f6e2a9f0d8d02a770`. Public174 remains unchanged. Checkpoint `026a78fc4` is pushed under the verified user identity. Do not repeat the focus-refused timing loop or relax its guards; continue bounded render-preparation and world-art source work, with native cost/visual acceptance still open.
+
+## Source201 pond-approach shoulder candidate — unqualified
+
+**Disposition:** subsequently rejected in the native comparison above; candidate source/tests restored to HEAD. The following records the preserved experiment, not current accepted source.
+
+Three unequal, tapered partial-wear stretches follow the existing finished approach. Every original serialized path record remains exact (SHA256 `2750f821cef622f7c853f1a0f201567b938a348e1ae12134b252a6eaabc4c6b0`); each new complete capsule stays inside the original support. This changes shoulder transitions, not the outer path contour. The real served-v10 512² mask changes 52 raw texels across along-path spans 5.01 / 5.77 / 3.75 m, with unchanged domain and nonzero support.
+
+Partial influence does **not** imply unchanged grass after filtering. Added XZ mask area above the 0.8 clearance threshold is approximately 0.041543 m²; independent bilinear subdivision bounds it between 0.024612 and 0.063587 m², below the explicitly declared 0.1 m² budget. This is not terrain-surface area or an actual removed-root count. Input segments increase from 556 to 616 (+10.8%): the original-route cap remains 600, with a separate maximum of 60 new wear segments and 660 combined. The earlier zero-clearance assumption and undifferentiated segment-budget failure are retained, not hidden. No source tuning was used to fit those results.
+
+Author verification passes 42 path tests; the independent root path/road-mask run passes **50 tests across three suites** using actual served assets. Scoped lint/format/diff checks and independent source/mathematical reviews pass. Matched types retain the same 13 inherited diagnostics, including one pre-existing test-file diagnostic; zero new diagnostics. Evidence: service-layout `pond-shoulder201-{tests06,root-tests01,types02,lint02,format02,diffcheck01}`.
+
+Canonical build200 succeeds with nine bundles; its only production-input changes from199 are CompactIslandPaths.ts and VegetationSystem.ts. Report SHA256 `5740452654a00d98d0530c8f8a64084b40dbd244193d77b579226847c59aa693`; framework-client SHA256 `38dfebc647105821a7331134b8a731837f88a13b4a5d2307054a8b1d34997477`. The candidate adds path records during initialization, not meshes, new texture samples or render passes. Startup cost, actual grass changes and matched native wide/close day/dawn artistic value remain **open**. Public174 is unchanged; do not call the candidate an accepted visual improvement.
 
 ## Source201 vegetation shadow-scan checkpoint
 
