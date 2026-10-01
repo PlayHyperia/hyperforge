@@ -140,6 +140,7 @@ export type GrassGeometryCandidate =
 export type GrassInstancingCandidate = "attributes-v1";
 export type GrassSubmissionCandidate = "adaptive-ranges-v1";
 export type GrassShadowCandidate = "distance-pcf-v1";
+export type GrassEnvironmentCandidate = "shared-max-roughness-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -189,6 +190,29 @@ export function resolveGrassShadowCandidate(
       "Grass shadow filtering requires the explicit fine meadow and uniform single-map shadow flow",
     );
   return "distance-pcf-v1";
+}
+
+/** Share only the fixed leaf material's owned outdoor environment evaluation.
+ * Omission preserves the stock material; terrain separately admits sculpting. */
+export function resolveGrassEnvironmentCandidate(
+  win?: Window,
+): GrassEnvironmentCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassEnvironment") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "shared-max-roughness-v1")
+    throw new Error("Unknown or duplicate grass environment candidate");
+  if (
+    (params?.getAll("page").length ?? 0) > 1 ||
+    (params?.getAll("embedded").length ?? 0) > 1 ||
+    resolveGrassLightingCandidate(windowRef) !== "leaf-volume-v1"
+  )
+    throw new Error(
+      "Grass environment sharing requires the explicit leaf-volume fine meadow",
+    );
+  return "shared-max-roughness-v1";
 }
 
 /** Explicit rooted-flower population; omission never enables this owner. */
@@ -825,6 +849,11 @@ export type StreamingGrassProfileReceipt = {
     transitionStart: number;
     transitionEnd: number;
     camera: "primary-world-position";
+    qualification: "unqualified";
+  };
+  /** Enabled ownership policy, not proof that every draw uses the fast path. */
+  environmentEvaluation?: {
+    mode: GrassEnvironmentCandidate;
     qualification: "unqualified";
   };
   profileId:

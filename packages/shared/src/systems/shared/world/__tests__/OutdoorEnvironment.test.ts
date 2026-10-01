@@ -16,6 +16,7 @@ import {
   resolveOutdoorCalibration,
   sampleOutdoorFill,
   sampleOutdoorInterval,
+  updateGrassEnvironmentMaterial,
 } from "../OutdoorEnvironment";
 import {
   SkySystem,
@@ -483,6 +484,28 @@ describe("outdoor environment CPU contracts (not GPU radiometry or art approval)
     expect(f.scene.environmentNode).toBe(foreign);
     expect(f.scene.environmentIntensity).toBe(7);
   });
+
+  it("does not enroll foreign or absent environment graphs or material bindings", () => {
+    const scene = new THREE.Scene();
+    const material = new THREE.MeshSSSNodeMaterial({ roughness: 1 });
+    const foreign = uniform(new THREE.Color(0.2, 0.4, 0.3)).rgb;
+    try {
+      const version = material.version;
+      updateGrassEnvironmentMaterial(scene, material);
+      expect(material.envNode).toBeNull();
+      expect(material.version).toBe(version);
+      scene.environmentNode = foreign;
+      updateGrassEnvironmentMaterial(scene, material);
+      expect(material.envNode).toBeNull();
+      expect(material.version).toBe(version);
+      material.envNode = foreign;
+      updateGrassEnvironmentMaterial(scene, material);
+      expect(material.envNode).toBe(foreign);
+      expect(material.version).toBe(version);
+    } finally {
+      material.dispose();
+    }
+  });
 });
 
 type NativeGrassEnvironmentProgram = {
@@ -524,7 +547,33 @@ type NativeGrassEnvironmentReceipt = {
     sharedDepth: boolean;
     stableOwners: boolean;
     cloneSharesNode: boolean;
+    transitions: {
+      roughness: number;
+      nodeIsNull: boolean;
+      versionDelta: number;
+      stableVersion: boolean;
+      stableNode: boolean;
+      pixels: { maxError: number; finite: boolean; alphaExact: boolean };
+      program: NativeGrassEnvironmentProgram;
+    }[];
   }[];
+  lifecycle: {
+    rejectedFields: string[];
+    guardFailures: string[];
+    retiredCloneRestored: boolean;
+    retiredCloneStable: boolean;
+    replacementBound: boolean;
+    replacementStable: boolean;
+    foreignMaterialPreserved: boolean;
+    foreignScenePreserved: boolean;
+    absentRestored: boolean;
+    foreignGraphNotEnrolled: boolean;
+    temporaryOverrideRecovered: boolean;
+    replacementCaptures: number;
+    replacementPixelError: number;
+    replacementPixelsFinite: boolean;
+    replacementAlphaExact: boolean;
+  };
   cleanup: {
     resourcesCreated: number;
     resourcesDisposed: number;
@@ -537,7 +586,7 @@ type NativeGrassEnvironmentReceipt = {
   };
 };
 
-// A finite native experiment, not a production optimization or FPS test. Both
+// A finite native helper qualification, not an island or FPS test. Both
 // paths use the real OutdoorEnvironment capture/update lifecycle and the same
 // initialized renderer. Only the candidate material's envNode differs. This
 // intentionally has no approximate fallback, material override or relaxed
@@ -553,7 +602,7 @@ globalThis.grassEnvironmentProbe = async () => {
   const errors=[],resources=[],cleanup={resourcesCreated:0,resourcesDisposed:0,outdoorDisposed:false,outdoorBytes:-1,
     sceneRestored:false,rendererDisposed:false,deviceDestroyed:false,errors:[]};
   const own=resource=>{resources.push(resource);cleanup.resourcesCreated++;return resource;};
-  let active=true,renderer,outdoor,scene,priorEnvironment,priorIntensity;
+  let active=true,renderer,outdoor,replacement,scene,priorEnvironment,priorIntensity;
   const onError=event=>errors.push(String(event.error.message));
   device.addEventListener('uncapturederror',onError);
   device.lost.then(info=>{if(active)errors.push('Device lost: '+info.message);});
@@ -628,14 +677,19 @@ globalThis.grassEnvironmentProbe = async () => {
       baseline.thicknessAmbientNode=float(.5);baseline.thicknessAttenuationNode=float(.8);
       baseline.thicknessPowerNode=float(2);baseline.thicknessScaleNode=float(1);
       const candidate=own(baseline.clone());
-      candidate.envNode=source.context({getUV:()=>normalWorld,getTextureLevel:()=>float(1)}).toVar('grassMaxRoughnessEnvironment');
-      const clone=own(candidate.clone());
       const receiver=new THREE.Mesh(geometry,baseline);receiver.receiveShadow=true;scene.add(receiver);
+      // Exercise the real production hook contract, including compileAsync's
+      // callback, using the actual material supplied by the renderer.
+      receiver.onBeforeRender=(_renderer,actualScene,_camera,_geometry,material)=>{
+        if(material!==baseline)updateGrassEnvironmentMaterial(actualScene,material);
+      };
       camera.position.set(3,2.5,4);camera.lookAt(0,0,0);scene.environmentRotation.set(0,0,0);scene.environmentIntensity=1;outdoor.update(.56);
       const programs={};
       for(const key of candidateFirst?['candidate','baseline']:['baseline','candidate']){
         receiver.material=key==='baseline'?baseline:candidate;programs[key]=await program(receiver);
       }
+      if(candidate.envNode===null)throw new Error('Production helper did not bind in object hook');
+      const clone=own(candidate.clone());
       receiver.material=clone;programs.clone=await program(receiver);
       receiver.material=baseline;programs.baselineReturn=await program(receiver);
       const map=light.shadow.map,depth=map?.depthTexture,versions=[baseline.version,candidate.version,clone.version];
@@ -664,20 +718,103 @@ globalThis.grassEnvironmentProbe = async () => {
       scene.environmentIntensity=0;const noEnvironment=await draw(receiver);scene.environmentIntensity=1;
       light.shadow.intensity=0;const noShadow=await draw(receiver);light.shadow.intensity=1;
       outdoor.update(.21);const otherPhase=await draw(receiver);
+      const transitions=[];
+      for(const roughness of [.63,1]){
+        baseline.roughness=roughness;baseline.needsUpdate=true;
+        candidate.roughness=roughness;
+        const before=candidate.version;
+        receiver.material=baseline;const plain=await draw(receiver);
+        receiver.material=candidate;const optimized=await draw(receiver);
+        const after=candidate.version,node=candidate.envNode;
+        const emitted=await program(receiver);await draw(receiver);
+        transitions.push({roughness,nodeIsNull:node===null,versionDelta:after-before,
+          stableVersion:after===candidate.version,stableNode:node===candidate.envNode,
+          pixels:difference(plain,optimized),program:emitted});
+      }
       orders.push({candidateFirst,programs,cases,cloneMaxError:difference(candidatePixels,clonePixels).maxError,
         baselineReturnMaxError,environmentSignal:difference(diagnostic,noEnvironment).maxError,
         shadowSignal:difference(diagnostic,noShadow).maxError,phaseSignal:difference(diagnostic,otherPhase).maxError,
-        sharedMap,sharedDepth,stableOwners,cloneSharesNode:clone.envNode===candidate.envNode});
+        sharedMap,sharedDepth,stableOwners,cloneSharesNode:clone.envNode===candidate.envNode,transitions});
       scene.remove(receiver);
     }
+    // Guards operate on the real published owner and real material fields. These
+    // identity checks are not GPU parity claims for unsupported lobe recipes.
+    const guarded=own(new THREE.MeshSSSNodeMaterial({roughness:1,metalness:0}));
+    updateGrassEnvironmentMaterial(scene,guarded);
+    const shared=guarded.envNode;
+    if(shared===null)throw new Error('Missing real shared graph for guard tests');
+    const retiredClone=own(guarded.clone()),foreign=vec3(.13,.24,.35),texture=own(new THREE.Texture());
+    const guardFailures=[],rejectedFields=[];
+    const reject=(field,value)=>{
+      const prior=guarded[field];guarded[field]=value;
+      updateGrassEnvironmentMaterial(scene,guarded);
+      const version=guarded.version;updateGrassEnvironmentMaterial(scene,guarded);
+      if(guarded.envNode!==null || guarded.version!==version)guardFailures.push(field+':did not stay stock');
+      guarded[field]=prior;updateGrassEnvironmentMaterial(scene,guarded);
+      if(guarded.envNode!==shared)guardFailures.push(field+':did not recover owned graph');
+      rejectedFields.push(field);
+    };
+    for(const field of ['roughness','metalness','ior','specularIntensity','anisotropy','clearcoat','retroreflectivity','transmission','sheen','iridescence','dispersion'])reject(field,.63);
+    for(const field of ['roughnessNode','metalnessNode','anisotropyNode','clearcoatNode','clearcoatRoughnessNode','clearcoatNormalNode',
+      'retroreflectivityNode','transmissionNode','sheenNode','sheenRoughnessNode','iridescenceNode','iridescenceIORNode','iridescenceThicknessNode',
+      'dispersionNode','iorNode','specularIntensityNode','specularColorNode','lightsNode','fragmentNode','backdropNode'])reject(field,foreign);
+    for(const field of ['roughnessMap','metalnessMap','envMap','anisotropyMap','clearcoatMap','clearcoatNormalMap','clearcoatRoughnessMap',
+      'transmissionMap','sheenColorMap','sheenRoughnessMap','iridescenceMap','iridescenceThicknessMap','specularIntensityMap','specularColorMap'])reject(field,texture);
+    reject('specularColor',new THREE.Color(.7,1,1));
+    guarded.envNode=foreign;const foreignVersion=guarded.version;updateGrassEnvironmentMaterial(scene,guarded);
+    const foreignMaterialPreserved=guarded.envNode===foreign && guarded.version===foreignVersion;
+    guarded.envNode=shared;
+    outdoor.dispose();
+    updateGrassEnvironmentMaterial(scene,retiredClone);
+    const retiredVersion=retiredClone.version;
+    const retiredCloneRestored=retiredClone.envNode===null;
+    updateGrassEnvironmentMaterial(scene,retiredClone);
+    const retiredCloneStable=retiredClone.version===retiredVersion;
+    // Publish a freshly prepared owner on the same scene; do not manufacture a
+    // graph/owner registration or sample the old disposed PMREM textures.
+    replacement=new OutdoorEnvironment(scene,'rgb-irradiance-v1');
+    await replacement.initialize(graphics,sky.createLightingCapture(),.56);
+    renderer.setRenderTarget(target);
+    const newSource=scene.environmentNode;
+    updateGrassEnvironmentMaterial(scene,guarded);
+    const newShared=guarded.envNode,replacementVersion=guarded.version;
+    replacement.update(.27);updateGrassEnvironmentMaterial(scene,guarded);
+    const replacementStable=guarded.version===replacementVersion && guarded.envNode===newShared;
+    const replacementBound=newSource!==source && newShared!==null && newShared!==shared;
+    const plain=own(guarded.clone());plain.envNode=null;
+    const receiver=new THREE.Mesh(geometry,plain);receiver.receiveShadow=true;scene.add(receiver);
+    receiver.onBeforeRender=(_renderer,actualScene,_camera,_geometry,material)=>{
+      if(material===guarded)updateGrassEnvironmentMaterial(actualScene,material);
+    };
+    receiver.material=plain;const replacementPlain=await draw(receiver);
+    receiver.material=guarded;const replacementOptimized=await draw(receiver);
+    const replacementDifference=difference(replacementPlain,replacementOptimized);
+    scene.remove(receiver);
+    scene.environmentNode=foreign;scene.environmentIntensity=2.75;
+    updateGrassEnvironmentMaterial(scene,guarded);
+    const foreignScenePreserved=scene.environmentNode===foreign && scene.environmentIntensity===2.75;
+    const foreignGraphNotEnrolled=guarded.envNode===null;
+    scene.environmentNode=newSource;updateGrassEnvironmentMaterial(scene,guarded);
+    const temporaryOverrideRecovered=guarded.envNode===newShared;
+    scene.environmentNode=foreign;updateGrassEnvironmentMaterial(scene,guarded);
+    replacement.dispose();
+    const absentVersion=guarded.version;
+    scene.environmentNode=null;updateGrassEnvironmentMaterial(scene,guarded);
+    const absentRestored=guarded.envNode===null && guarded.version===absentVersion;
+    scene.environmentNode=priorEnvironment;scene.environmentIntensity=priorIntensity;
+    const lifecycle={rejectedFields,guardFailures,retiredCloneRestored,retiredCloneStable,replacementBound,replacementStable,
+      foreignMaterialPreserved,foreignScenePreserved,foreignGraphNotEnrolled,temporaryOverrideRecovered,absentRestored,
+      replacementCaptures:replacement.getStatus().capturesCompleted,replacementPixelError:replacementDifference.maxError,
+      replacementPixelsFinite:replacementDifference.finite,replacementAlphaExact:replacementDifference.alphaExact};
     await device.queue.onSubmittedWorkDone();
     return {adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,description:adapter.info.description},
-      nativeBackend:renderer.backend.isWebGPUBackend,captureCount,orders,errors,cleanup};
+      nativeBackend:renderer.backend.isWebGPUBackend,captureCount,orders,lifecycle,errors,cleanup};
   }finally{
     const retire=operation=>{try{operation();}catch(error){cleanup.errors.push(String(error));}};
     retire(()=>renderer?.setAnimationLoop(null));retire(()=>renderer?.setRenderTarget(null));
-    retire(()=>{outdoor?.dispose();cleanup.outdoorDisposed=outdoor?.getStatus().state==='disposed';
-      cleanup.outdoorBytes=outdoor?.getStatus().baseColorBytes??0;
+    retire(()=>{replacement?.dispose();outdoor?.dispose();cleanup.outdoorDisposed=outdoor?.getStatus().state==='disposed' &&
+      (!replacement || replacement.getStatus().state==='disposed');
+      cleanup.outdoorBytes=(outdoor?.getStatus().baseColorBytes??0)+(replacement?.getStatus().baseColorBytes??0);
       cleanup.sceneRestored=!!scene && scene.environmentNode===priorEnvironment && scene.environmentIntensity===priorIntensity;});
     for(const resource of resources)retire(()=>{resource.dispose();cleanup.resourcesDisposed++;});
     retire(()=>{renderer?.dispose();cleanup.rendererDisposed=!!renderer;});
@@ -697,10 +834,10 @@ it.skipIf(process.env.HYPERIA_NATIVE_GRASS_ENVIRONMENT !== "1")(
         JSON.stringify(fileURLToPath(new URL(relative, import.meta.url)));
       const entry = await build({
         stdin: {
-          contents: `import THREE,{float,vec3,normalWorld} from ${path("../../../../extras/three/three.ts")};
+          contents: `import THREE,{float,vec3} from ${path("../../../../extras/three/three.ts")};
 import {World} from ${path("../../../../core/World.ts")};
 import {ClientGraphics} from ${path("../../../client/ClientGraphics.ts")};
-import {OutdoorEnvironment} from ${path("../OutdoorEnvironment.ts")};
+import {OutdoorEnvironment,updateGrassEnvironmentMaterial} from ${path("../OutdoorEnvironment.ts")};
 import {SkySystem} from ${path("../SkySystem.ts")};
 ${nativeGrassEnvironmentProbe}`,
           resolveDir: fileURLToPath(new URL(".", import.meta.url)),
@@ -822,26 +959,29 @@ ${nativeGrassEnvironmentProbe}`,
         [...source.matchAll(/\btextureSampleGrad\s*\(/g)].length;
       const sha = (source: string) =>
         createHash("sha256").update(source).digest("hex");
+      const summarizeProgram = (value: NativeGrassEnvironmentProgram) => ({
+        vertexSha256: sha(value.vertex),
+        fragmentSha256: sha(value.fragment),
+        sampleSites: samples(value.fragment),
+        sharedInitializations: [
+          ...value.fragment.matchAll(/grassMaxRoughnessEnvironment\s*=/g),
+        ].length,
+        compilationErrors: value.compilationErrors,
+      });
       process.stdout.write(
         `Native grass environment proof (not game pixels or performance acceptance): ${JSON.stringify(
           {
             ...receipt,
-            orders: receipt.orders.map(({ programs, ...row }) => ({
+            orders: receipt.orders.map(({ programs, transitions, ...row }) => ({
               ...row,
+              transitions: transitions.map(({ program, ...transition }) => ({
+                ...transition,
+                program: summarizeProgram(program),
+              })),
               programs: Object.fromEntries(
                 Object.entries(programs).map(([key, value]) => [
                   key,
-                  {
-                    vertexSha256: sha(value.vertex),
-                    fragmentSha256: sha(value.fragment),
-                    sampleSites: samples(value.fragment),
-                    sharedInitializations: [
-                      ...value.fragment.matchAll(
-                        /grassMaxRoughnessEnvironment\s*=/g,
-                      ),
-                    ].length,
-                    compilationErrors: value.compilationErrors,
-                  },
+                  summarizeProgram(value),
                 ]),
               ),
             })),
@@ -885,7 +1025,48 @@ ${nativeGrassEnvironmentProbe}`,
         expect(row.programs.baselineReturn.fragment).toBe(
           row.programs.baseline.fragment,
         );
+        expect(
+          row.transitions.map((transition) => transition.roughness),
+        ).toEqual([0.63, 1]);
+        for (const transition of row.transitions) {
+          expect(transition.nodeIsNull).toBe(transition.roughness !== 1);
+          expect(transition.versionDelta).toBe(1);
+          expect(transition.stableVersion).toBe(true);
+          expect(transition.stableNode).toBe(true);
+          expect(transition.pixels.finite).toBe(true);
+          expect(transition.pixels.alphaExact).toBe(true);
+          expect(transition.pixels.maxError).toBeLessThanOrEqual(0.00002);
+          expect(transition.program.compilationErrors).toEqual([]);
+          expect(samples(transition.program.fragment)).toBe(
+            transition.roughness === 1 ? 4 : 8,
+          );
+          expect([
+            ...transition.program.fragment.matchAll(
+              /grassMaxRoughnessEnvironment\s*=/g,
+            ),
+          ]).toHaveLength(transition.roughness === 1 ? 1 : 0);
+        }
       }
+      expect(receipt.lifecycle.guardFailures).toEqual([]);
+      expect(receipt.lifecycle.rejectedFields).toHaveLength(46);
+      for (const key of [
+        "retiredCloneRestored",
+        "retiredCloneStable",
+        "replacementBound",
+        "replacementStable",
+        "foreignMaterialPreserved",
+        "foreignScenePreserved",
+        "foreignGraphNotEnrolled",
+        "temporaryOverrideRecovered",
+        "absentRestored",
+        "replacementPixelsFinite",
+        "replacementAlphaExact",
+      ] as const)
+        expect(receipt.lifecycle[key], key).toBe(true);
+      expect(receipt.lifecycle.replacementCaptures).toBe(12);
+      expect(receipt.lifecycle.replacementPixelError).toBeLessThanOrEqual(
+        0.00002,
+      );
       expect(receipt.cleanup.errors).toEqual([]);
       expect(receipt.cleanup.resourcesDisposed).toBe(
         receipt.cleanup.resourcesCreated,

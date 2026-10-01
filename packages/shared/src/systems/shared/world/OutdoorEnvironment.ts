@@ -1,5 +1,13 @@
 import THREE from "../../../extras/three/three";
-import { mix, pmremTexture, uniform } from "three/tsl";
+import type Node from "three/src/nodes/core/Node.js";
+import {
+  float,
+  mix,
+  normalWorld,
+  pmremTexture,
+  uniform,
+  vec3,
+} from "three/tsl";
 import type { ClientGraphics } from "../../client/ClientGraphics";
 import { AMBIENT_LIGHT, HEMISPHERE_LIGHT } from "./LightingConfig";
 import { sampleSkyCycle, type SkyLightingCapture } from "./SkySystem";
@@ -16,6 +24,131 @@ const ATLAS_HEIGHT = 512;
 type RGB = readonly [number, number, number];
 export type OutdoorCalibration = "luminance-v1" | "rgb-irradiance-v1";
 type State = "idle" | "preparing" | "ready" | "failed" | "disposed";
+
+type SceneEnvironmentNode = NonNullable<THREE.Scene["environmentNode"]>;
+type SharedGrassEnvironmentNode = Node<"vec3">;
+type GrassEnvironmentOwner = {
+  source: SceneEnvironmentNode;
+  shared: SharedGrassEnvironmentNode | null;
+};
+const grassEnvironmentOwners = new WeakMap<
+  THREE.Scene,
+  GrassEnvironmentOwner
+>();
+// Keep historical provenance while a material/clone still holds the node. A
+// retired source must cease sampling, but its old binding is still ours to undo.
+const sharedGrassEnvironmentOwners = new WeakMap<Node, GrassEnvironmentOwner>();
+const unsupportedGrassScalars = [
+  "anisotropy",
+  "clearcoat",
+  "retroreflectivity",
+  "transmission",
+  "sheen",
+  "iridescence",
+  "dispersion",
+] as const;
+const unsupportedGrassFlags = [
+  "useAnisotropy",
+  "useClearcoat",
+  "useRetroreflection",
+  "useTransmission",
+  "useSheen",
+  "useIridescence",
+  "useDispersion",
+] as const;
+const unsupportedGrassNodesAndMaps = [
+  "anisotropyNode",
+  "anisotropyMap",
+  "clearcoatNode",
+  "clearcoatRoughnessNode",
+  "clearcoatNormalNode",
+  "clearcoatMap",
+  "clearcoatNormalMap",
+  "clearcoatRoughnessMap",
+  "retroreflectivityNode",
+  "transmissionNode",
+  "transmissionMap",
+  "sheenNode",
+  "sheenRoughnessNode",
+  "sheenColorMap",
+  "sheenRoughnessMap",
+  "iridescenceNode",
+  "iridescenceIORNode",
+  "iridescenceThicknessNode",
+  "iridescenceMap",
+  "iridescenceThicknessMap",
+  "dispersionNode",
+  "iorNode",
+  "specularIntensityNode",
+  "specularColorNode",
+  "specularIntensityMap",
+  "specularColorMap",
+  "lightsNode",
+  "fragmentNode",
+  "backdropNode",
+] as const;
+
+function supportsSharedGrassEnvironment(material: THREE.NodeMaterial): boolean {
+  if (
+    !(material instanceof THREE.MeshSSSNodeMaterial) ||
+    material.roughness !== 1 ||
+    material.roughnessNode !== null ||
+    material.roughnessMap !== null ||
+    material.metalness !== 0 ||
+    material.metalnessNode !== null ||
+    material.metalnessMap !== null ||
+    material.envMap !== null ||
+    material.ior !== 1.5 ||
+    material.specularIntensity !== 1 ||
+    material.specularColor.r !== 1 ||
+    material.specularColor.g !== 1 ||
+    material.specularColor.b !== 1
+  )
+    return false;
+  // Indexed loops and immutable field tables avoid allocating per grass draw.
+  // Reflect covers r186 fields missing from the older installed declarations.
+  for (let i = 0; i < unsupportedGrassScalars.length; i++)
+    if (Reflect.get(material, unsupportedGrassScalars[i]) !== 0) return false;
+  for (let i = 0; i < unsupportedGrassFlags.length; i++)
+    if (Reflect.get(material, unsupportedGrassFlags[i]) !== false) return false;
+  for (let i = 0; i < unsupportedGrassNodesAndMaps.length; i++)
+    if (Reflect.get(material, unsupportedGrassNodesAndMaps[i]) != null)
+      return false;
+  return true;
+}
+
+/** Bind only this world's published outdoor graph to an admitted matte leaf.
+ * Called from the object's before-render hook, before Three selects its program.
+ * A scalar recipe change restores the stock graph and requests one recompile;
+ * stable draws and sky-phase/texture updates do not change material versions.
+ * This reduces duplicate PMREM lookup work, not the physical lighting model. */
+export function updateGrassEnvironmentMaterial(
+  scene: THREE.Scene,
+  material: THREE.Material,
+): void {
+  let owner = grassEnvironmentOwners.get(scene);
+  // A temporary foreign scene override is not the owner's disposal. Preserve
+  // registration so restoring that still-live source can re-admit the recipe.
+  if (owner && scene.environmentNode !== owner.source) owner = undefined;
+  if (!(material instanceof THREE.NodeMaterial)) return;
+  const previous = material.envNode;
+  // Respect another writer even when this material previously held our node.
+  if (previous !== null && !sharedGrassEnvironmentOwners.has(previous)) return;
+  let next: SharedGrassEnvironmentNode | null = null;
+  if (owner && supportsSharedGrassEnvironment(material)) {
+    if (owner.shared === null) {
+      owner.shared = vec3(owner.source)
+        .context({ getUV: () => normalWorld, getTextureLevel: () => float(1) })
+        .toVar("grassMaxRoughnessEnvironment");
+      sharedGrassEnvironmentOwners.set(owner.shared, owner);
+    }
+    next = owner.shared;
+  }
+  if (previous !== next) {
+    material.envNode = next;
+    material.needsUpdate = true;
+  }
+}
 
 /** Explicit visual candidate; ordinary startup retains the existing lighting. */
 export function resolveOutdoorCalibration(
@@ -316,6 +449,10 @@ export class OutdoorEnvironment {
           this.scene.environmentIntensity = 1;
           this.state = "ready";
           this.update(phase);
+          grassEnvironmentOwners.set(this.scene, {
+            source: this.environmentNode,
+            shared: null,
+          });
         } catch (error) {
           errors.push(error);
         } finally {
@@ -373,6 +510,8 @@ export class OutdoorEnvironment {
   }
 
   private unpublish(): void {
+    if (grassEnvironmentOwners.get(this.scene)?.source === this.environmentNode)
+      grassEnvironmentOwners.delete(this.scene);
     if (
       this.environmentNode &&
       this.scene.environmentNode === this.environmentNode

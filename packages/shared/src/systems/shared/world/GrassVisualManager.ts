@@ -33,6 +33,7 @@ import THREE, {
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
+import { updateGrassEnvironmentMaterial } from "./OutdoorEnvironment";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
@@ -51,6 +52,7 @@ import type {
   GrassInstancingCandidate,
   GrassSubmissionCandidate,
   GrassShadowCandidate,
+  GrassEnvironmentCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -1913,6 +1915,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly instancingCandidate?: GrassInstancingCandidate,
     private readonly submissionCandidate?: GrassSubmissionCandidate,
     private readonly shadowCandidate?: GrassShadowCandidate,
+    private readonly environmentCandidate?: GrassEnvironmentCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1995,6 +1998,14 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error(
         "Grass lighting requires the admitted explicit fine meadow",
+      );
+    if (
+      environmentCandidate !== undefined &&
+      (environmentCandidate !== "shared-max-roughness-v1" ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id)
+    )
+      throw new Error(
+        "Grass environment sharing requires the admitted leaf-volume fine meadow",
       );
     if (
       geometryCandidate !== undefined &&
@@ -2463,6 +2474,14 @@ export class GrassVisualManager implements QuadTreeListener {
             },
           }
         : {}),
+      ...(this.environmentCandidate
+        ? {
+            environmentEvaluation: {
+              mode: this.environmentCandidate,
+              qualification: "unqualified" as const,
+            },
+          }
+        : {}),
       eligibility: this.grassEligibility,
       terrainProfileIdentity: this.terrainProfileIdentity,
       minimumLodLevel: this.minimumLodLevel,
@@ -2697,6 +2716,7 @@ export class GrassVisualManager implements QuadTreeListener {
     const mesh = this.instancingCandidate
       ? createMatrixFreeGrassMesh(geo, material)
       : createStorageInstancedMesh(geo, material, 1);
+    this.bindGrassEnvironment(mesh);
     mesh.name = "GrassQT_PrecompileSample";
     mesh.frustumCulled = false;
     mesh.receiveShadow = true;
@@ -3846,6 +3866,7 @@ export class GrassVisualManager implements QuadTreeListener {
       mesh = this.instancingCandidate
         ? createMatrixFreeGrassMesh(geo, material)
         : createStorageInstancedMesh(geo, material, data.count);
+      this.bindGrassEnvironment(mesh);
       mesh.position.set(node.centerX, 0, node.centerZ);
       // Chunk-local placement is immutable; parent/world transforms stay live.
       mesh.updateMatrix();
@@ -3970,6 +3991,25 @@ export class GrassVisualManager implements QuadTreeListener {
       else release();
       throw error;
     }
+  }
+
+  /** Object hooks run before pipeline selection in both WebGPU compile and
+   * render. Material hooks do not. Install before the adaptive draw wrapper,
+   * which forwards this hook for both primary and reflection passes. */
+  private bindGrassEnvironment(mesh: GrassChunkRenderMesh): void {
+    if (!this.environmentCandidate) return;
+    const previous = mesh.onBeforeRender;
+    mesh.onBeforeRender = function (
+      renderer,
+      scene,
+      camera,
+      geometry,
+      material,
+      group,
+    ) {
+      previous.call(this, renderer, scene, camera, geometry, material, group);
+      updateGrassEnvironmentMaterial(scene, material);
+    };
   }
 
   private processSettledWorkerResults(): number {

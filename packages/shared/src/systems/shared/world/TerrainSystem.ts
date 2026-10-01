@@ -212,6 +212,7 @@ import {
   resolveGrassInstancingCandidate,
   resolveGrassSubmissionCandidate,
   resolveGrassShadowCandidate,
+  resolveGrassEnvironmentCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -481,6 +482,7 @@ export class TerrainSystem extends System {
         instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
         submission?: ReturnType<typeof resolveGrassSubmissionCandidate>;
         shadow?: ReturnType<typeof resolveGrassShadowCandidate>;
+        environment?: ReturnType<typeof resolveGrassEnvironmentCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -950,6 +952,7 @@ export class TerrainSystem extends System {
       const instancing = resolveGrassInstancingCandidate();
       const submission = resolveGrassSubmissionCandidate();
       const shadow = resolveGrassShadowCandidate();
+      const environment = resolveGrassEnvironmentCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -970,6 +973,7 @@ export class TerrainSystem extends System {
         ...(instancing ? { instancing } : {}),
         ...(submission ? { submission } : {}),
         ...(shadow ? { shadow } : {}),
+        ...(environment ? { environment } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3123,6 +3127,7 @@ export class TerrainSystem extends System {
         grassSelection.instancing,
         grassSelection.submission,
         grassSelection.shadow,
+        grassSelection.environment,
       );
       if (grassSelection.submission && this.world.graphics)
         this.grassVisualManager.setAdaptiveGrassRenderer(

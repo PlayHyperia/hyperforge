@@ -63,6 +63,7 @@ import {
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
 import type {
+  GrassEnvironmentCandidate,
   GrassGeometryCandidate,
   GrassShadowCandidate,
 } from "../../../../runtime/clientViewportMode";
@@ -85,6 +86,7 @@ async function fixture(
   submissionCandidate?: "adaptive-ranges-v1",
   includeHabitat = false,
   shadowCandidate?: GrassShadowCandidate,
+  environmentCandidate?: GrassEnvironmentCandidate,
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -305,6 +307,7 @@ async function fixture(
       undefined,
       submissionCandidate,
       shadowCandidate,
+      environmentCandidate,
     );
     setupDisposals.push(() => owner.destroy());
     owner.setPlayerPosition(385, 374);
@@ -3679,6 +3682,170 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       expect(f.owner.getStreamingReadiness([f.node]).readyChunks).toBe(1);
     } finally {
       f.close();
+    }
+  });
+
+  it("keeps grass environment sharing opt-in without changing real grounded mesh data or stock no-environment callbacks", async () => {
+    const baseline = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      "per-blade-v1",
+    );
+    let candidate: Awaited<ReturnType<typeof fixture>> | undefined;
+    const dom = new JSDOM("");
+    const renderer = new THREE.WebGPURenderer({
+      canvas: dom.window.document.createElement("canvas"),
+    });
+    try {
+      candidate = await fixture(
+        undefined,
+        undefined,
+        16,
+        undefined,
+        "leaf-volume-v1",
+        "meadow-field-v1",
+        "per-blade-v1",
+        undefined,
+        undefined,
+        false,
+        undefined,
+        "shared-max-roughness-v1",
+      );
+      expect(
+        baseline.owner.getProfileReceipt().environmentEvaluation,
+      ).toBeUndefined();
+      expect(candidate.owner.getProfileReceipt().environmentEvaluation).toEqual(
+        {
+          mode: "shared-max-roughness-v1",
+          qualification: "unqualified",
+        },
+      );
+      const camera = new THREE.PerspectiveCamera();
+      const mirror = camera.clone();
+      mirror.position.set(20, -10, -20);
+      const checkHook = (
+        mesh: GrassChunkRenderMesh,
+        scene: THREE.Scene,
+        enabled: boolean,
+      ) => {
+        const material = mesh.material;
+        if (!(material instanceof MeshStandardNodeMaterial))
+          throw new Error("Actual grounded node material required");
+        expect(scene.environmentNode).toBeUndefined();
+        expect(material.envNode).toBeNull();
+        expect(material.envMap).toBeNull();
+        expect(
+          mesh.onBeforeRender === THREE.Object3D.prototype.onBeforeRender,
+        ).toBe(!enabled);
+        const version = material.version;
+        const geometry = mesh.geometry;
+        const index = geometry.index;
+        const attributes = Object.entries(geometry.attributes);
+        const nodes = [
+          material.positionNode,
+          material.normalNode,
+          material.colorNode,
+          material.aoNode,
+          material.contextNode,
+        ];
+        for (const view of [camera, mirror, camera]) {
+          // Installed r186 calls this with WebGPURenderer and a null group;
+          // the upstream Object3D declaration still names WebGLRenderer.
+          Reflect.apply(mesh.onBeforeRender, mesh, [
+            renderer,
+            scene,
+            view,
+            geometry,
+            material,
+            null,
+          ]);
+          expect(mesh.material).toBe(material);
+          expect(material.envNode).toBeNull();
+          expect(material.version).toBe(version);
+          expect(mesh.geometry).toBe(geometry);
+          expect(geometry.index).toBe(index);
+          for (const [name, attribute] of attributes)
+            expect(geometry.getAttribute(name), name).toBe(attribute);
+          for (const [i, node] of [
+            material.positionNode,
+            material.normalNode,
+            material.colorNode,
+            material.aoNode,
+            material.contextNode,
+          ].entries())
+            expect(node).toBe(nodes[i]);
+          expect([mesh.receiveShadow, mesh.castShadow]).toEqual([true, false]);
+        }
+      };
+      for (const f of [baseline, candidate]) {
+        const enabled = f === candidate;
+        let representatives = 0;
+        await f.owner.precompileRepresentativeChunk(async (object) => {
+          if (!(object instanceof THREE.InstancedMesh))
+            throw new Error("Actual storage-instanced representative required");
+          checkHook(object, f.world.stage.scene, enabled);
+          representatives++;
+        });
+        expect(representatives).toBe(3);
+        expect(f.container.children).toHaveLength(0);
+        await f.queue();
+        f.owner["processSettledWorkerResults"]();
+        f.finish();
+        const mesh = f.owner["chunks"].get(f.work.key)!.mesh;
+        expect(mesh.count).toBeGreaterThan(0);
+        checkHook(mesh, f.world.stage.scene, enabled);
+      }
+      const before = baseline.owner["chunks"].get(baseline.work.key)!.mesh;
+      const after = candidate.owner["chunks"].get(candidate.work.key)!.mesh;
+      expect(after.count).toBe(before.count);
+      expect(after.position).toEqual(before.position);
+      expect(after.matrix).toEqual(before.matrix);
+      expect(after.geometry.index!.array).toEqual(before.geometry.index!.array);
+      expect(after.geometry.drawRange).toEqual(before.geometry.drawRange);
+      expect(Object.keys(after.geometry.attributes).sort()).toEqual(
+        Object.keys(before.geometry.attributes).sort(),
+      );
+      for (const name of Object.keys(before.geometry.attributes)) {
+        const a = after.geometry.getAttribute(name);
+        const b = before.geometry.getAttribute(name);
+        expect(a.itemSize, name).toBe(b.itemSize);
+        expect(a.count, name).toBe(b.count);
+        expect(a.normalized, name).toBe(b.normalized);
+        expect(a.array, name).toEqual(b.array);
+      }
+      expect(after.geometry.boundingBox).toEqual(before.geometry.boundingBox);
+      expect(after.geometry.boundingSphere).toEqual(
+        before.geometry.boundingSphere,
+      );
+      expect(after.boundingBox).toEqual(before.boundingBox);
+      expect(after.boundingSphere).toEqual(before.boundingSphere);
+      expect(after.frustumCulled).toBe(before.frustumCulled);
+      expect(after.matrixAutoUpdate).toBe(before.matrixAutoUpdate);
+      expect(after.userData.grassBladeGrounding.sourceIndices).toEqual(
+        before.userData.grassBladeGrounding.sourceIndices,
+      );
+      expect(after.userData.grassBladeGrounding.sweptBounds).toEqual(
+        before.userData.grassBladeGrounding.sweptBounds,
+      );
+      expect(candidate.owner.getProfileReceipt().installedClumps).toBe(
+        baseline.owner.getProfileReceipt().installedClumps,
+      );
+      // This checks real production callbacks with an uninitialized CPU-side
+      // renderer, not GPU execution or live PMREM ownership. Those are native
+      // OutdoorEnvironment.test.ts responsibilities.
+      expect(renderer.initialized).toBe(false);
+    } finally {
+      try {
+        await renderer.dispose();
+      } finally {
+        dom.window.close();
+        candidate?.close();
+        baseline.close();
+      }
     }
   });
 
