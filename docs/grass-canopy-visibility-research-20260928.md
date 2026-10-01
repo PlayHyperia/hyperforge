@@ -1,5 +1,40 @@
 # Grass canopy visibility: research checkpoint
 
+## Native194 low-view and fallback checks; combined timing still open
+
+Private `runtime-reflection194-qualified02` retains canonical194,3840×1926/DPR2/MSAA4/High PCF and the same held lighting/exposure. Four native final-canvas captures complete with fresh main/mirror draws, full mirror color clears, pinned same-frame shadow resources, balanced three-buffer/error-scope cleanup and restored selectors. The first three controls are not byte-stable, so their capture integrity passes **do not establish exact pixel parity**.
+
+| Held capture | Full/full differing pixels | Candidate versus second full | Reflected grass removed | Raster outcome |
+| --- | ---: | ---: | --- | --- |
+| Low combined | 3 (max2 byte levels) | 2 (max2) | 1 draw /42,336 slots | [40,441,1880,522] |
+| Level combined | 7 (max2) | 7 (max2) | None | [557,547,802,251]; grass fallback only |
+| Edge yaw45 combined | 1 (max1) | 1 (max1) | None | Full1920×963, scissor off |
+| Later low raster-only control | 0 | 0 | None | [40,441,1880,522] |
+
+Each comparison covers7,395,840 pixels. The level and edge candidate differences exactly reverse the recorded full/full differences; low combined reverses two of three. This is derived from complete differing-pixel summaries, not independent retained raw buffers, and does not justify changing tolerance or attributing the differences to a particular GPU mechanism. The later low raster-only capture is exactly equal across all three renders but occurs at a different world frame. The low eye[386,27.1,404] has only0.889m terrain clearance: a low-angle QA pose, not standing gameplay. Level eye[370,34,388] targets[401,34,411]; edge eye[386,27.1,404] targets[394.485,24.8,432.284], all FOV70. These are held checks, not continuous-motion acceptance.
+
+Two combined timing attempts refuse during baseline warmup, before any measured block/sample. The targeted retry records355 signature rows,207 exact matches and148 mismatches. Its six bounded examples retain identical objects/geometry/attributes/draw parameters but show a shared shadow-material version increment of28. Installed Three caches one shadow override per light, copies each caster's alphaTest onto it and increments version on zero/positive transitions; its render-object cache can retain the program when the cache key is unchanged. A version increment alone is therefore not proof of changed geometry or compilation. **This explains only the shown examples:** the baseline has132 shadow rows, so at least16 unmatched rows are non-shadow. The truncated report cannot establish their cause; do not drop shadow versions and call the workload matched. Next collect bounded per-view/changed-field aggregates and retain complete changed non-shadow rows before correcting the comparison. Preserve actual pipeline/shader and geometry invariants; do not repeatedly rerun the same timer or silently freeze/exclude changing scene work.
+
+Camera/clock/exposure and both selectors restore; owned test windows close with the pre-existing New Tab preserved. Runtime exits0/STOPPED at2026-10-01T06:26:59.783Z, errors empty, protected public state unchanged, disposable database removed and private ports free. The ignored review module is removed;42 unrelated file hashes remain unchanged. No production/default/public174 change or combined FPS benefit is claimed.
+
+Evidence: service-layout `reflection194-qualified-runtime02`; inland-pond `runtime-reflection194-qualified02/client.log`, markers `REFLECTION194_FINAL_PIXELS`, `REFLECTION194_TIMING_RESULT` and `REF194Q_CLEANUP`. Final log SHA256 `d4f4ffe5bccea9d4fe5129b4b94971a933fbe3a3039855deaa6307b3c2383a57`; stopped process `d07b9d9cc3c77347c19d876e8d5bf06c18809c94a0d430d38048b8e61da032f7`. Existing diagnostic source SHA256 `2d1a5597fff477bd54a4c466ae48df365337bb2c1533a7700d3d89333e585b45` passes Node22 syntax and independent review; the mismatch-report addition does not relax equality.
+
+## Native194 reflected-grass submission and final-canvas pixel proof
+
+Private `runtime-reflection194-pixels01` uses canonical194 at3840×1926/DPR2/MSAA4/High PCF, phase0.56 and exposure0.850240084, with94 grass owners and complete streaming readiness. The held wide view is eye[370,34,388], target[401,25,411], FOV70. No production source/default or public preview changes.
+
+Three ordinary full/cull/full completed frames, with raster cropping fixed on, retain34 main grass draws/2,592,507 triangle slots. Mirror grass changes32→20→32 draws and2,734,848→1,566,207→2,734,848 slots: **12 fewer reflected draws and1,168,641 fewer submitted triangle slots**,42.73% of mirror grass or21.94% of total main-plus-mirror grass in this view. All32 culling queries map to pinned mesh owners; the12 rejected owners exactly match the removed draws. Main signatures and full bookends match. This proves submission reduction, not proportional GPU/FPS improvement.
+
+The existing controller then performs three fresh synchronous game renders at a single world tick, immediately copying the native final canvas after each render. Full/full is the control; the third render enables raster alone or raster plus grass culling. Both comparisons report **zero differing bytes across all7,395,840 canvas pixels**. Main and mirror draw execution is observed, not assumed. In the combined comparison, main remains271 draws; mirror changes266→254, with only the same12 grass owners/1,168,641 slots removed. Resolution, projection, exposure, wind/time, native shadow resources and settings are unchanged. Same-frame shadow-map reuse is verified against the actual map/cache identities; each mirror render clears its full color attachment before drawing. Three readback buffers and three error scopes retire per comparison, all observers/flags restore, and GPU/errors are empty.
+
+The initial pixel attempt refuses before copying because its diagnostic incorrectly requires new shadow draws during a same-frame replay. That failed attempt is retained; the corrected check explicitly proves unchanged same-frame shadow reuse while still requiring fresh main/mirror draws. No product shadow policy or pixel tolerance changes.
+
+These are exact final-canvas comparisons for held wide frames, **not moving/grazing-view, fallback, sustained performance or whole-island acceptance**. Keep both candidates off by default; next qualify broader camera conditions and matched combined GPU timing.
+
+Cleanup restores camera/clock/exposure and both selectors false. Owned game/DevTools windows close, preserving the pre-existing New Tab. Runtime exits0/STOPPED at2026-10-01T06:02:59.879Z, protected state unchanged, disposable database removed and private ports free. The ignored review module is removed;42 unrelated file hashes remain unchanged. Public3333 stays canonical174.
+
+Evidence: service-layout `reflection194-pixels-runtime01`, `reflection194-grass-submission-evidence01`; inland-pond `runtime-reflection194-pixels01/client.log` markers `REF194_GRASS_FOOTPRINT`, `REFLECTION194_FINAL_PIXELS` (labels `wide-raster-final-v2`, `wide-raster-grass-final`) and `REF194P_CLEANUP`. Client log SHA256 `71088f50e930690362129d2fb68fac78dbb29f3140cf6c18c576a632164b38cc`; stopped process receipt `fc9f6ffd9f64c45ed2c68caf0f2d31bef591a4db33448bcfd135cd3fa96b245e`.
+
 ## Native194 reflection footprint: measured lead, default still off
 
 Private `runtime-reflection194-native01` resumes the existing raster-only footprint candidate on canonical build194. It does not select grass footprint culling, adaptive submission, shared environment lighting or the experimental distance-shadow filter. The ordinary grass shader retains eight static PMREM sampling sites. Full native WebGPU settings remain 3840×1926/DPR2/MSAA4/High PCF, with postprocessing and bloom enabled, phase0.56 and held exposure0.850240084. Terrain28/28, grass123/123 logical regions and water reach readiness; 94 actual grass mesh owners are retained.
