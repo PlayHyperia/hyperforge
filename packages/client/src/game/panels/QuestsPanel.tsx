@@ -11,7 +11,8 @@
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from "react";
-import { EventType } from "@hyperforge/shared";
+import { useServerQuestSync } from "../systems/quest/useQuestLog";
+import { canClaimQuest } from "../systems/quest/questUtils";
 import {
   useWindowStore,
   useQuestSelectionStore,
@@ -42,25 +43,6 @@ import type { ClientWorld } from "../../types";
 /** Type guard for string array */
 function isStringArray(data: unknown): data is string[] {
   return Array.isArray(data) && data.every((item) => typeof item === "string");
-}
-
-/** Type guard for quest list update payload */
-interface QuestListPayload {
-  quests: ServerQuestListItem[];
-  questPoints: number;
-}
-
-function isQuestListPayload(data: unknown): data is QuestListPayload {
-  if (typeof data !== "object" || data === null) return false;
-  const obj = data as Record<string, unknown>;
-  return Array.isArray(obj.quests);
-}
-
-/** Type guard for quest detail payload */
-function isQuestDetailPayload(data: unknown): data is ServerQuestDetail {
-  if (typeof data !== "object" || data === null) return false;
-  const obj = data as Record<string, unknown>;
-  return typeof obj.id === "string" && typeof obj.name === "string";
 }
 
 interface QuestsPanelProps {
@@ -124,145 +106,6 @@ const CATEGORY_ICONS: Record<string, string> = {
   star: "\u2B50",
 };
 
-/** Server quest list item structure */
-interface ServerQuestListItem {
-  id: string;
-  name: string;
-  status: "not_started" | "in_progress" | "ready_to_complete" | "completed";
-  difficulty: string;
-  questPoints: number;
-}
-
-/** Server quest detail structure */
-interface ServerQuestDetail {
-  id: string;
-  name: string;
-  description: string;
-  status: "not_started" | "in_progress" | "ready_to_complete" | "completed";
-  difficulty: string;
-  questPoints: number;
-  currentStage: string;
-  stageProgress: Record<string, number>;
-  stages: Array<{
-    id: string;
-    description: string;
-    type: string;
-    target?: string;
-    count?: number;
-  }>;
-}
-
-/** Map server status to client state */
-function mapStatusToState(status: ServerQuestListItem["status"]): QuestState {
-  switch (status) {
-    case "not_started":
-      return "available";
-    case "in_progress":
-    case "ready_to_complete":
-      return "active";
-    case "completed":
-      return "completed";
-    default:
-      return "available";
-  }
-}
-
-/** Map server difficulty to category (best effort mapping) */
-function mapDifficultyToCategory(_difficulty: string): QuestCategory {
-  // Default to "main" for now - could be extended with server-side category data
-  return "main";
-}
-
-/** Transform server quest list item to client Quest type */
-function transformServerQuest(serverQuest: ServerQuestListItem): Quest {
-  return {
-    id: serverQuest.id,
-    title: serverQuest.name,
-    description: "", // Will be filled in from detail request
-    state: mapStatusToState(serverQuest.status),
-    category: mapDifficultyToCategory(serverQuest.difficulty),
-    level: 1, // Default level - could be added to server response
-    objectives: [], // Will be filled in from detail request
-    rewards: [
-      {
-        type: "quest_points",
-        name: "Quest Points",
-        amount: serverQuest.questPoints,
-      },
-    ],
-    pinned: false,
-    questGiver: undefined,
-    questGiverLocation: undefined,
-  };
-}
-
-/** Transform server quest detail to client Quest type */
-function transformServerQuestDetail(detail: ServerQuestDetail): Quest {
-  const state = mapStatusToState(detail.status);
-
-  // Filter out dialogue stages - only track kill/gather/interact objectives
-  const actionableStages = detail.stages.filter(
-    (stage) => stage.type !== "dialogue",
-  );
-
-  // Find current stage index in the filtered array
-  const currentStageIndex = actionableStages.findIndex(
-    (s) => s.id === detail.currentStage,
-  );
-
-  // Transform actionable stages to objectives
-  const objectives = actionableStages.map((stage, index) => {
-    // Determine progress for this stage
-    let current = 0;
-    const target = stage.count || 1;
-
-    // Check if this stage is before current stage (completed)
-    const isCompleted =
-      detail.status === "completed" || index < currentStageIndex;
-    const isCurrent = index === currentStageIndex;
-
-    if (isCompleted) {
-      current = target;
-    } else if (isCurrent && stage.count) {
-      // Get progress from stageProgress
-      if (stage.type === "kill") {
-        current = detail.stageProgress.kills || 0;
-      } else if (stage.target) {
-        current = detail.stageProgress[stage.target] || 0;
-      }
-    }
-
-    return {
-      id: stage.id,
-      type: stage.type as Quest["objectives"][0]["type"],
-      description: stage.description,
-      current,
-      target,
-      optional: false,
-    };
-  });
-
-  return {
-    id: detail.id,
-    title: detail.name,
-    description: detail.description,
-    state,
-    category: mapDifficultyToCategory(detail.difficulty),
-    level: 1,
-    objectives,
-    rewards: [
-      {
-        type: "quest_points",
-        name: "Quest Points",
-        amount: detail.questPoints,
-      },
-    ],
-    pinned: false,
-    questGiver: undefined,
-    questGiverLocation: undefined,
-  };
-}
-
 /** Props for MobileQuestDetail component */
 interface MobileQuestDetailProps {
   quest: Quest;
@@ -292,7 +135,7 @@ function MobileQuestDetail({
   const categoryIcon =
     CATEGORY_ICONS[categoryConfig.icon] || categoryConfig.icon;
   const canAccept = quest.state === "available";
-  const canComplete = quest.state === "active" && progress === 100;
+  const canComplete = canClaimQuest(quest);
 
   const containerStyle: React.CSSProperties = {
     ...getPanelSurfaceStyle(theme),
@@ -641,6 +484,7 @@ function MobileQuestDetail({
  * Mobile: Shows quest details inline with a back button.
  */
 export function QuestsPanel({ world }: QuestsPanelProps) {
+  useServerQuestSync(world);
   // Theme and mobile detection
   const theme = useTheme();
   const { shouldUseMobileUI } = useMobileLayout();
@@ -656,11 +500,8 @@ export function QuestsPanel({ world }: QuestsPanelProps) {
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
   // Quest data from server
-  const [allQuests, setAllQuests] = useState<Quest[]>([]);
-  const [questDetails, setQuestDetails] = useState<Map<string, Quest>>(
-    new Map(),
-  );
-  const [loading, setLoading] = useState(true);
+  const allQuests = useQuestSelectionStore((state) => state.quests);
+  const loading = useQuestSelectionStore((state) => !state.questsLoaded);
 
   // Mobile inline quest viewing state
   // When viewing a quest on mobile, this holds the quest ID
@@ -701,112 +542,15 @@ export function QuestsPanel({ world }: QuestsPanelProps) {
     return () => window.removeEventListener("questPinChanged", handlePinChange);
   }, []);
 
-  // Fetch quest detail for restored mobile viewing quest
-  useEffect(() => {
-    if (
-      shouldUseMobileUI &&
-      mobileViewingQuestId &&
-      !questDetails.has(mobileViewingQuestId)
-    ) {
-      // Fetch quest detail from server if we don't have it yet
-      world.network?.send?.("getQuestDetail", {
-        questId: mobileViewingQuestId,
-      });
-    }
-  }, [shouldUseMobileUI, mobileViewingQuestId, questDetails, world]);
-
-  // Fetch quest data from server
-  useEffect(() => {
-    const fetchQuestList = () => {
-      if (world.network?.send) {
-        world.network.send("getQuestList", {});
-      }
-    };
-
-    // Handle quest list response - with type guard validation
-    const onQuestListUpdate = (data: unknown) => {
-      if (!isQuestListPayload(data)) {
-        console.warn("[QuestsPanel] Invalid quest list update:", data);
-        setLoading(false);
-        return;
-      }
-
-      const quests = (data.quests || []).map(transformServerQuest);
-      setAllQuests(quests);
-      setLoading(false);
-    };
-
-    // Handle quest detail response - with type guard validation
-    const onQuestDetailUpdate = (data: unknown) => {
-      if (!isQuestDetailPayload(data)) {
-        console.warn("[QuestsPanel] Invalid quest detail update:", data);
-        return;
-      }
-      const quest = transformServerQuestDetail(data);
-
-      setQuestDetails((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(quest.id, quest);
-        return newMap;
-      });
-
-      // Update selectedQuest in store if this quest is currently selected
-      const currentSelected = useQuestSelectionStore.getState().selectedQuest;
-      if (currentSelected && currentSelected.id === quest.id) {
-        useQuestSelectionStore.getState().setSelectedQuest(quest);
-      }
-    };
-
-    // Refresh on quest events
-    const onQuestEvent = (data?: { questId?: string }) => {
-      fetchQuestList();
-
-      // If this event is for the currently selected quest, re-fetch its detail
-      const currentSelected = useQuestSelectionStore.getState().selectedQuest;
-      if (currentSelected && data?.questId === currentSelected.id) {
-        world.network?.send?.("getQuestDetail", {
-          questId: currentSelected.id,
-        });
-      }
-    };
-
-    // Register handlers
-    world.network?.on("questList", onQuestListUpdate);
-    world.network?.on("questDetail", onQuestDetailUpdate);
-    // Bridge server→client quest packets to trigger re-fetch
-    world.network?.on("questStarted", onQuestEvent);
-    world.network?.on("questProgressed", onQuestEvent);
-    world.network?.on("questCompleted", onQuestEvent);
-    world.on(EventType.QUEST_STARTED, onQuestEvent);
-    world.on(EventType.QUEST_PROGRESSED, onQuestEvent);
-    world.on(EventType.QUEST_COMPLETED, onQuestEvent);
-
-    // Initial fetch
-    fetchQuestList();
-
-    return () => {
-      world.network?.off("questList", onQuestListUpdate);
-      world.network?.off("questDetail", onQuestDetailUpdate);
-      world.network?.off("questStarted", onQuestEvent);
-      world.network?.off("questProgressed", onQuestEvent);
-      world.network?.off("questCompleted", onQuestEvent);
-      world.off(EventType.QUEST_STARTED, onQuestEvent);
-      world.off(EventType.QUEST_PROGRESSED, onQuestEvent);
-      world.off(EventType.QUEST_COMPLETED, onQuestEvent);
-    };
-  }, [world]);
-
-  // Merge quest list with detailed quest data and pinned state
-  const mergedQuests = useMemo(() => {
-    return allQuests.map((quest) => {
-      const detail = questDetails.get(quest.id);
-      const pinned = pinnedQuestIds.has(quest.id);
-      if (detail) {
-        return { ...quest, ...detail, pinned };
-      }
-      return { ...quest, pinned };
-    });
-  }, [allQuests, questDetails, pinnedQuestIds]);
+  // Pinning is local; all progress comes from the latest shared snapshot.
+  const mergedQuests = useMemo(
+    () =>
+      allQuests.map((quest) => ({
+        ...quest,
+        pinned: pinnedQuestIds.has(quest.id),
+      })),
+    [allQuests, pinnedQuestIds],
+  );
 
   // Filter and sort quests
   const filteredQuests = useMemo(() => {
@@ -889,17 +633,10 @@ export function QuestsPanel({ world }: QuestsPanelProps) {
   const setSelectedQuest = useQuestSelectionStore((s) => s.setSelectedQuest);
   const createWindow = useWindowStore((s) => s.createWindow);
 
-  // Handle quest click - fetch details and show inline (mobile) or open window (desktop)
+  // The list snapshot already includes details and objective denominators.
   const handleQuestClick = useCallback(
     (quest: Quest) => {
-      // Request quest detail from server (will update questDetails state)
-      if (world.network?.send) {
-        world.network.send("getQuestDetail", { questId: quest.id });
-      }
-
-      // Set the selected quest in the store (use detail if available, otherwise basic quest)
-      const detailedQuest = questDetails.get(quest.id) || quest;
-      setSelectedQuest(detailedQuest);
+      setSelectedQuest(quest);
 
       // Mobile: Show quest inline within this panel
       if (shouldUseMobileUI) {
@@ -942,7 +679,7 @@ export function QuestsPanel({ world }: QuestsPanelProps) {
         });
       }
     },
-    [setSelectedQuest, createWindow, world, questDetails, shouldUseMobileUI],
+    [setSelectedQuest, createWindow, shouldUseMobileUI],
   );
 
   // Handle back button on mobile - return to quest list
@@ -981,9 +718,7 @@ export function QuestsPanel({ world }: QuestsPanelProps) {
 
   // Get the quest being viewed on mobile (from merged quests which have details)
   const mobileViewingQuest = mobileViewingQuestId
-    ? mergedQuests.find((q) => q.id === mobileViewingQuestId) ||
-      questDetails.get(mobileViewingQuestId) ||
-      allQuests.find((q) => q.id === mobileViewingQuestId)
+    ? mergedQuests.find((q) => q.id === mobileViewingQuestId)
     : null;
 
   // Mobile: Show quest detail inline if viewing a quest

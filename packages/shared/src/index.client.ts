@@ -98,6 +98,8 @@ export { PlayerRemote } from "./entities/player/PlayerRemote";
 // Export System class from core systems
 export { System } from "./systems/shared";
 
+export type { QuestSnapshot, QuestListPayload } from "./types/game/quest-types";
+
 // Export all types from types/index.ts
 export type {
   Anchors,

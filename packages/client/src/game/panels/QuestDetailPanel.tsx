@@ -24,6 +24,8 @@ import {
 import { COLORS, spacing, typography } from "../../constants";
 import { parseJSONWithDefault } from "../../utils/validation";
 import type { ClientWorld } from "../../types";
+import { useServerQuestSync } from "../systems/quest/useQuestLog";
+import { canClaimQuest } from "../systems/quest/questUtils";
 
 // ============================================================================
 // Quest Detail Panel Component
@@ -75,6 +77,7 @@ const STATUS_COLORS: Record<string, string> = {
  * Auto-closes when no quest is selected - the panel should never show empty.
  */
 export function QuestDetailPanel({ world, onClose }: QuestDetailPanelProps) {
+  useServerQuestSync(world);
   const theme = useTheme();
   const selectedQuest = useQuestSelectionStore((s) => s.selectedQuest);
   const setSelectedQuest = useQuestSelectionStore((s) => s.setSelectedQuest);
@@ -174,7 +177,7 @@ export function QuestDetailPanel({ world, onClose }: QuestDetailPanelProps) {
   const progress = calculateQuestProgress(selectedQuest);
   const categoryConfig = CATEGORY_CONFIG[selectedQuest.category];
   const canAccept = selectedQuest.state === "available";
-  const canComplete = selectedQuest.state === "active" && progress === 100;
+  const canComplete = canClaimQuest(selectedQuest);
   const closeButtonStyle = getShellControlButtonStyle(theme, "danger");
 
   // Styles

@@ -7,7 +7,10 @@
  * @packageDocumentation
  */
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
+import { EventType } from "@hyperforge/shared";
+import type { ClientWorld } from "../../../types";
+import { useQuestSelectionStore } from "../../../ui/stores/questStore";
 import {
   type Quest,
   type QuestState,
@@ -19,8 +22,75 @@ import {
   sortQuests,
   groupQuestsByCategory,
   calculateQuestProgress,
-  areAllObjectivesComplete,
+  canClaimQuest,
+  isQuestListPayload,
 } from "./questUtils";
+
+const journalSubscriptions = new WeakMap<
+  ClientWorld,
+  { users: number; stop: () => void }
+>();
+
+/** Share one refresh stream across list and detached detail; no per-quest fetches. */
+export function subscribeQuestSnapshots(world: ClientWorld): () => void {
+  let subscription = journalSubscriptions.get(world);
+  if (!subscription) {
+    const network = world.network;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastRequestAt = 0;
+    const fetchList = () => {
+      lastRequestAt = Date.now();
+      network?.send?.("getQuestList", {});
+    };
+    const onList = (data: unknown) => {
+      if (isQuestListPayload(data))
+        useQuestSelectionStore.getState().applyQuestList(data);
+    };
+    const onProgress = () => {
+      if (refreshTimer !== undefined) return;
+      refreshTimer = setTimeout(
+        () => {
+          refreshTimer = undefined;
+          fetchList();
+        },
+        Math.max(120, 300 - (Date.now() - lastRequestAt)),
+      );
+    };
+    const events = [
+      EventType.QUEST_STARTED,
+      EventType.QUEST_PROGRESSED,
+      EventType.QUEST_COMPLETED,
+    ];
+    network?.on("questList", onList);
+    for (const event of events) world.on(event, onProgress);
+    subscription = {
+      users: 0,
+      stop: () => {
+        if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+        network?.off("questList", onList);
+        for (const event of events) world.off(event, onProgress);
+      },
+    };
+    journalSubscriptions.set(world, subscription);
+    useQuestSelectionStore.getState().resetQuestList();
+    fetchList();
+  }
+  const ownedSubscription = subscription;
+  ownedSubscription.users++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--ownedSubscription.users === 0) {
+      ownedSubscription.stop();
+      journalSubscriptions.delete(world);
+    }
+  };
+}
+
+export function useServerQuestSync(world: ClientWorld): void {
+  useEffect(() => subscribeQuestSnapshots(world), [world]);
+}
 
 // ============================================================================
 // Types
@@ -388,7 +458,7 @@ export function useQuestLog(
   const canCompleteQuest = useCallback(
     (questId: string): boolean => {
       const quest = quests.find((q) => q.id === questId);
-      return quest ? areAllObjectivesComplete(quest) : false;
+      return quest ? canClaimQuest(quest) : false;
     },
     [quests],
   );

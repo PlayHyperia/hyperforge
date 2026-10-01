@@ -145,6 +145,70 @@ export interface QuestProgress {
   completedAt?: number;
 }
 
+/** Complete journal snapshot: every required stage is needed for honest progress. */
+export interface QuestSnapshot {
+  id: string;
+  name: string;
+  description: string;
+  status: QuestStatus;
+  difficulty: QuestDifficulty;
+  questPoints: number;
+  startNpc: string;
+  currentStage: string;
+  stageProgress: StageProgress;
+  stages: Array<
+    Pick<QuestStage, "id" | "description" | "type" | "target" | "count">
+  >;
+  /** Current-stage aliases retained for existing list consumers. */
+  stageType?: QuestStageType;
+  stageTarget?: string;
+  stageCount?: number;
+}
+
+export interface QuestListPayload {
+  quests: QuestSnapshot[];
+  questPoints: number;
+}
+
+/** Copy authoritative state so a queued packet cannot change with later progress. */
+export function createQuestSnapshot(
+  definition: QuestDefinition,
+  status: QuestStatus,
+  progress?: QuestProgress,
+): QuestSnapshot {
+  const currentStage = progress?.currentStage ?? definition.stages[0]?.id ?? "";
+  const stage = progress
+    ? definition.stages.find((entry) => entry.id === currentStage)
+    : undefined;
+  return {
+    id: definition.id,
+    name: definition.name,
+    description: definition.description,
+    status,
+    difficulty: definition.difficulty,
+    questPoints: definition.questPoints,
+    startNpc: definition.startNpc,
+    currentStage,
+    stageProgress: { ...progress?.stageProgress },
+    stages: definition.stages.map(
+      ({ id, description, type, target, count }) => ({
+        id,
+        description,
+        type,
+        target,
+        count,
+      }),
+    ),
+    ...(stage
+      ? {
+          stageType: stage.type,
+          stageTarget: stage.target,
+          stageCount: stage.count,
+        }
+      : {}),
+  };
+}
+
 /** Complete quest state for a player (mutable for system use) */
 export interface PlayerQuestState {
   /** Player/character ID */

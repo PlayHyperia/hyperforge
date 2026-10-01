@@ -96,6 +96,10 @@
 
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
+import type {
+  QuestListPayload,
+  QuestSnapshot,
+} from "../../types/game/quest-types";
 import { DataManager } from "../../data/DataManager";
 import type { TerrainSystem } from "../shared/world/TerrainSystem";
 import {
@@ -3664,37 +3668,12 @@ export class ClientNetwork extends SystemBase {
   };
 
   // --- Quest system handlers ---
-  onQuestList = (data: {
-    quests: Array<{
-      id: string;
-      name: string;
-      status: string;
-      difficulty: string;
-      questPoints: number;
-    }>;
-    questPoints: number;
-  }) => {
+  onQuestList = (data: QuestListPayload) => {
     // Emit for QuestJournal to update
     this.emit("questList", data);
   };
 
-  onQuestDetail = (data: {
-    id: string;
-    name: string;
-    description: string;
-    status: string;
-    difficulty: string;
-    questPoints: number;
-    currentStage: string;
-    stageProgress: Record<string, number>;
-    stages: Array<{
-      id: string;
-      description: string;
-      type: string;
-      target?: string;
-      count?: number;
-    }>;
-  }) => {
+  onQuestDetail = (data: QuestSnapshot) => {
     // Emit for QuestJournal to update
     this.emit("questDetail", data);
   };

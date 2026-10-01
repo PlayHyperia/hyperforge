@@ -511,7 +511,8 @@ export type {
 } from "./types/game/duel-types";
 
 // Export quest type guards for server validation
-export { isValidQuestId } from "./types/game/quest-types";
+export { isValidQuestId, createQuestSnapshot } from "./types/game/quest-types";
+export type { QuestSnapshot, QuestListPayload } from "./types/game/quest-types";
 
 // Export item helpers used by server network snapshot
 export {
