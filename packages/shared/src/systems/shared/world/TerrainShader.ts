@@ -1346,7 +1346,7 @@ export function createTerrainMaterial(
           compactPond.radius,
           compactPond.surfaceY,
         ),
-      )
+      ).setGroup(THREE.TSL.renderGroup)
     : null;
   // Ensure noise texture is generated (still used for dirt patch variation)
   const noiseTex = generateNoiseTexture();
@@ -1356,12 +1356,16 @@ export function createTerrainMaterial(
     new THREE.Vector3(...SUN_LIGHT.DEFAULT_DIRECTION),
   );
   const timeUniform = uniform(0);
-  const surfaceDetailStrength = uniform(0);
-  const noiseScale = uniform(TERRAIN_SHADER_CONSTANTS.NOISE_SCALE);
+  // These owner-wide values stay constant within a render call. Share their
+  // binding across chunks, but refresh for each primary/reflection render.
+  const surfaceDetailStrength = uniform(0).setGroup(THREE.TSL.renderGroup);
+  const noiseScale = uniform(TERRAIN_SHADER_CONSTANTS.NOISE_SCALE).setGroup(
+    THREE.TSL.renderGroup,
+  );
 
   // Sky-color fog: uses the shared render target texture (updated in-place by SkySystem)
   const fogTexNode = texture(fogRenderTarget.texture, screenUV);
-  const fogEnabledUniform = uniform(1.0);
+  const fogEnabledUniform = uniform(1.0).setGroup(THREE.TSL.renderGroup);
 
   // ============================================================================
   // VERTEX LIGHTING UNIFORMS (for lampposts, torches, etc.)
@@ -1372,9 +1376,15 @@ export function createTerrainMaterial(
   const vertexLightParamUniforms: UniformNode<"vec2", THREE.Vector2>[] = []; // (intensity, range)
 
   for (let i = 0; i < MAX_VERTEX_LIGHTS; i++) {
-    vertexLightPositionUniforms.push(uniform(new THREE.Vector3(0, 0, 0)));
-    vertexLightColorUniforms.push(uniform(new THREE.Vector3(1, 0.9, 0.6))); // Warm lamplight default
-    vertexLightParamUniforms.push(uniform(new THREE.Vector2(0, 15))); // intensity=0 (off), range=15m
+    vertexLightPositionUniforms.push(
+      uniform(new THREE.Vector3(0, 0, 0)).setGroup(THREE.TSL.renderGroup),
+    );
+    vertexLightColorUniforms.push(
+      uniform(new THREE.Vector3(1, 0.9, 0.6)).setGroup(THREE.TSL.renderGroup),
+    ); // Warm lamplight default
+    vertexLightParamUniforms.push(
+      uniform(new THREE.Vector2(0, 15)).setGroup(THREE.TSL.renderGroup),
+    ); // intensity=0 (off), range=15m
   }
 
   const worldPos = positionWorld;

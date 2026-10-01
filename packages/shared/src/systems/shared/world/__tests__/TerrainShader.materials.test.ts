@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { JSDOM } from "jsdom";
+import type { Node, UniformNode } from "three/webgpu";
 
 import THREE from "../../../../extras/three/three";
 import {
   MAX_VERTEX_LIGHTS,
   TERRAIN_SHADE,
+  TERRAIN_SHADER_CONSTANTS,
   TerrainShadeUniforms,
   createTerrainMaterial,
   updateTerrainVertexLights,
@@ -156,5 +159,372 @@ describe("TerrainShader material graph", () => {
     );
 
     material.dispose();
+  });
+});
+
+// Exercise installed Three binding/scheduling objects without initializing a
+// renderer, replacing its methods, or claiming compiled/native GPU coverage.
+type TerrainMaterial = ReturnType<typeof createTerrainMaterial>;
+type TerrainLightNode =
+  | TerrainMaterial["terrainUniforms"]["vertexLightPositions"][number]
+  | TerrainMaterial["terrainUniforms"]["vertexLightParams"][number];
+type UniformBuffer = {
+  groupNode: TerrainLightNode["groupNode"];
+  uniforms: Array<{
+    nodeUniform: { node: TerrainLightNode };
+    offset: number;
+    itemSize: number;
+  }>;
+  buffer: Float32Array;
+  update(): boolean;
+  clearUpdateRanges(): void;
+};
+type BindingGroup = { name: string; bindings: UniformBuffer[] };
+type BindingBuilder = THREE.WGSLNodeBuilder & {
+  setShaderStage(stage: "vertex" | "fragment"): void;
+  getUniformFromNode(
+    node: TerrainLightNode,
+    type: string,
+    stage: "vertex" | "fragment",
+  ): unknown;
+  getBindings(): BindingGroup[];
+};
+
+function graph(root: Node): Set<Node> {
+  const visited = new Set<Node>();
+  function visit(node: Node) {
+    if (visited.has(node)) return;
+    visited.add(node);
+    for (const child of node.getChildren()) visit(child);
+  }
+  visit(root);
+  return visited;
+}
+
+function terrainLightNodes(material: TerrainMaterial): TerrainLightNode[] {
+  const u = material.terrainUniforms;
+  return [
+    ...u.vertexLightPositions,
+    ...u.vertexLightColors,
+    ...u.vertexLightParams,
+  ];
+}
+
+async function bindingFixture() {
+  // These installed private classes have no published declarations. The narrow
+  // types describe their real instances; no substitute implementations exist.
+  const internal = "three/src/renderers/common/";
+  const { default: NodeManager } = (await import(
+    `${internal}nodes/NodeManager.js`
+  )) as {
+    default: new (
+      renderer: THREE.WebGPURenderer,
+      backend: unknown,
+    ) => { updateGroup(binding: UniformBuffer): boolean; dispose(): void };
+  };
+  const { default: RenderContext } = (await import(
+    `${internal}RenderContext.js`
+  )) as { default: new () => object };
+  const { default: NodeBuilderState } = (await import(
+    `${internal}nodes/NodeBuilderState.js`
+  )) as {
+    default: new (
+      vertex: string,
+      fragment: string,
+      compute: string,
+      attributes: [],
+      bindings: BindingGroup[],
+      updates: [],
+      before: [],
+      after: [],
+      observer: null,
+      clipping: boolean,
+    ) => { createBindings(): BindingGroup[] };
+  };
+  const dom = new JSDOM("<!doctype html><canvas></canvas>");
+  const renderer = new THREE.WebGPURenderer({
+    canvas: dom.window.document.querySelector("canvas")!,
+  });
+  const manager = new NodeManager(renderer, renderer.backend);
+  const geometry = new THREE.BufferGeometry();
+  const primary = new RenderContext();
+  const reflection = new RenderContext();
+  function bindings(
+    material: TerrainMaterial,
+    nodes = terrainLightNodes(material),
+    context = primary,
+    stages: Array<"vertex" | "fragment"> = ["fragment"],
+  ) {
+    const previous = Reflect.get(renderer, "_currentRenderContext");
+    Reflect.set(renderer, "_currentRenderContext", context);
+    try {
+      const builder = new THREE.WGSLNodeBuilder(
+        new THREE.Mesh(geometry, material),
+        renderer,
+      ) as BindingBuilder;
+      for (const stage of stages) {
+        builder.setShaderStage(stage);
+        for (const node of nodes) {
+          const type = node.getNodeType(builder);
+          // The terrain light/albedo terms are fragment inputs. The explicit
+          // dual-stage case below tests buffer sharing, not their actual use.
+          builder.getUniformFromNode(node, type, stage);
+        }
+      }
+      return builder.getBindings();
+    } finally {
+      Reflect.set(renderer, "_currentRenderContext", previous);
+    }
+  }
+  function renderBuffer(material: TerrainMaterial, context = primary) {
+    const groups = bindings(material, terrainLightNodes(material), context);
+    const group = groups.find((entry) => entry.name === "render");
+    expect(group).toBeDefined();
+    expect(group!.bindings).toHaveLength(1);
+    return group!.bindings[0];
+  }
+  return {
+    manager,
+    reflection,
+    bindings,
+    renderBuffer,
+    instanceBindings(groups: BindingGroup[]) {
+      return new NodeBuilderState(
+        "",
+        "",
+        "",
+        [],
+        groups,
+        [],
+        [],
+        [],
+        null,
+        false,
+      ).createBindings();
+    },
+    async dispose() {
+      manager.dispose();
+      geometry.dispose();
+      await renderer.dispose();
+      dom.window.close();
+    },
+  };
+}
+
+describe("terrain render-scoped uniform ownership", () => {
+  it("groups exactly the 24 light nodes and four local controls, not shared palette or stock state", () => {
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactPond: {
+        id: "uniform-test",
+        centerX: 10,
+        centerZ: 20,
+        radius: 8,
+        surfaceY: 3,
+      },
+    });
+    try {
+      if (
+        !(material instanceof THREE.MeshStandardNodeMaterial) ||
+        !material.colorNode
+      )
+        throw new Error("Expected actual terrain graph");
+      // The repository's ambient material extension declares colorNode unknown.
+      // The actual node material and non-null graph are checked above.
+      const colorNode = material.colorNode as Node;
+      expect(material.positionNode).toBeNull();
+      for (const node of terrainLightNodes(material))
+        expect(graph(colorNode).has(node)).toBe(true);
+      const noise = [...graph(colorNode)].filter(
+        (node) =>
+          Reflect.get(node, "isUniformNode") === true &&
+          Reflect.get(node, "value") === TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+      );
+      expect(noise).toHaveLength(1);
+      const admitted = [
+        ...terrainLightNodes(material),
+        material.terrainUniforms.fogEnabled,
+        material.terrainUniforms.surfaceDetailStrength,
+        material.compactPondMaterial!.parameters,
+        noise[0] as UniformNode<"float", number>,
+      ];
+      expect(new Set(admitted).size).toBe(28);
+      for (const node of admitted)
+        expect(node.groupNode).toBe(THREE.TSL.renderGroup);
+      for (const node of [
+        material.terrainUniforms.shade.tint,
+        material.terrainUniforms.shade.strength,
+        material.terrainUniforms.sunPosition,
+        material.terrainUniforms.sunDirection,
+        material.terrainUniforms.dayIntensity,
+        material.terrainUniforms.time,
+      ])
+        expect(node.groupNode).toBe(THREE.TSL.objectGroup);
+      for (const node of graph(colorNode)) {
+        if (Reflect.get(node, "isTextureNode") === true)
+          expect(Reflect.get(node, "groupNode")).toBe(THREE.TSL.objectGroup);
+      }
+    } finally {
+      material.dispose();
+    }
+  });
+
+  it("shares actual chunk bindings only for the same node owner and render context", async () => {
+    const f = await bindingFixture(),
+      a = createTerrainMaterial(),
+      b = createTerrainMaterial();
+    try {
+      const first = f.bindings(a),
+        second = f.bindings(a),
+        other = f.bindings(b);
+      expect(first[0].name).toBe("render");
+      expect(first[0]).toBe(second[0]);
+      expect(first[0]).not.toBe(other[0]);
+      expect(first[0]).not.toBe(
+        f.bindings(a, terrainLightNodes(a), f.reflection)[0],
+      );
+      expect(
+        new Set(first[0].bindings[0].uniforms.map((u) => u.nodeUniform.node)),
+      ).toEqual(new Set(terrainLightNodes(a)));
+      expect(first[0].bindings[0].uniforms).toHaveLength(24);
+      const dualStage = f.bindings(a, terrainLightNodes(a), undefined, [
+        "vertex",
+        "fragment",
+      ]);
+      expect(dualStage).toHaveLength(1);
+      expect(dualStage[0].bindings).toHaveLength(1);
+      // Installed r186 allocates distinct unnamed per-stage slots. It shares
+      // their buffer; it does not deduplicate these slots by node identity.
+      expect(dualStage[0].bindings[0].uniforms).toHaveLength(48);
+      expect(
+        new Set(
+          dualStage[0].bindings[0].uniforms.map((u) => u.nodeUniform.node),
+        ),
+      ).toEqual(new Set(terrainLightNodes(a)));
+      a.terrainUniforms.vertexLightPositions[0].value.set(1, 2, 3);
+      expect(b.terrainUniforms.vertexLightPositions[0].value.toArray()).toEqual(
+        [0, 0, 0],
+      );
+    } finally {
+      a.dispose();
+      b.dispose();
+      await f.dispose();
+    }
+  });
+
+  it("refreshes on nested reflection entry and resumed primary, not on repeated chunk draws", async () => {
+    const f = await bindingFixture(),
+      material = createTerrainMaterial();
+    const frame = new THREE.NodeFrame(),
+      group = THREE.TSL.renderGroup;
+    try {
+      const primary = f.renderBuffer(material),
+        mirror = f.renderBuffer(material, f.reflection);
+      const version = group.version;
+      frame.renderId = 10;
+      frame.updateNode(group);
+      expect(group.version).toBe(version + 1);
+      expect(f.manager.updateGroup(primary)).toBe(true);
+      frame.updateNode(group);
+      expect(group.version).toBe(version + 1);
+      expect(f.manager.updateGroup(primary)).toBe(false);
+      frame.renderId = 11;
+      frame.updateNode(group);
+      expect(f.manager.updateGroup(mirror)).toBe(true);
+      frame.renderId = 10;
+      frame.updateNode(group);
+      expect(group.version).toBe(version + 3);
+      expect(f.manager.updateGroup(primary)).toBe(true);
+      expect(f.manager.updateGroup(primary)).toBe(false);
+    } finally {
+      material.dispose();
+      await f.dispose();
+    }
+  });
+
+  it("packs real changed values on the next render without coupling terrain owners", async () => {
+    const f = await bindingFixture(),
+      a = createTerrainMaterial(),
+      b = createTerrainMaterial();
+    const frame = new THREE.NodeFrame();
+    try {
+      const first = f.renderBuffer(a),
+        other = f.renderBuffer(b);
+      frame.renderId = 20;
+      frame.updateNode(THREE.TSL.renderGroup);
+      for (const buffer of [first, other]) {
+        expect(f.manager.updateGroup(buffer)).toBe(true);
+        buffer.update();
+        buffer.clearUpdateRanges();
+      }
+      const before = first.buffer.slice(),
+        untouched = other.buffer.slice();
+      updateTerrainVertexLights(a.terrainUniforms, [
+        {
+          position: new THREE.Vector3(2, 3, 4),
+          color: new THREE.Color(0.25, 0.5, 0.75),
+          intensity: 1.5,
+          range: 18,
+        },
+      ]);
+      // World-owned writes precede the next render; they are not per-draw setters.
+      expect(f.manager.updateGroup(first)).toBe(false);
+      expect(first.buffer).toEqual(before);
+      frame.renderId++;
+      frame.updateNode(THREE.TSL.renderGroup);
+      expect(f.manager.updateGroup(first)).toBe(true);
+      expect(first.update()).toBe(true);
+      const packed = (node: TerrainLightNode) => {
+        const uniform = first.uniforms.find(
+          (u) => u.nodeUniform.node === node,
+        )!;
+        return Array.from(
+          first.buffer.slice(uniform.offset, uniform.offset + uniform.itemSize),
+        );
+      };
+      expect(packed(a.terrainUniforms.vertexLightPositions[0])).toEqual([
+        2, 3, 4,
+      ]);
+      expect(packed(a.terrainUniforms.vertexLightColors[0])).toEqual([
+        0.25, 0.5, 0.75,
+      ]);
+      expect(packed(a.terrainUniforms.vertexLightParams[0])).toEqual([1.5, 18]);
+      expect(packed(a.terrainUniforms.vertexLightParams[1])).toEqual([0, 1]);
+      expect(f.manager.updateGroup(other)).toBe(true);
+      expect(other.update()).toBe(false);
+      expect(other.buffer).toEqual(untouched);
+      expect(f.manager.updateGroup(first)).toBe(false);
+    } finally {
+      a.dispose();
+      b.dispose();
+      await f.dispose();
+    }
+  });
+
+  it("retains shared buffers but still clones ordinary per-object bindings", async () => {
+    const f = await bindingFixture(),
+      material = createTerrainMaterial();
+    try {
+      const groups = f.bindings(material, [
+        ...terrainLightNodes(material),
+        material.terrainUniforms.sunPosition,
+      ]);
+      const first = f.instanceBindings(groups),
+        second = f.instanceBindings(groups);
+      const shared = groups.find((g) => g.name === "render")!;
+      const object = groups.find((g) => g.name === "object")!;
+      expect(shared).toBeDefined();
+      expect(object).toBeDefined();
+      expect(first.find((g) => g.name === "render")).toBe(shared);
+      expect(second.find((g) => g.name === "render")).toBe(shared);
+      const firstObject = first.find((g) => g.name === "object")!;
+      const secondObject = second.find((g) => g.name === "object")!;
+      expect(firstObject).not.toBe(object);
+      expect(firstObject).not.toBe(secondObject);
+      expect(firstObject.bindings[0]).not.toBe(secondObject.bindings[0]);
+    } finally {
+      material.dispose();
+      await f.dispose();
+    }
   });
 });
