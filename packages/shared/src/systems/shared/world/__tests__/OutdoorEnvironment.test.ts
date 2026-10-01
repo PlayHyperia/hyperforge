@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+import type { Browser } from "playwright";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import { mix, pmremTexture, uniform } from "three/tsl";
@@ -479,3 +484,428 @@ describe("outdoor environment CPU contracts (not GPU radiometry or art approval)
     expect(f.scene.environmentIntensity).toBe(7);
   });
 });
+
+type NativeGrassEnvironmentProgram = {
+  vertex: string;
+  fragment: string;
+  compilationErrors: string[];
+};
+type NativeGrassEnvironmentReceipt = {
+  adapter: { vendor: string; architecture: string; description: string };
+  nativeBackend: boolean;
+  captureCount: number;
+  errors: string[];
+  orders: {
+    candidateFirst: boolean;
+    programs: {
+      baseline: NativeGrassEnvironmentProgram;
+      candidate: NativeGrassEnvironmentProgram;
+      clone: NativeGrassEnvironmentProgram;
+      baselineReturn: NativeGrassEnvironmentProgram;
+    };
+    cases: {
+      phase: number;
+      intensity: number;
+      rotation: number;
+      mirrorLike: boolean;
+      maxError: number;
+      meanError: number;
+      changedChannels: number;
+      alphaExact: boolean;
+      coveredPixels: number;
+      finite: boolean;
+    }[];
+    cloneMaxError: number;
+    baselineReturnMaxError: number;
+    environmentSignal: number;
+    shadowSignal: number;
+    phaseSignal: number;
+    sharedMap: boolean;
+    sharedDepth: boolean;
+    stableOwners: boolean;
+    cloneSharesNode: boolean;
+  }[];
+  cleanup: {
+    resourcesCreated: number;
+    resourcesDisposed: number;
+    outdoorDisposed: boolean;
+    outdoorBytes: number;
+    sceneRestored: boolean;
+    rendererDisposed: boolean;
+    deviceDestroyed: boolean;
+    errors: string[];
+  };
+};
+
+// A finite native experiment, not a production optimization or FPS test. Both
+// paths use the real OutdoorEnvironment capture/update lifecycle and the same
+// initialized renderer. Only the candidate material's envNode differs. This
+// intentionally has no approximate fallback, material override or relaxed
+// assertion if the global Var fails to share the two stock isolate scopes.
+const nativeGrassEnvironmentProbe = String.raw`
+globalThis.grassEnvironmentProbe = async () => {
+  if (!navigator.gpu || !isSecureContext) throw new Error('Native WebGPU required');
+  const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+  if(!adapter || adapter.isFallbackAdapter || adapter.info.isFallbackAdapter ||
+    /swiftshader|llvmpipe|software/i.test([adapter.info.vendor,adapter.info.architecture,adapter.info.description].join(' ')))
+    throw new Error('Hardware WebGPU required');
+  const device=await adapter.requestDevice();
+  const errors=[],resources=[],cleanup={resourcesCreated:0,resourcesDisposed:0,outdoorDisposed:false,outdoorBytes:-1,
+    sceneRestored:false,rendererDisposed:false,deviceDestroyed:false,errors:[]};
+  const own=resource=>{resources.push(resource);cleanup.resourcesCreated++;return resource;};
+  let active=true,renderer,outdoor,scene,priorEnvironment,priorIntensity;
+  const onError=event=>errors.push(String(event.error.message));
+  device.addEventListener('uncapturederror',onError);
+  device.lost.then(info=>{if(active)errors.push('Device lost: '+info.message);});
+  const difference=(a,b)=>{
+    if(a.length!==b.length || !(a instanceof Float32Array) || !(b instanceof Float32Array))
+      throw new Error('Actual linear RGBA32F readbacks required');
+    let maxError=0,total=0,changedChannels=0,coveredPixels=0,finite=true,alphaExact=true;
+    for(let i=0;i<a.length;i++) {
+      finite &&= Number.isFinite(a[i]) && Number.isFinite(b[i]);
+      const error=Math.abs(a[i]-b[i]);maxError=Math.max(maxError,error);total+=error;
+      if(error!==0)changedChannels++;
+      if(i%4===3){alphaExact &&= a[i]===b[i];if(a[i]>.5)coveredPixels++;}
+    }
+    return {maxError,meanError:total/a.length,changedChannels,alphaExact,coveredPixels,finite};
+  };
+  try {
+    const canvas=document.querySelector('canvas');if(!canvas)throw new Error('Missing native canvas');
+    renderer=new THREE.WebGPURenderer({canvas,device});await renderer.init();
+    if(!renderer.backend.isWebGPUBackend || renderer.backend.device!==device)throw new Error('Wrong renderer owner');
+    renderer.setPixelRatio(1);renderer.setSize(96,96,false);renderer.setClearColor(0,0);
+    renderer.toneMapping=THREE.NoToneMapping;renderer.outputColorSpace=THREE.LinearSRGBColorSpace;
+    renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;
+    const world=new World(),graphics=new ClientGraphics(world);
+    // Attach the real initialized renderer to the real preparation-queue owner;
+    // neither its queue nor the outdoor capture is substituted by a fixture.
+    graphics.renderer=renderer;scene=world.stage.scene;
+    priorEnvironment=scene.environmentNode;priorIntensity=scene.environmentIntensity;
+    outdoor=new OutdoorEnvironment(scene,'rgb-irradiance-v1');
+    const sky=new SkySystem(world,'scattering-v1');
+    await outdoor.initialize(graphics,sky.createLightingCapture(),.56);
+    const captureCount=outdoor.getStatus().capturesCompleted;
+    if(!outdoor.ready || captureCount!==12 || !graphics.isPrecompileIdle())throw new Error('Actual outdoor capture incomplete');
+    const source=scene.environmentNode;
+    if(!source)throw new Error('Missing actual outdoor graph');
+    const target=own(new THREE.RenderTarget(96,96,{type:THREE.FloatType,colorSpace:THREE.LinearSRGBColorSpace}));
+    renderer.setRenderTarget(target);
+    const camera=new THREE.PerspectiveCamera(48,1,.1,30);
+    const light=new THREE.DirectionalLight(0xffeedd,1.7);light.castShadow=true;light.position.set(3,5,4);
+    light.shadow.mapSize.set(128,128);light.shadow.bias=.0002;light.shadow.normalBias=.01;
+    Object.assign(light.shadow.camera,{near:.1,far:20,left:-3,right:3,top:3,bottom:-3});
+    light.shadow.camera.updateProjectionMatrix();scene.add(light,light.target);own(light.shadow);
+    const geometry=own(new THREE.SphereGeometry(1,32,20));
+    const casterGeometry=own(new THREE.BoxGeometry(.65,.8,.65)),casterMaterial=own(new THREE.MeshStandardNodeMaterial());
+    const caster=new THREE.Mesh(casterGeometry,casterMaterial);caster.position.set(.25,1.25,.35);caster.castShadow=true;scene.add(caster);
+    const orders=[];
+    const draw=async receiver=>{
+      await new Promise((resolve,reject)=>renderer.setAnimationLoop(()=>{
+        renderer.setAnimationLoop(null);
+        try {renderer.render(scene,camera);resolve();}catch(error){reject(error);}
+      }));
+      await device.queue.onSubmittedWorkDone();
+      if(receiver.geometry!==geometry || !receiver.receiveShadow)throw new Error('Receiver geometry/shadow changed');
+      return renderer.readRenderTargetPixelsAsync(target,0,0,96,96);
+    };
+    const program=async receiver=>{
+      const emitted=await renderer.debug.getShaderAsync(scene,camera,receiver);
+      if(!emitted.vertexShader || !emitted.fragmentShader)throw new Error('Missing actual material program');
+      const compilationErrors=[];
+      for(const code of [emitted.vertexShader,emitted.fragmentShader]){
+        device.pushErrorScope('validation');
+        let module,scope;
+        try {module=device.createShaderModule({code});}finally{scope=device.popErrorScope();}
+        const [info,error]=await Promise.all([module.getCompilationInfo(),scope]);
+        compilationErrors.push(...[...info.messages].filter(m=>m.type==='error').map(m=>m.message));
+        if(error)compilationErrors.push(error.message);
+      }
+      return {vertex:emitted.vertexShader,fragment:emitted.fragmentShader,compilationErrors};
+    };
+    for(const candidateFirst of [false,true]){
+      const baseline=own(new THREE.MeshSSSNodeMaterial({color:0x729b45,roughness:1,metalness:0,side:THREE.DoubleSide}));
+      baseline.thicknessColorNode=vec3(.12,.18,.04);baseline.thicknessDistortionNode=float(.1);
+      baseline.thicknessAmbientNode=float(.5);baseline.thicknessAttenuationNode=float(.8);
+      baseline.thicknessPowerNode=float(2);baseline.thicknessScaleNode=float(1);
+      const candidate=own(baseline.clone());
+      candidate.envNode=source.context({getUV:()=>normalWorld,getTextureLevel:()=>float(1)}).toVar('grassMaxRoughnessEnvironment');
+      const clone=own(candidate.clone());
+      const receiver=new THREE.Mesh(geometry,baseline);receiver.receiveShadow=true;scene.add(receiver);
+      camera.position.set(3,2.5,4);camera.lookAt(0,0,0);scene.environmentRotation.set(0,0,0);scene.environmentIntensity=1;outdoor.update(.56);
+      const programs={};
+      for(const key of candidateFirst?['candidate','baseline']:['baseline','candidate']){
+        receiver.material=key==='baseline'?baseline:candidate;programs[key]=await program(receiver);
+      }
+      receiver.material=clone;programs.clone=await program(receiver);
+      receiver.material=baseline;programs.baselineReturn=await program(receiver);
+      const map=light.shadow.map,depth=map?.depthTexture,versions=[baseline.version,candidate.version,clone.version];
+      if(!map || !depth)throw new Error('Missing actual shadow map');
+      let sharedMap=true,sharedDepth=true,stableOwners=true;
+      const snapshots=[];
+      const cases=[];
+      for(const [phase,intensity,rotation,mirrorLike] of [[.21,.65,0,false],[.27,1,.71,false],[.56,1.35,-.43,false],[.74,.9,1.2,true]]){
+        outdoor.update(phase);scene.environmentIntensity=intensity;scene.environmentRotation.set(.13,rotation,-.07);
+        camera.position.set(mirrorLike?-3:3,mirrorLike?-2.5:2.5,mirrorLike?-4:4);camera.lookAt(0,0,0);
+        receiver.material=baseline;const a=await draw(receiver);receiver.material=candidate;const b=await draw(receiver);
+        cases.push({phase,intensity,rotation,mirrorLike,...difference(a,b)});snapshots.push(a);
+        sharedMap &&= light.shadow.map===map;sharedDepth &&= light.shadow.map.depthTexture===depth;
+        stableOwners &&= scene.environmentNode===source && receiver.geometry===geometry &&
+          baseline.roughness===1 && candidate.roughness===1 && baseline.envNode===null && baseline.envMap===null && candidate.envMap===null &&
+          versions.every((v,i)=>v===[baseline,candidate,clone][i].version);
+      }
+      receiver.material=candidate;const candidatePixels=await draw(receiver);
+      receiver.material=clone;const clonePixels=await draw(receiver);
+      receiver.material=baseline;const returned=await draw(receiver);
+      const baselineReturnMaxError=difference(snapshots.at(-1),returned).maxError;
+      // Sensitivity checks each change one control at a fixed above-ground view.
+      camera.position.set(3,2.5,4);camera.lookAt(0,0,0);scene.environmentRotation.set(0,0,0);
+      outdoor.update(.56);scene.environmentIntensity=1;
+      const diagnostic=await draw(receiver);
+      scene.environmentIntensity=0;const noEnvironment=await draw(receiver);scene.environmentIntensity=1;
+      light.shadow.intensity=0;const noShadow=await draw(receiver);light.shadow.intensity=1;
+      outdoor.update(.21);const otherPhase=await draw(receiver);
+      orders.push({candidateFirst,programs,cases,cloneMaxError:difference(candidatePixels,clonePixels).maxError,
+        baselineReturnMaxError,environmentSignal:difference(diagnostic,noEnvironment).maxError,
+        shadowSignal:difference(diagnostic,noShadow).maxError,phaseSignal:difference(diagnostic,otherPhase).maxError,
+        sharedMap,sharedDepth,stableOwners,cloneSharesNode:clone.envNode===candidate.envNode});
+      scene.remove(receiver);
+    }
+    await device.queue.onSubmittedWorkDone();
+    return {adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,description:adapter.info.description},
+      nativeBackend:renderer.backend.isWebGPUBackend,captureCount,orders,errors,cleanup};
+  }finally{
+    const retire=operation=>{try{operation();}catch(error){cleanup.errors.push(String(error));}};
+    retire(()=>renderer?.setAnimationLoop(null));retire(()=>renderer?.setRenderTarget(null));
+    retire(()=>{outdoor?.dispose();cleanup.outdoorDisposed=outdoor?.getStatus().state==='disposed';
+      cleanup.outdoorBytes=outdoor?.getStatus().baseColorBytes??0;
+      cleanup.sceneRestored=!!scene && scene.environmentNode===priorEnvironment && scene.environmentIntensity===priorIntensity;});
+    for(const resource of resources)retire(()=>{resource.dispose();cleanup.resourcesDisposed++;});
+    retire(()=>{renderer?.dispose();cleanup.rendererDisposed=!!renderer;});
+    active=false;device.removeEventListener('uncapturederror',onError);
+    retire(()=>{device.destroy();cleanup.deviceDestroyed=true;});
+  }
+};`;
+
+it.skipIf(process.env.HYPERIA_NATIVE_GRASS_ENVIRONMENT !== "1")(
+  "native max-roughness environment sharing removes duplicate samples with bounded linear pixel error",
+  async () => {
+    let browser: Browser | undefined;
+    let server: Server | undefined;
+    const errors: string[] = [];
+    try {
+      const path = (relative: string) =>
+        JSON.stringify(fileURLToPath(new URL(relative, import.meta.url)));
+      const entry = await build({
+        stdin: {
+          contents: `import THREE,{float,vec3,normalWorld} from ${path("../../../../extras/three/three.ts")};
+import {World} from ${path("../../../../core/World.ts")};
+import {ClientGraphics} from ${path("../../../client/ClientGraphics.ts")};
+import {OutdoorEnvironment} from ${path("../OutdoorEnvironment.ts")};
+import {SkySystem} from ${path("../SkySystem.ts")};
+${nativeGrassEnvironmentProbe}`,
+          resolveDir: fileURLToPath(new URL(".", import.meta.url)),
+          loader: "js",
+        },
+        bundle: true,
+        write: false,
+        metafile: true,
+        platform: "browser",
+        // PhysX retains a Node-only fs require behind its environment guard.
+        // Leave it external, not replaced: executing that branch in this real
+        // browser is an error. No physics module is initialized by this proof.
+        external: ["fs"],
+        // A browser entry has no server environment. This compile-time empty
+        // configuration does not create a process shim or enable PhysX's Node
+        // branch, and never embeds the host environment in the served bundle.
+        define: { "process.env": "{}" },
+        format: "esm",
+        target: "es2022",
+        minify: false,
+        keepNames: true,
+      });
+      expect(entry.outputFiles).toHaveLength(1);
+      const inputs = Object.keys(entry.metafile.inputs);
+      expect(
+        inputs.filter((p) => /__tests__|vitest|playwright|node:/.test(p)),
+      ).toEqual([]);
+      for (const name of [
+        "OutdoorEnvironment.ts",
+        "SkySystem.ts",
+        "ClientGraphics.ts",
+        "World.ts",
+      ])
+        expect(inputs.some((p) => p.endsWith("/" + name))).toBe(true);
+      expect(
+        inputs.filter((p) => p.endsWith("/build/three.webgpu.js")),
+      ).toHaveLength(1);
+      server = createServer((request, response) => {
+        response.setHeader("Cache-Control", "no-store");
+        if (request.url === "/") {
+          response.setHeader("Content-Type", "text/html");
+          response.end(
+            '<!doctype html><title>Hyperia native grass environment qualification</title><canvas></canvas><script type="module" src="/entry.js"></script>',
+          );
+        } else if (request.url === "/entry.js") {
+          response.setHeader("Content-Type", "text/javascript");
+          response.end(entry.outputFiles[0].contents);
+        } else if (request.url === "/favicon.ico")
+          response.writeHead(204).end();
+        else {
+          errors.push(`Unexpected request ${request.url}`);
+          response.writeHead(404).end();
+        }
+      });
+      await new Promise<void>((resolve, reject) => {
+        server!.once("error", reject);
+        server!.listen(0, "127.0.0.1", () => {
+          server!.removeListener("error", reject);
+          resolve();
+        });
+      });
+      const address = server.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing private port");
+      const { chromium } = await import("playwright");
+      browser = await chromium.launch({
+        channel: "chrome",
+        headless: false,
+        timeout: 20_000,
+        args: ["--use-angle=metal", "--enable-features=WebGPU,UnsafeWebGPU"],
+      });
+      const page = await browser.newPage();
+      page.setDefaultTimeout(20_000);
+      page.on("pageerror", (error) => {
+        errors.push(error.message);
+        process.stdout.write(
+          `Native grass environment page error: ${error.stack ?? error.message}\n`,
+        );
+      });
+      const origin = `http://127.0.0.1:${address.port}`;
+      await page.route("**/*", (route) => {
+        if (new URL(route.request().url()).origin === origin)
+          return route.continue();
+        errors.push("Unexpected nonlocal request");
+        return route.abort();
+      });
+      await page.goto(origin, { waitUntil: "load" });
+      await page
+        .waitForFunction(
+          () =>
+            typeof Reflect.get(globalThis, "grassEnvironmentProbe") ===
+            "function",
+        )
+        .catch((error: unknown) => {
+          throw new AggregateError(
+            [error, ...errors],
+            "Native grass environment entry did not initialize",
+          );
+        });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const receipt = await Promise.race([
+        page.evaluate(async () => {
+          const actual = window as unknown as Window & {
+            grassEnvironmentProbe(): Promise<NativeGrassEnvironmentReceipt>;
+          };
+          return actual.grassEnvironmentProbe();
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error("Native grass environment proof exceeded 60 seconds"),
+              ),
+            60_000,
+          );
+        }),
+      ]).finally(() => clearTimeout(timeout));
+      const samples = (source: string) =>
+        [...source.matchAll(/\btextureSampleGrad\s*\(/g)].length;
+      const sha = (source: string) =>
+        createHash("sha256").update(source).digest("hex");
+      process.stdout.write(
+        `Native grass environment proof (not game pixels or performance acceptance): ${JSON.stringify(
+          {
+            ...receipt,
+            orders: receipt.orders.map(({ programs, ...row }) => ({
+              ...row,
+              programs: Object.fromEntries(
+                Object.entries(programs).map(([key, value]) => [
+                  key,
+                  {
+                    vertexSha256: sha(value.vertex),
+                    fragmentSha256: sha(value.fragment),
+                    sampleSites: samples(value.fragment),
+                    sharedInitializations: [
+                      ...value.fragment.matchAll(
+                        /grassMaxRoughnessEnvironment\s*=/g,
+                      ),
+                    ].length,
+                    compilationErrors: value.compilationErrors,
+                  },
+                ]),
+              ),
+            })),
+          },
+        )}\n`,
+      );
+      expect(errors).toEqual([]);
+      expect(receipt.errors).toEqual([]);
+      expect(receipt.nativeBackend).toBe(true);
+      expect(receipt.captureCount).toBe(12);
+      expect(receipt.orders).toHaveLength(2);
+      for (const row of receipt.orders) {
+        expect(row.cases).toHaveLength(4);
+        for (const pixels of row.cases) {
+          expect(pixels.finite).toBe(true);
+          expect(pixels.alphaExact).toBe(true);
+          expect(pixels.coveredPixels).toBeGreaterThan(500);
+          // Fixed before the first run: linear RGBA32F, not a screenshot/image
+          // quantization tolerance. Do not increase this on candidate failure.
+          expect(pixels.maxError).toBeLessThanOrEqual(0.00002);
+        }
+        expect(row.cloneMaxError).toBe(0);
+        expect(row.baselineReturnMaxError).toBe(0);
+        expect(row.environmentSignal).toBeGreaterThan(0.001);
+        expect(row.shadowSignal).toBeGreaterThan(0.001);
+        expect(row.phaseSignal).toBeGreaterThan(0.001);
+        expect(row.sharedMap).toBe(true);
+        expect(row.sharedDepth).toBe(true);
+        expect(row.stableOwners).toBe(true);
+        expect(row.cloneSharesNode).toBe(true);
+        for (const [key, program] of Object.entries(row.programs)) {
+          expect(program.compilationErrors).toEqual([]);
+          expect(samples(program.fragment)).toBe(
+            key === "candidate" || key === "clone" ? 4 : 8,
+          );
+          if (key === "candidate" || key === "clone")
+            expect([
+              ...program.fragment.matchAll(/grassMaxRoughnessEnvironment\s*=/g),
+            ]).toHaveLength(1);
+        }
+        expect(row.programs.baselineReturn.fragment).toBe(
+          row.programs.baseline.fragment,
+        );
+      }
+      expect(receipt.cleanup.errors).toEqual([]);
+      expect(receipt.cleanup.resourcesDisposed).toBe(
+        receipt.cleanup.resourcesCreated,
+      );
+      expect(receipt.cleanup.outdoorDisposed).toBe(true);
+      expect(receipt.cleanup.outdoorBytes).toBe(0);
+      expect(receipt.cleanup.sceneRestored).toBe(true);
+      expect(receipt.cleanup.rendererDisposed).toBe(true);
+      expect(receipt.cleanup.deviceDestroyed).toBe(true);
+    } finally {
+      try {
+        await browser?.close();
+      } finally {
+        if (server?.listening)
+          await new Promise<void>((resolve, reject) => {
+            server!.close((error) => (error ? reject(error) : resolve()));
+            server!.closeAllConnections();
+          });
+      }
+    }
+  },
+  120_000,
+);
