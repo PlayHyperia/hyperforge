@@ -2353,12 +2353,16 @@ export class VegetationSystem extends System {
     const sun = environment?.sunLight ?? null;
     this.lodSunLight = sun;
     this.hasUnknownLodShadowLight = false;
-    this.world.stage.scene.traverseVisible(this.checkLodShadowLight);
     let knownViews =
       terrain?.areWaterReflectionsEnabled() === false &&
       !!sun &&
-      !this.hasUnknownLodShadowLight &&
       !this.world.graphics?.renderer.xr?.isPresenting;
+    // These gates already require hero geometry. Discover additional shadow
+    // views only when their result can affect selection; keep the reset loop.
+    if (knownViews) {
+      this.world.stage.scene.traverseVisible(this.checkLodShadowLight);
+      knownViews = !this.hasUnknownLodShadowLight;
+    }
     let shadowCamera: THREE.OrthographicCamera | null = null;
     if (knownViews && sun?.castShadow) {
       if (

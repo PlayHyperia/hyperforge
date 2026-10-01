@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
+import { JSDOM } from "jsdom";
 import THREE, { float, vec3 } from "../../../../extras/three/three";
 import { UniformDirectionalShadowNode } from "../../../../extras/three/UniformDirectionalShadow";
 import { World } from "../../../../core/World";
 import { ClientLoader } from "../../../client/ClientLoader";
+import { ClientGraphics } from "../../../client/ClientGraphics";
 import { modelCache } from "../../../../utils/rendering/ModelCache";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
 import { Environment } from "../Environment";
@@ -581,6 +583,139 @@ describe("isolated static vegetation LOD selector actual CPU ownership", () => {
     expect(counts).toEqual([1, 1, 1]);
     expect(f.vegetation["screenSpaceChunks"].size).toBe(0);
     expect(f.vegetation["chunkedMeshes"].size).toBe(0);
+  });
+});
+
+describe("vegetation shadow-light scan eligibility", () => {
+  // Observe real Three recursion without substituting scene/world methods.
+  class TraversalProbe extends THREE.Group {
+    visits = 0;
+    override traverseVisible(callback: (object: THREE.Object3D) => void): void {
+      this.visits++;
+      super.traverseVisible(callback);
+    }
+  }
+  const probe = (f: ReturnType<typeof fixture>) => {
+    const parent = new TraversalProbe(),
+      child = new TraversalProbe();
+    parent.add(child);
+    f.world.stage.scene.add(parent);
+    return { parent, child };
+  };
+
+  it("skips the dead scan with reflections enabled but restores coarse chunks to hero", () => {
+    const f = fixture(),
+      p = probe(f);
+    expect(f.select(100)).toBe(1);
+    p.parent.visits = p.child.visits = 0;
+    f.water.setReflectionsEnabled(true);
+    expect(f.select(100)).toBe(0);
+    expect(f.chunk.mesh.geometry).toBe(f.state.heroGeometry);
+    expect([p.parent.visits, p.child.visits]).toEqual([0, 0]);
+  });
+
+  it("skips the dead scan without a sun owner", () => {
+    const f = fixture(),
+      p = probe(f);
+    f.environment.sunLight = null;
+    expect(f.select(100)).toBe(0);
+    expect([p.parent.visits, p.child.visits]).toEqual([0, 0]);
+  });
+
+  it("skips the dead scan for actual Three XR-manager presentation state", async () => {
+    const f = fixture(),
+      p = probe(f);
+    const dom = new JSDOM("<!doctype html><canvas></canvas>");
+    const renderer = new THREE.WebGPURenderer({
+      canvas: dom.window.document.querySelector("canvas")!,
+    });
+    const graphics = f.world.register(
+      "graphics",
+      ClientGraphics,
+    ) as ClientGraphics;
+    const descriptor = Object.getOwnPropertyDescriptor(graphics, "renderer");
+    Object.defineProperty(graphics, "renderer", {
+      value: renderer,
+      configurable: true,
+    });
+    // No XR session/device/rendering is claimed: exercise the real manager's
+    // source-owned state used by this CPU selection predicate only.
+    const presenting = Object.getOwnPropertyDescriptor(
+      renderer.xr,
+      "isPresenting",
+    )!;
+    try {
+      expect(presenting.writable).toBe(true);
+      expect(Reflect.set(renderer.xr, "isPresenting", true)).toBe(true);
+      expect(f.select(100)).toBe(0);
+      expect([p.parent.visits, p.child.visits]).toEqual([0, 0]);
+    } finally {
+      Object.defineProperty(renderer.xr, "isPresenting", presenting);
+      if (descriptor) Object.defineProperty(graphics, "renderer", descriptor);
+      else Reflect.deleteProperty(graphics, "renderer");
+      await renderer.dispose();
+      dom.window.close();
+    }
+  });
+
+  it("retains a fresh real scene scan for each supported view", () => {
+    const f = fixture(),
+      p = probe(f);
+    expect(f.select(100)).toBe(1);
+    expect([p.parent.visits, p.child.visits]).toEqual([1, 1]);
+    expect(f.select(100)).toBe(1);
+    expect([p.parent.visits, p.child.visits]).toEqual([2, 2]);
+  });
+
+  it("still discovers foreign shadow lights and current ancestor visibility", () => {
+    const f = fixture(),
+      p = probe(f);
+    const other = new THREE.SpotLight();
+    other.castShadow = true;
+    p.child.add(other);
+    cleanup.push(() => other.dispose());
+    expect(f.select(100)).toBe(0);
+    expect([p.parent.visits, p.child.visits]).toEqual([1, 1]);
+    p.parent.visible = false;
+    expect(f.select(100)).toBe(1);
+    expect([p.parent.visits, p.child.visits]).toEqual([2, 1]);
+    p.parent.visible = true;
+    expect(f.select(100)).toBe(0);
+    expect([p.parent.visits, p.child.visits]).toEqual([3, 2]);
+  });
+
+  it("preserves the invisible-chunk fallback loop and resumes current light discovery", () => {
+    const f = fixture(),
+      p = probe(f);
+    expect(f.select(100)).toBe(1);
+    const matrix = f.chunk.mesh.instanceMatrix.array.slice();
+    const sphere = f.state.heroGeometry.boundingSphere;
+    f.chunk.mesh.visible = false;
+    f.water.setReflectionsEnabled(true);
+    p.parent.visits = p.child.visits = 0;
+    expect(f.select(100)).toBe(0);
+    expect([
+      f.state.errorPixels,
+      f.state.extentPixels,
+      f.state.shadowErrorPixels,
+    ]).toEqual([Infinity, Infinity, Infinity]);
+    expect(f.chunk.mesh.geometry).toBe(f.state.heroGeometry);
+    expect(f.state.lodGeometry!.boundingSphere).toBe(sphere);
+    expect(f.chunk.mesh.instanceMatrix.array).toEqual(matrix);
+    expect(f.chunk.mesh.count).toBe(1);
+    expect(f.chunk.mesh.material).toBe(f.material);
+    expect(f.chunk.mesh.visible).toBe(false);
+    expect([p.parent.visits, p.child.visits]).toEqual([0, 0]);
+    const other = new THREE.SpotLight();
+    other.castShadow = true;
+    p.child.add(other);
+    cleanup.push(() => other.dispose());
+    f.water.setReflectionsEnabled(false);
+    f.chunk.mesh.visible = true;
+    expect(f.select(100)).toBe(0);
+    other.removeFromParent();
+    expect(f.select(100)).toBe(1);
+    expect([p.parent.visits, p.child.visits]).toEqual([2, 2]);
   });
 });
 
