@@ -211,6 +211,7 @@ import {
   resolveGrassVergeEvaluation,
   resolveGrassInstancingCandidate,
   resolveGrassSubmissionCandidate,
+  resolveGrassShadowCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -479,6 +480,7 @@ export class TerrainSystem extends System {
         vergeEvaluation?: ReturnType<typeof resolveGrassVergeEvaluation>;
         instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
         submission?: ReturnType<typeof resolveGrassSubmissionCandidate>;
+        shadow?: ReturnType<typeof resolveGrassShadowCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -947,6 +949,7 @@ export class TerrainSystem extends System {
       const vergeEvaluation = resolveGrassVergeEvaluation();
       const instancing = resolveGrassInstancingCandidate();
       const submission = resolveGrassSubmissionCandidate();
+      const shadow = resolveGrassShadowCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -966,6 +969,7 @@ export class TerrainSystem extends System {
         ...(vergeEvaluation ? { vergeEvaluation } : {}),
         ...(instancing ? { instancing } : {}),
         ...(submission ? { submission } : {}),
+        ...(shadow ? { shadow } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3118,6 +3122,7 @@ export class TerrainSystem extends System {
         grassSelection.vergeEvaluation,
         grassSelection.instancing,
         grassSelection.submission,
+        grassSelection.shadow,
       );
       if (grassSelection.submission && this.world.graphics)
         this.grassVisualManager.setAdaptiveGrassRenderer(

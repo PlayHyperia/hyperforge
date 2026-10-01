@@ -139,6 +139,7 @@ export type GrassGeometryCandidate =
   "sheath-close-v1" | "rooted-fan-v1" | "meadow-canopy-v1" | "meadow-field-v1";
 export type GrassInstancingCandidate = "attributes-v1";
 export type GrassSubmissionCandidate = "adaptive-ranges-v1";
+export type GrassShadowCandidate = "distance-pcf-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -167,6 +168,27 @@ export function resolveSingleMapShadowFlow(
       "Single-map shadow flow requires the explicit non-embedded island profile",
     );
   return "uniform-v1";
+}
+
+/** Grass receiver-only experiment; omission preserves the existing filter.
+ * The terrain owner separately requires the actual compact sculpt profile. */
+export function resolveGrassShadowCandidate(
+  win?: Window,
+): GrassShadowCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("grassShadow") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "distance-pcf-v1")
+    throw new Error("Unknown or duplicate grass shadow candidate");
+  if (
+    resolveGrassAppearanceCandidate(windowRef) !== "fine-meadow-v1" ||
+    resolveSingleMapShadowFlow(windowRef) !== "uniform-v1"
+  )
+    throw new Error(
+      "Grass shadow filtering requires the explicit fine meadow and uniform single-map shadow flow",
+    );
+  return "distance-pcf-v1";
 }
 
 /** Explicit rooted-flower population; omission never enables this owner. */
@@ -797,6 +819,14 @@ export type StreamingGrassProfileReceipt = {
   geometryLayout?: import("../systems/shared/world/GrassBladeLayout").FineGrassGeometryLayout;
   /** Opt-in authored composition; historical receipts omit this identity. */
   geometryCandidate?: GrassGeometryCandidate;
+  /** Experimental receiver sampling only, not visual/performance acceptance. */
+  shadowFiltering?: {
+    mode: GrassShadowCandidate;
+    transitionStart: number;
+    transitionEnd: number;
+    camera: "primary-world-position";
+    qualification: "unqualified";
+  };
   profileId:
     | "ordinary-v1"
     | "fixed-arena-v1"

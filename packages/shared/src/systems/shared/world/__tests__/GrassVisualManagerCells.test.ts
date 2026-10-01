@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { Worker } from "node:worker_threads";
 import { JSDOM } from "jsdom";
-import { MeshStandardNodeMaterial, WGSLNodeBuilder } from "three/webgpu";
+import {
+  MeshStandardNodeMaterial,
+  NodeFrame,
+  WGSLNodeBuilder,
+} from "three/webgpu";
 import { Fn } from "three/tsl";
 import ConvertNode from "three/src/nodes/utils/ConvertNode.js";
 import { INSTANCE_MATRIX_STORAGE_ATTRIBUTE } from "../../../../utils/rendering/createStorageInstancedMesh";
@@ -53,11 +57,15 @@ import {
   FINE_MEADOW_GRASS_VISUAL_PROFILE,
   FINE_MEADOW_APPEARANCE,
   GRASS_CONFIG,
+  GRASS_DISTANCE_SHADOW_FILTER,
   STREAMING_GRASS_VISUAL_PROFILE,
   GrassVisualManager,
 } from "../GrassVisualManager";
 import { getGrassBladeLayout } from "../GrassBladeLayout";
-import type { GrassGeometryCandidate } from "../../../../runtime/clientViewportMode";
+import type {
+  GrassGeometryCandidate,
+  GrassShadowCandidate,
+} from "../../../../runtime/clientViewportMode";
 import type { GrassPlacementCoverageTrial } from "../../../../utils/workers/GrassPlacementCell";
 import type { GrassGroundingWorkerPort } from "../../../../utils/workers/GrassGroundingWorkerClient";
 import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
@@ -76,6 +84,7 @@ async function fixture(
   diagnosticSubcells?: "world-grid-6.25m-v1",
   submissionCandidate?: "adaptive-ranges-v1",
   includeHabitat = false,
+  shadowCandidate?: GrassShadowCandidate,
 ) {
   const worker = new Worker(
     `const {parentPort}=require('node:worker_threads');
@@ -295,6 +304,7 @@ async function fixture(
       undefined,
       undefined,
       submissionCandidate,
+      shadowCandidate,
     );
     setupDisposals.push(() => owner.destroy());
     owner.setPlayerPosition(385, 374);
@@ -3667,6 +3677,223 @@ describe("fine meadow cells borrow actual terrain owners without replacing them"
       f.owner["processSettledWorkerResults"]();
       expect(f.finish()).toBe(1);
       expect(f.owner.getStreamingReadiness([f.node]).readyChunks).toBe(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("keeps grass shadow filtering opt-in and preserves real placement, geometry and receiver flags", async () => {
+    const baseline = await fixture();
+    let candidate: Awaited<ReturnType<typeof fixture>> | undefined;
+    try {
+      candidate = await fixture(
+        undefined,
+        undefined,
+        16,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        "distance-pcf-v1",
+      );
+      expect(baseline.owner["grassShadowContext"]).toBeNull();
+      expect(baseline.owner["material"].contextNode).toBeNull();
+      expect(
+        baseline.owner.getProfileReceipt().shadowFiltering,
+      ).toBeUndefined();
+      expect(candidate.owner.getProfileReceipt().shadowFiltering).toEqual({
+        mode: "distance-pcf-v1",
+        transitionStart: 40,
+        transitionEnd: 70,
+        camera: "primary-world-position",
+        qualification: "unqualified",
+      });
+      for (const f of [baseline, candidate]) {
+        await f.queue();
+        f.owner["processSettledWorkerResults"]();
+        f.finish();
+      }
+      const before = baseline.owner["chunks"].get(baseline.work.key)!.mesh;
+      const after = candidate.owner["chunks"].get(candidate.work.key)!.mesh;
+      expect(after.count).toBe(before.count);
+      expect(after.geometry.index!.array).toEqual(before.geometry.index!.array);
+      expect(Object.keys(after.geometry.attributes)).toEqual(
+        Object.keys(before.geometry.attributes),
+      );
+      for (const name of Object.keys(before.geometry.attributes))
+        expect(after.geometry.getAttribute(name).array).toEqual(
+          before.geometry.getAttribute(name).array,
+        );
+      expect(after.boundingBox).toEqual(before.boundingBox);
+      expect([before.receiveShadow, before.castShadow]).toEqual([true, false]);
+      expect([after.receiveShadow, after.castShadow]).toEqual([true, false]);
+      const context = candidate.owner["grassShadowContext"]!;
+      expect((after.material as MeshStandardNodeMaterial).contextNode).toBe(
+        context.contextNode,
+      );
+      expect(candidate.owner.getProfileReceipt().installedClumps).toBe(
+        baseline.owner.getProfileReceipt().installedClumps,
+      );
+    } finally {
+      candidate?.close();
+      baseline.close();
+    }
+  });
+
+  it("uses complete transformed 3D grass bounds and captured primary camera for each shadow draw without material churn", async () => {
+    const f = await fixture(
+      undefined,
+      undefined,
+      16,
+      undefined,
+      "leaf-volume-v1",
+      "meadow-field-v1",
+      undefined,
+      undefined,
+      undefined,
+      false,
+      "distance-pcf-v1",
+    );
+    try {
+      const context = f.owner["grassShadowContext"]!;
+      expect(f.owner["material"].contextNode).toBe(context.contextNode);
+      expect(f.owner["foldedMaterial"]!.contextNode).toBe(context.contextNode);
+      let representatives = 0;
+      await f.owner.precompileRepresentativeChunk(async (object) => {
+        const mesh = object as THREE.InstancedMesh;
+        expect((mesh.material as MeshStandardNodeMaterial).contextNode).toBe(
+          context.contextNode,
+        );
+        expect([mesh.receiveShadow, mesh.castShadow]).toEqual([true, false]);
+        representatives++;
+      });
+      expect(representatives).toBe(3);
+      await f.queue();
+      f.owner["processSettledWorkerResults"]();
+      f.finish();
+      const mesh = f.owner["chunks"].get(f.work.key)!.mesh;
+      const material = mesh.material as MeshStandardNodeMaterial;
+      const version = material.version;
+      const geometry = mesh.geometry;
+      const scratchBounds = f.owner["grassShadowWorldBounds"];
+      f.container.position.set(-100, 13, 40);
+      f.container.rotation.y = 0.35;
+      f.container.scale.set(0.75, 1.25, 0.65);
+      f.container.updateMatrixWorld(true);
+      const box = mesh.boundingBox!.clone().applyMatrix4(mesh.matrixWorld);
+      const center = box.getCenter(new THREE.Vector3());
+      const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 500);
+      camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      camera.updateProjectionMatrix();
+      const mirror = camera.clone();
+      mirror.position.copy(center).add(new THREE.Vector3(1000, 1000, 1000));
+      mirror.updateMatrixWorld();
+      const frame = new NodeFrame();
+      frame.object = mesh;
+      frame.material = material;
+      frame.camera = mirror;
+      const mode = () => {
+        frame.updateNode(context.drawMode);
+        return context.drawMode.value;
+      };
+      const capture = (x: number, y: number, z: number) => {
+        camera.position.set(x, y, z);
+        camera.lookAt(x, y, z - 1);
+        f.owner.capturePrimaryView(camera);
+      };
+      expect(mode()).toBe(0); // no primary view, never use the far mirror camera
+      capture(center.x, center.y, center.z);
+      expect(mode()).toBe(0);
+      expect(context.primaryCameraPosition.value.toArray()).toEqual(
+        center.toArray(),
+      );
+      // A second actual instanced grass object shares the same context and
+      // complete wind-swept envelope, translated far away. Keep one NodeFrame
+      // and alternate objects without changing frame/render IDs or recapturing
+      // the camera: OBJECT updates must not be accidentally frame-deduplicated.
+      const other = mesh.clone();
+      try {
+        other.position.x += 500;
+        other.updateMatrix();
+        f.container.add(other);
+        f.container.updateMatrixWorld(true);
+        expect((other.material as MeshStandardNodeMaterial).contextNode).toBe(
+          context.contextNode,
+        );
+        frame.object = other;
+        expect(mode()).toBe(1);
+        frame.object = mesh;
+        expect(mode()).toBe(0);
+        frame.object = other;
+        expect(mode()).toBe(1);
+        expect([frame.frameId, frame.renderId]).toEqual([0, 0]);
+      } finally {
+        frame.object = mesh;
+        other.removeFromParent();
+        other.dispose();
+      }
+      // Identical XZ, but a high primary camera must choose far: this is 3D,
+      // not the placement/LOD owner's planar player-distance calculation.
+      capture(center.x, box.max.y + 100, center.z);
+      mirror.position.copy(center);
+      mirror.updateMatrixWorld();
+      expect(mode()).toBe(1);
+      const captured = context.primaryCameraPosition.value.clone();
+      camera.position.copy(center); // changing the source object is not a capture
+      camera.updateMatrixWorld();
+      frame.camera = camera;
+      expect(mode()).toBe(1);
+      expect(context.primaryCameraPosition.value).toEqual(captured);
+      capture(center.x, box.max.y + 55, center.z);
+      expect(mode()).toBe(2);
+      frame.camera = mirror;
+      expect(mode()).toBe(2);
+
+      const savedBounds = mesh.boundingBox!.clone();
+      const savedMatrix = mesh.matrixWorld.clone();
+      try {
+        // Real object/NodeFrame; a point envelope makes endpoint inequalities
+        // exact without replacing any manager or renderer methods.
+        mesh.boundingBox!.set(new THREE.Vector3(), new THREE.Vector3());
+        mesh.matrixWorld.identity();
+        capture(GRASS_DISTANCE_SHADOW_FILTER.transitionStart, 0, 0);
+        expect(mode()).toBe(0);
+        capture(GRASS_DISTANCE_SHADOW_FILTER.transitionEnd, 0, 0);
+        expect(mode()).toBe(1);
+        capture(55, 0, 0);
+        expect(mode()).toBe(2);
+        const originalBounds = mesh.boundingBox;
+        mesh.boundingBox = null;
+        expect(mode()).toBe(0);
+        mesh.boundingBox = originalBounds;
+        mesh.boundingBox!.min.x = NaN;
+        expect(mode()).toBe(0);
+        mesh.boundingBox!.copy(savedBounds);
+        mesh.matrixWorld.elements[0] = Infinity;
+        expect(mode()).toBe(0);
+        mesh.matrixWorld.copy(savedMatrix);
+        camera.projectionMatrix.elements.fill(0);
+        f.owner.capturePrimaryView(camera);
+        expect(mode()).toBe(0);
+        camera.updateProjectionMatrix();
+        camera.position.y = NaN;
+        f.owner.capturePrimaryView(camera);
+        expect(mode()).toBe(0);
+      } finally {
+        mesh.boundingBox!.copy(savedBounds);
+        mesh.matrixWorld.copy(savedMatrix);
+      }
+      expect(f.owner["grassShadowWorldBounds"]).toBe(scratchBounds);
+      expect(mesh.material).toBe(material);
+      expect(material.version).toBe(version);
+      expect(mesh.geometry).toBe(geometry);
+      expect([mesh.receiveShadow, mesh.castShadow]).toEqual([true, false]);
+      expect(f.owner.getProfileReceipt().shadowFiltering!.qualification).toBe(
+        "unqualified",
+      );
     } finally {
       f.close();
     }

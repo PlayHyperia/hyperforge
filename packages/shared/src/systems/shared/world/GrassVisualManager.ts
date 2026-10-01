@@ -37,6 +37,7 @@ import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
 import { createStorageInstancedMesh } from "../../../utils/rendering/createStorageInstancedMesh";
+import { GrassShadowFilterContext } from "../../../extras/three/UniformDirectionalShadow";
 import {
   createCompactHabitatSoilNode,
   createCompactBankVergeLocality,
@@ -49,6 +50,7 @@ import type {
   GrassGeometryCandidate,
   GrassInstancingCandidate,
   GrassSubmissionCandidate,
+  GrassShadowCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -172,6 +174,14 @@ import {
 // ---------------------------------------------------------------------------
 // Configuration — tweak these to control grass appearance & performance
 // ---------------------------------------------------------------------------
+
+/** Explicit receiver-only experiment. Distances still require native visual
+ * and cost qualification; no population, blade or global shadow changes. */
+export const GRASS_DISTANCE_SHADOW_FILTER = Object.freeze({
+  id: "distance-pcf-v1" as const,
+  transitionStart: 40,
+  transitionEnd: 70,
+});
 
 export const GRASS_CONFIG = {
   // -- Density & distribution -----------------------------------------------
@@ -1765,6 +1775,8 @@ export class GrassVisualManager implements QuadTreeListener {
     null;
   private clumpInvariantPreparationPending = false;
   private material: MeshStandardNodeMaterial;
+  private readonly grassShadowContext: GrassShadowFilterContext | null;
+  private readonly grassShadowWorldBounds = new THREE.Box3();
   private foldedMaterial: MeshStandardNodeMaterial | null = null;
   private foldedBladeNormalNode: MeshStandardNodeMaterial["normalNode"] = null;
   private meadowDetailMaterialFactory:
@@ -1821,6 +1833,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private hasPrimaryView = false;
   private primaryViewValid = false;
   private primaryViewX = 0;
+  private primaryViewY = 0;
   private primaryViewZ = 0;
   private readonly primaryViewProjection = new THREE.Matrix4();
   private readonly primaryViewFrustum = new THREE.Frustum();
@@ -1899,6 +1912,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly grassVergeEvaluation?: GrassVergeEvaluation,
     private readonly instancingCandidate?: GrassInstancingCandidate,
     private readonly submissionCandidate?: GrassSubmissionCandidate,
+    private readonly shadowCandidate?: GrassShadowCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -1959,6 +1973,17 @@ export class GrassVisualManager implements QuadTreeListener {
     }
     if (this.fineMeadow && appearanceCandidate !== FINE_MEADOW_APPEARANCE.id)
       throw new Error("Fine meadow requires its explicit appearance");
+    if (
+      shadowCandidate !== undefined &&
+      (shadowCandidate !== GRASS_DISTANCE_SHADOW_FILTER.id ||
+        !this.fineMeadow ||
+        appearanceCandidate !== FINE_MEADOW_APPEARANCE.id ||
+        !workerSetup ||
+        !isCompactSculptProfile(workerSetup.terrainConfig.TERRAIN_PROFILE))
+    )
+      throw new Error(
+        "Grass shadow filtering requires the admitted explicit compact fine meadow",
+      );
     if (
       lightingCandidate !== undefined &&
       ((lightingCandidate !== FINE_GRASS_CANOPY_NORMAL_LIGHTING.id &&
@@ -2237,6 +2262,21 @@ export class GrassVisualManager implements QuadTreeListener {
       );
     });
     this.material = this.createMaterial();
+    // Publish the opt-in context before folded, grounded or representative
+    // clones. They share these uniforms; the draw mode updates for each object.
+    this.grassShadowContext = shadowCandidate
+      ? new GrassShadowFilterContext(this.material.contextNode)
+      : null;
+    if (this.grassShadowContext) {
+      this.grassShadowContext.transitionStart.value =
+        GRASS_DISTANCE_SHADOW_FILTER.transitionStart;
+      this.grassShadowContext.transitionEnd.value =
+        GRASS_DISTANCE_SHADOW_FILTER.transitionEnd;
+      this.grassShadowContext.drawMode.onObjectUpdate((frame) =>
+        this.getGrassShadowDrawMode(frame.object),
+      );
+      this.material.contextNode = this.grassShadowContext.contextNode;
+    }
     // Construct only after all profile checks and material setup. A failed
     // native Worker construction must not leak the already-owned GPU objects.
     try {
@@ -2412,6 +2452,17 @@ export class GrassVisualManager implements QuadTreeListener {
       ...(this.geometryCandidate === undefined
         ? {}
         : { geometryCandidate: this.geometryCandidate }),
+      ...(this.grassShadowContext
+        ? {
+            shadowFiltering: {
+              mode: this.shadowCandidate!,
+              transitionStart: this.grassShadowContext.transitionStart.value,
+              transitionEnd: this.grassShadowContext.transitionEnd.value,
+              camera: "primary-world-position" as const,
+              qualification: "unqualified" as const,
+            },
+          }
+        : {}),
       eligibility: this.grassEligibility,
       terrainProfileIdentity: this.terrainProfileIdentity,
       minimumLodLevel: this.minimumLodLevel,
@@ -2733,6 +2784,7 @@ export class GrassVisualManager implements QuadTreeListener {
     camera.updateWorldMatrix(true, false);
     this.hasPrimaryView = true;
     this.primaryViewX = camera.matrixWorld.elements[12];
+    this.primaryViewY = camera.matrixWorld.elements[13];
     this.primaryViewZ = camera.matrixWorld.elements[14];
     this.primaryViewProjection.multiplyMatrices(
       camera.projectionMatrix,
@@ -2768,6 +2820,64 @@ export class GrassVisualManager implements QuadTreeListener {
         return;
     }
     this.primaryViewValid = true;
+    this.grassShadowContext?.primaryCameraPosition.value.set(
+      this.primaryViewX,
+      this.primaryViewY,
+      this.primaryViewZ,
+    );
+  }
+
+  /** Conservative complete wind-swept bounds, never cell centers or the current
+   * pass camera. Three has refreshed matrixWorld before the object-uniform
+   * update. No allocations, matrix updates, material changes or scene work. */
+  private getGrassShadowDrawMode(object: THREE.Object3D | null): 0 | 1 | 2 {
+    if (
+      this.destroyed ||
+      !this.grassShadowContext ||
+      !this.hasPrimaryView ||
+      !this.primaryViewValid ||
+      !object
+    )
+      return 0;
+    const mesh = object as GrassChunkRenderMesh;
+    const bounds = mesh.boundingBox;
+    if (!bounds || bounds.isEmpty()) return 0;
+    const matrix = mesh.matrixWorld.elements;
+    for (let i = 0; i < 16; i++) if (!Number.isFinite(matrix[i])) return 0;
+    const worldBounds = this.grassShadowWorldBounds
+      .copy(bounds)
+      .applyMatrix4(mesh.matrixWorld);
+    const { min, max } = worldBounds;
+    if (
+      !Number.isFinite(min.x) ||
+      !Number.isFinite(min.y) ||
+      !Number.isFinite(min.z) ||
+      !Number.isFinite(max.x) ||
+      !Number.isFinite(max.y) ||
+      !Number.isFinite(max.z)
+    )
+      return 0;
+    const start = this.grassShadowContext.transitionStart.value;
+    const end = this.grassShadowContext.transitionEnd.value;
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start < 0 ||
+      end <= start
+    )
+      return 0;
+    const x = this.primaryViewX;
+    const y = this.primaryViewY;
+    const z = this.primaryViewZ;
+    const farX = Math.max(Math.abs(x - min.x), Math.abs(x - max.x));
+    const farY = Math.max(Math.abs(y - min.y), Math.abs(y - max.y));
+    const farZ = Math.max(Math.abs(z - min.z), Math.abs(z - max.z));
+    if (farX * farX + farY * farY + farZ * farZ <= start * start) return 0;
+    const nearX = Math.max(min.x - x, 0, x - max.x);
+    const nearY = Math.max(min.y - y, 0, y - max.y);
+    const nearZ = Math.max(min.z - z, 0, z - max.z);
+    if (nearX * nearX + nearY * nearY + nearZ * nearZ >= end * end) return 1;
+    return 2;
   }
 
   update(playerX: number, playerZ: number, camera?: THREE.Camera): void {
