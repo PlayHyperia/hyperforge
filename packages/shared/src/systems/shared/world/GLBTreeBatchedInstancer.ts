@@ -779,9 +779,8 @@ function applyHighlightColor(
 /** One main-world choice, reused unchanged by reflection/shadow rendering.
  * This bounds the rest geometry plus a conservative shader wind envelope, not
  * the dynamic visible silhouette. No renderer callback or secondary camera can
- * reselect a LOD. Existing hot-update ordering uses the last completed main
- * camera/parent matrices (one-frame motion lag). Different LOD parents/transforms
- * keep full detail. */
+ * reselect a LOD. Explicit primary preparation supplies the finalized main
+ * camera/parent matrices. Different LOD parents/transforms keep full detail. */
 function selectPoolProjectedLod(
   pool: TreeTypePool,
   variant: number,
@@ -899,6 +898,7 @@ export function destroyGLBTreeBatchedInstancer(): void {
   windMode = "legacy-leaf-v1";
   lodCandidate = undefined;
   lastUpdateFrame = -1;
+  lastPreparedFrame = -1;
   highlightedEntityId = null;
 }
 
@@ -949,16 +949,11 @@ export async function addInstance(
 
     const insertionDissolve = lifetime?.getInitialDissolve() ?? initialDissolve;
 
-    // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
+    // Projected membership is selected only at primary render preparation.
+    // Async insertions remain at full detail until that boundary. The ordinary
+    // distance path still avoids LOD0 pop-in at range.
     let initialLOD: 0 | 1 | 2 = 0;
-    if (lodCandidate) {
-      initialLOD = selectPoolProjectedLod(
-        pool,
-        variantIndex,
-        composeInstanceMatrix(position, rotation, scale, pool.yOffset),
-        0,
-      );
-    } else if (world?.camera) {
+    if (!lodCandidate && world?.camera) {
       const cp = world.camera.position;
       const dx = cp.x - position.x;
       const dz = cp.z - position.z;
@@ -1236,15 +1231,9 @@ export function startDissolve(
 }
 
 let lastUpdateFrame = -1;
+let lastPreparedFrame = -1;
 
-export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
-  if (!world) return;
-  if (world.frame === lastUpdateFrame) return;
-  lastUpdateFrame = world.frame;
-
-  const camera = world.camera;
-  if (!camera) return;
-
+function selectTreeLods(camera: THREE.PerspectiveCamera): void {
   const camPos = camera.position;
   const lod1DistSq = resourceLOD.lod1DistanceSq;
   const lod2DistSq = resourceLOD.lod2DistanceSq;
@@ -1331,11 +1320,10 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
       slot.currentLOD = targetLOD;
     }
   }
+}
 
-  // Tick dissolve animations — runs AFTER LOD transitions above so that
-  // applyDissolveValue always finds the entity in its current (post-swap) pool.
-  tickDissolveAnims(dissolveAnims, deltaTime, applyDissolveValue);
-
+function updateTreeVisibility(camera: THREE.PerspectiveCamera): void {
+  const camPos = camera.position;
   // ---- Per-instance frustum + distance culling ----
   // Build camera frustum once for all trees this frame.
   _cullProjScreenMatrix.multiplyMatrices(
@@ -1381,8 +1369,51 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
       }
     }
   }
+}
+
+/** Candidate-only, once-per-world-frame selection from the finalized primary
+ * camera. Call before any renderer submission, never from per-pass callbacks.
+ * Secondary cameras cannot claim preparation or change shared membership. */
+export function prepareGLBTreeBatchedInstancerForRender(
+  camera: THREE.PerspectiveCamera,
+): void {
+  if (
+    !world ||
+    !lodCandidate ||
+    camera !== world.camera ||
+    lastPreparedFrame === world.frame
+  )
+    return;
+  lastPreparedFrame = world.frame;
+  camera.updateWorldMatrix(true, false);
+  for (const pool of pools.values())
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool) {
+        for (const batch of lodPool.batches)
+          batch.updateWorldMatrix(true, false);
+        for (const material of lodPool.materials)
+          material.dissolveUniforms.cameraPos.value.copy(camera.position);
+      }
+  selectTreeLods(camera);
+  updateTreeVisibility(camera);
+}
+
+export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
+  if (!world) return;
+  if (world.frame === lastUpdateFrame) return;
+  lastUpdateFrame = world.frame;
+
+  const camera = world.camera;
+  if (!camera) return;
+
+  // Preserve the ordinary distance path's selection/animation/culling order.
+  // Projected swaps happen later and transfer this frame's updated dissolve.
+  if (!lodCandidate) selectTreeLods(camera);
+  tickDissolveAnims(dissolveAnims, deltaTime, applyDissolveValue);
+  if (!lodCandidate) updateTreeVisibility(camera);
 
   // Update dissolve uniforms
+  const camPos = camera.position;
   const camY = camPos.y;
   const players = world.getPlayers();
   const localPlayer = players && players.length > 0 ? players[0] : null;

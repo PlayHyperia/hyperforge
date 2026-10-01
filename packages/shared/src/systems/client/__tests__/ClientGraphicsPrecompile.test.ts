@@ -87,6 +87,26 @@ describe("ClientGraphics renderer preparation", () => {
     );
   });
 
+  it("prepares projected trees once at the primary submission boundary", () => {
+    // Wiring guard; actual pool tests exercise late-pose selection and native
+    // WebGPU remains responsible for final rendered transition acceptance.
+    const source = readFileSync(
+      new URL("../ClientGraphics.ts", import.meta.url),
+      "utf8",
+    );
+    const render = source.slice(
+      source.indexOf("  render() {"),
+      source.indexOf("  precompileObject(object:"),
+    );
+    const call = "prepareGLBTreeBatchedInstancerForRender(this.world.camera);";
+    expect(source.split(call)).toHaveLength(2);
+    const prepare = render.indexOf(call);
+    const submit = render.indexOf("this.renderer.render(");
+    expect(prepare).toBeGreaterThan(0);
+    expect(submit).toBeGreaterThan(prepare);
+    expect(render.indexOf("this.composer.render();")).toBeGreaterThan(prepare);
+  });
+
   it("retains grass range cleanup inside the actual scene submission finally", () => {
     // Wiring guard only: native WebGPU still verifies callback failure and
     // nested reflection restoration. Do not substitute a pretend renderer.

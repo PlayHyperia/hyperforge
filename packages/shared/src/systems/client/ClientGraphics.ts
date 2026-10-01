@@ -104,6 +104,7 @@ import {
 } from "../../utils/rendering/OpaqueLoadingRenderGate";
 import type { Environment } from "../shared/world/Environment";
 import type { VegetationSystem } from "../shared/world/VegetationSystem";
+import { prepareGLBTreeBatchedInstancerForRender } from "../shared/world/GLBTreeBatchedInstancer";
 
 let renderer: WebGPURenderer | undefined;
 
@@ -410,6 +411,8 @@ export class ClientGraphics extends System {
         this.renderer.domElement.width,
         this.renderer.domElement.height,
       );
+    // Use the finalized primary pose; secondary passes reuse tree membership.
+    prepareGLBTreeBatchedInstancerForRender(this.world.camera);
     // Keep primary-view scheduling, offscreen fog and all preparation above
     // active. Only the final scene/composer submission is covered by this gate.
     if (!this.isPrecompileIdle()) this.opaqueLoadingRenderGate.invalidate();

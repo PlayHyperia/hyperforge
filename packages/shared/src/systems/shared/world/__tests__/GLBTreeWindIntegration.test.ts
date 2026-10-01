@@ -493,6 +493,7 @@ describe("actual GLB projected tree LOD candidate", () => {
           const original = geometryState(geometry);
           expect(geometry.getAttribute("color").getX(0)).toBe(1);
           expect(await track(pool.add(0, "legacy"))).toBe(true);
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           const lod1Meshes = activeRows(pool).map((row) => row.mesh);
           expect(lod1Meshes).toHaveLength(2);
           // A large but finite public uniform deliberately stresses the envelope;
@@ -500,6 +501,7 @@ describe("actual GLB projected tree LOD candidate", () => {
           wind.setStrength(1000);
           pool.world.frame++;
           batched.updateGLBTreeBatchedInstancer(0);
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           expect(
             activeRows(pool).every((row) => !lod1Meshes.includes(row.mesh)),
           ).toBe(true);
@@ -510,6 +512,7 @@ describe("actual GLB projected tree LOD candidate", () => {
           wind.setStrength(0);
           pool.world.frame++;
           batched.updateGLBTreeBatchedInstancer(0);
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           expect(activeRows(pool).map((row) => row.mesh)).toEqual(lod1Meshes);
           expect(geometryState(geometry)).toEqual(original);
         });
@@ -522,6 +525,7 @@ describe("actual GLB projected tree LOD candidate", () => {
     await withTrees("batched", async ({ pool, track }) => {
       await withTreeViewport(pool.world, async () => {
         expect(await track(pool.add(0, "default"))).toBe(true);
+        batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
         for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
       });
     });
@@ -537,12 +541,15 @@ describe("actual GLB projected tree LOD candidate", () => {
           const snapshots = original.map(geometryState);
           const proxy = pool.proxy("projected")!;
           expect(proxy.geometries).toEqual(original);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
           pool.deplete("projected", 1);
           const before = activeRows(pool).map((row) => row.dissolve);
           const step = () => {
             pool.world.frame++;
             batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           };
           step();
           // A secondary render in this world frame cannot reselect the meshes.
@@ -550,6 +557,7 @@ describe("actual GLB projected tree LOD candidate", () => {
           expect(renderer.domElement.width).toBe(10000);
           expect(renderer.domElement.style.width).toBe("1000px");
           batched.updateGLBTreeBatchedInstancer(0);
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
           step();
           for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
@@ -562,6 +570,97 @@ describe("actual GLB projected tree LOD candidate", () => {
           for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
           expect(pool.proxy("projected")!.geometries).toEqual(proxy.geometries);
           expect(original.map(geometryState)).toEqual(snapshots);
+        });
+      },
+      { lodCandidate: "projected-v1" },
+    );
+  });
+
+  it("prepares the finalized primary camera once without ticking dissolve twice", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track }) => {
+        await withTreeViewport(pool.world, async () => {
+          const camera = pool.world.camera;
+          expect(await track(pool.add(0, "late-camera"))).toBe(true);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+
+          batched.startDissolve("late-camera", 1, false);
+          pool.world.frame++;
+          batched.updateGLBTreeBatchedInstancer(0.03);
+          for (const row of activeRows(pool)) {
+            verifyRow(row, 0, 1, "batched");
+            expect(row.dissolve).toBeCloseTo(0.1);
+          }
+
+          // A camera owner changes pose after hot updates. Deliberately leave
+          // its matrixWorld stale: primary preparation must finalize it.
+          camera.position.set(10, 5, 20);
+          camera.lookAt(10, 5, 100);
+          const secondary = camera.clone();
+          secondary.lookAt(10, 2, 0);
+          batched.prepareGLBTreeBatchedInstancerForRender(secondary);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          for (const row of activeRows(pool)) {
+            verifyRow(row, 0, 0, "batched");
+            expect(
+              (row.mesh.material as TreeDissolveMaterial).dissolveUniforms
+                .cameraPos.value,
+            ).toEqual(camera.position);
+            expect((row.mesh as THREE.BatchedMesh).getVisibleAt(row.slot)).toBe(
+              false,
+            );
+            expect(row.dissolve).toBeCloseTo(0.1);
+          }
+
+          // Repeated preparation, hot updates and secondary cameras cannot
+          // change membership/visibility or advance animation in this frame.
+          camera.lookAt(10, 2, 0);
+          batched.updateGLBTreeBatchedInstancer(0.03);
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          batched.prepareGLBTreeBatchedInstancerForRender(secondary);
+          for (const row of activeRows(pool)) {
+            expect((row.mesh as THREE.BatchedMesh).getVisibleAt(row.slot)).toBe(
+              false,
+            );
+            expect(row.dissolve).toBeCloseTo(0.1);
+          }
+          pool.world.frame++;
+          batched.updateGLBTreeBatchedInstancer(0.03);
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          for (const row of activeRows(pool)) {
+            verifyRow(row, 0, 0, "batched");
+            expect((row.mesh as THREE.BatchedMesh).getVisibleAt(row.slot)).toBe(
+              true,
+            );
+            expect(row.dissolve).toBeCloseTo(0.2);
+          }
+
+          pool.world.frame++;
+          batched.updateGLBTreeBatchedInstancer(0.03);
+          camera.position.set(20, 5, 200);
+          camera.lookAt(20, 2, 0);
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          for (const row of activeRows(pool)) {
+            verifyRow(row, 0, 1, "batched");
+            expect(row.dissolve).toBeCloseTo(0.3);
+            expect(
+              (row.mesh.material as TreeDissolveMaterial).dissolveUniforms
+                .cameraPos.value,
+            ).toEqual(camera.position);
+          }
+
+          // Reinitializing at the same world.frame must not retain preparation
+          // ownership from the destroyed pool.
+          pool.destroy();
+          pool.init("connected-v1", "projected-v1");
+          expect(await track(pool.add(0, "reinitialized"))).toBe(true);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
+          batched.prepareGLBTreeBatchedInstancerForRender(camera);
+          for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
         });
       },
       { lodCandidate: "projected-v1" },
@@ -582,6 +681,7 @@ describe("actual GLB projected tree LOD candidate", () => {
             pool.world.stage.scene.updateMatrixWorld(true);
             pool.world.frame++;
             batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           };
           // Put all batches back at the scene root for the shared row reader,
           // preserving their identical complete parent-space affine transform.
@@ -629,6 +729,7 @@ describe("actual GLB projected tree LOD candidate", () => {
         pool.remove("not-ready");
         await withTreeViewport(pool.world, async () => {
           expect(await track(pool.add(1, "missing-lod1"))).toBe(true);
+          batched.prepareGLBTreeBatchedInstancerForRender(pool.world.camera);
           for (const row of activeRows(pool)) verifyRow(row, 1, 0, "batched");
         });
       },
