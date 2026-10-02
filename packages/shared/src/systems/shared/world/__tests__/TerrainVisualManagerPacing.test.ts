@@ -3,7 +3,7 @@ import { Worker } from "node:worker_threads";
 import { World } from "../../../../core/World";
 import { DataManager } from "../../../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
-import THREE from "../../../../extras/three/three";
+import THREE, { vec3 } from "../../../../extras/three/three";
 import { createTerrainWorkerConfig } from "../../../../utils/workers/TerrainWorkerShared";
 import {
   QUAD_CHUNK_WORKER_CODE,
@@ -181,6 +181,382 @@ function drain(manager: TerrainVisualManager, complete: () => boolean) {
   for (let i = 0; i < 2000 && !complete(); i++) slice(manager);
   expect(complete()).toBe(true);
 }
+
+function boxFrustum(box: THREE.Box3): THREE.Frustum {
+  return new THREE.Frustum(
+    new THREE.Plane(new THREE.Vector3(1, 0, 0), -box.min.x),
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0), box.max.x),
+    new THREE.Plane(new THREE.Vector3(0, 1, 0), -box.min.y),
+    new THREE.Plane(new THREE.Vector3(0, -1, 0), box.max.y),
+    new THREE.Plane(new THREE.Vector3(0, 0, 1), -box.min.z),
+    new THREE.Plane(new THREE.Vector3(0, 0, -1), box.max.z),
+  );
+}
+
+async function boundsFixture(wireframe = false) {
+  const f = await fixture(8, false, wireframe);
+  const node = f.addNode();
+  drain(f.manager, () => node.visualChunkKey !== null);
+  const mesh = f.manager.getChunks().get(node.visualChunkKey!)!.mesh;
+  f.scene.updateMatrixWorld(true);
+  const position = mesh.geometry.getAttribute("position");
+  const bounds = new THREE.Box3().setFromBufferAttribute(position);
+  const worldBounds = bounds.clone().applyMatrix4(mesh.matrixWorld);
+  // A box above every actual terrain vertex, but inside the wide terrain
+  // sphere. This is the real false-positive shape observed below mirror water.
+  const outside = boxFrustum(
+    new THREE.Box3(
+      new THREE.Vector3(
+        worldBounds.min.x - 100,
+        worldBounds.max.y + 1,
+        worldBounds.min.z - 100,
+      ),
+      new THREE.Vector3(
+        worldBounds.max.x + 100,
+        worldBounds.max.y + 100,
+        worldBounds.max.z + 100,
+      ),
+    ),
+  );
+  expect(outside.intersectsBox(worldBounds)).toBe(false);
+  expect(THREE.Mesh.prototype.intersectsFrustum.call(mesh, outside)).toBe(true);
+  return { ...f, node, mesh, position, bounds, worldBounds, outside };
+}
+
+describe("TerrainVisualManager opt-in immutable per-pass bounds", () => {
+  it.each([false, true])(
+    "retains default sphere results and tightens only qualified geometry (wireframe=%s)",
+    async (wireframe) => {
+      const f = await boundsFixture(wireframe);
+      const originalGeometry = f.mesh.geometry;
+      const originalIndex = originalGeometry.index;
+      const originalMaterial = f.mesh.material;
+      const originalFlags = [
+        f.mesh.visible,
+        f.mesh.frustumCulled,
+        f.mesh.castShadow,
+        f.mesh.receiveShadow,
+      ];
+      expect(Object.hasOwn(f.mesh, "intersectsFrustum")).toBe(false);
+      expect(f.mesh.intersectsFrustum).toBe(
+        THREE.Mesh.prototype.intersectsFrustum,
+      );
+      expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+      f.manager.setTerrainBoundsCullingEnabled(true);
+      expect(f.mesh.intersectsFrustum(f.outside)).toBe(false);
+      f.manager.setTerrainBoundsCullingEnabled(false);
+      expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+      expect(f.mesh.geometry).toBe(originalGeometry);
+      expect(f.mesh.geometry.index).toBe(originalIndex);
+      expect(f.mesh.material).toBe(originalMaterial);
+      expect([
+        f.mesh.visible,
+        f.mesh.frustumCulled,
+        f.mesh.castShadow,
+        f.mesh.receiveShadow,
+      ]).toEqual(originalFlags);
+    },
+  );
+
+  it("uses current per-pass frusta and includes the lowest skirt vertex independently of mutable public bounds", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    let lowest = new THREE.Vector3(0, Infinity, 0);
+    for (let i = 0; i < f.position.count; i++) {
+      if (f.position.getY(i) < lowest.y)
+        lowest = new THREE.Vector3().fromBufferAttribute(f.position, i);
+    }
+    const surfaceMin = Math.min(
+      ...Array.from(
+        f.mesh.geometry.userData.terrainCellTopology
+          ? {
+              length:
+                f.mesh.geometry.userData.terrainCellTopology.surfaceVertexCount,
+            }
+          : { length: f.node.resolution ** 2 },
+        (_, i) => f.position.getY(i),
+      ),
+    );
+    expect(lowest.y).toBeLessThan(surfaceMin);
+    lowest.applyMatrix4(f.mesh.matrixWorld);
+    const skirtView = boxFrustum(
+      new THREE.Box3(
+        lowest.clone().addScalar(-0.001),
+        lowest.clone().addScalar(0.001),
+      ),
+    );
+    const reused = f.outside.clone();
+    expect(f.mesh.intersectsFrustum(reused)).toBe(false);
+    reused.copy(skirtView);
+    expect(f.mesh.intersectsFrustum(reused)).toBe(true);
+    // Render visibility cannot be corrupted by a later public box replacement.
+    f.mesh.geometry.boundingBox = new THREE.Box3();
+    expect(f.mesh.intersectsFrustum(reused)).toBe(true);
+    reused.copy(f.outside);
+    expect(f.mesh.intersectsFrustum(reused)).toBe(false);
+  });
+
+  it("transforms the immutable box through current translated, rotated, scaled and sheared parents", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    const transforms = [
+      new THREE.Matrix4().makeTranslation(-500, 210, 700),
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(10, 30, -50),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, 0.9, -0.3)),
+        new THREE.Vector3(-2, 0.7, 3),
+      ),
+      new THREE.Matrix4().makeShear(0.5, 0.2, -0.1, 0.3, 0.1, -0.2),
+    ];
+    f.container.matrixAutoUpdate = false;
+    for (const transform of transforms) {
+      f.container.matrix.copy(transform);
+      f.scene.updateMatrixWorld(true);
+      const transformed = f.bounds.clone().applyMatrix4(f.mesh.matrixWorld);
+      // Independently transform every actual vertex to prove containment.
+      for (let i = 0; i < f.position.count; i++)
+        expect(
+          transformed.containsPoint(
+            new THREE.Vector3()
+              .fromBufferAttribute(f.position, i)
+              .applyMatrix4(f.mesh.matrixWorld),
+          ),
+        ).toBe(true);
+      const inside = boxFrustum(transformed.clone().expandByScalar(0.001));
+      const outside = boxFrustum(
+        new THREE.Box3(
+          new THREE.Vector3(
+            transformed.min.x - 1,
+            transformed.max.y + 1,
+            transformed.min.z - 1,
+          ),
+          transformed.max.clone().add(new THREE.Vector3(1, 100, 1)),
+        ),
+      );
+      expect(f.mesh.intersectsFrustum(inside)).toBe(true);
+      expect(f.mesh.intersectsFrustum(outside)).toBe(false);
+    }
+  });
+
+  it("falls back to the original sphere for unknown/deformed materials and render callbacks", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    const displacement = new THREE.Texture();
+    const unknown = new THREE.MeshPhysicalNodeMaterial();
+    const mutations: Array<[string, () => void, () => void]> = [
+      [
+        "position node",
+        () => {
+          f.material.positionNode = vec3(0);
+        },
+        () => {
+          f.material.positionNode = null;
+        },
+      ],
+      [
+        "vertex node",
+        () => {
+          f.material.vertexNode = vec3(0);
+        },
+        () => {
+          f.material.vertexNode = null;
+        },
+      ],
+      [
+        "geometry node",
+        () => {
+          f.material.geometryNode = vec3(0);
+        },
+        () => {
+          f.material.geometryNode = null;
+        },
+      ],
+      [
+        "context node",
+        () => {
+          f.material.contextNode = vec3(0);
+        },
+        () => {
+          f.material.contextNode = null;
+        },
+      ],
+      [
+        "displacement",
+        () => {
+          f.material.displacementMap = displacement;
+        },
+        () => {
+          f.material.displacementMap = null;
+        },
+      ],
+      [
+        "unknown material",
+        () => {
+          f.mesh.material = unknown;
+        },
+        () => {
+          f.mesh.material = f.material;
+        },
+      ],
+      [
+        "mesh render callback",
+        () => {
+          f.mesh.onBeforeRender = () => {};
+        },
+        () => {
+          f.mesh.onBeforeRender = THREE.Object3D.prototype.onBeforeRender;
+        },
+      ],
+      [
+        "mesh shadow callback",
+        () => {
+          f.mesh.onBeforeShadow = () => {};
+        },
+        () => {
+          f.mesh.onBeforeShadow = THREE.Object3D.prototype.onBeforeShadow;
+        },
+      ],
+      [
+        "material callback",
+        () => {
+          f.material.onBeforeRender = () => {};
+        },
+        () => {
+          f.material.onBeforeRender = THREE.Material.prototype.onBeforeRender;
+        },
+      ],
+      [
+        "shadow material",
+        () => {
+          f.mesh.customDepthMaterial = unknown;
+        },
+        () => {
+          f.mesh.customDepthMaterial = undefined;
+        },
+      ],
+    ];
+    try {
+      for (const [name, change, restore] of mutations) {
+        expect(f.mesh.intersectsFrustum(f.outside), name).toBe(false);
+        change();
+        expect(f.mesh.intersectsFrustum(f.outside), name).toBe(
+          THREE.Mesh.prototype.intersectsFrustum.call(f.mesh, f.outside),
+        );
+        restore();
+        expect(f.mesh.intersectsFrustum(f.outside), name).toBe(false);
+      }
+    } finally {
+      displacement.dispose();
+      unknown.dispose();
+    }
+  });
+
+  it("falls back on changed geometry identity, topology, attribute revisions, morphs and normalization", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    const geometry = f.mesh.geometry;
+    const replacement = geometry.clone();
+    f.mesh.geometry = replacement;
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+    f.mesh.geometry = geometry;
+    replacement.dispose();
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(false);
+    geometry.morphAttributes.position = [f.position.clone()];
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+    delete geometry.morphAttributes.position;
+    const originalTopology = geometry.userData.terrainCellTopology;
+    geometry.userData.terrainCellTopology = {};
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+    if (originalTopology)
+      geometry.userData.terrainCellTopology = originalTopology;
+    else delete geometry.userData.terrainCellTopology;
+    f.position.normalized = true;
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+    f.position.normalized = false;
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(false);
+    // Publication immutability uses Three's version contract, never a render-
+    // time scan. As elsewhere, raw array writes must also mark needsUpdate.
+    f.position.needsUpdate = true;
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+  });
+
+  it("delegates non-affine/nonfinite transforms, invalid planes and multi-view frusta", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    const matrix = f.mesh.matrixWorld.clone();
+    for (const [index, value] of [
+      [3, 0.001],
+      [7, 0.1],
+      [15, 2],
+      [12, Infinity],
+    ]) {
+      f.mesh.matrixWorld.elements[index] = value;
+      expect(f.mesh.intersectsFrustum(f.outside)).toBe(
+        THREE.Mesh.prototype.intersectsFrustum.call(f.mesh, f.outside),
+      );
+      f.mesh.matrixWorld.copy(matrix);
+    }
+    for (const value of [Infinity, NaN]) {
+      const frustum = f.outside.clone();
+      frustum.planes[0].constant = value;
+      expect(f.mesh.intersectsFrustum(frustum)).toBe(
+        THREE.Mesh.prototype.intersectsFrustum.call(f.mesh, frustum),
+      );
+    }
+    const camera = new THREE.PerspectiveCamera();
+    camera.position
+      .copy(f.worldBounds.getCenter(new THREE.Vector3()))
+      .add(new THREE.Vector3(0, 80, 100));
+    camera.lookAt(f.worldBounds.getCenter(new THREE.Vector3()));
+    camera.updateMatrixWorld(true);
+    const frusta = new THREE.FrustumArray().setFromArrayCamera(
+      new THREE.ArrayCamera([camera]),
+    );
+    expect(f.mesh.intersectsFrustum(frusta)).toBe(
+      THREE.Mesh.prototype.intersectsFrustum.call(f.mesh, frusta),
+    );
+  });
+
+  it("does not acquire a pre-existing custom visibility owner", async () => {
+    const f = await boundsFixture();
+    const owner: THREE.Mesh["intersectsFrustum"] = () => true;
+    f.mesh.intersectsFrustum = owner;
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    expect(f.mesh.intersectsFrustum).toBe(owner);
+    expect(f.mesh.intersectsFrustum(f.outside)).toBe(true);
+    f.manager.dispose();
+    expect(f.mesh.intersectsFrustum).toBe(owner);
+  });
+
+  it("restores retired hooks exactly once without clobbering a later owner", async () => {
+    const f = await boundsFixture();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    const held = f.mesh.intersectsFrustum;
+    let disposals = 0;
+    f.mesh.geometry.addEventListener("dispose", () => {
+      disposals++;
+    });
+    f.manager.onNodeDestroyGeometry(f.node);
+    expect(f.mesh.intersectsFrustum).toBe(
+      THREE.Mesh.prototype.intersectsFrustum,
+    );
+    expect(Object.hasOwn(f.mesh, "intersectsFrustum")).toBe(false);
+    expect(held.call(f.mesh, f.outside)).toBe(true);
+    expect(disposals).toBe(1);
+    f.manager.onNodeNeedsGeometry(f.node);
+    drain(f.manager, () => f.node.visualChunkKey !== null);
+    const replacement = f.manager.getChunks().get(f.node.visualChunkKey!)!.mesh;
+    expect(replacement.intersectsFrustum).not.toBe(
+      THREE.Mesh.prototype.intersectsFrustum,
+    );
+    const laterOwner: THREE.Mesh["intersectsFrustum"] = () => true;
+    replacement.intersectsFrustum = laterOwner;
+    f.manager.dispose();
+    f.manager.setTerrainBoundsCullingEnabled(true);
+    expect(replacement.intersectsFrustum).toBe(laterOwner);
+    expect(disposals).toBe(1);
+  });
+});
 
 describe("TerrainVisualManager actual cooperative preparation", () => {
   it("bounds admitted raw reservations and queues bootstrap without preparing geometry", async () => {
@@ -410,12 +786,15 @@ describe("TerrainVisualManager actual cooperative preparation", () => {
     async (action) => {
       const f = await fixture(64, true, true),
         node = f.addNode();
+      f.manager.setTerrainBoundsCullingEnabled(true);
+      const rejectedMeshes: THREE.Mesh[] = [];
       let geometryDisposals = 0,
         materialDisposals = 0,
         calls = 0;
       const listener = (event: { child: THREE.Object3D }) => {
         calls++;
         const mesh = event.child as THREE.Mesh;
+        rejectedMeshes.push(mesh);
         mesh.geometry.addEventListener("dispose", () => {
           geometryDisposals++;
         });
@@ -438,6 +817,11 @@ describe("TerrainVisualManager actual cooperative preparation", () => {
       expect(f.container.children).toHaveLength(0);
       expect(f.manager.getChunks().size).toBe(0);
       expect(f.manager.getRetainedSurface(node)).toBeNull();
+      expect(
+        rejectedMeshes.every(
+          (mesh) => !Object.hasOwn(mesh, "intersectsFrustum"),
+        ),
+      ).toBe(true);
       expect(f.manager["failedAttempts"].get(node.id) ?? 0).toBe(
         action === "throw" ? 1 : 0,
       );

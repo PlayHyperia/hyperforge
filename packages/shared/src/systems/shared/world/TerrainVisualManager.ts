@@ -112,6 +112,15 @@ export class TerrainVisualManager implements QuadTreeListener {
   >();
   private releasedGeometry = new WeakSet<THREE.BufferGeometry>();
   private removedMeshes = new WeakSet<THREE.Mesh>();
+  private terrainBoundsCullingEnabled = false;
+  private readonly terrainBoundsHooks = new WeakMap<
+    THREE.Mesh,
+    {
+      original: THREE.Mesh["intersectsFrustum"];
+      installed: THREE.Mesh["intersectsFrustum"];
+      originalDescriptor: PropertyDescriptor | undefined;
+    }
+  >();
   private disposed = false;
   private playerX = 0;
   private playerZ = 0;
@@ -246,9 +255,24 @@ export class TerrainVisualManager implements QuadTreeListener {
     this.framesSinceInit++;
   }
 
+  /** Native qualification switch only; never changes visibility or geometry. */
+  setTerrainBoundsCullingEnabled(enabled: boolean): void {
+    if (typeof enabled !== "boolean")
+      throw new Error("Terrain bounds culling requires a boolean");
+    if (this.disposed) return;
+    this.terrainBoundsCullingEnabled = enabled;
+    // Default-off publishes unchanged meshes without bounds scans or hooks.
+    // Qualification enables once before warmup; subsequent toggles reuse the
+    // admitted immutable bounds rather than rescan geometry in a render pass.
+    if (enabled)
+      for (const chunk of this.chunks.values())
+        this.bindTerrainBoundsCulling(chunk);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.terrainBoundsCullingEnabled = false;
     this.quadTree.dispose();
     for (const chunk of this.chunks.values()) {
       this.removeMeshFromScene(chunk);
@@ -1235,8 +1259,9 @@ export class TerrainVisualManager implements QuadTreeListener {
       heightData: result.heightData,
       surface,
     };
-
     try {
+      if (this.terrainBoundsCullingEnabled)
+        this.bindTerrainBoundsCulling(chunk);
       if (!isCurrent()) throw new Error("Terrain publication owner changed");
       // Three dispatches synchronous added/childadded events. They may dispose,
       // invalidate, reparent or throw before publication: recheck and roll back.
@@ -1251,6 +1276,7 @@ export class TerrainVisualManager implements QuadTreeListener {
       this.failedAttempts.delete(node.id);
       node.testReady();
     } catch (error) {
+      this.releaseTerrainBoundsCulling(mesh);
       if (this.chunks.get(key) === chunk) this.chunks.delete(key);
       if (node.visualChunkKey === key) node.visualChunkKey = null;
       try {
@@ -1266,6 +1292,7 @@ export class TerrainVisualManager implements QuadTreeListener {
   private removeMeshFromScene(chunk: TerrainVisualChunk): void {
     if (this.removedMeshes.has(chunk.mesh)) return;
     this.removedMeshes.add(chunk.mesh);
+    this.releaseTerrainBoundsCulling(chunk.mesh);
     // Retire ownership before Three's synchronous removal callbacks. They can
     // re-enter dispose/invalidation; an old removal must not delete a new owner.
     if (this.chunks.get(chunk.key) === chunk) this.chunks.delete(chunk.key);
@@ -1296,6 +1323,125 @@ export class TerrainVisualManager implements QuadTreeListener {
         }
       }
     }
+  }
+
+  private bindTerrainBoundsCulling(chunk: TerrainVisualChunk): void {
+    const mesh = chunk.mesh;
+    const original = mesh.intersectsFrustum;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      mesh,
+      "intersectsFrustum",
+    );
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    if (
+      this.terrainBoundsHooks.has(mesh) ||
+      original !== THREE.Mesh.prototype.intersectsFrustum ||
+      !Object.isExtensible(mesh) ||
+      (originalDescriptor &&
+        (!("value" in originalDescriptor) ||
+          !originalDescriptor.configurable ||
+          !originalDescriptor.writable)) ||
+      !chunk.surface.matchesGeometry(geometry) ||
+      !(position instanceof THREE.BufferAttribute) ||
+      position.normalized
+    )
+      return;
+    // Capture actual published vertices once, INCLUDING skirts/collars. Tree
+    // height bounds describe only the surface and cannot safely replace these.
+    // Never trust a later mutable geometry.boundingBox or scan in a render pass.
+    const localBounds = new THREE.Box3().setFromBufferAttribute(position);
+    if (
+      localBounds.isEmpty() ||
+      ![...localBounds.min.toArray(), ...localBounds.max.toArray()].every(
+        Number.isFinite,
+      )
+    )
+      return;
+    const worldBounds = new THREE.Box3();
+    const material = mesh.material;
+    const installed: THREE.Mesh["intersectsFrustum"] = (frustum) => {
+      if (!this.terrainBoundsCullingEnabled || this.disposed)
+        return original.call(mesh, frustum);
+      const m = mesh.matrixWorld.elements;
+      const knownMaterial =
+        material instanceof THREE.MeshStandardNodeMaterial &&
+        material.constructor === THREE.MeshStandardNodeMaterial
+          ? !material.positionNode &&
+            !material.vertexNode &&
+            !material.geometryNode &&
+            !material.contextNode &&
+            !material.displacementMap &&
+            material.setupPosition ===
+              THREE.NodeMaterial.prototype.setupPosition &&
+            material.setupVertex === THREE.NodeMaterial.prototype.setupVertex
+          : material instanceof THREE.MeshBasicMaterial &&
+            material.constructor === THREE.MeshBasicMaterial;
+      if (
+        this.chunks.get(chunk.key) !== chunk ||
+        this.releasedGeometry.has(geometry) ||
+        mesh.geometry !== geometry ||
+        mesh.material !== material ||
+        !chunk.surface.matchesGeometry(geometry) ||
+        position.normalized ||
+        geometry.morphAttributes.position?.length ||
+        !knownMaterial ||
+        !(material instanceof THREE.Material) ||
+        material.onBeforeRender !== THREE.Material.prototype.onBeforeRender ||
+        material.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile ||
+        mesh.customDepthMaterial ||
+        mesh.customDistanceMaterial ||
+        mesh.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+        mesh.onBeforeShadow !== THREE.Object3D.prototype.onBeforeShadow ||
+        !(frustum instanceof THREE.Frustum) ||
+        !m.every(Number.isFinite) ||
+        m[3] !== 0 ||
+        m[7] !== 0 ||
+        m[11] !== 0 ||
+        m[15] !== 1 ||
+        !frustum.planes.every(
+          (plane) =>
+            Number.isFinite(plane.constant) &&
+            Number.isFinite(plane.normal.x) &&
+            Number.isFinite(plane.normal.y) &&
+            Number.isFinite(plane.normal.z) &&
+            plane.normal.lengthSq() > 0,
+        )
+      )
+        return original.call(mesh, frustum);
+      worldBounds.copy(localBounds).applyMatrix4(mesh.matrixWorld);
+      if (
+        !Number.isFinite(worldBounds.min.x) ||
+        !Number.isFinite(worldBounds.min.y) ||
+        !Number.isFinite(worldBounds.min.z) ||
+        !Number.isFinite(worldBounds.max.x) ||
+        !Number.isFinite(worldBounds.max.y) ||
+        !Number.isFinite(worldBounds.max.z)
+      )
+        return original.call(mesh, frustum);
+      return frustum.intersectsBox(worldBounds);
+    };
+    this.terrainBoundsHooks.set(mesh, {
+      original,
+      installed,
+      originalDescriptor,
+    });
+    mesh.intersectsFrustum = installed;
+  }
+
+  private releaseTerrainBoundsCulling(mesh: THREE.Mesh): void {
+    const hooks = this.terrainBoundsHooks.get(mesh);
+    if (!hooks) return;
+    if (mesh.intersectsFrustum === hooks.installed) {
+      if (hooks.originalDescriptor)
+        Object.defineProperty(
+          mesh,
+          "intersectsFrustum",
+          hooks.originalDescriptor,
+        );
+      else Reflect.deleteProperty(mesh, "intersectsFrustum");
+    }
+    this.terrainBoundsHooks.delete(mesh);
   }
 
   private releaseGeometry(geometry: THREE.BufferGeometry): void {

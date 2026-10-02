@@ -1,5 +1,102 @@
 # Grass canopy visibility: research checkpoint
 
+## Native211 — terrain AABB reduces submissions; cadence benefit does not replicate
+
+The general per-pass terrain AABB candidate is implemented and tested, but **remains default-off and unaccepted for performance promotion**. Native execution confirms the predicted removal of ten mirror-terrain submissions. The first timed comparison looks promising; an immediate matched repeat does not reproduce the benefit. This is useful attribution and implementation evidence, **not a proven FPS improvement or completion of the 60 FPS at 2× goal**. It supersedes Native210's implementation-pending status without changing that census's historical findings.
+
+### Implementation, build and unchanged-content admission
+
+The existing [terrain visual manager](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/systems/shared/world/TerrainVisualManager.ts:259) owns the explicit qualification setter. Default-off avoids the initial bounds scans/hooks. Qualification initializes conservative bounds from actual published geometry, including skirts/collars, and uses the existing per-pass frustum path; it does not replace geometry, reduce detail or enable the water-specific crop. The focused verification reports **67 tests passed and ESLint passed**; independent verification reports **12 passed / 25 skipped**. TypeScript still reports five known procgen-distribution errors, none in the changed source. Skipped tests and pre-existing type errors are not represented as a fully clean project-wide verification.
+
+The native runs use canonical **build205**, with pins-report SHA256 `eaa0996e89461855bcedd39d5efba36749d45bf56e3def5cd0e8c906b55fb21e` and framework SHA256 `ea253b489ddcf5d66881feb4f66428a3e8f3113c05bac44a3e06f5cfb27f458d`. Build204 is an unused intermediate, not the measured build.
+
+Both receipts contain the **same exact executed controller source, quality snapshot, pose, phase, exposure, geometry-owner records and mirror target**. The actual canvas is **3024×1724, DPR2, MSAA4**, High shadows, reflections enabled, postprocessing and bloom preferences enabled; actual composer routing is enabled, LUT/depth blur/highlights are inactive. The reflection crop and reflected-grass footprint experiments are disabled, and primary shadow reuse is disabled. The held phase is **0.56**, exposure **0.850240084**, camera `[385,31.851440846086817,368.1885010332282]`, quaternion `[0,0.9930916123118833,0.11734159346022194,0]`, FOV70; player `[385,28.919301523097687,374]`. The mirror target stays **1512×862**. All **52 terrain and 94 grass owners** are pinned, with 52 candidate-bound terrain owners. Recorded focus samples are visible/focused throughout, the runtime/quality/pose/population guards pass, and both receipts finish with empty errors.
+
+### Actual submission change, not a pixel-cost estimate
+
+| Observed work | OFF | ON |
+| --- | ---: | ---: |
+| Mirror terrain draws / triangles | 17 / 482,838 | 7 / 398,418 |
+| Primary terrain draws / triangles | 18 / 491,280 | 18 / 491,280 |
+| Primary grass draws / triangles | 45 / 3,708,681 | 45 / 3,708,681 |
+| Mirror grass draws / triangles | 40 / 3,263,232 | 40 / 3,263,232 |
+| All-object sun-shadow draws / triangles, separate census only | 216 / 1,245,144 | 216 / 1,245,144 |
+
+The timed terrain/grass counts are stable within every measured arm in both runs. The separate native census also finds unchanged aggregate shadow submissions; that count is **not a shadow timing result**. Removing **84,420 mirror triangles (17.48% of mirror-terrain submissions)** matches Native210's full-frustum prediction. These below-plane chunks were already clipped before producing mirror fragments, so the established removal is submission/vertex work, not elimination of that proportion of terrain shading cost. Neither the two extra crop-only opportunities nor any primary-view reduction is demonstrated here. The timing controller's terrain/grass-only counters must not be interpreted as a count of all shadow or fullscreen work.
+
+### Two bracketed comparisons
+
+Each run uses **OFF / ON / OFF / ON / OFF**, six seconds per arm, with the first second of each arm excluded. The candidate is initialized ON then OFF before the timing clock starts. Thus every OFF arm includes the same already-installed, disabled wrapper; this is **not a comparison against pristine never-enabled default-off cost**. The original ordinary `World.tick` is observed without a forced render, GPU fence/timer or quality omission. Read-only draw counting remains installed in every arm. Synchronous CPU includes that observer, and ON invokes it fewer times; guards outside the CPU interval still contribute to cadence.
+
+All values below are milliseconds. Medians use the standard midpoint for even sample counts; p95 uses sorted index `floor(0.95 × (n − 1))`. Interval counts exclude the first measured tick of each arm, so transitions/warmup do not enter cadence samples.
+
+| Run / arm | Measured ticks / intervals | Wall interval median / p95 | Input interval median / p95 | Synchronous tick CPU median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| First OFF1 | 70 / 69 | 71.10 / 81.00 | 72.50 / 83.40 | 16.20 / 18.70 |
+| First ON1 | 72 / 71 | 68.20 / 76.70 | 66.90 / 76.30 | 15.10 / 18.20 |
+| First OFF2 | 68 / 67 | 72.20 / 80.70 | 73.50 / 83.30 | 15.90 / 19.50 |
+| First ON2 | 72 / 71 | 68.80 / 77.10 | 68.80 / 79.80 | 15.20 / 17.50 |
+| First OFF3 | 70 / 69 | 70.60 / 78.80 | 70.40 / 80.10 | 15.90 / 18.50 |
+| Repeat OFF1 | 72 / 71 | 68.40 / 76.60 | 68.90 / 76.90 | 14.80 / 19.50 |
+| Repeat ON1 | 69 / 68 | 71.50 / 80.40 | 72.55 / 81.10 | 16.20 / 21.70 |
+| Repeat OFF2 | 71 / 70 | 69.20 / 78.40 | 70.70 / 81.20 | 15.30 / 19.30 |
+| Repeat ON2 | 69 / 68 | 71.55 / 80.30 | 73.20 / 81.20 | 15.60 / 20.00 |
+| Repeat OFF3 | 68 / 67 | 73.00 / 81.30 | 74.40 / 83.20 | 16.30 / 19.30 |
+
+The first run's ON wall medians are **3.45 ms and 2.60 ms lower** than their neighboring OFF-median averages. In the matched repeat, ON is instead **2.70 ms and 0.45 ms higher** than those local brackets. These short screens do not establish a causal regression either; they establish **failure to replicate a consistent benefit**. Do not select only the first result, pool away the reversal, compare against older builds as a controlled experiment, convert the reciprocal of these intervals into displayed FPS, or infer exclusive GPU timing. The measured intervals remain far above the 16.67 ms frame budget, and this small culling opportunity is not an evidenced route to the whole target by itself.
+
+The main task inspected same-view native OFF/ON screenshots and found no gross missing terrain. This is limited visual evidence at this one held view/light, **not pixel identity, all-view/all-day correctness or shipping acceptance**. Keep the candidate default-off while prioritizing larger measured contributors.
+
+### Evidence and restoration
+
+[First timing receipt and exact source](/Users/lucid/Downloads/hyperia-native211-terrain-bounds.json), SHA256 `9fc0cd9d60621a30e60ea25d4e5e43d42830824323bc1e05b6dfc7e6ce2cd7c2`, contains 421 total / 352 measured ticks and 347 valid within-arm intervals. [Matched repeat receipt and exact source](</Users/lucid/Downloads/hyperia-native211-terrain-bounds (1).json>), SHA256 `40416b6c8c28bdd74a93bab49eda4e7d1a5106bb88f33da85cd34ace7533faf9`, contains 418 total / 349 measured ticks and 344 valid intervals. Both record `complete:true`, `restored:true`, `candidateRestoredOff:true`, exact backend-draw/world-tick descriptor restoration and empty errors. The candidate-owned disabled mesh wrappers remain by design until normal disposal/reload; observer restoration does not claim their removal.
+
+[Separate census and cleanup receipt](/Users/lucid/Downloads/hyperia-native211-census-cleanup.json), SHA256 `31b06f4230a3da971ab04938a4fc4eb3fdc1f029c7ac512b5b8072dbbf45a373`, preserves both completed one-frame censuses, their exact executed observer source and the borrowed control sources. Every other census category matches, including all-object primary/mirror/sun submissions. Both censuses restore all four observer descriptors. Separate cleanup verifies camera, clock, environment/renderer exposure, candidate OFF, observer/UI absence and resumed ordinary animation; errors are empty. The owned game and DevTools close, preserving the original New Tab.
+
+Private `runtime-terrain211-bounds01` stops at `2026-10-02T04:53:50.149Z`: process receipt SHA256 `3151c23c7a0bbac050f60638973d8d1846111a88c09c5a2e00ff176d76178f8b`, errors empty, protected resources unchanged, disposable database removed, all four private ports empty and owned container absent. The original runtime helper is restored byte-for-byte and syntax checked. A temporary repository-root copy used to serve the reviewed diagnostic through the existing Vite allowlist is removed; the private evidence copy remains. The initial root-relative import returned404; the exact workspace-file import succeeded without expanding filesystem access. No default enablement, public-build promotion or shipping-performance claim is made.
+
+## Native210 — terrain-bound census narrows the next culling experiment
+
+A read-only native census on private canonical build203 identifies terrain submissions that tighter per-pass bounds could reject. **This is one completed ordinary frame, not a cadence test, implemented saving or shipping result.** The next experiment is a **default-off general terrain AABB admission** in the existing terrain visual manager, currently being implemented and not accepted. Specialized water-crop culling is not the first implementation target. The 60 FPS at 2× goal remains unmet; Native209's compressed texture candidate stays opt-in with no consistent measured win.
+
+### Actual frame and independently reproduced classification
+
+The census observes actual **3024×1724, DPR2, MSAA4**, phase0.56 and exposure0.850240084. Player position is `[385,28.919301523097687,374]`; camera position `[385,31.851440846086817,368.1885010332282]`, quaternion `[0,0.9930916123118833,0.11734159346022194,0]`, FOV70. High-quality content is not reduced. Reflections remain enabled; both reflection scissor and reflected-grass footprint experiments remain disabled. The page is visible but unfocused, explicitly admitted for this **submission census only**, not for FPS or frame-pacing conclusions.
+
+The live water owner admits a conservative sampled rectangle `[784,338,728,118]` within the unchanged1512×862 mirror target. No scissor is enabled and no camera is cropped. The observer records the final oblique mirror projection/view matrices inside the existing nested render, after the reflector updates them, and examines actual original-material terrain draws. Every recorded terrain draw issues one draw call. Declared local boxes enclose the inspected CPU vertex positions; unsupported displacement, morphing, instancing, custom vertex transforms, bundles and other uncertain bound cases are not admitted. This frame has zero unknown terrain bounds.
+
+| Mirror terrain classification | Issued draws | Submitted triangles |
+| --- | ---: | ---: |
+| Complete mirror terrain | 17 | 482,838 |
+| Outside the ordinary full-frustum AABB test | 10 | 84,420 |
+| Additional rejections from the sampled-water crop only | 2 | 16,884 |
+| Combined outside sampled-water crop | 12 | 101,304 |
+| Retained by the crop AABB test | 5 | 381,534 |
+
+An independent recomputation using the installed three@0.186.0 `Matrix4`, `Box3` and `Frustum` reproduces **all17 local-to-world boxes and both classifications exactly**. The24 reconstructed crop-plane components match the receipt with maximum absolute difference0. The full-frustum opportunity is17.48% of mirror-terrain triangles; the crop adds only3.50%. The two incremental crop-only chunks are `QuadTerrain_quad_51_d4_250_550` and `QuadTerrain_quad_50_d4_250_450`, each8,442 triangles. These counts are not GPU-time percentages.
+
+All ten ordinary full-frustum rejections lie entirely below the mirror's oblique clip plane at `y=24.6`, with separation margins4.20–22.10m. Their box-derived enclosing spheres intersect the full frustum, consistent with loose spherical culling of broad, shallow terrain chunks. **Actual geometry bounding spheres were not serialized**, so this is not an independent reconstruction of their exact radii. The ordinary AABB classification itself is independently verified. Those ten chunks already produce no mirror fragments after clipping: any removal saves submission/vertex work, not their purported full terrain-fragment shading cost. Five retained chunks still contain79.02% of mirror-terrain triangles. No primary-view or shadow-view AABB saving has yet been measured.
+
+The [official Three.js Frustum documentation](https://threejs.org/docs/pages/Frustum.html) distinguishes object/sphere intersection from conservative box intersection. Installed r186 [Mesh.intersectsFrustum](/Users/lucid/Documents/hyperia/hyperia-implementation/node_modules/three/src/objects/Mesh.js:226) delegates to the sphere-based object test; [Frustum](/Users/lucid/Documents/hyperia/hyperia-implementation/node_modules/three/src/math/Frustum.js:95) supplies the exact WebGPU projection-plane and box tests used for the independent recomputation. The existing [terrain generator](/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/src/systems/shared/world/TerrainQuadChunkGenerator.ts:483) computes both geometry bounds. This supports testing a conservative general per-pass AABB gate without replacing geometry or changing resolution; it does not establish its frame-time value or lifecycle safety before implementation and native qualification.
+
+### Other observed work and interpretation limits
+
+The same ordinary frame records18 primary terrain draws/491,280 triangles,45 primary grass draws/3,708,681 triangles and40 mirror grass draws/3,263,232 triangles. These overlapping view/category submission counts are not a most-to-least GPU cost ranking. No geometry, grass density, reflection capture or shadow content is omitted by this observer.
+
+Two sun-shadow renders complete against the same shadow-camera/target owner: one under the primary scene and one inside the mirror. Their combined category records216 issued draws/1,245,144 triangles. The receipt does not split those aggregate draws/triangles between the two captures, so do not halve the total or label it an exclusive repeated-shadow cost. The primary shadow-reuse snapshot is disabled. Investigate that repeated work separately with its actual owner and invariants.
+
+The preference and actual composer route are true, but the recorded LUT is `none`, LUT activation and depth blur are false, and both highlight targets are inactive. `effectDraws:[]` is **not proof of no output/fullscreen rendering**: the observer matches only `Render Pipeline`, `RenderPipeline` and `Outline` names and does not match `Output`. Frame submission counts, the sampled crop's6.59% target-area fraction and an empty name-filter result must not be converted into FPS, fill-rate or postprocessing-cost claims.
+
+### Evidence, observer restoration and completed runtime cleanup
+
+[Exact Native210 receipt and executed console source](/Users/lucid/Downloads/hyperia-native210-terrain-census.json), SHA256 `25df11f1314698973d2da7bb925928ac10348048a4e1f9f3487d0175ba84f472`. The accepted `census` records `complete:true`, `restored:true`, one tick, an admitted completed mirror capture/current captured lake owner, and empty errors. All four exact descriptors—backend draw, renderer render, reflector update and world tick—restore. Original calls are forwarded; no forced render, GPU timer/fence, new animation loop, omission or quality change is introduced by the census. Its per-vertex inspection adds observer work, so even a coincidental interval would not be clean performance evidence.
+
+The historical helper import initially returns HTTP403 from the existing Vite allowlist. No allowlist broadening or game setting change results from that refusal. The retained camera/clock and exposure controls are subsequently installed through their exact console source, which is included in the receipt's `controls` field. The initial focused-only census attempt refuses before installing any hook: zero ticks and an empty restoration list. Its `restored:false` follows the four-installed-hook completion requirement, not a detected hook leak. The successful retry explicitly permits visible/unfocused observation and retains the other admission checks.
+
+[Separate control-restoration receipt](/Users/lucid/Downloads/hyperia-native210-cleanup.json), SHA256 `6e072809ec5c70dcf65338941c471b140d78e8569912de7443ba645afb3daf5e`, verifies camera, clock, environment exposure, renderer exposure, census restoration, resumed ordinary animation and absence of the review controller, with empty errors. The owned game and DevTools tabs are closed while preserving New Tab. The private `runtime-terrain210-census01/process.json` receipt is `STOPPED` at `2026-10-02T04:27:18.760Z`, SHA256 `7c2aa3231f4c1ac8ecf72e49810b56caaa5cfb1eb097ff6c532b67918cd3bf4b`: empty errors, protected resources unchanged, ephemeral database removed, all four private ports empty and the exact owned Docker container absent. The temporary runtime helper is restored and its syntax check passes. These cleanup checks certify the separate control/runtime owners; they do not qualify the performance candidate.
+
+No default or public-build promotion is claimed. Freeze the default-off AABB implementation behind focused real-geometry/lifecycle tests, then run matched complete-content native images and bracketed timing before deciding whether it advances the 60 FPS target.
+
 ## Native209 — native compressed terrain loading verified; no consistent cadence win
 
 The six-map UASTC terrain candidate now loads through the actual initialized WebGPU renderer on private canonical build203. **Keep it opt-in and unqualified: the PNG / UASTC / UASTC / PNG screen does not demonstrate a consistent performance improvement.** The 60 FPS at 2× goal remains unmet. This section supersedes Native208's “next implementation” status, not its reflection-attribution result.
