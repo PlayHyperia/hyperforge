@@ -65,6 +65,7 @@ import {
   type CompactRockSampling,
   type CompactGroundSampling,
   type CompactTerrainTextureEncoding,
+  type CompactTerrainTextureMatrix,
   type CompactSurfaceBlend,
   type CompactPondBlend,
   type CompactCoastBlend,
@@ -1198,6 +1199,7 @@ export function createTerrainMaterial(
     compactRockSampling?: CompactRockSampling;
     compactGroundSampling?: CompactGroundSampling;
     compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
+    compactTerrainTextureMatrix?: CompactTerrainTextureMatrix;
     compactTextureRenderer?: THREE.WebGPURenderer;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
@@ -1248,6 +1250,14 @@ export function createTerrainMaterial(
     throw new Error(
       "Terrain texture encoding requires the compact PBR material",
     );
+  if (options.compactTerrainTextureMatrix !== undefined) {
+    if (options.compactTerrainTextureMatrix !== "identity-v1")
+      throw new Error("Invalid compact terrain texture matrix mode");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain texture matrix requires the compact PBR material",
+      );
+  }
   if (options.compactGroundSampling !== undefined) {
     if (options.compactGroundSampling !== "exact-zero-v1")
       throw new Error("Invalid compact ground sampling");
@@ -1421,6 +1431,7 @@ export function createTerrainMaterial(
           : undefined,
         options.compactTerrainTextureEncoding,
         options.compactTextureRenderer,
+        options.compactTerrainTextureMatrix,
       )
     : null;
 

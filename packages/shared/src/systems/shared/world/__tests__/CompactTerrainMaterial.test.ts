@@ -138,6 +138,407 @@ function createTerrainMaterial(
   return material;
 }
 
+describe("identity terrain texture matrices (real TSL ownership, not native qualification)", () => {
+  const createOwner = (selected = true) =>
+    new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      "height-v1",
+      "stochastic-v1",
+      "frequency-v1",
+      undefined,
+      undefined,
+      selected ? "identity-v1" : undefined,
+    );
+  const digest = (key: string) =>
+    key === "ground-height"
+      ? COMPACT_TERRAIN_HEIGHT_SHA256["ground-height"]
+      : expectedDigest(key);
+
+  it("preserves all seven live base/sample/gradient references through actual PNG admission, upload and disposal", async () => {
+    const owner = createOwner();
+    const disposeCounts = new Map<THREE.Texture, number>();
+    try {
+      for (const entry of lifecycle(owner).entries.values()) {
+        const old = entry.node.value;
+        const sampled = owner.sample(entry.node, vec2(0.2, 0.4));
+        const gradient = owner.sample(entry.node, vec2(0.2, 0.4), {
+          dx: vec2(0.01, 0),
+          dy: vec2(0, 0.01),
+        });
+        const clone = gradient.clone();
+        const decoded = await decodedTexture(entry.key);
+        let oldDisposals = 0,
+          realDisposals = 0;
+        old.addEventListener("dispose", () => oldDisposals++);
+        decoded.addEventListener("dispose", () => realDisposals++);
+        disposeCounts.set(decoded, 0);
+        decoded.addEventListener("dispose", () =>
+          disposeCounts.set(decoded, disposeCounts.get(decoded)! + 1),
+        );
+        entry.status = "loading";
+        expect(
+          lifecycle(owner).installTexture(entry, decoded, digest(entry.key)),
+        ).toBe(true);
+        expect(oldDisposals).toBe(1);
+        for (const node of [entry.node, sampled, gradient]) {
+          expect(node.value).toBe(decoded);
+          expect(node.updateMatrix).toBe(false);
+        }
+        // A bare r186 clone snapshots value; sample()/grad() deliberately bind
+        // getBase instead. Preserve that upstream behavior, not a custom clone.
+        expect(clone.value).toBe(old);
+        expect(sampled.getBase()).toBe(entry.node);
+        expect(gradient.getBase()).toBe(entry.node);
+        expect(decoded.matrixAutoUpdate).toBe(false);
+        expect(decoded.matrix.toArray()).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+        expect(decoded.anisotropy).toBe(16);
+        expect(decoded.flipY).toBe(false);
+        expect(decoded.premultiplyAlpha).toBe(false);
+        expect(decoded.minFilter).toBe(THREE.LinearMipmapLinearFilter);
+        expect(decoded.colorSpace).toBe(
+          entry.key.endsWith("albedo-roughness")
+            ? THREE.SRGBColorSpace
+            : THREE.NoColorSpace,
+        );
+        const version = decoded.version;
+        decoded.needsUpdate = true;
+        expect(decoded.version).toBe(version + 1);
+        const independentCopy = decoded.clone();
+        expect(independentCopy.matrix.equals(decoded.matrix)).toBe(true);
+        expect(Object.isFrozen(independentCopy.offset)).toBe(false);
+        independentCopy.dispose();
+        expect(realDisposals).toBe(0);
+      }
+      expect(owner.getReceipt().status).toBe("ready");
+    } finally {
+      owner.dispose();
+    }
+    expect(owner.getReceipt().status).toBe("disposed");
+    owner.dispose();
+    expect([...disposeCounts.values()]).toEqual([1, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it("locks real compressed texture objects without disturbing mips, upload versions or clones (not native decode proof)", () => {
+    const owner = createOwner();
+    try {
+      for (const channel of ["albedo-roughness", "normal-ao"] as const) {
+        const image = new THREE.CompressedTexture(
+          COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.map((bytes, level) => ({
+            data: new Uint8Array(bytes),
+            width: Math.max(1, 1024 >> level),
+            height: Math.max(1, 1024 >> level),
+          })),
+          1024,
+          1024,
+          THREE.RGBA_ASTC_4x4_Format,
+        );
+        image.colorSpace =
+          channel === "albedo-roughness"
+            ? THREE.SRGBColorSpace
+            : THREE.NoColorSpace;
+        validateCompactTerrainCompressedTexture(
+          image,
+          channel,
+          THREE.RGBA_ASTC_4x4_Format,
+        );
+        const entry = lifecycle(owner).entries.get(`grass-${channel}`)!;
+        const sample = owner.sample(entry.node, vec2(0));
+        const mips = image.mipmaps;
+        entry.status = "loading";
+        // Exercise the common installer directly, not a fabricated renderer or
+        // transcode. Native compressed byte decoding remains a separate gate.
+        expect(
+          lifecycle(owner).installTexture(entry, image, digest(entry.key)),
+        ).toBe(true);
+        expect(sample.value).toBe(image);
+        expect(image.mipmaps).toBe(mips);
+        expect(image.generateMipmaps).toBe(false);
+        expect(image.matrixAutoUpdate).toBe(false);
+        expect(() => image.repeat.set(2, 2)).toThrow();
+        expect(() => {
+          image.matrix = new THREE.Matrix3();
+        }).toThrow();
+        const version = image.version;
+        image.needsUpdate = true;
+        expect(image.version).toBe(version + 1);
+        validateCompactTerrainCompressedTexture(
+          image,
+          channel,
+          THREE.RGBA_ASTC_4x4_Format,
+        );
+        const clone = image.clone();
+        expect(clone.mipmaps).toEqual(mips);
+        expect(clone.matrix.equals(image.matrix)).toBe(true);
+        clone.dispose();
+      }
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("accounts for r186 cloning resetting matrix flags without modifying upstream methods", () => {
+    const owner = createOwner();
+    try {
+      const root = owner.getNode("grass", "albedo-roughness");
+      expect(root.updateMatrix).toBe(false);
+      expect(root.sample(vec2(0)).updateMatrix).toBe(true);
+      expect(
+        root.grad(vec2(0.01, 0), vec2(0, 0.01)).sample(vec2(0)).updateMatrix,
+      ).toBe(true);
+      expect(owner.sample(root, vec2(0)).updateMatrix).toBe(false);
+      expect(
+        owner.sample(root, vec2(0), { dx: vec2(0.01, 0), dy: vec2(0, 0.01) })
+          .updateMatrix,
+      ).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("pins transform contents/references and base publication without freezing normal Texture state", () => {
+    const owner = createOwner();
+    const foreign = new THREE.Texture();
+    try {
+      for (const entry of lifecycle(owner).entries.values()) {
+        const image = entry.node.value;
+        const mutations = [
+          () => {
+            image.offset.x = 1;
+          },
+          () => {
+            image.repeat.y = 2;
+          },
+          () => {
+            image.center.x = 0.5;
+          },
+          () => {
+            image.matrix.elements[0] = 2;
+          },
+          () => {
+            image.matrix.elements = new THREE.Matrix3().elements;
+          },
+          () => {
+            image.offset = new THREE.Vector2();
+          },
+          () => {
+            image.repeat = new THREE.Vector2(1, 1);
+          },
+          () => {
+            image.center = new THREE.Vector2();
+          },
+          () => {
+            image.matrix = new THREE.Matrix3();
+          },
+          () => {
+            image.rotation = 1;
+          },
+          () => {
+            image.matrixAutoUpdate = true;
+          },
+          () => {
+            entry.node.value = foreign;
+          },
+          () => {
+            entry.node.referenceNode = texture(foreign);
+          },
+          () => {
+            Object.defineProperty(entry.node, "value", { value: foreign });
+          },
+        ];
+        for (const mutation of mutations) expect(mutation).toThrow();
+        expect(image.matrix.equals(new THREE.Matrix3())).toBe(true);
+        expect(Object.isFrozen(image)).toBe(false);
+        expect(entry.node.value).toBe(image);
+      }
+      expect(() => owner.sample(texture(foreign), vec2(0))).toThrow(
+        "owned base node",
+      );
+      expect(() =>
+        Object.defineProperty(owner, "textureMatrix", { value: undefined }),
+      ).toThrow();
+    } finally {
+      owner.dispose();
+      foreign.dispose();
+    }
+  });
+
+  it("rejects every nonidentity admission before publication and disposes the rejected texture once", async () => {
+    const mutations: Array<(image: THREE.Texture) => void> = [
+      (image) => {
+        image.offset.x = 0.1;
+      },
+      (image) => {
+        image.repeat.y = 2;
+      },
+      (image) => {
+        image.center.x = 0.5;
+      },
+      (image) => {
+        image.rotation = 0.3;
+      },
+      (image) => {
+        image.matrix.elements[6] = 0.1;
+      },
+      (image) => {
+        image.matrix.elements[0] = NaN;
+      },
+    ];
+    const owner = createOwner();
+    try {
+      const entry = lifecycle(owner).entries.get("grass-albedo-roughness")!;
+      const original = entry.node.value;
+      for (const mutate of mutations) {
+        const image = await decodedTexture(entry.key);
+        mutate(image);
+        let disposals = 0;
+        image.addEventListener("dispose", () => disposals++);
+        entry.status = "loading";
+        expect(() =>
+          lifecycle(owner).installTexture(entry, image, digest(entry.key)),
+        ).toThrow("identity UV transform");
+        expect(disposals).toBe(1);
+        expect(entry.node.value).toBe(original);
+      }
+      owner.dispose();
+      const late = await decodedTexture(entry.key);
+      let lateDisposals = 0;
+      late.addEventListener("dispose", () => lateDisposals++);
+      expect(
+        lifecycle(owner).installTexture(entry, late, digest(entry.key)),
+      ).toBe(false);
+      expect(lateDisposals).toBe(1);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("keeps the baseline mutable, its native setter active and samples matrix-updated", () => {
+    const owner = createOwner(false);
+    const replacement = new THREE.Texture();
+    try {
+      const base = owner.getNode("grass", "albedo-roughness");
+      const original = base.value;
+      expect(owner.getReceipt()).not.toHaveProperty("textureMatrix");
+      original.offset.set(0.2, 0.3);
+      original.updateMatrix();
+      expect(original.matrixAutoUpdate).toBe(true);
+      expect(owner.sample(base, vec2(0)).updateMatrix).toBe(true);
+      base.value = replacement;
+      expect(base.value).toBe(replacement);
+      original.dispose();
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("covers projected grass/substrate/dirt/rock and prepared height samples without changing graph arithmetic", () => {
+    const owners = [createOwner(false), createOwner()];
+    const fingerprints: string[][] = [];
+    try {
+      for (const owner of owners) {
+        const factory = createCompactTerrainLayerFactory(
+          owner,
+          float(16),
+          float(0.43),
+        );
+        const prepared = factory.prepareGround();
+        const resolved = prepared.resolve({
+          grassRequired: float(1).equal(1),
+          dirtRequired: float(1).equal(1),
+        });
+        const layers = {
+          ...factory.createGround(),
+          rock: factory.createRock(),
+          deferredRock: factory.createRock(float(1).equal(1)),
+          resolvedGrass: resolved.grass,
+          resolvedDirt: resolved.dirt,
+        };
+        const roots = [
+          ...Object.values(layers).flatMap((layer) => Object.values(layer)),
+          ...Object.values(prepared.heights),
+        ];
+        const keys = new Map(
+          owner.getReceipt().textures.map((row) => [row.textureUuid, row.key]),
+        );
+        const nodes = new Set<Node>();
+        const expandedStack = (node: Node) =>
+          [
+            "compactGrassAppearanceResult",
+            "compactDirtAppearanceResult",
+            "compactRockAppearanceResult",
+          ].includes(String(Reflect.get(node, "name")))
+            ? numericShaderStack(Reflect.get(node, "node"))
+            : null;
+        const visit = (node: Node) => {
+          if (nodes.has(node)) return;
+          nodes.add(node);
+          for (const child of node.getChildren()) visit(child);
+          const stack = expandedStack(node);
+          if (stack) visit(stack);
+        };
+        for (const root of roots) visit(root);
+        const samples = [...nodes].filter(
+          (node) =>
+            Reflect.get(node, "value") instanceof THREE.Texture &&
+            Reflect.get(node, "uvNode"),
+        );
+        expect(samples.length).toBeGreaterThan(30);
+        expect(
+          new Set(
+            samples.map((node) => keys.get(Reflect.get(node, "value").uuid)),
+          ),
+        ).toEqual(new Set(owner.getReceipt().textures.map((row) => row.key)));
+        for (const sample of samples)
+          expect(Reflect.get(sample, "updateMatrix")).toBe(
+            !owner.textureMatrix,
+          );
+        const cache = new Map<Node, string>();
+        const fingerprint = (node: Node): string => {
+          const cached = cache.get(node);
+          if (cached) return cached;
+          const value: unknown = Reflect.get(node, "value");
+          const result = createHash("sha256")
+            .update(
+              JSON.stringify({
+                type: node.type,
+                fields: [
+                  "op",
+                  "method",
+                  "components",
+                  "scope",
+                  "nodeType",
+                  "name",
+                ].map((key) => Reflect.get(node, key)),
+                value:
+                  value instanceof THREE.Texture
+                    ? keys.get(value.uuid)
+                    : value instanceof THREE.Vector2 ||
+                        value instanceof THREE.Vector3 ||
+                        value instanceof THREE.Vector4
+                      ? value.toArray()
+                      : typeof value === "number" || typeof value === "boolean"
+                        ? value
+                        : null,
+                children: [...node.getChildren()].map(fingerprint),
+                stack: expandedStack(node)
+                  ? fingerprint(expandedStack(node)!)
+                  : null,
+              }),
+            )
+            .digest("hex");
+          cache.set(node, result);
+          return result;
+        };
+        fingerprints.push(roots.map(fingerprint));
+      }
+      expect(fingerprints[1]).toEqual(fingerprints[0]);
+    } finally {
+      for (const owner of owners) owner.dispose();
+    }
+  });
+});
+
 describe("opt-in UASTC terrain texture admission (real Three textures, not visual proof)", () => {
   it("pins all six actual derivative bytes without changing PNG source admission", async () => {
     for (const [key, descriptor] of Object.entries(

@@ -489,6 +489,20 @@ export function resolveCompactTerrainTextureEncoding(
   return "uastc-v1";
 }
 
+/** Fresh-material identity UV candidate; omission preserves the normal path. */
+export function resolveCompactTerrainTextureMatrix(
+  win?: Window,
+): "identity-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values =
+    getSearchParams(windowRef)?.getAll("terrainTextureMatrix") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "identity-v1")
+    throw new Error("Unknown or duplicate terrain texture matrix candidate");
+  return "identity-v1";
+}
+
 /** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
 export function resolveCompactSurfaceBlendCandidate(
   win?: Window,

@@ -204,6 +204,7 @@ import {
   resolveCompactRockSampling,
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
+  resolveCompactTerrainTextureMatrix,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -468,6 +469,9 @@ export class TerrainSystem extends System {
   private compactTerrainTextureEncoding: ReturnType<
     typeof resolveCompactTerrainTextureEncoding
   > | null;
+  private compactTerrainTextureMatrix: ReturnType<
+    typeof resolveCompactTerrainTextureMatrix
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -679,6 +683,7 @@ export class TerrainSystem extends System {
       compactRockProjection: this.getCompactRockProjection(),
       compactRockSampling: this.getCompactRockSampling(),
       compactGroundSampling: this.getCompactGroundSampling(),
+      compactTerrainTextureMatrix: this.getCompactTerrainTextureMatrix(),
       ...(textureEncoding
         ? {
             compactTerrainTextureEncoding: textureEncoding,
@@ -911,6 +916,18 @@ export class TerrainSystem extends System {
       throw new Error(
         "Terrain texture encoding requires compact sculpt terrain",
       );
+    return selection;
+  }
+
+  private getCompactTerrainTextureMatrix(): ReturnType<
+    typeof resolveCompactTerrainTextureMatrix
+  > {
+    if (this.compactTerrainTextureMatrix === undefined)
+      this.compactTerrainTextureMatrix =
+        resolveCompactTerrainTextureMatrix() ?? null;
+    const selection = this.compactTerrainTextureMatrix ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error("Terrain texture matrix requires compact sculpt terrain");
     return selection;
   }
 

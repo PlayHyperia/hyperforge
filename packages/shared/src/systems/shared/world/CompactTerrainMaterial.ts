@@ -155,6 +155,7 @@ export type CompactRockSampling = "exact-zero-v1";
 export type CompactGroundSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
 export type CompactTerrainTextureEncoding = "uastc-v1";
+export type CompactTerrainTextureMatrix = "identity-v1";
 type CompactTerrainCompressedFormat = NonNullable<
   ReturnType<typeof getKTX2TerrainFormat>
 >;
@@ -268,6 +269,7 @@ export class CompactTerrainTextureSet {
   private disposed = false;
   private readonly compressedFormat: CompactTerrainCompressedFormat | null;
   private readonly transcoderPath: string;
+  #identityTextures?: WeakMap<TextureNode<"vec4">, THREE.Texture>;
 
   constructor(
     cdnUrl: string,
@@ -277,7 +279,18 @@ export class CompactTerrainTextureSet {
     readonly grassSubstrate?: CompactGrassSubstrate,
     readonly textureEncoding?: CompactTerrainTextureEncoding,
     private readonly textureRenderer?: THREE.WebGPURenderer,
+    readonly textureMatrix?: CompactTerrainTextureMatrix,
   ) {
+    if (textureMatrix !== undefined && textureMatrix !== "identity-v1")
+      throw new Error("Unknown compact terrain texture matrix mode");
+    if (textureMatrix) {
+      this.#identityTextures = new WeakMap();
+      Object.defineProperty(this, "textureMatrix", {
+        value: textureMatrix,
+        writable: false,
+        configurable: false,
+      });
+    }
     this.transcoderPath = `${cdnUrl.replace(/\/$/, "")}${KTX2_TRANSCODER_PATH}`;
     if (textureEncoding !== undefined && textureEncoding !== "uastc-v1")
       throw new Error("Unknown compact terrain texture encoding");
@@ -323,7 +336,7 @@ export class CompactTerrainTextureSet {
               : `terrain/textures/compact-pbr/${key}.png`
           }`,
           ...(this.compressedFormat ? { compressed: true as const } : {}),
-          node: texture(image),
+          node: this.createTextureNode(image),
           status: "idle",
           error: null,
           width: 1,
@@ -343,7 +356,7 @@ export class CompactTerrainTextureSet {
       this.entries.set("ground-height", {
         key: "ground-height",
         url: `${cdnUrl.replace(/\/$/, "")}/terrain/textures/compact-pbr/ground-height.png`,
-        node: texture(image),
+        node: this.createTextureNode(image),
         status: "idle",
         error: null,
         width: 1,
@@ -412,6 +425,7 @@ export class CompactTerrainTextureSet {
           ? COMPACT_GRASS_SUBSTRATE.additionalSurfaceSampleCount
           : 0),
       bitmapOptions: { ...COMPACT_TERRAIN_BITMAP_OPTIONS },
+      ...(this.textureMatrix ? { textureMatrix: this.textureMatrix } : {}),
       ...(this.textureEncoding
         ? {
             textureEncoding: {
@@ -437,6 +451,82 @@ export class CompactTerrainTextureSet {
     return this.entries.get("ground-height")?.node;
   }
 
+  private createTextureNode(image: THREE.Texture): TextureNode<"vec4"> {
+    const base = texture(image);
+    const identityTextures = this.#identityTextures;
+    if (identityTextures) {
+      identityTextures.set(base, image);
+      base.updateMatrix = false;
+      // Samples follow this base through placeholder replacement, but external
+      // assignment cannot replace the admitted identity texture or its owner.
+      Object.defineProperties(base, {
+        value: {
+          get: () => identityTextures.get(base)!,
+          configurable: false,
+        },
+        referenceNode: {
+          value: null,
+          writable: false,
+          configurable: false,
+        },
+      });
+    }
+    return base;
+  }
+
+  sample(
+    base: TextureNode<"vec4">,
+    uv: Node<"vec2">,
+    gradients?: { dx: Node<"vec2">; dy: Node<"vec2"> },
+  ): TextureNode<"vec4"> {
+    if (this.#identityTextures && !this.#identityTextures.has(base))
+      throw new Error("Identity terrain sampling requires its owned base node");
+    const sampled = gradients
+      ? base.grad(gradients.dx, gradients.dy).sample(uv)
+      : base.sample(uv);
+    // TextureNode.clone() does not preserve updateMatrix. Set the final sample,
+    // not just its root, before building a fresh material graph.
+    if (this.#identityTextures) sampled.updateMatrix = false;
+    return sampled;
+  }
+
+  private lockIdentityTransform(image: THREE.Texture): void {
+    if (
+      !(image.offset instanceof THREE.Vector2) ||
+      !(image.repeat instanceof THREE.Vector2) ||
+      !(image.center instanceof THREE.Vector2) ||
+      !(image.matrix instanceof THREE.Matrix3) ||
+      image.offset.x !== 0 ||
+      image.offset.y !== 0 ||
+      image.repeat.x !== 1 ||
+      image.repeat.y !== 1 ||
+      image.center.x !== 0 ||
+      image.center.y !== 0 ||
+      image.rotation !== 0 ||
+      !image.matrix.equals(new THREE.Matrix3())
+    )
+      throw new Error(
+        "Compact terrain texture requires an identity UV transform",
+      );
+    // Only transforms are immutable. Upload/version, source, sampling policy,
+    // and disposal remain normal Texture behavior for PNG and KTX2 alike.
+    Object.freeze(image.offset);
+    Object.freeze(image.repeat);
+    Object.freeze(image.center);
+    Object.freeze(image.matrix.elements);
+    Object.freeze(image.matrix);
+    for (const key of ["offset", "repeat", "center", "matrix"] as const)
+      Object.defineProperty(image, key, {
+        value: image[key],
+        writable: false,
+        configurable: false,
+      });
+    Object.defineProperties(image, {
+      rotation: { value: 0, writable: false, configurable: false },
+      matrixAutoUpdate: { value: false, writable: false, configurable: false },
+    });
+  }
+
   private expectedDigest(key: Key): string {
     return key === "ground-height"
       ? COMPACT_TERRAIN_HEIGHT_SHA256[key]
@@ -449,6 +539,7 @@ export class CompactTerrainTextureSet {
     image: THREE.Texture,
     channel: Channel | "ground-height",
   ): void {
+    if (this.#identityTextures) this.lockIdentityTransform(image);
     image.colorSpace =
       channel === "albedo-roughness"
         ? THREE.SRGBColorSpace
@@ -504,19 +595,25 @@ export class CompactTerrainTextureSet {
         throw error;
       }
     }
-    this.configureTexture(
-      image,
-      entry.key === "ground-height"
-        ? "ground-height"
-        : entry.key.endsWith("normal-ao")
-          ? "normal-ao"
-          : "albedo-roughness",
-    );
+    try {
+      this.configureTexture(
+        image,
+        entry.key === "ground-height"
+          ? "ground-height"
+          : entry.key.endsWith("normal-ao")
+            ? "normal-ao"
+            : "albedo-roughness",
+      );
+    } catch (error) {
+      this.disposeTexture(image);
+      throw error;
+    }
     const previous = entry.node.value;
     // TextureNode.sample() retains a reference to this base node, so every
     // projection follows the new real texture; never stuff an HTML image into
     // a DataTexture or leave a sampled clone pointing at the placeholder.
-    entry.node.value = image;
+    if (this.#identityTextures) this.#identityTextures.set(entry.node, image);
+    else entry.node.value = image;
     entry.width = source.width;
     entry.height = source.height;
     entry.sha256 = sha256;
@@ -2088,9 +2185,7 @@ export function createCompactTerrainLayerFactory(
   ): CompactTerrainLayer => {
     const sample = (channel: Channel) => {
       const base = textures.getNode(layer, channel);
-      return gradients
-        ? base.grad(gradients.dx, gradients.dy).sample(uv)
-        : base.sample(uv);
+      return textures.sample(base, uv, gradients);
     };
     const ar = sample("albedo-roughness");
     let na = sample("normal-ao");
@@ -2110,9 +2205,7 @@ export function createCompactTerrainLayerFactory(
       // Reuse the same sRGB texture/UV owner: sampling decodes RGB to linear.
       // Reuse filtered packed alpha so roughness follows the same turf footprint.
       const low = textures
-        .getNode(layer, "albedo-roughness")
-        .grad(broad.dx, broad.dy)
-        .sample(uv)
+        .sample(textures.getNode(layer, "albedo-roughness"), uv, broad)
         .toVar(`compactGrassSubstrateLow${projection}`);
       albedo = mix(
         low.rgb,
@@ -2121,19 +2214,14 @@ export function createCompactTerrainLayerFactory(
       ).toVar(`compactGrassSubstrateAlbedo${projection}`);
       grassRoughnessAlpha = low.a;
       // Filter the packed material signal, not its original cotangent frame.
-      na = textures
-        .getNode(layer, "normal-ao")
-        .grad(broad.dx, broad.dy)
-        .sample(uv);
+      na = textures.sample(textures.getNode(layer, "normal-ao"), uv, broad);
     }
     const heightMap = textures.getHeightNode();
     // Each layer's height follows its own exact projection and gradients.
     // Sampling RGB once at a common UV would misalign the material relief.
     const heightSample =
       heightMap && layer !== "rock"
-        ? gradients
-          ? heightMap.grad(gradients.dx, gradients.dy).sample(uv)
-          : heightMap.sample(uv)
+        ? textures.sample(heightMap, uv, gradients)
         : undefined;
     return {
       ...(layer === "rock" ? { rawRockAo: na.a } : {}),
@@ -2464,7 +2552,7 @@ export function createCompactTerrainLayerFactory(
         uv: Node<"vec2">;
         dx: Node<"vec2">;
         dy: Node<"vec2">;
-      }) => heightMap.grad(p.dx, p.dy).sample(p.uv);
+      }) => textures.sample(heightMap, p.uv, p);
       const grassHeight = mix(
         sampleHeight(grassProjection.a).r,
         sampleHeight(grassProjection.b).r,

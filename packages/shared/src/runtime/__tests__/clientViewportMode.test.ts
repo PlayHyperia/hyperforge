@@ -26,6 +26,7 @@ import {
   resolveCompactRockSampling,
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
+  resolveCompactTerrainTextureMatrix,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -63,6 +64,90 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit identity terrain texture matrix (no quality defaults)", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string) => {
+    dom.reconfigure({ url: `http://localhost:3344/?${query}` });
+    return dom.window as unknown as Window;
+  };
+  it("is absent by default, independent of peer selectors, and exact when selected", () => {
+    for (const query of [
+      "",
+      "terrainTextureEncoding=invalid",
+      "groundSampling=invalid",
+    ])
+      expect(resolveCompactTerrainTextureMatrix(visit(query))).toBeUndefined();
+    expect(
+      resolveCompactTerrainTextureMatrix(
+        visit("terrainTextureMatrix=identity-v1"),
+      ),
+    ).toBe("identity-v1");
+    for (const value of [
+      "",
+      "IDENTITY-V1",
+      "identity-v1%20",
+      "%20identity-v1",
+      "off",
+      "identity-v1&terrainTextureMatrix=identity-v1",
+      "&terrainTextureMatrix=identity-v1",
+    ])
+      expect(() =>
+        resolveCompactTerrainTextureMatrix(
+          visit(`terrainTextureMatrix=${value}`),
+        ),
+      ).toThrow("texture matrix candidate");
+  });
+  it.each([false, true])(
+    "captures once with selected=%s without adding a GPU init dependency",
+    (selected) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(selected ? "terrainTextureMatrix=identity-v1" : ""),
+      });
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      try {
+        expect(terrain["getCompactTerrainTextureMatrix"]()).toBe(
+          selected ? "identity-v1" : undefined,
+        );
+        visit("terrainTextureMatrix=invalid");
+        expect(terrain["getCompactTerrainTextureMatrix"]()).toBe(
+          selected ? "identity-v1" : undefined,
+        );
+        expect(terrain.getDependencies()).toEqual({});
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+  it("rejects non-sculpt terrain and has no server-side default", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("terrainTextureMatrix=identity-v1"),
+    });
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+    try {
+      expect(() => terrain["getCompactTerrainTextureMatrix"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      Reflect.deleteProperty(globalThis, "window");
+      expect(resolveCompactTerrainTextureMatrix()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
 
 describe("explicit UASTC terrain encoding (no renderer or quality defaults)", () => {
   const dom = new JSDOM("", { url: "http://localhost:3344/" });

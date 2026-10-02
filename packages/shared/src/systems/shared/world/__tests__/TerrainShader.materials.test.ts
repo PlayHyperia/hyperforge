@@ -13,6 +13,52 @@ import {
 } from "../TerrainShader";
 
 describe("TerrainShader material graph", () => {
+  it("admits identity terrain texture matrices only explicitly for independent compact materials", () => {
+    type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
+    const invalid: Options = { compactPbr: true };
+    Reflect.set(invalid, "compactTerrainTextureMatrix", "identity-v2");
+    expect(() => createTerrainMaterial(undefined, invalid)).toThrow(
+      "Invalid compact terrain texture matrix mode",
+    );
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        compactTerrainTextureMatrix: "identity-v1",
+      }),
+    ).toThrow("requires the compact PBR material");
+    const baseline = createTerrainMaterial(undefined, { compactPbr: true });
+    const first = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactTerrainTextureMatrix: "identity-v1",
+    });
+    const second = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactTerrainTextureMatrix: "identity-v1",
+    });
+    try {
+      expect(baseline.compactTerrainSurface!.getReceipt()).not.toHaveProperty(
+        "textureMatrix",
+      );
+      expect(first.compactTerrainSurface!.getReceipt().textureMatrix).toBe(
+        "identity-v1",
+      );
+      const a = first.compactTerrainSurface!.getNode(
+        "grass",
+        "albedo-roughness",
+      );
+      const b = second.compactTerrainSurface!.getNode(
+        "grass",
+        "albedo-roughness",
+      );
+      expect(a).not.toBe(b);
+      expect(a.value).not.toBe(b.value);
+      first.dispose();
+      expect(second.compactTerrainSurface!.getReceipt().status).toBe("idle");
+    } finally {
+      baseline.dispose();
+      first.dispose();
+      second.dispose();
+    }
+  });
   it("requires explicit admitted rock sampling before deferring ground appearance", () => {
     type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
     const invalid: Options = {};
