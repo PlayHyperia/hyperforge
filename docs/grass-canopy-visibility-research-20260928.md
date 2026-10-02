@@ -1,5 +1,69 @@
 # Grass canopy visibility: research checkpoint
 
+## Native215 — terrain surface attribution repeats an approximately 11 ms effect
+
+Two completed native **full / cheap / full / cheap / full** comparisons isolate a substantial terrain-surface opportunity at unchanged **3024×1724, DPR 2, MSAA 4, High shadows**. Simplifying only the terrain surface recipe reduces median ordinary tick intervals by **10.900–11.525 ms** against neighboring full-material arms. This is a reproducible diagnostic effect, **not a quality-preserving shipping optimization, exclusive GPU time, displayed FPS or 60 FPS acceptance**. Even the altered-material intervals remain 32.2–32.4 ms, above 16.67 ms.
+
+### Exact scope and actual rendered work
+
+Canonical **build207** is reused: its production source bytes match checkpoint `8d4b3d8fea`; no new production source, default, asset or public build is changed. Host reports **Apple M5  / 24 GiB RAM**, with AC power/100% charge checked before setup. The same fixed pond camera, player, held daylight 0.56 / exposure 0.850240084, seven terrain textures, 52 terrain / 94 grass owners, compositor, bloom, mirror 1512×862 and sun-map 4096² are retained in both runs. Effective depth blur remains off.
+
+A fresh clone receives constant surface albedo, roughness 0.9, AO 1 and geometric normal. The **original custom-light multiplier and fog/output nodes are retained by identity**, along with ordinary MeshStandard lighting, environment, depth and shadow flags. Only the material argument for owned main/mirror terrain draws is substituted; scene meshes keep their original material and all shadow passes forward original rendering. Both programs warm through ordinary frames before trusted timing starts. No manual render, animation-loop replacement, GPU fence or GPU timestamp collection occurs.
+
+All **3,438 recorded ticks** have identical issued work, verified independently from the raw rows—not merely from admission checks:
+
+| View | Issued calls / triangle slots | Terrain calls / triangles | Grass calls / triangles |
+| --- | ---: | ---: | ---: |
+| Primary | 331 / 4,904,452 | 18 / 491,280 | 45 / 3,708,681 |
+| Mirror | 320 / 4,424,057 | 17 / 482,838 | 40 / 3,263,232 |
+| Primary-triggered shadow | 108 / 622,572 | 0 / 0 | 0 / 0 |
+| Mirror-triggered shadow | 108 / 622,572 | 0 / 0 | 0 / 0 |
+
+Each tick retains one mirror capture and two shadow refreshes. Total 10,573,653 triangle slots include repeated views; they are **not unique scene triangles**. Total issued calls and triangle counts, including dynamic actors, also remain constant. Full arms substitute zero material arguments; cheap arms substitute exactly 35.
+
+### Repeated timing
+
+Each comparison lasts 65 seconds: five 13-second arms, with the first 3 seconds of each excluded. All focus, visibility, device, quality, pose, texture, geometry/transform, lighting, target and owner guards pass. Receipt lighting checks quantize only recorded comparisons to 1e-9; no live light value is rounded. Medians use midpoint for even sample counts; p95/p99 use sorted index `floor(q × (n−1))`. Synchronous CPU includes observer work; wall intervals include guard overhead.
+
+| Run / arm | Measured ticks | Wall interval median / p95 / p99 (ms) | Tick CPU median / p95 / p99 (ms) |
+| --- | ---: | ---: | ---: |
+| 1 full A1 | 227 | 43.95 / 47.4 / 48.7 | 11.6 / 15.9 / 17.5 |
+| 1 cheap B1 | 315 | 32.2 / 33.8 / 34.5 | 12.1 / 14.2 / 15.6 |
+| 1 full A2 | 232 | 43.5 / 45.6 / 45.9 | 11.3 / 13.5 / 14.1 |
+| 1 cheap B2 | 313 | 32.4 / 34.1 / 34.8 | 12.1 / 13.5 / 14.3 |
+| 1 full A3 | 234 | 43.1 / 45.9 / 47.3 | 11.4 / 13.7 / 14.6 |
+| 2 full A1 | 232 | 43.5 / 46.3 / 47.3 | 11.4 / 14.3 / 15.4 |
+| 2 cheap B1 | 312 | 32.4 / 34.0 / 35.2 | 12.1 / 13.7 / 14.4 |
+| 2 full A2 | 232 | 43.4 / 45.5 / 46.2 | 11.3 / 13.6 / 14.3 |
+| 2 cheap B2 | 316 | 32.2 / 33.7 / 34.4 | 12.0 / 13.6 / 14.5 |
+| 2 full A3 | 232 | 43.4 / 45.9 / 47.1 | 11.3 / 13.5 / 14.4 |
+
+The cheap-arm reductions relative to the average of neighboring full medians are **11.525 / 10.900 ms**, then **11.050 / 11.200 ms**. CPU instead rises 0.65–0.75 ms. Therefore do not label this a CPU optimization or infer an exclusive GPU duration. Surface normals, AO and roughness change dependent lighting/reflection/postprocessing pixels, and unused surface varyings disappear; the result bounds **surface-recipe and dependent-render work**, not just texture fetches.
+
+[First receipt](</Users/lucid/Downloads/hyperia-native215-surface-attribution (2).json>): 1,717 ticks / 1,321 measured; SHA256 `e9a809af576b13cad53d066a95b6f52d0590347954c6311209279d141b129f84`.
+[Repeat](</Users/lucid/Downloads/hyperia-native215-surface-attribution (3).json>): 1,721 / 1,324; SHA256 `1228a63aab7160f73b9be04ee0f725bfaa2bbbf237a1041872ca1369bb1796af`.
+Both use exactly the same installer, quality/pose/light/texture/target identities and coverage. Final original-material arms render 304/302 ordinary ticks before cleanup.
+
+### Shader evidence and diagnostic qualification
+
+Each run records four actual drawn program states (full/cheap × primary/mirror), with identical main/mirror strings for each material. Full fragment/vertex are **byte-identical to Native214 baseline**. The full fragment digest is `3c37bb9d323d36ba7efde8a3794fa3758f2d00a83137d71c76d03f6fd4010dab`, and vertex `82bcf4fe5554ed51480172fa01d50ff28b49bb04d076433dc4161a86ed58f33f`.
+
+Full→cheap fragment source changes 156,276→41,476 characters and 55→16 texture operations: implicit 7→3, gradient 43→8, comparison **5→5**. Update registrations change 94→32; derivative operations 13→1 each for dpdx/dpdy. Neither fragment contains discard or fragment-depth output. These are emitted-source counts, **not executed native instruction counts, pixel parity or GPU timing**. The cheap fragment SHA256 is `9620a1ea0bccd07640dc59e2dadd442ea16845a1764b9179f0516a1376ee4742`.
+
+Two initial preparation attempts refuse **before any timing rows or program states**, restoring all four hooks and disposing the clones. The diagnostic had incorrectly assumed every backend draw call issues geometry; source and native inspection confirm empty BatchedMesh groups legitimately issue zero calls. The correction admits only unowned empty instance/batch cases with no pipeline error, records them separately and never counts them as issued. No terrain/grass guard is relaxed. Those two receipts are excluded from performance conclusions.
+
+Independent emitted-source review confirms unchanged model→view→projection vertex placement/clipping, with only unused surface varyings pruned; original eight point-light terms, lamppost mask, PBR/PMREM/ambient/hemi lighting, five-tap directional receiver and custom sky fog remain. Geometric-normal substitution changes normal-bias coordinates and specular response, so no pixel equivalence is claimed. The 62 fewer registered update nodes are texture OBJECT nodes (66→4); other update categories are unchanged.
+
+A conditional raw-layer albedo/roughness reuse path could replace 16 static gradient sites (grass 4 / dirt 3 / rock 9) with 3 cache reads: whole 55→42 sites, retaining 14 normal/AO and 5 height sites. This is an architectural count, not a proven implementation or timing gain; rock samples already branch, and the 11 ms diagnostic cannot be scaled by sample ratios. A bounded patch must prove filtering fidelity and absence of original reads on the selected path before any cache is expanded.
+
+### Cleanup, ranked priority and next implementation
+
+The private [helper](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native-surface215.mjs), SHA256 `ad6294270fe73049c18edb08ec79d9126f4ca618a9d276b9a409a3da905657f4`, passes syntax checking and independent restoration/scope review. Four exact descriptors restore before clone disposal; original material nodes/version remain unchanged. [Camera/clock/exposure cleanup](/Users/lucid/Downloads/hyperia-native215-cleanup.json) passes with all owners absent and native renderer entries restored. Runtime `runtime-native215-surface01` is **STOPPED**, errors empty, protected state unchanged, disposable database removed and all four private ports free. Its process receipt SHA256 is `dcdf0dc8c9703ab3be84eeb05df09f12fe5cb84c2bb654f655030ebec0a1f78c`. Owned game/DevTools tabs close; original New Tab remains. Two temporary repository modules are removed; evidence helper remains outside the repo. The original runtime helper restores to its previous digest. Public 3333/build174 and saved database are untouched.
+
+**Priority remains terrain, grass and repeated planar capture.** Native215 locates an approximately 11 ms opportunity **inside terrain**, not a fourth additive cost. Native206 terrain/grass omissions were measured at a larger canvas; Native208 reflection also overlaps both. Do not sum those deltas or claim an exclusive most-to-least GPU budget.
+
+**Next:** implement a bounded, explicit opt-in terrain surface-reuse experiment with original rendering as fallback, actual emitted-sample elimination and memory/preparation budgets. Preserve live lighting/shadows and view-dependent detail. World-anchored sampling is not automatically camera-independent: derivatives, anisotropic footprints, filtered-height composition and normal-distance fade make a naive final-color atlas unsafe. Require close/grazing/shore/rock/main/mirror comparisons, invalidation and original-detail fallback, then matched full-content performance before promotion. Do not ship the flat diagnostic, build a large island-wide atlas, or return to tiny bank/matrix coefficient tuning. Sustained 60 FPS at 2× and wider scene-route acceptance remain open.
+
 ## Native214 — regional bank branch verified; negligible complete-scene gain
 
 The explicit, **default-off** `terrainBankEvaluation=regional-v1` candidate now skips the original pond-bank recipe only where its existing radial influence is **exactly zero**. Four complete-content A/B/B/A samples show only a **0.2–0.45 ms** median wall-interval difference. This is not a material step toward the **16.67 ms / 60 FPS at 2×** target and does not justify promotion. Do not spend another primary-work batch tuning this small branch.
