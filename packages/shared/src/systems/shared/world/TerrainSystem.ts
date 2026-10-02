@@ -218,6 +218,7 @@ import {
   resolveGrassSubmissionCandidate,
   resolveGrassShadowCandidate,
   resolveGrassEnvironmentCandidate,
+  resolveGrassLightingModelCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -500,6 +501,7 @@ export class TerrainSystem extends System {
         submission?: ReturnType<typeof resolveGrassSubmissionCandidate>;
         shadow?: ReturnType<typeof resolveGrassShadowCandidate>;
         environment?: ReturnType<typeof resolveGrassEnvironmentCandidate>;
+        lightingModel?: ReturnType<typeof resolveGrassLightingModelCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -1048,6 +1050,7 @@ export class TerrainSystem extends System {
       const submission = resolveGrassSubmissionCandidate();
       const shadow = resolveGrassShadowCandidate();
       const environment = resolveGrassEnvironmentCandidate();
+      const lightingModel = resolveGrassLightingModelCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -1069,6 +1072,7 @@ export class TerrainSystem extends System {
         ...(submission ? { submission } : {}),
         ...(shadow ? { shadow } : {}),
         ...(environment ? { environment } : {}),
+        ...(lightingModel ? { lightingModel } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3239,6 +3243,7 @@ export class TerrainSystem extends System {
         grassSelection.submission,
         grassSelection.shadow,
         grassSelection.environment,
+        grassSelection.lightingModel,
       );
       if (grassSelection.submission && this.world.graphics)
         this.grassVisualManager.setAdaptiveGrassRenderer(

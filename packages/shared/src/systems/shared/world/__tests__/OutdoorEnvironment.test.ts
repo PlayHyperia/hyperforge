@@ -5,7 +5,16 @@ import { build } from "esbuild";
 import type { Browser } from "playwright";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
-import { mix, pmremTexture, uniform } from "three/tsl";
+import {
+  materialEnvRotation,
+  mix,
+  normalWorld,
+  pmremTexture,
+  uniform,
+  vec2,
+  vec3,
+} from "three/tsl";
+import type Node from "three/src/nodes/core/Node.js";
 import { World } from "../../../../core/World";
 import { ClientGraphics } from "../../../client/ClientGraphics";
 import { AMBIENT_LIGHT, HEMISPHERE_LIGHT } from "../LightingConfig";
@@ -17,7 +26,12 @@ import {
   sampleOutdoorFill,
   sampleOutdoorInterval,
   updateGrassEnvironmentMaterial,
+  updateGrassRoughLeafEnvironmentMaterial,
+  OUTDOOR_ROUGH_LEAF_MAP,
+  createOutdoorRoughLeafDirection,
+  createOutdoorRoughLeafUV,
 } from "../OutdoorEnvironment";
+import { GrassRoughLeafMaterial } from "../GrassRoughLeafMaterial";
 import {
   SkySystem,
   sampleSkyCycle,
@@ -60,7 +74,7 @@ function integratedUp(
 
 // The seeded fixture exercises actual owner update/disposal and real Three
 // texture/node identities. It does NOT exercise initialization or GPU filtering.
-function cpuOwnedGraph() {
+function cpuOwnedGraph(roughLeaf = false) {
   const scene = new THREE.Scene();
   const priorNode = uniform(new THREE.Color(0.1, 0.2, 0.3));
   const targets = OUTDOOR_ENVIRONMENT_PHASES.map(
@@ -74,7 +88,7 @@ function cpuOwnedGraph() {
     nodeB = pmremTexture(targets[1].texture),
     weight = uniform(0);
   const graph = mix(nodeA, nodeB, weight);
-  const owner = new OutdoorEnvironment(scene);
+  const owner = new OutdoorEnvironment(scene, "luminance-v1", roughLeaf);
   const fixture = owner as unknown as {
     state: "ready";
     targets: THREE.RenderTarget[];
@@ -505,6 +519,374 @@ describe("outdoor environment CPU contracts (not GPU radiometry or art approval)
     } finally {
       material.dispose();
     }
+  });
+});
+
+// Arithmetic evaluation of actual finite TSL nodes only, not a mocked renderer,
+// image filter or GPU result. Unknown operations refuse instead of approximating.
+function angularValue(node: Node, cache = new Map<Node, number[]>()): number[] {
+  const known = cache.get(node);
+  if (known) return known;
+  const read = (key: string): unknown => Reflect.get(node, key);
+  const child = (key: string) => {
+    const value = read(key);
+    if (!(value instanceof THREE.Node))
+      throw new Error(`Missing angular node ${key}`);
+    return angularValue(value, cache);
+  };
+  const pair = (fn: (a: number, b: number) => number) => {
+    const a = child("aNode"),
+      b = child("bNode");
+    return Array.from({ length: Math.max(a.length, b.length) }, (_, i) =>
+      fn(a[a.length === 1 ? 0 : i], b[b.length === 1 ? 0 : i]),
+    );
+  };
+  const calculate = (): number[] => {
+    const value = read("value");
+    if (typeof value === "number") return [value];
+    if (value instanceof THREE.Vector2 || value instanceof THREE.Vector3)
+      return value.toArray();
+    if (node.type === "VarNode" || node.type === "ConvertNode")
+      return child("node");
+    if (node.type === "SplitNode")
+      return [...String(read("components"))].map(
+        (c) => child("node")["xyzw".indexOf(c)],
+      );
+    if (node.type === "JoinNode") {
+      const nodes = read("nodes");
+      if (!Array.isArray(nodes) || !nodes.every((n) => n instanceof THREE.Node))
+        throw new Error("Actual join required");
+      return nodes.flatMap((n) => angularValue(n, cache));
+    }
+    if (node.type === "ConditionalNode")
+      return child(child("condNode")[0] ? "ifNode" : "elseNode");
+    switch (read("op")) {
+      case "+":
+        return pair((a, b) => a + b);
+      case "-":
+        return pair((a, b) => a - b);
+      case "*":
+        return pair((a, b) => a * b);
+      case "/":
+        return pair((a, b) => a / b);
+      case ">":
+        return pair((a, b) => Number(a > b));
+      case ">=":
+        return pair((a, b) => Number(a >= b));
+      case "<=":
+        return pair((a, b) => Number(a <= b));
+    }
+    switch (read("method")) {
+      case "negate":
+        return child("aNode").map((v) => -v);
+      case "round":
+        return child("aNode").map(Math.round);
+      case "fract":
+        return child("aNode").map((v) => v - Math.floor(v));
+      case "sin":
+        return child("aNode").map(Math.sin);
+      case "cos":
+        return child("aNode").map(Math.cos);
+      case "acos":
+        return child("aNode").map(Math.acos);
+      case "atan":
+        return pair((a, b) => {
+          if (a === 0 && b === 0)
+            throw new Error("WGSL atan origin must never be evaluated");
+          return Math.atan2(a, b);
+        });
+      case "clamp": {
+        const c = child("cNode");
+        return pair((a, b) => Math.max(a, b)).map((v, i) =>
+          Math.min(v, c[c.length === 1 ? 0 : i]),
+        );
+      }
+    }
+    throw new Error(
+      `Unsupported angular TSL ${node.type}/${String(read("method"))}`,
+    );
+  };
+  const result = calculate();
+  cache.set(node, result);
+  return result;
+}
+
+function cpuRoughLeafGraph() {
+  const f = cpuOwnedGraph(true);
+  const maps = OUTDOOR_ENVIRONMENT_PHASES.map(
+    () =>
+      new THREE.RenderTarget(
+        OUTDOOR_ROUGH_LEAF_MAP.width,
+        OUTDOOR_ROUGH_LEAF_MAP.height,
+        {
+          type: THREE.HalfFloatType,
+          colorSpace: THREE.LinearSRGBColorSpace,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          generateMipmaps: false,
+          depthBuffer: false,
+        },
+      ),
+  );
+  // Seeded real targets qualify ownership/graphs only; no claim that these empty
+  // targets contain prepared radiance or that native map filtering was executed.
+  const privateOwner = f.owner as unknown as {
+    roughLeafTargets: THREE.RenderTarget[];
+    roughLeafNodeA: { value: THREE.Texture };
+    roughLeafNodeB: { value: THREE.Texture };
+    roughLeafNode: Node<"vec3">;
+    publishRoughLeaf(): void;
+    publishGrassOwner(): void;
+  };
+  privateOwner.roughLeafTargets = maps;
+  privateOwner.publishRoughLeaf();
+  privateOwner.publishGrassOwner();
+  return { ...f, maps, privateOwner };
+}
+
+describe("rough-leaf environment CPU arithmetic/ownership (not native bake, filtering or visual acceptance)", () => {
+  it("allocates no candidate targets or graph on the ordinary path", () => {
+    const f = cpuOwnedGraph();
+    try {
+      expect(f.owner.getStatus().roughLeaf).toMatchObject({
+        enabled: false,
+        state: "idle",
+        phaseCount: 0,
+        baseColorBytes: 0,
+        capturesCompleted: 0,
+      });
+      f.owner.update(0.25);
+      expect(f.owner.getStatus().roughLeaf.phaseCount).toBe(0);
+      expect(OUTDOOR_ROUGH_LEAF_MAP.bytesPerPhase * 12).toBe(804960);
+    } finally {
+      f.owner.dispose();
+    }
+  });
+
+  it("duplicates longitude endpoints and exact complete pole rows in the actual bake graph", () => {
+    const { width, height } = OUTDOOR_ROUGH_LEAF_MAP;
+    for (let row = 0; row < height; row++) {
+      const left = angularValue(
+        createOutdoorRoughLeafDirection(
+          vec2(0.5 / width, (row + 0.5) / height),
+        ),
+      );
+      const right = angularValue(
+        createOutdoorRoughLeafDirection(
+          vec2((width - 0.5) / width, (row + 0.5) / height),
+        ),
+      );
+      expect(left).toEqual(right);
+      expect(Math.hypot(...left)).toBeCloseTo(1, 14);
+    }
+    for (let column = 0; column < width; column++) {
+      expect(
+        angularValue(
+          createOutdoorRoughLeafDirection(
+            vec2((column + 0.5) / width, 0.5 / height),
+          ),
+        ),
+      ).toEqual([0, 1, 0]);
+      expect(
+        angularValue(
+          createOutdoorRoughLeafDirection(
+            vec2((column + 0.5) / width, (height - 0.5) / height),
+          ),
+        ),
+      ).toEqual([0, -1, 0]);
+    }
+  });
+
+  it("roundtrips texel-center directions and handles exact poles without atan(0,0)", () => {
+    const { width, height, longitudeSegments, polarSegments } =
+      OUTDOOR_ROUGH_LEAF_MAP;
+    for (const x of [1, 16, 32, 64, 96, 112, 127])
+      for (const y of [1, 8, 16, 32, 48, 56, 63]) {
+        const expected = [(x + 0.5) / width, (y + 0.5) / height];
+        const direction = createOutdoorRoughLeafDirection(
+          vec2(...(expected as [number, number])),
+        );
+        const actual = angularValue(createOutdoorRoughLeafUV(direction));
+        actual.forEach((v, i) => expect(v).toBeCloseTo(expected[i], 12));
+      }
+    for (const y of [-1, 1]) {
+      const actual = angularValue(createOutdoorRoughLeafUV(vec3(0, y, 0)));
+      expect(actual).toEqual([
+        (longitudeSegments / 2 + 0.5) / width,
+        ((y === 1 ? 0 : polarSegments) + 0.5) / height,
+      ]);
+      expect(actual.every(Number.isFinite)).toBe(true);
+    }
+  });
+
+  it("keeps both seam approaches in their endpoint-inclusive texel domains", () => {
+    const { width } = OUTDOOR_ROUGH_LEAF_MAP;
+    for (const epsilon of [1e-4, 1e-8, 1e-12]) {
+      const a = angularValue(
+        createOutdoorRoughLeafUV(
+          vec3(-Math.cos(epsilon), 0, -Math.sin(epsilon)),
+        ),
+      );
+      const b = angularValue(
+        createOutdoorRoughLeafUV(
+          vec3(-Math.cos(epsilon), 0, Math.sin(epsilon)),
+        ),
+      );
+      expect(a[0]).toBeGreaterThanOrEqual(0.5 / width);
+      expect(b[0]).toBeLessThanOrEqual((width - 0.5) / width);
+      expect(a[0] - 0.5 / width).toBeCloseTo((width - 0.5) / width - b[0], 12);
+      expect(a[1]).toBe(b[1]);
+    }
+  });
+
+  it("shares the existing cyclic phase interval/weight and preserves two live map bindings", () => {
+    const f = cpuRoughLeafGraph();
+    try {
+      expect(f.privateOwner.roughLeafNodeA).not.toBe(
+        f.privateOwner.roughLeafNodeB,
+      );
+      expect(f.privateOwner.roughLeafNodeA.value).toBe(f.maps[0].texture);
+      expect(f.privateOwner.roughLeafNodeB.value).toBe(f.maps[1].texture);
+      for (const phase of [
+        ...OUTDOOR_ENVIRONMENT_PHASES,
+        0.99,
+        1,
+        -0.01,
+        2.125,
+      ]) {
+        const out = { a: 0, b: 0, blend: 0 };
+        sampleOutdoorInterval(phase, out);
+        f.owner.update(phase);
+        expect(f.privateOwner.roughLeafNodeA.value).toBe(f.maps[out.a].texture);
+        expect(f.privateOwner.roughLeafNodeB.value).toBe(f.maps[out.b].texture);
+        expect(f.weight.value).toBe(out.blend);
+      }
+      expect(f.owner.getStatus().roughLeaf).toMatchObject({
+        enabled: true,
+        state: "ready",
+        phaseCount: 12,
+        baseColorBytes: 804960,
+      });
+    } finally {
+      f.owner.dispose();
+    }
+    expect(f.owner.getStatus().roughLeaf.baseColorBytes).toBe(0);
+  });
+
+  it("retains the stock Y-before-environment-rotation convention in the actual live graph", () => {
+    const f = cpuRoughLeafGraph();
+    try {
+      const nodes = new Set<Node>();
+      const visit = (node: Node) => {
+        if (nodes.has(node)) return;
+        nodes.add(node);
+        for (const child of node.getChildren()) visit(child);
+      };
+      visit(f.privateOwner.roughLeafNode);
+      const products = [...nodes].filter(
+        (node) =>
+          Reflect.get(node, "op") === "*" &&
+          Reflect.get(node, "aNode") === materialEnvRotation,
+      );
+      expect(products).toHaveLength(1);
+      const input: unknown = Reflect.get(products[0], "bNode");
+      expect(input).toBeInstanceOf(THREE.Node);
+      if (!(input instanceof THREE.Node))
+        throw new Error("Actual vector required");
+      for (const vector of [
+        new THREE.Vector3(0.3, 0.8, -0.4).normalize(),
+        new THREE.Vector3(-0.7, 0.2, 0.5).normalize(),
+      ]) {
+        const cache = new Map<Node, number[]>([
+          [normalWorld, vector.toArray()],
+        ]);
+        // Evaluate the real right operand, not a second implementation of it.
+        const flipped = angularValue(input, cache);
+        expect(flipped).toEqual([vector.x, -vector.y, vector.z]);
+        const rotation = new THREE.Matrix3().setFromMatrix4(
+          new THREE.Matrix4().makeRotationFromEuler(
+            new THREE.Euler(0.4, -0.7, 0.9),
+          ),
+        );
+        const actual = new THREE.Vector3(
+          ...(flipped as [number, number, number]),
+        )
+          .applyMatrix3(rotation)
+          .normalize();
+        const wrongOrder = vector.clone().applyMatrix3(rotation);
+        wrongOrder.y *= -1;
+        expect(actual.distanceTo(wrongOrder)).toBeGreaterThan(0.1);
+        expect(
+          angularValue(createOutdoorRoughLeafUV(vec3(actual))).every(
+            Number.isFinite,
+          ),
+        ).toBe(true);
+      }
+    } finally {
+      f.owner.dispose();
+    }
+  });
+
+  it("binds only the current world, restores stock on retirement/recipe change, preserves foreign writers", () => {
+    const f = cpuRoughLeafGraph(),
+      other = cpuRoughLeafGraph();
+    const material = new GrassRoughLeafMaterial({ roughness: 1 });
+    material.thicknessColorNode = vec3(0.2, 0.3, 0.1);
+    try {
+      updateGrassRoughLeafEnvironmentMaterial(f.scene, material);
+      expect(material.envNode).toBe(f.privateOwner.roughLeafNode);
+      const version = material.version;
+      updateGrassRoughLeafEnvironmentMaterial(f.scene, material);
+      expect(material.version).toBe(version);
+      const clone = material.clone();
+      try {
+        expect(clone.envNode).toBe(material.envNode);
+        updateGrassRoughLeafEnvironmentMaterial(other.scene, clone);
+        expect(clone.envNode).toBe(other.privateOwner.roughLeafNode);
+        clone.roughness = 0.8;
+        updateGrassRoughLeafEnvironmentMaterial(other.scene, clone);
+        expect(clone.envNode).toBeNull();
+        clone.roughness = 1;
+        updateGrassRoughLeafEnvironmentMaterial(other.scene, clone);
+        expect(clone.envNode).toBe(other.privateOwner.roughLeafNode);
+      } finally {
+        clone.dispose();
+      }
+      const foreign = uniform(new THREE.Color(0.2, 0.3, 0.4));
+      f.scene.environmentNode = foreign;
+      updateGrassRoughLeafEnvironmentMaterial(f.scene, material);
+      expect(material.envNode).toBeNull();
+      f.scene.environmentNode = f.graph;
+      updateGrassRoughLeafEnvironmentMaterial(f.scene, material);
+      expect(material.envNode).toBe(f.privateOwner.roughLeafNode);
+      f.owner.dispose();
+      updateGrassRoughLeafEnvironmentMaterial(f.scene, material);
+      expect(material.envNode).toBeNull();
+      material.envNode = foreign;
+      updateGrassRoughLeafEnvironmentMaterial(other.scene, material);
+      expect(material.envNode).toBe(foreign);
+    } finally {
+      material.dispose();
+      f.owner.dispose();
+      other.owner.dispose();
+    }
+  });
+
+  it("retires all candidate and source targets once even when a target listener throws", () => {
+    const f = cpuRoughLeafGraph();
+    const retired: THREE.RenderTarget[] = [];
+    for (const target of [...f.maps, ...f.targets])
+      target.addEventListener("dispose", () => {
+        retired.push(target);
+        if (target === f.maps[0]) throw new Error("map listener failure");
+      });
+    expect(() => f.owner.dispose()).toThrow(AggregateError);
+    expect(new Set(retired).size).toBe(24);
+    expect(retired).toHaveLength(24);
+    expect(f.owner.getStatus().roughLeaf.baseColorBytes).toBe(0);
+    expect(f.owner.getStatus().baseColorBytes).toBe(0);
+    f.owner.dispose();
+    expect(retired).toHaveLength(24);
   });
 });
 

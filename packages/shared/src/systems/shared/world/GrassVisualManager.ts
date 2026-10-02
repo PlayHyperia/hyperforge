@@ -33,7 +33,11 @@ import THREE, {
   output,
 } from "../../../extras/three/three";
 import { SUN_LIGHT } from "./LightingConfig";
-import { updateGrassEnvironmentMaterial } from "./OutdoorEnvironment";
+import {
+  updateGrassEnvironmentMaterial,
+  updateGrassRoughLeafEnvironmentMaterial,
+} from "./OutdoorEnvironment";
+import { GrassRoughLeafMaterial } from "./GrassRoughLeafMaterial";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
@@ -53,6 +57,7 @@ import type {
   GrassSubmissionCandidate,
   GrassShadowCandidate,
   GrassEnvironmentCandidate,
+  GrassLightingModelCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -1916,6 +1921,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly submissionCandidate?: GrassSubmissionCandidate,
     private readonly shadowCandidate?: GrassShadowCandidate,
     private readonly environmentCandidate?: GrassEnvironmentCandidate,
+    private readonly lightingModelCandidate?: GrassLightingModelCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -2017,6 +2023,17 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error(
         "Grass geometry requires the explicit leaf-volume fine meadow",
+      );
+    if (
+      lightingModelCandidate !== undefined &&
+      (lightingModelCandidate !== "rough-leaf-v1" ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        environmentCandidate !== undefined ||
+        shadowCandidate !== undefined)
+    )
+      throw new Error(
+        "Rough leaf lighting requires the admitted meadow field without other lighting trials",
       );
     if (
       instancingCandidate !== undefined &&
@@ -2478,6 +2495,14 @@ export class GrassVisualManager implements QuadTreeListener {
         ? {
             environmentEvaluation: {
               mode: this.environmentCandidate,
+              qualification: "unqualified" as const,
+            },
+          }
+        : {}),
+      ...(this.lightingModelCandidate
+        ? {
+            lightingModel: {
+              mode: this.lightingModelCandidate,
               qualification: "unqualified" as const,
             },
           }
@@ -3997,7 +4022,8 @@ export class GrassVisualManager implements QuadTreeListener {
    * render. Material hooks do not. Install before the adaptive draw wrapper,
    * which forwards this hook for both primary and reflection passes. */
   private bindGrassEnvironment(mesh: GrassChunkRenderMesh): void {
-    if (!this.environmentCandidate) return;
+    if (!this.environmentCandidate && !this.lightingModelCandidate) return;
+    const roughLeaf = this.lightingModelCandidate !== undefined;
     const previous = mesh.onBeforeRender;
     mesh.onBeforeRender = function (
       renderer,
@@ -4008,7 +4034,8 @@ export class GrassVisualManager implements QuadTreeListener {
       group,
     ) {
       previous.call(this, renderer, scene, camera, geometry, material, group);
-      updateGrassEnvironmentMaterial(scene, material);
+      if (roughLeaf) updateGrassRoughLeafEnvironmentMaterial(scene, material);
+      else updateGrassEnvironmentMaterial(scene, material);
     };
   }
 
@@ -4662,7 +4689,9 @@ export class GrassVisualManager implements QuadTreeListener {
       isCompactSculptProfile(terrainProfile);
     const mat =
       compactPhysical && appearance?.id === FINE_MEADOW_APPEARANCE.id
-        ? new MeshSSSNodeMaterial()
+        ? this.lightingModelCandidate
+          ? new GrassRoughLeafMaterial()
+          : new MeshSSSNodeMaterial()
         : new MeshStandardNodeMaterial();
     mat.name = appearance?.id ?? "legacy-blades-v1";
     if (this.lightingCandidate)

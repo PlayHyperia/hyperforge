@@ -1,5 +1,58 @@
 # Grass canopy visibility: research checkpoint
 
+## Native220 — rough-leaf lighting candidate repeats a 2.35–2.80 ms improvement
+
+**Implemented, opt-in, not promoted.** Two full-content native comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** show a repeatable **2.35–2.80 ms** reduction in median wall tick intervals. Candidate medians remain **41.20–41.60 ms**, far above the **16.67 ms** target. These short instrumented intervals are not presented FPS or sustained 60 FPS acceptance. No density, geometry, shadow-quality, reflection, postprocessing or resolution setting is reduced.
+
+### Implementation and native shader proof
+
+Explicit `grassLightingModel=rough-leaf-v1` admits only the retained compact fine-meadow/leaf-volume/meadow-field recipe with uniform shadows and no stacked environment/shadow trial. Ordinary/default worlds retain the existing material and allocate no extra fields. `GrassRoughLeafMaterial` specializes the fixed roughness1/metalness0 dielectric algebra while retaining the installed r186 DFG, direct SSS, energy compensation, receiver shadows and AO. Unsupported material recipes, missing/retired preparation and foreign ownership fall back to the stock path.
+
+OutdoorEnvironment optionally prepares12 owned129×65 RGBA16F linear radiance fields from the existing maximum-roughness PMREM captures, through the existing bounded renderer preparation queue. Phase interpolation, environment rotation, duplicate seam/pole support and texel-center sampling are explicit. Logical field color storage is804,960 bytes (about0.768MiB), **not measured total GPU memory**. Error/retirement cleanup does not dispose borrowed stock environment textures.
+
+[Actual draw-owned census](/Users/lucid/Downloads/hyperia-native220-grass-census.json), SHA256 `c11238a3cf78b73ec16b6c0e6ab00f2afd34264de240c9b203712f904f79ee06`, verifies85 stock/candidate pairs:45 primary and40 mirror. The candidate has **14→8 static texture sites**: original1 DFG and5 PCF comparisons remain, while8 PMREM gradient sites become2 explicit-LOD field reads shared by radiance and irradiance. Update registrations34→26; fragment size40,868→20,667 characters. Static sites are not executed sample counts or GPU timings. Independent normalized shader comparison verifies unchanged wind, root deltas, visibility/coverage, placement and blade-normal dependencies. Stock matches Native219 after generated identifiers/struct-member ordering are normalized.
+
+### Repeated full-content timing
+
+Each run uses stock / candidate / stock / candidate / stock, at least3seconds warmup and10seconds measured per arm, with the candidate prewarmed. The first interval in each arm is excluded. Camera, player, phase0.56/exposure0.850240084, all render settings and owners are pinned. No extra render loop, GPU fence or readback occurs during timing. Stock-arm clones are actual canonical MeshSSSNodeMaterials; merely clearing a subclass clone's environment would incorrectly reactivate the candidate from the existing object hook.
+
+| Run / arm | Same-arm intervals | Wall median / p95 (ms) | Tick CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| 1 stock A1 | 230 | 44.10 /46.60 | 12.00 |
+| 1 candidate B1 | 243 | 41.30 /44.70 | 11.70 |
+| 1 stock A2 | 229 | 44.00 /47.30 | 11.70 |
+| 1 candidate B2 | 243 | 41.40 /44.10 | 11.90 |
+| 1 stock A3 | 230 | 43.90 /46.90 | 11.65 |
+| 2 stock A1 | 229 | 44.00 /46.90 | 11.80 |
+| 2 candidate B1 | 242 | 41.60 /44.30 | 12.10 |
+| 2 stock A2 | 230 | 43.90 /46.20 | 11.70 |
+| 2 candidate B2 | 244 | 41.20 /43.90 | 11.60 |
+| 2 stock A3 | 230 | 44.10 /46.40 | 11.80 |
+
+Paired savings against neighboring stock medians are **2.75/2.55/2.35/2.80 ms**, roughly5–6%; CPU improvement is not consistent. Median uses midpoint; p95 uses sorted index floor(0.95×(n−1)). [First timing](/Users/lucid/Downloads/hyperia-native220-grass-rough-leaf-comparison.json), SHA256 `2fe9d6804a0d7b63b2f483400d242bb20bd8daf3261326d9991aea601134d48b`; [repeat](</Users/lucid/Downloads/hyperia-native220-grass-rough-leaf-comparison (1).json>), SHA256 `9874341a5d656df184eb54c21cb370b56c3e9f14a0a310a196a9177be524d50e`.
+
+All3,015 recorded ticks retain **865 calls /10,567,653 repeated-view triangle slots**: main331/4,904,452; mirror318/4,418,057; each sun refresh108/622,572. Main/mirror grass stays45/3,708,681 and40/3,263,232; terrain18/491,280 and17/482,838. One mirror and two shadow refreshes remain. Native219 had2 more mirror calls/6,000 slots, so use the current paired comparisons—not cross-run absolute subtraction. Both runs and the census complete with empty errors, original hooks/materials restored and all94 private clones disposed per controller.
+
+### Environment accuracy and remaining acceptance
+
+The [real-GPU numerical bundle](</Users/lucid/Downloads/hyperia-native220-radiometry (1).json>), SHA256 `ee75ece0f1af8c9ee7dc64968f2bde0b25d15dbb38ca441578496859c7a56421`, completes **78 cases:26 source/midpoint/wrap phases ×3 rotations ×202 sampled directions**, covering sphere, seam, pole and cardinal regions. All three disjoint same-owner batches complete/restored with empty errors and pass the predeclared raw-linear absolute p95≤0.003/max≤0.015 and normalized p95≤0.05/max≤0.15 thresholds (normalization floor0.02). Actual WGSL is checked for direction-input flow into the lighting normal; canonical materialEnvRotation is checked after the real draw. This measures the environment-field approximation, **not complete lit-material or final-canvas parity**.
+
+Independent raw-value recomputation verifies47,268 RGB comparisons, all finite/nonnegative with alpha1 and the same24 owner maps as timing. Worst absolute error is0.0048828125; worst normalized error is0.00408830744 (0.409%). Largest per-case/channel p95 errors are0.0009765625 absolute and0.00117370892 normalized (0.1174%). Reported statistics match independent recomputation exactly.
+
+A first overly restrictive diagnostic shader-name guard refuses before sampling and restores; its [receipt](/Users/lucid/Downloads/hyperia-native220-radiometry.json) is not acceptance. A subsequent single78-case preparation hits the unchanged15second lease deadline after44cases and restores; it is retained in the final bundle as incomplete. Three bounded batches27/27/24 then complete without changing the product timeout or weakening shader-flow validation.
+
+The [candidate ordinary-frame capture](/Users/lucid/Downloads/hyperia-native220-roughleaf-ready-wide.png) shows no obvious gross failure at this held daylight pose, but is not a matched visual comparison. **Day/night, backlight, tree-shadow-edge, pond/motion and complete-material fallback/device-lifecycle native checks remain open before default/public promotion.** Source lifecycle tests are not a substitute for those native checks.
+
+### Verification, protection and next action
+
+Scoped source verification: **817 pass,1 native-only skip** across4 suites/818 total tests; all10 owned files pass targeted lint/format. Real TSL builder stages and recipe/ownership/fallback/cleanup checks are included. Combined typecheck retains exactly5 inherited errors in CompactServiceCourtVisuals/CompactServiceCourt/CompactServiceCourtSystem/RootedFlowerVisualManager, none in the changed files; do not claim a clean whole-project typecheck.
+
+Protected canonical build209 completes with9 bundles/979 inputs, zero source overrides and production bytes matching canonical source. Build report SHA256 `038efb6c9525a21d63a3bfa9e0ee4c1e1fe4582ad0cee279da223e4eaf6357dc`; framework client `59ecea7715af6c427e0e2a822916a45ac45b12dddfd676341d67b9dca68afb61`. Test receipt [source220-integrated-tests01.json](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source220-integrated-tests01.json), SHA256 `285d7b471fc9c664291e38e2e5a77df25090a596a2e2de58c32180e6003395a4`.
+
+Native UI confirms all3 preparation leases restored, preparation idle, camera/clock and renderer/environment exposure restored before closing owned game/DevTools. Private runtime stops2026-10-02T12:37:12.794Z, errors empty, protected state unchanged, disposable database removed and four private ports free; process SHA256 `e80a61b25e636faee3302977c5d525e83f5b6500fcb6873c439fd569fe632600`. Three temporary served diagnostic modules are removed; their external evidence copies remain. Runtime helper returns to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. All414 protected file hashes/438 symlinks,42 unrelated dirty-file hashes,10 tested source hashes and3 retained terrain-source pins verify unchanged. Public3333/build174, saved database and assets remain protected.
+
+**Next:** complete bounded matched visual/fallback qualification for this demonstrably faster candidate, then target the remaining larger terrain/grass/reflection work. Native206's same-run terrain-before-grass ranking remains valid; Native208 reflection overlaps both. Do not add diagnostic deltas or mistake Native219's11ms unlit opportunity for this2.35–2.80ms retained-lighting result. Postprocessing/actors/tree attribution and sustained multi-view16.67ms acceptance remain open.
+
 ## Native219 — grass lighting attribution repeats a 10.825–11.450 ms effect
 
 **Decision: prioritize a substantial leaf-lighting implementation, not another small terrain-cache adjustment.** Two five-arm native comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** reproduce a **10.825–11.450 ms** reduction in median wall tick intervals when only grass lighting is bypassed. Original blade geometry, density, wind, grounding, coverage, terrain, reflection and shadow-map refreshes remain. This is a diagnostic opportunity, **not a shipping speedup or 60 FPS acceptance**. No production source/default/public build/asset changes are made.

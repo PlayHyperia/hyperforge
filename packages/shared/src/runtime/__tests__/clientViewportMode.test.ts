@@ -40,6 +40,7 @@ import {
   resolveGrassSubmissionCandidate,
   resolveGrassShadowCandidate,
   resolveGrassEnvironmentCandidate,
+  resolveGrassLightingModelCandidate,
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
@@ -759,6 +760,128 @@ describe("explicit grass distance shadow filtering", () => {
         "requires the compact fine meadow",
       );
       expect(terrain["grassVisualSelection"]).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
+
+describe("explicit rough-leaf lighting model", () => {
+  const dependencies =
+    "worldPreview=retained-v1&streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1&shadowFlow=uniform-v1";
+  const selected = "grassLightingModel=rough-leaf-v1";
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  function visit(query: string, path = "/"): Window {
+    dom.reconfigure({ url: `http://localhost:3344${path}?${query}` });
+    return dom.window as unknown as Window;
+  }
+
+  it("adds no default selection and rejects unknown/duplicate values", () => {
+    expect(resolveGrassLightingModelCandidate()).toBeUndefined();
+    for (const query of ["", dependencies, "grassGeometry=invalid"])
+      expect(resolveGrassLightingModelCandidate(visit(query))).toBeUndefined();
+    for (const value of [
+      "",
+      "true",
+      "rough-leaf-v2",
+      "ROUGH-LEAF-V1",
+      "%20rough-leaf-v1",
+      "rough-leaf-v1&grassLightingModel=rough-leaf-v1",
+    ])
+      expect(() =>
+        resolveGrassLightingModelCandidate(
+          visit(`${dependencies}&grassLightingModel=${value}`),
+        ),
+      ).toThrow("Unknown or duplicate grass lighting model candidate");
+  });
+
+  it("requires every exact dependency and an ordinary local-player route", () => {
+    expect(
+      resolveGrassLightingModelCandidate(visit(`${dependencies}&${selected}`)),
+    ).toBe("rough-leaf-v1");
+    for (const key of new URLSearchParams(dependencies).keys()) {
+      const missing = new URLSearchParams(dependencies);
+      missing.delete(key);
+      const duplicate = new URLSearchParams(dependencies);
+      duplicate.append(key, duplicate.get(key)!);
+      const invalid = new URLSearchParams(dependencies);
+      invalid.set(key, "invalid");
+      for (const params of [missing, duplicate, invalid])
+        expect(() =>
+          resolveGrassLightingModelCandidate(visit(`${params}&${selected}`)),
+        ).toThrow();
+    }
+    for (const suffix of [
+      "grassEnvironment=shared-max-roughness-v1",
+      "grassEnvironment=",
+      "grassShadow=distance-pcf-v1",
+      "grassShadow=",
+      "embedded=true",
+      "embedded=false",
+      "page=stream",
+      "mode=spectator",
+    ])
+      expect(() =>
+        resolveGrassLightingModelCandidate(
+          visit(`${dependencies}&${selected}&${suffix}`),
+        ),
+      ).toThrow();
+    for (const path of ["/stream.html", "/play"])
+      expect(() =>
+        resolveGrassLightingModelCandidate(
+          visit(`${dependencies}&${selected}`, path),
+        ),
+      ).toThrow();
+  });
+
+  it.each([false, true])(
+    "captures the terrain choice once (enabled=%s)",
+    (enabled) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(`${dependencies}${enabled ? `&${selected}` : ""}`),
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.lightingModel).toBe(
+          enabled ? "rough-leaf-v1" : undefined,
+        );
+        expect(captured.shadow).toBeUndefined();
+        expect(captured.environment).toBeUndefined();
+        visit(`${dependencies}&grassLightingModel=invalid`);
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+
+  it("rejects a non-sculpt terrain without creating a grass manager", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit(`${dependencies}&${selected}`),
+    });
+    try {
+      expect(() => terrain["getCompactGrassColorGrade"]()).toThrow(
+        "Grass color grade requires the compact fine meadow",
+      );
+      expect(terrain["grassVisualManager"]).toBeNull();
     } finally {
       if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
       else Reflect.deleteProperty(globalThis, "window");
@@ -3626,7 +3749,7 @@ describe("explicit attribute-only grass instancing", () => {
       1,
     );
     expect(source).toMatch(
-      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*grassSelection\.submission,\s*grassSelection\.shadow,\s*grassSelection\.environment,\s*\);/u,
+      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*grassSelection\.submission,\s*grassSelection\.shadow,\s*grassSelection\.environment,\s*grassSelection\.lightingModel,\s*\);/u,
     );
   });
 });
@@ -4326,7 +4449,7 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(submission \? \{ submission \} : \{\}\),\s*\.\.\.\(shadow \? \{ shadow \} : \{\}\),\s*\.\.\.\(environment \? \{ environment \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(submission \? \{ submission \} : \{\}\),\s*\.\.\.\(shadow \? \{ shadow \} : \{\}\),\s*\.\.\.\(environment \? \{ environment \} : \{\}\),\s*\.\.\.\(lightingModel \? \{ lightingModel \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,

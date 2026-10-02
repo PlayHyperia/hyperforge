@@ -1,7 +1,10 @@
 import THREE, { CSMShadowNode } from "../../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 import { UniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
-import { resolveSingleMapShadowFlow } from "../../../runtime/clientViewportMode";
+import {
+  resolveSingleMapShadowFlow,
+  resolveGrassLightingModelCandidate,
+} from "../../../runtime/clientViewportMode";
 
 import { Node as NodeClass } from "../../../nodes/Node";
 import { System } from "../infrastructure/System";
@@ -217,6 +220,7 @@ export class Environment extends System {
   // CSMShadowNode for WebGPU cascaded shadows
   private csmShadowNode: InstanceType<typeof CSMShadowNode> | null = null;
   private readonly singleMapShadowFlow = resolveSingleMapShadowFlow();
+  private readonly grassLightingModel = resolveGrassLightingModelCandidate();
   private singleMapShadowNode: UniformDirectionalShadowNode | null = null;
 
   // CSM frustum update optimization - only recalculate when needed
@@ -301,9 +305,16 @@ export class Environment extends System {
     // Prepare one shared sky IBL before world startup completes. Standard PBR
     // actors, equipment and terrain inherit it; planar water remains separate.
     if (this.world.stage?.scene && this.world.graphics) {
+      if (
+        this.grassLightingModel &&
+        (!DataManager.getWorldConfig() ||
+          !isCompactSculptProfile(DataManager.getWorldTerrainProfile()))
+      )
+        throw new Error("Rough leaf lighting requires compact sculpt terrain");
       this.outdoorEnvironment = new OutdoorEnvironment(
         this.world.stage.scene,
         resolveOutdoorCalibration(),
+        this.grassLightingModel !== undefined,
       );
       await this.outdoorEnvironment.initialize(
         this.world.graphics,

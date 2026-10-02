@@ -1,16 +1,29 @@
 import THREE from "../../../extras/three/three";
 import type Node from "three/src/nodes/core/Node.js";
 import {
+  acos,
+  atan,
+  cos,
   float,
+  materialEnvRotation,
   mix,
   normalWorld,
   pmremTexture,
+  sin,
+  texture,
   uniform,
+  uv,
+  vec2,
   vec3,
+  vec4,
 } from "three/tsl";
 import type { ClientGraphics } from "../../client/ClientGraphics";
 import { AMBIENT_LIGHT, HEMISPHERE_LIGHT } from "./LightingConfig";
 import { sampleSkyCycle, type SkyLightingCapture } from "./SkySystem";
+import {
+  setRoughLeafEnvironment,
+  supportsRoughLeafRecipe,
+} from "./GrassRoughLeafMaterial";
 
 // Smooth sky radiance needs far less angular detail than reflected geometry.
 // Twelve RGBA16F 384x512 atlases occupy 18 MiB of base color storage. This is
@@ -21,15 +34,36 @@ export const OUTDOOR_ENVIRONMENT_PHASES = Object.freeze([
 export const OUTDOOR_ENVIRONMENT_FACE_SIZE = 128;
 const ATLAS_WIDTH = 384;
 const ATLAS_HEIGHT = 512;
+/** Opt-in finite-resolution approximation of the SAME roughness-one PMREM
+ * radiance. Explicit duplicate longitude endpoint and pole rows, no mip chain.
+ * Native radiometry, seam/orientation and full-world performance remain gates. */
+export const OUTDOOR_ROUGH_LEAF_MAP = Object.freeze({
+  width: 129,
+  height: 65,
+  longitudeSegments: 128,
+  polarSegments: 64,
+  bytesPerPhase: 129 * 65 * 8,
+});
 type RGB = readonly [number, number, number];
 export type OutdoorCalibration = "luminance-v1" | "rgb-irradiance-v1";
 type State = "idle" | "preparing" | "ready" | "failed" | "disposed";
+// Public r186 callback; installed declarations do not yet expose its contract.
+type RoughLeafBuilder = {
+  material: THREE.Material | null;
+  fragmentShader?: string;
+};
+type RoughLeafBuilderCallback = (
+  builder: RoughLeafBuilder,
+  owner: { object?: THREE.Object3D; material?: THREE.Material },
+) => void;
+type RoughLeafDebug = { onNodeBuilderCreated: RoughLeafBuilderCallback | null };
 
 type SceneEnvironmentNode = NonNullable<THREE.Scene["environmentNode"]>;
 type SharedGrassEnvironmentNode = Node<"vec3">;
 type GrassEnvironmentOwner = {
   source: SceneEnvironmentNode;
   shared: SharedGrassEnvironmentNode | null;
+  roughLeaf: SharedGrassEnvironmentNode | null;
 };
 const grassEnvironmentOwners = new WeakMap<
   THREE.Scene,
@@ -148,6 +182,85 @@ export function updateGrassEnvironmentMaterial(
     material.envNode = next;
     material.needsUpdate = true;
   }
+}
+
+/** The object callback runs before pipeline selection. Missing, foreign or
+ * retired owners restore the material's stock path; the setter never takes
+ * ownership of a foreign envNode or of the owner's textures. */
+export function updateGrassRoughLeafEnvironmentMaterial(
+  scene: THREE.Scene,
+  material: THREE.Material,
+): void {
+  const owner = grassEnvironmentOwners.get(scene);
+  const node =
+    owner &&
+    scene.environmentNode === owner.source &&
+    supportsRoughLeafRecipe(material)
+      ? owner.roughLeaf
+      : null;
+  setRoughLeafEnvironment(material, node);
+}
+
+/** Texel-center grid used only for the preparation quad. Rounding selects the
+ * exact integer cell despite interpolated-UV roundoff. Seam columns and every
+ * texel on a pole row resolve to identical directions, not almost-equal sine. */
+export function createOutdoorRoughLeafDirection(
+  mapUV: Node<"vec2">,
+): Node<"vec3"> {
+  const grid = mapUV
+    .mul(vec2(OUTDOOR_ROUGH_LEAF_MAP.width, OUTDOOR_ROUGH_LEAF_MAP.height))
+    .sub(0.5)
+    .round();
+  const longitude = grid.x
+    .div(OUTDOOR_ROUGH_LEAF_MAP.longitudeSegments)
+    .fract()
+    .sub(0.5)
+    .mul(Math.PI * 2);
+  const polar = grid.y
+    .clamp(0, OUTDOOR_ROUGH_LEAF_MAP.polarSegments)
+    .div(OUTDOOR_ROUGH_LEAF_MAP.polarSegments)
+    .mul(Math.PI);
+  const direction = vec3(
+    cos(longitude).mul(sin(polar)),
+    cos(polar),
+    sin(longitude).mul(sin(polar)),
+  );
+  return grid.y
+    .lessThanEqual(0)
+    .select(
+      vec3(0, 1, 0),
+      grid.y
+        .greaterThanEqual(OUTDOOR_ROUGH_LEAF_MAP.polarSegments)
+        .select(vec3(0, -1, 0), direction),
+    );
+}
+
+/** Map a unit direction into the endpoint-inclusive texel-center domain.
+ * atan(0,0) is indeterminate in WGSL: feed (0,1) at either pole instead. */
+export function createOutdoorRoughLeafUV(
+  direction: Node<"vec3">,
+): Node<"vec2"> {
+  const radial = direction.x
+    .mul(direction.x)
+    .add(direction.z.mul(direction.z))
+    .greaterThan(1e-20);
+  const angle = atan(
+    radial.select(direction.z, float(0)),
+    radial.select(direction.x, float(1)),
+  );
+  const angular = vec2(
+    angle.div(Math.PI * 2).add(0.5),
+    acos(direction.y.clamp(-1, 1)).div(Math.PI),
+  );
+  return angular
+    .mul(
+      vec2(
+        OUTDOOR_ROUGH_LEAF_MAP.longitudeSegments,
+        OUTDOOR_ROUGH_LEAF_MAP.polarSegments,
+      ),
+    )
+    .add(0.5)
+    .div(vec2(OUTDOOR_ROUGH_LEAF_MAP.width, OUTDOOR_ROUGH_LEAF_MAP.height));
 }
 
 /** Explicit visual candidate; ordinary startup retains the existing lighting. */
@@ -346,14 +459,24 @@ export class OutdoorEnvironment {
   private readonly interval = { a: 0, b: 1, blend: 0 };
   private preparationMs = 0;
   private capturesCompleted = 0;
+  private roughLeafTargets: THREE.RenderTarget[] = [];
+  private roughLeafNodeA: ReturnType<typeof texture> | null = null;
+  private roughLeafNodeB: ReturnType<typeof texture> | null = null;
+  private roughLeafNode: SharedGrassEnvironmentNode | null = null;
+  private roughLeafState: State = "idle";
+  private roughLeafFailure: string | null = null;
+  private roughLeafCapturesCompleted = 0;
 
   constructor(
     private readonly scene: THREE.Scene,
     private readonly calibration: OutdoorCalibration = "luminance-v1",
+    private readonly enableRoughLeaf = false,
   ) {
     if (calibration !== "luminance-v1" && calibration !== "rgb-irradiance-v1") {
       throw new Error("Invalid outdoor lighting calibration");
     }
+    if (typeof enableRoughLeaf !== "boolean")
+      throw new Error("Invalid rough-leaf environment selection");
   }
 
   get ready(): boolean {
@@ -371,6 +494,16 @@ export class OutdoorEnvironment {
       blend: this.interval.blend,
       capturesCompleted: this.capturesCompleted,
       preparationMs: this.preparationMs,
+      roughLeaf: {
+        enabled: this.enableRoughLeaf,
+        state: this.roughLeafState,
+        failure: this.roughLeafFailure,
+        ...OUTDOOR_ROUGH_LEAF_MAP,
+        phaseCount: this.roughLeafTargets.length,
+        baseColorBytes:
+          this.roughLeafTargets.length * OUTDOOR_ROUGH_LEAF_MAP.bytesPerPhase,
+        capturesCompleted: this.roughLeafCapturesCompleted,
+      },
     };
   }
 
@@ -438,6 +571,18 @@ export class OutdoorEnvironment {
             await device.queue.onSubmittedWorkDone();
             this.capturesCompleted++;
           }
+          if (this.enableRoughLeaf) {
+            try {
+              await this.prepareRoughLeaf(renderer, device);
+            } catch (error) {
+              this.roughLeafFailure = String(error);
+              this.roughLeafState = this.closed ? "disposed" : "failed";
+              this.retireRoughLeafTargets();
+              // A cancelled queue operation cannot publish even the stock graph.
+              // A failed optional bake otherwise leaves all ordinary PMREMs intact.
+              if (this.closed) throw error;
+            }
+          }
           if (this.closed) throw new Error("Outdoor preparation cancelled");
           this.nodeA = pmremTexture(this.targets[0].texture);
           this.nodeB = pmremTexture(this.targets[1].texture);
@@ -449,10 +594,7 @@ export class OutdoorEnvironment {
           this.scene.environmentIntensity = 1;
           this.state = "ready";
           this.update(phase);
-          grassEnvironmentOwners.set(this.scene, {
-            source: this.environmentNode,
-            shared: null,
-          });
+          this.publishGrassOwner();
         } catch (error) {
           errors.push(error);
         } finally {
@@ -494,6 +636,14 @@ export class OutdoorEnvironment {
     const textureB = this.targets[this.interval.b].texture;
     if (this.nodeA.value !== textureA) this.nodeA.value = textureA;
     if (this.nodeB.value !== textureB) this.nodeB.value = textureB;
+    if (this.roughLeafNodeA && this.roughLeafNodeB) {
+      const roughA = this.roughLeafTargets[this.interval.a].texture;
+      const roughB = this.roughLeafTargets[this.interval.b].texture;
+      if (this.roughLeafNodeA.value !== roughA)
+        this.roughLeafNodeA.value = roughA;
+      if (this.roughLeafNodeB.value !== roughB)
+        this.roughLeafNodeB.value = roughB;
+    }
     this.weight.value = this.interval.blend;
   }
 
@@ -501,6 +651,7 @@ export class OutdoorEnvironment {
     if (this.state === "disposed") return;
     this.closed = true;
     this.state = "disposed";
+    this.roughLeafState = "disposed";
     this.unpublish();
     if (!this.working) this.retireTargets();
   }
@@ -521,11 +672,266 @@ export class OutdoorEnvironment {
     }
   }
 
+  private publishGrassOwner(): void {
+    if (
+      !this.ready ||
+      !this.environmentNode ||
+      this.scene.environmentNode !== this.environmentNode
+    )
+      throw new Error(
+        "Outdoor grass binding requires its published live owner",
+      );
+    grassEnvironmentOwners.set(this.scene, {
+      source: this.environmentNode,
+      shared: null,
+      roughLeaf: this.roughLeafNode,
+    });
+  }
+
   private retireTargets(): void {
     const targets = this.targets;
     this.targets = [];
     this.nodeA = this.nodeB = null;
+    attemptAll([
+      () => this.retireRoughLeafTargets(),
+      ...targets.map((target) => () => target.dispose()),
+    ]);
+  }
+
+  private retireRoughLeafTargets(): void {
+    const targets = this.roughLeafTargets;
+    this.roughLeafTargets = [];
+    this.roughLeafNodeA = this.roughLeafNodeB = null;
+    this.roughLeafNode = null;
     attemptAll(targets.map((target) => () => target.dispose()));
+  }
+
+  /** Already inside this owner's prepareRenderer lease. No nested queue,
+   * source replacement, new sky captures or camera-dependent world baking. */
+  private async prepareRoughLeaf(
+    renderer: ClientGraphics["renderer"],
+    device: GPUDevice,
+  ): Promise<void> {
+    if (
+      this.closed ||
+      this.targets.length !== OUTDOOR_ENVIRONMENT_PHASES.length ||
+      !renderer.hasInitialized() ||
+      device.limits.maxTextureDimension2D < OUTDOOR_ROUGH_LEAF_MAP.width
+    )
+      throw new Error("Rough-leaf preparation requires twelve live PMREMs");
+    this.roughLeafState = "preparing";
+    for (const [index, source] of this.targets.entries()) {
+      if (this.closed) throw new Error("Outdoor preparation cancelled");
+      const target = new THREE.RenderTarget(
+        OUTDOOR_ROUGH_LEAF_MAP.width,
+        OUTDOOR_ROUGH_LEAF_MAP.height,
+        {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          generateMipmaps: false,
+          type: THREE.HalfFloatType,
+          format: THREE.RGBAFormat,
+          colorSpace: THREE.LinearSRGBColorSpace,
+          depthBuffer: false,
+          stencilBuffer: false,
+          samples: 0,
+        },
+      );
+      target.texture.name = `OutdoorSky.rough-leaf-phase-${OUTDOOR_ENVIRONMENT_PHASES[index]}`;
+      target.texture.wrapS = target.texture.wrapT = THREE.ClampToEdgeWrapping;
+      target.texture.matrixAutoUpdate = false;
+      this.roughLeafTargets.push(target); // Own before any compilation/render.
+      await this.bakeRoughLeafPhase(renderer, device, source.texture, target);
+      if (this.closed) throw new Error("Outdoor preparation cancelled");
+      this.roughLeafCapturesCompleted++;
+    }
+    this.publishRoughLeaf();
+  }
+
+  private publishRoughLeaf(): void {
+    if (
+      this.closed ||
+      !this.enableRoughLeaf ||
+      this.roughLeafTargets.length !== OUTDOOR_ENVIRONMENT_PHASES.length
+    )
+      throw new Error("Rough-leaf binding requires all twelve phase maps");
+    // Distinct starting maps keep both sampled bindings independently live.
+    this.roughLeafNodeA = texture(this.roughLeafTargets[0].texture);
+    this.roughLeafNodeB = texture(this.roughLeafTargets[1].texture);
+    this.roughLeafNodeA.updateMatrix = this.roughLeafNodeB.updateMatrix = false;
+    // Stock PMREMNode rotates AFTER flipping Y on render-target sources.
+    // The preparation quad cancels that flip, storing raw F(direction). This
+    // live transform therefore exactly retains the stock rotation convention.
+    const direction = materialEnvRotation
+      .mul(vec3(normalWorld.x, normalWorld.y.negate(), normalWorld.z))
+      .xyz.normalize();
+    const mapUV = createOutdoorRoughLeafUV(direction).toVar(
+      "roughLeafEnvironmentUV",
+    );
+    const a = this.roughLeafNodeA.sample(mapUV).level(float(0));
+    const b = this.roughLeafNodeB.sample(mapUV).level(float(0));
+    a.updateMatrix = b.updateMatrix = false;
+    // .level() loses its vector dimension in the installed declarations.
+    // Concrete ConvertNodes retain an actual typed graph, not a type assertion.
+    const rgbaA = vec4(new THREE.ConvertNode<"vec4">(a, "vec4"));
+    const rgbaB = vec4(new THREE.ConvertNode<"vec4">(b, "vec4"));
+    this.roughLeafNode = mix(rgbaA.rgb, rgbaB.rgb, this.weight).toVar(
+      "roughLeafEnvironmentRadiance",
+    );
+    this.roughLeafState = "ready";
+  }
+
+  private async bakeRoughLeafPhase(
+    renderer: ClientGraphics["renderer"],
+    device: GPUDevice,
+    source: THREE.Texture,
+    target: THREE.RenderTarget,
+  ): Promise<void> {
+    const material = new THREE.NodeMaterial();
+    let pmrem: ReturnType<typeof pmremTexture> | null = null;
+    let compilation: Promise<void> | undefined;
+    let restoreCallback: (() => void) | undefined;
+    let assertBuilder: (() => void) | undefined;
+    let scopes = 0;
+    const errors: unknown[] = [];
+    const requireBake = (condition: unknown, message: string) => {
+      if (!condition) throw new Error(`Rough-leaf bake: ${message}`);
+    };
+    try {
+      requireBake(
+        source.isRenderTargetTexture &&
+          source.mapping === THREE.CubeUVReflectionMapping,
+        "owned render-target PMREM required",
+      );
+      const direction = createOutdoorRoughLeafDirection(uv());
+      // PMREMNode performs its own Y flip. Cancel it here and use the bake
+      // material's identity environment rotation; NO phase/intensity/π gains.
+      pmrem = pmremTexture(
+        source,
+        vec3(direction.x, direction.y.negate(), direction.z),
+        float(1),
+      );
+      material.fragmentNode = vec4(pmrem.toVar("roughLeafBakedRadiance"), 1);
+      material.vertexNode = vec4(THREE.TSL.positionGeometry.xy, 0, 1);
+      material.name = "OutdoorSky.rough-leaf-bake";
+      material.depthTest = material.depthWrite = false;
+      material.fog = material.toneMapped = false;
+      material.blending = THREE.NoBlending;
+      material.premultipliedAlpha = false;
+      const quad = new THREE.QuadMesh(material);
+      quad.frustumCulled = false;
+      const expectedFragment = material.fragmentNode;
+      const debug = renderer.debug as unknown as RoughLeafDebug;
+      const descriptor = Object.getOwnPropertyDescriptor(
+          debug,
+          "onNodeBuilderCreated",
+        ),
+        prior = debug.onNodeBuilderCreated;
+      requireBake(
+        (prior === null || typeof prior === "function") &&
+          (descriptor
+            ? descriptor.configurable && "value" in descriptor
+            : Object.isExtensible(debug)),
+        "safe builder callback",
+      );
+      const builders: RoughLeafBuilder[] = [];
+      let overflow = false;
+      const observe: RoughLeafBuilderCallback = (builder, owner) => {
+        prior?.(builder, owner);
+        if (owner.object === quad && owner.material === material) {
+          if (builders.length < 4) builders.push(builder);
+          else overflow = true;
+        }
+      };
+      Object.defineProperty(debug, "onNodeBuilderCreated", {
+        value: observe,
+        configurable: true,
+        writable: true,
+        enumerable: descriptor?.enumerable ?? false,
+      });
+      restoreCallback = () => {
+        requireBake(
+          debug.onNodeBuilderCreated === observe,
+          "foreign callback retained",
+        );
+        if (descriptor)
+          Object.defineProperty(debug, "onNodeBuilderCreated", descriptor);
+        else Reflect.deleteProperty(debug, "onNodeBuilderCreated");
+        requireBake(
+          debug.onNodeBuilderCreated === prior,
+          "callback restoration failed",
+        );
+      };
+      assertBuilder = () =>
+        requireBake(
+          !this.closed &&
+            builders.length > 0 &&
+            !overflow &&
+            debug.onNodeBuilderCreated === observe &&
+            material.fragmentNode === expectedFragment &&
+            builders.every(
+              (builder) =>
+                builder.material === material &&
+                !!builder.fragmentShader?.includes("roughLeafBakedRadiance"),
+            ),
+          "owned roughness-one shader required; compiler fallback rejected",
+        );
+      for (const filter of [
+        "out-of-memory",
+        "internal",
+        "validation",
+      ] as const) {
+        device.pushErrorScope(filter);
+        scopes++;
+      }
+      this.withCaptureState(
+        renderer,
+        () => {
+          compilation = renderer.compileAsync(quad, quad.camera);
+        },
+        target,
+      );
+      await compilation;
+      assertBuilder();
+      const issued = this.withCaptureState(
+        renderer,
+        () => {
+          const before = renderer.info.render.drawCalls;
+          // QuadMesh.render temporarily overwrites vertexNode without finally.
+          // Use the same explicit fullscreen vertex for compile and draw instead.
+          renderer.render(quad, quad.camera);
+          return renderer.info.render.drawCalls - before;
+        },
+        target,
+      );
+      requireBake(issued === 1, "one real phase-map draw required");
+      await device.queue.onSubmittedWorkDone();
+      assertBuilder();
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      await compilation?.catch((error) => {
+        if (!errors.includes(error)) errors.push(error);
+      });
+      await device.queue
+        .onSubmittedWorkDone()
+        .catch((error) => errors.push(error));
+      while (scopes > 0) {
+        scopes--;
+        try {
+          const error = await device.popErrorScope();
+          if (error) errors.push(new Error(error.message));
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      cleanupAfter(errors, [
+        () => assertBuilder?.(),
+        () => restoreCallback?.(),
+        () => material.dispose(),
+        () => pmrem?.dispose(),
+      ]);
+    }
   }
 
   private capture(
@@ -534,6 +940,21 @@ export class OutdoorEnvironment {
     scene: THREE.Scene,
     target: THREE.RenderTarget,
   ): void {
+    this.withCaptureState(renderer, () =>
+      generator.fromScene(scene, 0, 0.1, 100, {
+        size: OUTDOOR_ENVIRONMENT_FACE_SIZE,
+        renderTarget: target,
+      }),
+    );
+  }
+
+  /** Restore borrowed state synchronously, including compile initiation. Never
+   * change canvas size, pixel ratio, animation loop or a source environment. */
+  private withCaptureState<T>(
+    renderer: ClientGraphics["renderer"],
+    operation: () => T,
+    target?: THREE.RenderTarget,
+  ): T {
     const previous = {
       target: renderer.getRenderTarget(),
       face: renderer.getActiveCubeFace(),
@@ -551,17 +972,20 @@ export class OutdoorEnvironment {
       renderObject: renderer.getRenderObjectFunction(),
     };
     const errors: unknown[] = [];
+    let value!: T;
     try {
       renderer.setMRT(null);
       renderer.setRenderObjectFunction(null);
       renderer.setScissorTest(false);
+      if (target) {
+        renderer.setRenderTarget(target);
+        renderer.setClearColor(0, 0);
+        renderer.autoClear = true;
+      }
       renderer.toneMapping = THREE.NoToneMapping;
       renderer.toneMappingExposure = 1;
       renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-      generator.fromScene(scene, 0, 0.1, 100, {
-        size: OUTDOOR_ENVIRONMENT_FACE_SIZE,
-        renderTarget: target,
-      });
+      value = operation();
     } catch (error) {
       errors.push(error);
     } finally {
@@ -592,5 +1016,6 @@ export class OutdoorEnvironment {
         },
       ]);
     }
+    return value;
   }
 }

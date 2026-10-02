@@ -141,6 +141,7 @@ export type GrassInstancingCandidate = "attributes-v1";
 export type GrassSubmissionCandidate = "adaptive-ranges-v1";
 export type GrassShadowCandidate = "distance-pcf-v1";
 export type GrassEnvironmentCandidate = "shared-max-roughness-v1";
+export type GrassLightingModelCandidate = "rough-leaf-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -213,6 +214,31 @@ export function resolveGrassEnvironmentCandidate(
       "Grass environment sharing requires the explicit leaf-volume fine meadow",
     );
   return "shared-max-roughness-v1";
+}
+
+/** Private full-content lighting trial. No density, shadow or quality defaults
+ * change; missing/retired sky preparation uses the existing SSS material path. */
+export function resolveGrassLightingModelCandidate(
+  win?: Window,
+): GrassLightingModelCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassLightingModel") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "rough-leaf-v1")
+    throw new Error("Unknown or duplicate grass lighting model candidate");
+  if (
+    !resolveLocalPlayerWorldPreview(windowRef) ||
+    resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1" ||
+    resolveSingleMapShadowFlow(windowRef) !== "uniform-v1" ||
+    params?.has("grassEnvironment") ||
+    params?.has("grassShadow")
+  )
+    throw new Error(
+      "Rough leaf lighting requires the ordinary retained leaf-volume meadow field, uniform shadows and no stacked environment/shadow trial",
+    );
+  return "rough-leaf-v1";
 }
 
 /** Explicit rooted-flower population; omission never enables this owner. */
@@ -912,6 +938,11 @@ export type StreamingGrassProfileReceipt = {
   /** Enabled ownership policy, not proof that every draw uses the fast path. */
   environmentEvaluation?: {
     mode: GrassEnvironmentCandidate;
+    qualification: "unqualified";
+  };
+  /** Selection only; prepared sky ownership and recipe admission are per draw. */
+  lightingModel?: {
+    mode: GrassLightingModelCandidate;
     qualification: "unqualified";
   };
   profileId:

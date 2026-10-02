@@ -57,6 +57,7 @@ import {
   isMeadowGrassBladeLayout,
 } from "../GrassBladeLayout";
 import { sampleSkyCycle } from "../SkySystem";
+import { GrassRoughLeafMaterial } from "../GrassRoughLeafMaterial";
 import {
   createGroundedGrassMaterial,
   GRASS_CLUMP_CACHE_ATTRIBUTE,
@@ -82,6 +83,7 @@ function manager(
   vergeEvaluation?: ConstructorParameters<typeof GrassVisualManager>[18],
   instancing?: ConstructorParameters<typeof GrassVisualManager>[19],
   submission?: ConstructorParameters<typeof GrassVisualManager>[20],
+  lightingModel?: ConstructorParameters<typeof GrassVisualManager>[23],
 ) {
   const config = createTerrainWorkerConfig(terrain, 16);
   const setup: GrassWorkerSetup = {
@@ -126,6 +128,9 @@ function manager(
     vergeEvaluation,
     instancing,
     submission,
+    undefined,
+    undefined,
+    lightingModel,
   );
 }
 
@@ -633,6 +638,97 @@ describe("adaptive grass submission constructor admission (CPU only)", () => {
     } finally {
       owner.destroy();
     }
+  });
+});
+
+describe("rough-leaf material owner admission (not native appearance)", () => {
+  const options: Parameters<typeof manager> = [
+    FINE_MEADOW_GRASS_VISUAL_PROFILE,
+    SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+    true,
+    "fine-meadow-v1",
+    undefined,
+    "leaf-volume-v1",
+    undefined,
+    "meadow-field-v1",
+    undefined,
+    undefined,
+    undefined,
+    "rough-leaf-v1",
+  ];
+
+  it("keeps all source LOD geometry and leaf roots while selecting the explicit subtype", () => {
+    const originalOptions = [...options] as Parameters<typeof manager>;
+    originalOptions[11] = undefined;
+    const original = manager(...originalOptions);
+    const candidate = manager(...options);
+    try {
+      expect(original["material"]).toBeInstanceOf(MeshSSSNodeMaterial);
+      expect(original["material"]).not.toBeInstanceOf(GrassRoughLeafMaterial);
+      expect(candidate["material"]).toBeInstanceOf(GrassRoughLeafMaterial);
+      expect(candidate["material"]).toBeInstanceOf(MeshSSSNodeMaterial);
+      const { lightingModel, ...receipt } = candidate.getProfileReceipt();
+      expect(lightingModel).toEqual({
+        mode: "rough-leaf-v1",
+        qualification: "unqualified",
+      });
+      expect(receipt).toEqual(original.getProfileReceipt());
+      expect(candidate["material"].userData).toEqual(
+        original["material"].userData,
+      );
+      for (let lod = 0; lod < 3; lod++) {
+        const a = original["lodGeometries"][lod];
+        const b = candidate["lodGeometries"][lod];
+        expect(b.index?.array).toEqual(a.index?.array);
+        expect(Object.keys(b.attributes)).toEqual(Object.keys(a.attributes));
+        for (const name of Object.keys(a.attributes))
+          expect(b.attributes[name].array).toEqual(a.attributes[name].array);
+      }
+      const source = candidate["material"];
+      const clone = source.clone();
+      try {
+        expect(clone).toBeInstanceOf(GrassRoughLeafMaterial);
+        for (const key of [
+          "positionNode",
+          "normalNode",
+          "colorNode",
+          "outputNode",
+          "aoNode",
+          "thicknessColorNode",
+          "thicknessAttenuationNode",
+          "thicknessPowerNode",
+          "thicknessScaleNode",
+          "thicknessDistortionNode",
+          "thicknessAmbientNode",
+        ] as const)
+          expect(Reflect.get(clone, key)).toBe(Reflect.get(source, key));
+        expect(clone.lights).toBe(true);
+        expect(clone.side).toBe(THREE.DoubleSide);
+        expect(clone.transparent).toBe(false);
+        expect(clone.depthWrite).toBe(true);
+        expect(clone.fragmentNode).toBeNull();
+        expect(clone.roughness).toBe(1);
+        expect(clone.metalness).toBe(0);
+      } finally {
+        clone.dispose();
+      }
+    } finally {
+      candidate.destroy();
+      original.destroy();
+    }
+  });
+
+  it.each([
+    { index: 7, value: undefined },
+    { index: 7, value: "rooted-fan-v1" },
+    { index: 5, value: undefined },
+    { index: 11, value: "unknown" },
+    { index: 11, value: null },
+    { index: 2, value: false },
+  ])("rejects unsupported construction %#", ({ index, value }) => {
+    const args: unknown[] = [...options];
+    args[index] = value;
+    expect(() => Reflect.apply(manager, undefined, args)).toThrow();
   });
 });
 
