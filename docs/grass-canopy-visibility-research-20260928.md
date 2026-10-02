@@ -1,5 +1,64 @@
 # Grass canopy visibility: research checkpoint
 
+## Native212 — sun-map refresh saves CPU work; cadence benefit is inconsistent
+
+Two repeated native attribution screens complete on canonical **build205**. Temporarily omitting both primary- and mirror-triggered sun-map refreshes removes measurable synchronous CPU work, but **does not establish a consistent improvement in ordinary tick cadence**. Terrain, grass and repeated planar capture remain the leading action priorities. This is a diagnostic with stale seeded shadow depth, **not a shipping shadow policy, receiver-PCF benchmark, exclusive GPU cost or displayed FPS result**. Defaults and visual-quality settings remain unchanged; sustained 60 FPS at 2× is still unqualified.
+
+### Matched scope and actual omitted work
+
+Both successful receipts contain the same exact installer source, quality/pose snapshots, settled sun state, mirror/shadow targets and owner counts. Actual canvas is **3024×1724, DPR2, MSAA4, High shadows**, held phase **0.56**, exposure **0.850240084**, with the same pond camera as Native211. Reflections/postprocessing/bloom are enabled; the mirror is **1512×862** and the single sun map **4096×4096**. All **52 terrain / 94 grass owners** remain admitted. Terrain AABB culling, reflection-footprint experiments and primary shadow reuse remain disabled. **Native212 records `depthBlur:true`, unlike Native211's `false`; their absolute timings are not a controlled cross-run comparison.**
+
+The scoped nested-render lease forwards all ordinary rendering except the two already-seeded sun-map captures during omission arms. Every full tick completes one primary-triggered and one mirror-triggered shadow render; every omission tick skips those two renders while retaining receiver shadow sampling and the existing map, blend and public shadow/reflection settings. The observer records **224 shadow draw attempts in full arms and zero in omission arms**—attempts, not the earlier census's 216 issued draws. Primary/mirror beauty attempts stay **340/329**, with stable geometry-slot sums **14,904,384/13,463,199**; primary grass/terrain attempts stay **45/18**, mirror **40/17**. These are consistency guards, not triangle or GPU-time estimates.
+
+### Repeated five-arm evidence
+
+Each screen is full / omit / full / omit / full, **six seconds per arm with one second excluded for warmup**. Medians use the standard midpoint for even counts; p95 uses sorted index `floor(0.95 × (n − 1))`. All times are milliseconds. Interval samples exclude arm/warmup transitions.
+
+| Run / arm | Measured ticks / intervals | Wall interval median / p95 | Input interval median / p95 | Synchronous tick CPU median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| First full1 | 67 / 66 | 74.80 / 82.40 | 74.30 / 85.00 | 17.30 / 23.90 |
+| First omit1 | 63 / 62 | 78.75 / 86.60 | 78.45 / 88.70 | 13.40 / 16.60 |
+| First full2 | 66 / 65 | 74.70 / 82.70 | 75.00 / 86.00 | 15.85 / 18.70 |
+| First omit2 | 68 / 67 | 73.70 / 82.60 | 73.10 / 85.20 | 11.10 / 13.50 |
+| First full3 | 66 / 65 | 75.70 / 83.40 | 75.00 / 84.40 | 15.80 / 18.10 |
+| Repeat full1 | 67 / 66 | 74.25 / 85.20 | 74.90 / 86.70 | 15.00 / 19.80 |
+| Repeat omit1 | 65 / 64 | 75.75 / 84.40 | 77.10 / 85.00 | 11.50 / 13.30 |
+| Repeat full2 | 67 / 66 | 74.95 / 82.70 | 74.95 / 83.30 | 15.20 / 17.50 |
+| Repeat omit2 | 67 / 66 | 74.80 / 83.10 | 74.75 / 83.70 | 11.30 / 14.30 |
+| Repeat full3 | 66 / 65 | 75.60 / 83.90 | 75.10 / 84.40 | 15.40 / 17.90 |
+
+Against the average of each omission arm's adjacent full medians, synchronous CPU falls **3.175 / 4.725 ms** in the first run and **3.600 / 4.000 ms** in the repeat. Wall intervals instead change **+4.000 / −1.500 ms**, then **+1.150 / −0.475 ms**: no consistent cadence win. The CPU scope includes draw-observer work, and omission removes some callbacks. Shadow refresh also overlaps mirror capture; the test removes **both** refreshes, not merely a redundant mirror refresh. Do not add its delta to planar-capture attribution, call it all shadow cost, or assume the full CPU reduction is recoverable by shadow reuse. Receiver-PCF cost and a correct dynamic-shadow reuse policy remain unmeasured here.
+
+A post-timing host observation finds AC power/100% battery, **12,889.75 MiB of 13,312 MiB swap used**, and other user apps/background services active. This was not continuous monitoring during the runs and does not prove a host cause. The matched internal comparisons are retained with that limitation; approximately 75 ms absolute cadence is not attributed to the game alone or labeled a cross-run regression.
+
+### Current priority ranking — not an additive GPU budget
+
+| Action priority / measured scope | Evidence | Interpretation |
+| --- | --- | --- |
+| Terrain rendering | [Native206](#native206--current-build-performance-ranking-at-2): **29.1–29.8 ms** marginal cadence effect at 3800×1886 | Largest of the two directly matched content-omission scopes. |
+| Grass rendering | [Native206](#native206--current-build-performance-ranking-at-2): **25.45–26.3 ms**, same canvas/run | Ranked below terrain within that screen; visibility/overdraw change with omission. |
+| Repeated planar capture | [Native208](#native208--repeated-planar-capture-contribution-verified-no-shipping-gain): **12.6–13.6 ms** at 3024×1724 | Large separate marginal effect; includes nested terrain/grass/shadow work. |
+| Sun-map refresh | Native212 above: **3.175–4.725 ms less synchronous CPU**, no consistent cadence benefit | Capture-only attribution, not receiver-PCF or exclusive GPU time. |
+| Scene-transform matrix work | [Native205](#performance-first-priority-and-native205-cpu-attribution): **2.70 ms total CPU/tick** | Instrumented ten-tick average, visible/unfocused; different method, not an omission delta or the texture-matrix shader work below. |
+
+This is an **action-priority ordering**, not an exhaustive universal cost ranking: canvases, conditions and methods differ, and the scopes overlap. Other renderer work, postprocessing, shadow receivers and actor/tree costs remain incompletely attributed. Do not total these numbers or convert them to exclusive budget percentages.
+
+### Live shader baseline and next candidate
+
+A separate [native terrain-shader census](/Users/lucid/Downloads/hyperia-native212-terrain-shader.json), SHA256 `ba3316aa6ca981126214e691239760614e3d48d5287dde86d5aafca3cc1a1ec1`, completes one ordinary frame and restores both observers with empty errors. It records **35 issued terrain draws** (18 primary / 17 mirror) and two actual renderer states. Both states have byte-identical fragment WGSL, SHA256 `3c37bb9d323d36ba7efde8a3794fa3758f2d00a83137d71c76d03f6fd4010dab`. Each contains 94 update nodes, 80 OBJECT updates and **66 OBJECT texture-matrix nodes**; 60 nodes are exactly UUID-mapped to the seven compact texture roles, all with identity matrices. Source correlation identifies 35 packed-map matrix sample expressions, 37 including road/lamp sampling; **this correlation is not a shader-binding map**. The census is visible but unfocused and supplies shader/ownership evidence, not timing.
+
+The next bounded candidate is **guarded removal of redundant identity texture-matrix work from world-projected sampling**, currently being implemented, default-off/evidence-pending and **not native-qualified**. Preserve resolution, population, textures and visual quality; require actual candidate WGSL admission, matched native images and repeated complete-content timings before promotion. The baseline census above establishes the existing work, not its savings. Compression and terrain AABB remain unpromoted after their inconsistent screens.
+
+### Receipts, refusal and cleanup status
+
+[First successful receipt](</Users/lucid/Downloads/hyperia-native212-shadow-contributions (1).json>), SHA256 `c3160d0fdd850ba9e4e8298101df44adc566a1431ddeda03878b3a3fb5eaa88b`, records **395 total / 330 measured ticks / 325 intervals**. [Matched repeat](</Users/lucid/Downloads/hyperia-native212-shadow-contributions (2).json>), SHA256 `74df549072209136cd9641141d31f780aeb611f6f47b0c48deae823c11872dbe`, records **398 / 332 / 327**. Both include exact source, all focus samples visible/focused, seeded captures, `complete/restored/ownerAbsent/renderStateRestored:true`, four restored observers and empty errors/failures. No manual render, new animation loop or GPU timer/fence is used.
+
+The [initial refused receipt](/Users/lucid/Downloads/hyperia-native212-shadow-contributions.json), SHA256 `7d9edd1355872e12dde6e2a8ef3d4df94ff07dcf4c2c40a8d391a886d39a3ada`, contains one unmeasured row before `sun-shadow-owner-state` fails while the sun settles. It restores all observers/render state and contributes **zero timing samples**. The later successful runs retain the guard; the refusal is not silently discarded as a pass.
+
+The separate [control-cleanup receipt](/Users/lucid/Downloads/hyperia-native212-cleanup.json), SHA256 `b9964693cd9eeb0fd2e166f6b1a3e84223725e7c4c3781625a965327d141fa79`, verifies camera/clock and environment/renderer exposure restoration, observer/UI absence, culling OFF and ordinary animation, with empty errors. Owned private game/DevTools tabs close while New Tab is preserved. Runtime212 records **STOPPED at `2026-10-02T05:23:31.497Z`**, process-receipt SHA256 `5ad3466c4c6d416a46085cdae73de57fb593b9b4c9d02159575104432617a791`, empty errors, protected resources unchanged and disposable database removed; private ports3344/5565/5566/57841 are empty. The original runtime helper is restored to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax checking. Both temporary repository module copies are removed while evidence copies remain. Cleanup and WGSL-baseline collection are complete; no source/public promotion or production shadow/visual-default change is claimed.
+
+Final independent cleanup checks also confirm all 42 unrelated-file hashes unchanged and the exact owned Docker container absent.
+
 ## Native211 — terrain AABB reduces submissions; cadence benefit does not replicate
 
 The general per-pass terrain AABB candidate is implemented and tested, but **remains default-off and unaccepted for performance promotion**. Native execution confirms the predicted removal of ten mirror-terrain submissions. The first timed comparison looks promising; an immediate matched repeat does not reproduce the benefit. This is useful attribution and implementation evidence, **not a proven FPS improvement or completion of the 60 FPS at 2× goal**. It supersedes Native210's implementation-pending status without changing that census's historical findings.
