@@ -1,5 +1,18 @@
 # Grass canopy visibility: research checkpoint
 
+## Native225 — preliminary cadence; fresh-tab comparison interrupted
+
+The unchanged Native214 full-content helper is reused for same-build210 cache-off/cache-on screening. Each arm is25 seconds with the first5 seconds excluded; it measures original World.tick CPU and ordinary input/wall cadence, including cache preparation and compute submission when enabled. It does not measure GPU completion or physical display throughput. Its inherited receipt description still names the old regional-bank comparison: Native225's actual URLs/custody establish that the intended changed selector is only `grassDynamics=clump-frame-v1`, with the bank selector absent in both.
+
+The first [A1 timing receipt](</Users/lucid/Downloads/hyperia-native214-full-content-timing (4).json>), SHA256 `a062fd22bbeb517b71db15d18b334e27ccb0cad77908d24f5ff9086736dbbe91`, completes with490 measured ticks, zero omissions/errors and restored timing hooks. Full3024×1724/DPR2/MSAA4/High shadows/reflections, phase0.56/exposure0.850240084, exact Native224 low-meadow pose,85 grass and35 terrain attempts per measured tick are retained. Input-cadence median41.7ms/p9549.9ms; original-tick CPU median11.6ms/p9514.8ms. [A1 custody](/Users/lucid/Downloads/hyperia-native225-A1-custody.json) verifies null cache before/after, four canonical class identities and restored camera/clock/exposure.
+
+**Exclude A1 from causal candidate-gain claims.** Navigating the private game to New Tab left one established5566 WebSocket and one connected user; only closing that exact retained test tab released them. This proves navigation was insufficient session teardown, not continued GPU rendering or a specific browser cache mechanism. Chrome's displayed10.4GB then5.1GB tab-memory labels are observations, not measured cache overhead. Prior Native224 cleanup's New Tab step therefore does not prove browser context retirement, although its server/database/ports and method/resource cleanup remain verified.
+
+Root creates a fresh blank tab, closes the retained test tab, and checks private connectedUserCount0 plus no established5566 sockets twice before loading B1. The candidate's canonical identities and matching held view pass; pre-sample cache is prepared, healthy,94 owners/162,508 clumps, zero retained bindings and advancing generation2715. The Mac locks during/around the25-second B1 run. **B1 has not been read/exported and has no accepted timing result.** Unlock is requested; do not infer success or failure solely from the lock.
+
+Private runtime225 is stopped by owned SIGTERM at2026-10-02T16:29:02.110Z with empty errors, protected state unchanged, disposable database removed and all private ports free. The temporary served bank helper is removed; runtime helper returns to its baseline SHA256. Public3333 and saved data are untouched. **Browser recovery remains pending manual unlock:** inspect/export the existing B1 result, dispose its timing/controller, restore `__exposure225` and `__pondReview`, clear owned globals and actually close its test tab. Do not claim full native cleanup yet. Subsequent comparisons must use equally warmed, truly closed/reopened tabs with disconnected-server verification. No clump-cache speedup, default promotion or60FPS acceptance is established.
+
+
 ## Native224 — live grass cache output and exact sampled GPU arithmetic
 
 Build210 runs the committed default-off Source223 pilot at **3024 × 1724 / DPR 2 / 4× MSAA**, High PCF shadows, full reflections, phase 0.56 and exposure 0.850240084. Source checkpoint `b1d5504e6413d0add810179aadf08c8c1f6c341d` is pushed on `codex/sol-duel-stream-launch` under the verified human author/committer identity. Public defaults are unchanged.
