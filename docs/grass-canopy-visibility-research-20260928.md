@@ -1,5 +1,47 @@
 # Grass canopy visibility: research checkpoint
 
+## Native218 — terrain normal/AO attribution repeats a 3.45–4.05 ms effect
+
+**Result: useful cost attribution, not a shipping optimization.** Two full/normal-AO-substitution/full/substitution/full comparisons complete at **3024×1724, DPR 2, MSAA 4, High shadows**, ordinary player pose and unchanged canonical build208. Relative to the average of neighboring full arms, median wall-cadence reductions are **3.750 /4.050 /3.450 /3.800 ms**. CPU does not consistently improve. No production source, default, public build or asset changes are made.
+
+The private clone substitutes only `normalNode=null` and `aoNode=float(1)`, retaining original color/roughness/height/weights, PBR machinery, local lights, fog, geometry, shadow refreshes and reflection. This uses the standard interpolated geometric normal, **not flat face shading**. Normal-dependent specular, indirect response and receiver normal-bias coordinates intentionally change. It measures this marginal graph and dependent-render work—not isolated texture cost, exclusive GPU time, pixel parity or recoverable quality-preserving savings.
+
+### Two native comparisons
+
+Each arm has at least3seconds of stable ordinary rendering followed by a separate10second measurement window. The candidate is prewarmed first; no interval crosses warmup/arm boundaries. No extra render loop, GPU fence, timestamps, draw omission or resolution change is used. Camera(385,31.8514408461,368.1885010332), player(385,28.9193015231,374), phase0.56/exposure0.850240084 remain held; effective depth blur is false, bloom/composer and planar reflection stay active. Dirt cache, ground/matrix/bank candidates, terrain bounds and shadow reuse are absent/off.
+
+| Run / arm | Measured ticks | Wall interval median / p95 / p99 (ms) | Synchronous tick CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| 1 full A1 | 234 | 43.30 /46.10 /46.80 | 11.35 |
+| 1 normal/AO B1 | 257 | 39.60 /42.10 /43.70 | 11.20 |
+| 1 full A2 | 233 | 43.40 /45.60 /46.70 | 11.20 |
+| 1 normal/AO B2 | 256 | 39.40 /42.60 /44.10 | 12.20 |
+| 1 full A3 | 232 | 43.50 /46.20 /46.60 | 11.80 |
+| 2 full A1 | 233 | 43.30 /45.80 /46.40 | 11.40 |
+| 2 normal/AO B1 | 255 | 40.00 /41.80 /43.20 | 12.70 |
+| 2 full A2 | 232 | 43.60 /46.00 /47.10 | 11.40 |
+| 2 normal/AO B2 | 254 | 39.90 /41.90 /42.40 | 12.70 |
+| 2 full A3 | 231 | 43.80 /46.70 /47.90 | 12.00 |
+
+[First completed receipt](</Users/lucid/Downloads/hyperia-native218-normal-ao-attribution (1).json>), SHA256 `c99bf671421b824ff6c737c6606a31b6a98e9af31dbe231393e613e8ded272b3`; [repeat](</Users/lucid/Downloads/hyperia-native218-normal-ao-attribution (2).json>), SHA256 `91bd520f1ec72aae67799660603e99274fe85710a56f8f1c426f9b9ddc3242ca`. Independent and root recomputation verifies **3,153 recorded ticks /2,417 measured /2,407 same-arm intervals**, empty errors, matching source/quality/pose/light/texture/target identities and no boundary arithmetic errors. Input-timestamp medians remain41.7ms full and41.6ms candidate. CPU paired savings are +0.075/−0.700/−1.300/−1.000ms. Median uses midpoint; p95/p99 use sorted index floor(q×(n−1)). These short instrumented tick intervals are **not displayed FPS or sustained60FPS acceptance**.
+
+Every recorded tick retains **867 issued calls /10,573,653 repeated-view triangle slots**: main331/4,904,452; mirror320/4,424,057; each shadow108/622,572. Main/mirror terrain remain18/491,280 and17/482,838; grass45/3,708,681 and40/3,263,232. One mirror capture and two sun-map refreshes occur per tick; only the35 main/mirror terrain material arguments are substituted in candidate arms. Scene-owned materials and shadow overrides are never replaced.
+
+### Actual compiled shader findings
+
+Four captured draw-owned program states per run prove main/mirror and cross-run identity per condition. The full fragment matches Native215 SHA256 `3c37bb9d323d36ba7efde8a3794fa3758f2d00a83137d71c76d03f6fd4010dab`; the candidate is `b202a6060028008a92308bf085850b3cccf40ba534f8817612bc98ec7ec7b117`. Actual sampled-binding UUID mapping proves **55→50 static texture operations**, removing exactly two grass and three dirt normal/AO sites. All nine rock normal/AO sites remain emitted in the retained packed rock branch; do not claim14 eliminated reads or infer native compiler execution from source counts. All16 albedo/roughness and5 height sites,8 PMREM gradient sites,7 implicit sites and5 receiver-shadow comparisons remain. Update registrations94→87; texture OBJECT registrations66→59. Vertex-main geometry arithmetic matches after generated temporary-number normalization. This verifies intended diagnostic scope, not visual acceptance.
+
+The [initial refused receipt](/Users/lucid/Downloads/hyperia-native218-normal-ao-attribution.json) contains zero rows/states. Its private guard incorrectly expected `float(1).value`; installed r186 and native inspection prove an anonymous intent VarNode wrapping ConstNode(1). The corrected guard pins and validates that exact chain, without altering the graph or relaxing ownership. Corrected helper SHA256 `06ac75e3b5f63acc19dde5ea1936827c0de22cf8c65f25969c797bda4f0de447` passes syntax, real-TSL structure validation and independent review. The refusal is not a performance sample.
+
+### Cleanup and next action
+
+Both complete receipts verify all four hook descriptors restored, original material unchanged and diagnostic clone disposed. [Cleanup receipt](/Users/lucid/Downloads/hyperia-native218-cleanup.json), SHA256 `10462e83136b7788596a815bf2c3996326ac91def3af7e36095999a4134274ff`, separately verifies camera/clock/environment/renderer exposure restoration, absent observer/UI/review owners, original renderer entries, ordinary loop, idle preparation and unchanged2× canvas. Owned game/DevTools close, preserving New Tab.
+
+Private runtime `runtime-native218-normal01` stops at `2026-10-02T10:36:49.591Z`, errors empty, protected state unchanged, disposable database removed and all four private ports free. Process receipt SHA256 `b5c8d728183f2b6b080be99358be4207d6677cef416291a264bef559982011a9`. Two temporary served modules are removed; runtime helper restores to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax checking. All42 unrelated hashes and five production source pins match. Public3333/build174, saved database and assets remain unchanged. No new product-code changes require another product-test run; Native216 verification remains the source baseline.
+
+**Next primary task:** collect actual grass program/binding evidence, then isolate grass lighting/receiver cost with owned MeshSSS material clones changing only `lights=false` after confirming `lightsNode===null`. Retain original color/normal/output/position nodes, blade geometry, wind, alpha/coverage, density, LODs, all view counts and captures. Installed r186 confirms this bypasses standard/SSS/environment/receiver lighting; it is broader than the prior Native192 shadow-only and Native194 environment-only trials. Reject a diagnostic that cannot preserve coverage or verify actual vertex placement. Use the result to choose a substantial quality-preserving leaf-lighting representation; a weak result redirects effort toward geometry/coverage/vertex work. Do not ship unlit grass, removed terrain normals/AO, or pursue another small distant-normal/dirt-cache sweep. Native206 terrain/grass omissions remain the within-run ranking; Native208 reflection overlaps both. Do not add these different scopes/resolutions or subtract Native218 from Native215 to invent exclusive sub-budgets. Sustained16.67ms at2× remains open.
+
+
 ## Native217 — dirt-cache usefulness rejected after matched native repeats
 
 **Decision: stop expanding this dirt-only page.** Two complete same-graph comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** show no consistent benefit. Active-arm median wall-cadence savings against adjacent inactive-arm averages are **+0.250, −1.425, −0.650 and −0.950 ms**; three of four active arms are slower. This does not prove a causal regression, but does not justify promotion, paging expansion or another small cache-tuning batch. The default-off Native216 implementation remains unchanged.
