@@ -1,5 +1,61 @@
 # Grass canopy visibility: research checkpoint
 
+## Native222 — water-depth sharing rejected; MSAA handling shows a small lead
+
+**Result: one accepted full-content 2× comparison shows a 1.35 ms (~3.3%) marginal wall-cadence improvement in each treatment arm.** Treatment medians remain **39.9–40.0 ms**, not 16.67 ms or sustained 60 FPS. This is a private fixed-view descriptor experiment, not a production-safe renderer optimization. Product source, defaults, public build174, quality and scene content are unchanged.
+
+### Why the two water-depth copies must remain
+
+The [one-tick ownership trace](/Users/lucid/Downloads/hyperia-native222-water-depth-ownership.json), SHA256 `bf5a258f2c903b81393c845a8a9816de7d9135ab72a4b4a6a8c02e838cd8634b`, completes/restores with24 events,6 contexts,2 copies and no errors. One lake object/material has two actual compiled owners: the transparent double-sided renderer path submits back-side and front-side draws.
+
+Copy1 occurs after288 primary draws. A depth-writing back-side water draw follows (primary ordinal289,8,752 triangle slots); copy2 then occurs before the front-side draw290. Both copies belong to the same outer renderObject scope but have distinct viewport-depth nodes/destination textures. A submitted depth-writing draw does not establish pixel coverage, but it **prevents admitting equal pre-water depth** from the current evidence. The proposed node-sharing implementation is therefore rejected; no water source edit is made.
+
+### Actual descriptor and image proof
+
+The [accepted guarded proof](</Users/lucid/Downloads/hyperia-native222-msaa-continuation-proof (1).json>), SHA256 `01acfdd45609d86ec5b2bd75ac33faa7651793b5b98fcb6eaa2f5d5cf3bffd02`, completes/restores in3.777s with empty errors. It records stock, candidate and restored ordinary completed frames at **3024×1724 / DPR2 / MSAA4**, phase0.56 and exposure0.850240084. A guard verifies that no further ordinary frame occurs before each canvas snapshot request.
+
+The experiment clones the actual primary GPU render-pass descriptors without changing Three's cached descriptors or render-target flags:
+
+| Segment | Stock color | Candidate color | Depth |
+| --- | --- | --- | --- |
+| Initial | CLEAR / STORE / resolve | CLEAR / STORE / no resolve | CLEAR / STORE |
+| After first depth copy | LOAD / STORE / resolve | LOAD / STORE / no resolve | LOAD / STORE |
+| After second depth copy | LOAD / STORE / resolve | LOAD / DISCARD / resolve | LOAD / STORE |
+
+All draws, both depth snapshots, reflection, shadow refreshes, texture/geometry inputs and programs remain. Each arm checks3,706 sampled bindings on actual draws, including nested mirror/shadow work: **zero consumers of the resolved primary color before primary finish**, one output-color-transform consumer afterwards. Error scopes and queue drain are bounded and used only for this correctness proof, not timing.
+
+Root and an independent reviewer inspect the original [stock](/Users/lucid/Downloads/hyperia-native222-msaa-stock.png), [candidate](/Users/lucid/Downloads/hyperia-native222-msaa-candidate.png) and [restored](/Users/lucid/Downloads/hyperia-native222-msaa-restored.png) PNGs with no obvious coverage, pond/reflection, lighting or scene regression. All three disk dimensions, sizes and SHA256 values exactly match the receipt. Live wind, water, clouds and actors prevent pixel-identity claims; this is one held daylight view, not temporal/all-view acceptance.
+
+The earlier `hyperia-native222-msaa-continuation-proof.json` passes descriptor/draw/restoration checks but lacks the explicit no-intervening-frame PNG guard. It is not the image/timing admission receipt.
+
+### One accepted timing run; interrupted repeat excluded
+
+The [timing receipt](/Users/lucid/Downloads/hyperia-native222-msaa-continuation-timing.json), SHA256 `fdb4f23fb6246608cb008b6e2d60cab14a2d9f5ef725ec1ccf1d30603f328d70`, completes/restores with no errors in68.562s. Five arms each have3s settling and10s measurement after initial warmup. No fences, readbacks or GPU timestamps occur during sampling. Root and an independent reviewer recompute the statistics.
+
+| Arm | Measured ticks | Wall median / p95 ms | Instrumented tick CPU median ms |
+| --- | ---: | ---: | ---: |
+| Original1 | 244 | 41.4 /43.9 | 11.9 |
+| Candidate1 | 252 | 39.9 /42.5 | 11.8 |
+| Original2 | 245 | 41.1 /43.6 | 11.6 |
+| Candidate2 | 252 | 40.0 /42.3 | 11.7 |
+| Original3 | 244 | 41.6 /43.5 | 11.7 |
+
+Each candidate is1.350ms below the mean of its neighboring original medians. CPU does not improve: paired differences are−0.050ms. Input-timestamp medians are41.7ms original /41.6ms candidate. Medians use the middle pair where needed; p95 uses sorted index floor(0.95×(n−1)). These are instrumented ordinary-tick intervals, **not exclusive GPU cost or physical-display FPS**.
+
+All1,614 recorded rows,1,237 measured ticks and1,232 same-arm intervals retain exactly **863 world-view calls /10,561,653 repeated-view triangle slots**: primary329/4,898,452; mirror318/4,418,057; each of two sun refreshes108/622,572. The separate ownership census additionally counts2 other calls/3,969 slots: its whole-census total is865/10,565,622. Do not mix these scopes. Live owners remain52 terrain/94 grass;120 draw-object/view states comprise85 grass and35 terrain, not120 unique meshes. Programs, geometry, target/depth-copy identities, sampled-color consumer checks and full original tail refresh remain unchanged. All timing hooks/descriptor leases restore and no original material changes.
+
+A second timing run starts but the private runtime's40-minute watchdog ends the server before export. It supplies **no accepted repeat or cleanup receipt from the page** and is excluded. The browser transitions to a connection-refused document; no detached diagnostic page remains.
+
+### Safety, limits and next action
+
+The fixed three-segment prediction is deliberately **not shipping code**. An unexpected fourth segment after the predicted final discard invalidates the trial; forwarding subsequent original calls cannot repair already discarded content. A production design must know an actual continuation versus final boundary, preserve intermediate-color consumers and final-target load contracts, and handle nested captures, viewport/scissor, blend/stencil state, occlusion/timing queries and existing bundles. Online per-segment render bundles are a possible implementation route, but fresh bundle creation/validation adds CPU cost not included in this descriptor-only opportunity.
+
+The [Three render-target documentation](https://threejs.org/docs/pages/RenderTarget.html#storeMultisampledColorBuffer) explicitly requires retaining multisampled color for later LOAD continuations. Do not globally disable color/depth storage or infer measured bandwidth from attachment byte sizes.
+
+Private runtime `runtime-native222-water-ownership01` is STOPPED at2026-10-02T14:15:27.828Z, watchdog reason, empty errors, protected state unchanged, disposable database removed and all four private ports free. Process receipt SHA256 `5c6f391449fe5bd108c80d9ba50facd10ccf404535989f2291be39954b8d1f36`. The reused Chrome tab is restored to New Tab. Four temporary served helpers are removed; external evidence/helpers remain. The runtime helper returns to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax. All414 protected file hashes,438 links,42 unrelated changes,10 Source220 pins and3 terrain pins match. Public3333/build174 and the saved database remain untouched.
+
+**Decision:** retain the1.35ms lead as unreplicated, secondary evidence; do not spend the main queue building a complex backend for an unproven small net gain. Keep primary effort on the larger terrain/grass/repeated-reflection costs. Complete remaining actor/tree/postprocessing attribution before claiming an exhaustive ranked GPU budget. Rough-leaf reverse/backlit/tree-shadow-edge/motion and native fallback/lifecycle gates remain open before promotion; no60FPS or AAA acceptance is claimed.
+
 ## Native221 — matched grass images pass; two primary depth copies observed
 
 **Progress: the faster grass candidate passes bounded day, low-sun and night front-view regression checks; the next performance target is an observed duplicate-sized depth-copy boundary, not another visual-quality change.** Product source remains exactly Source220/commit583211. No defaults, density, geometry, shadows, resolution, reflection or public build changes occur in this checkpoint. Native220's repeated2.35–2.80ms improvement is unchanged; **41.2–41.6ms is still not16.67ms or60FPS**.
