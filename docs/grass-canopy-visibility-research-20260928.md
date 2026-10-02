@@ -1,5 +1,37 @@
 # Grass canopy visibility: research checkpoint
 
+## Native228 — repeat not qualified; batched accounting corrected; cleanup verified
+
+**No new performance result and no production change.** The Native227 single-pair lead remains unreplicated. The true2× / sustained16.67ms goal is not achieved. Canonical build211 and all50 pinned source/unrelated files remain unchanged.
+
+A fresh private runtime on AC power uses the same held arena-lobby view, phase0.56/exposure0.850240084,3024×1724/DPR2/MSAA4/High shadows/full reflections. The same128m/4096² fixed-view probe prepares in1,984.7ms outside timing. Coverage checks20,480,000 channel-texels with zero invalid values and maximum normal-length error0.0006973; allocation remains405.33MiB persistent/533.33MiB readback peak. Warmup substitutes1,090 primary frames and restores before timing. This is preparation/lifecycle evidence, not performance acceptance.
+
+### Diagnostic correction and excluded attempts
+
+The new external `native-terrain-surface228.mjs` requests one100-second stock/cache/cache/stock sequence,25seconds per block with the first5 excluded. One persistent allocation remains resident in every arm; no preparation/readback/fence occurs during timing. Actual selected primary material, original nonprimary material, ordered terrain/grass issued geometry, quality, pose, source and focus are guarded.
+
+Its first version incorrectly assumes one backend call means at most one issued draw. Installed Three r186 `WebGPUBackend._draw` legitimately loops through BatchedMesh subdraws and calls `Info.update` for each. The corrected helper captures that batch count before forwarding the original call, permits only the corresponding actual delta, records batch totals, rejects array-camera ambiguity and retains exact-one checks for owned terrain/grass. Root and independent source review pass; Node22 syntax passes. Frozen corrected helper SHA256: `c77acfb2e83756db5751df7852c1505d03ed627369d489d0f3698115afc19eb0`. This changes diagnostic accounting only.
+
+| Receipt | Stop | Recorded / measured rows | Decision |
+| --- | --- | ---: | --- |
+| [Initial](/Users/lucid/Downloads/hyperia-native228-surface-abba.json) | Batched-draw counter guard |1 invalid warmup /0|Excluded|
+| [Corrected](</Users/lucid/Downloads/hyperia-native228-surface-abba (1).json>) | Lost focus after about10seconds |238 stock-only /120|Excluded; no completed block|
+| [Final arm](</Users/lucid/Downloads/hyperia-native228-surface-abba (2).json>) | Lost focus before start |0 /0|Excluded|
+
+All three receipts have `complete=false`, `restored=true`, zero timed cached draws, and an inactive healthy original-fallback probe afterward. Root and independent review agree: no candidate comparison, speedup or displayed-FPS inference is possible. The cause of the focus changes is not established. Stop retries in this window rather than discard focus guards. Receipt SHA256 values in table order:
+
+- `6ef556c3a682bb4d704304b065ac127b6beeb32a96a219bbb818e6566be118c2`
+- `798079bbc7f0df2b9e0259b9d2569a5f0838f1a5c2c364ca44840c2e0980d441`
+- `2e965a8d5d46125afb2d6e906c014274f649674ea4e668113668f7cb7eab319b`
+
+### Cleanup and next gate
+
+[Cleanup receipt](/Users/lucid/Downloads/hyperia-native228-cleanup.json), SHA256 `cb97bb55b02ddc73b5b6e3a4b92ed96281dbe40cd64e056e3cce24dbfbf47ded`, verifies exact renderer restoration, camera/clock/exposure restoration, diagnostic-owner removal and owned GPU-resource retirement with no probe errors. The owned game/DevTools windows close; private connectedUserCount reaches0 with no established5566 socket. Runtime stops at2026-10-02T22:28:58.041Z with empty errors, protected state unchanged, disposable database removed and four private ports free. Process SHA256 `f92972da78e22a5cfe27de21c7dbc0330c3de884595ca95459c5330fce42ad42`. Three temporary served helpers are removed while external evidence copies remain; runtime helper baseline and all50 source/unrelated hashes match. Public3333 and saved-player data are untouched.
+
+Do not promote/expand the full-surface cache until the repeat succeeds. A possible bounded follow-up is four1024² two-RGBA16F pages:85.33MiB logical resident,110.67MiB peak with one staging page/shared depth—not a measured or approved hardware budget. The existing100m whole-mesh substitution cannot directly use16m pages. Final cached normals cannot exactly reproduce the source's camera-dependent45–120m normal fade; filtering composed surfaces also differs from composing filtered source maps. Any paging implementation needs original fallback, actual terrain-region/version tracking, filtering/gutter/mip qualification and skirt/overlap exclusion. No such product implementation is claimed here.
+
+The terrain/grass/reflection ranking and missing-category caveats below remain unchanged. Prioritize completing useful attribution and substantial measured changes, not repeating tiny or focus-refused pilots.
+
 ## Source227 / Native227 — full terrain surface cache executes; preliminary cadence lead
 
 **Status: representation prototype verified, not promoted.** Performance remains the sole active priority and sustained 60 FPS / 16.67 ms at actual 2× is not achieved. Unlike the rejected small dirt/grass-cache pilots, this experiment replaces the expensive composed terrain surface for one complete 100 m chunk, while retaining its geometry and live lighting.
