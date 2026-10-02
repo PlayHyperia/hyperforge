@@ -1,5 +1,54 @@
 # Grass canopy visibility: research checkpoint
 
+## Native219 — grass lighting attribution repeats a 10.825–11.450 ms effect
+
+**Decision: prioritize a substantial leaf-lighting implementation, not another small terrain-cache adjustment.** Two five-arm native comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** reproduce a **10.825–11.450 ms** reduction in median wall tick intervals when only grass lighting is bypassed. Original blade geometry, density, wind, grounding, coverage, terrain, reflection and shadow-map refreshes remain. This is a diagnostic opportunity, **not a shipping speedup or 60 FPS acceptance**. No production source/default/public build/asset changes are made.
+
+### Actual baseline and diagnostic scope
+
+An ordinary-frame census captures85 issued grass program states:45 primary and40 mirror, from94 resident source-material owners. All use the exact installed r186 MeshSSSNodeMaterial prototype. The baseline fragment is identical across draws (40,868 characters; SHA256 `842b03d9cfc381832ac5418d7735ff9487fc46e7c3167dfdedb6f73735cd7e95`):14 static texture sites comprise one DFG lookup, five receiver PCF comparisons and eight PMREM gradient samples. Four sampled texture bindings and34 update registrations are observed. Static shader sites are not measured execution counts or exclusive GPU costs. [Baseline census](</Users/lucid/Downloads/hyperia-native219-grass-census (1).json>), SHA256 `7e0140deb4320d78d63f0c6e850a3e984938109657752b7f0395ead84aefea89`.
+
+Each timing run creates94 private source-material clones, changing only `lights=false` after requiring `lightsNode===null`. Original color/normal/output/position/thickness nodes, opacity/depth/side/clipping and all geometry stay pinned. Only the85 main/mirror grass draw material arguments are substituted; scene-owned materials and shadow overrides are never changed. Optional material-keyed clump caches and alternate submission/instancing owners are absent, avoiding a clone-dependent vertex fallback.
+
+This intentionally removes direct/indirect PBR, SSS, environment and receiver-lighting work, including dependent lighting-normal/varying calculations. It is **not shadow-reception-only, fragment-only, exclusive GPU time or equivalent appearance**. Changed grass color also affects reflection and downstream postprocessing. Unlit grass is not a shipping proposal.
+
+### Two completed native comparisons
+
+Both use full / unlitGrass / full / unlitGrass / full. Candidate prewarming precedes at least3seconds of stable ordinary rendering and a separate10second measurement window per arm. The first interval of each arm is excluded. No extra render loop, GPU fence, timestamp query, omission, density or resolution change is used. Camera(385,31.8514408461,368.1885010332), player(385,28.9193015231,374), phase0.56/exposure0.850240084, source/settings and target identities match across runs.
+
+| Run / arm | Measured ticks | Wall median / p95 (ms) | Tick CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| 1 full A1 | 235 | 42.65 /45.60 | 11.8 |
+| 1 unlit B1 | 314 | 32.20 /34.50 | 12.3 |
+| 1 full A2 | 232 | 43.40 /46.80 | 11.9 |
+| 1 unlit B2 | 311 | 32.35 /34.20 | 12.3 |
+| 1 full A3 | 234 | 43.00 /45.70 | 11.8 |
+| 2 full A1 | 232 | 43.50 /46.20 | 11.6 |
+| 2 unlit B1 | 315 | 31.90 /33.90 | 12.3 |
+| 2 full A2 | 232 | 43.20 /46.00 | 11.6 |
+| 2 unlit B2 | 313 | 32.20 /34.00 | 12.2 |
+| 2 full A3 | 231 | 43.70 /46.10 | 11.6 |
+
+[First timing](/Users/lucid/Downloads/hyperia-native219-grass-lighting-attribution.json), SHA256 `072989e42f2ee0a20117e05cab7ffba1e85d97059eaed2a1dc7f0e7733f9a92a`; [repeat](</Users/lucid/Downloads/hyperia-native219-grass-lighting-attribution (1).json>), SHA256 `520bfff18682efe6874b6f551d8cae9b842e9bdf067abd1755033b9c77dd23bd`. Independent analysis plus root recomputation confirms **3,454 recorded ticks /2,649 measured /2,639 same-arm intervals**. Savings against neighboring full-arm averages are10.825/10.850/11.450/11.250ms; CPU instead increases0.45–0.70ms. Median uses midpoint; p95 uses sorted index floor(0.95×(n−1)). Input-timestamp medians are41.7ms full and33.3ms unlit. These short instrumented tick intervals are not displayed FPS; even the altered-lighting condition remains well above16.67ms.
+
+All recorded ticks retain **867 calls /10,573,653 repeated-view triangle slots**: main331/4,904,452; mirror320/4,424,057; each shadow108/622,572. Main/mirror grass stay45/3,708,681 and40/3,263,232; terrain18/491,280 and17/482,838. One mirror capture and two sun-map refreshes occur per tick. Draw order, geometry, arm boundaries, replacement counts, pose/quality/light and source/target guards pass.
+
+### Actual shader qualification
+
+Independent inspection of all85 full/candidate pairs in each run verifies baseline raw shaders exactly match the census. Candidate fragment length drops40,868→3,266, static texture sites14→0, sampled bindings4→0 and update registrations34→15. Vertex length18,100→13,748 reflects removal of lighting-only normal/varying calculations, **not** reduced blade work. Position dependencies through wind, instance transform, root-delta interpolation, visibility-degenerate blades and clip projection remain equivalent after generated identifier normalization. Albedo/alpha expressions retain their original inputs; alpha/depth/side/coverage contracts stay unchanged. Across runs all full shader pairs and candidate fragments match byte-for-byte; each candidate vertex differs only by its newly allocated instance-buffer identifier. No silent node-material fallback is admitted.
+
+The initial census refuses its diagnostic32-program/8,388,608-character capacity before a completed row; that [refused receipt](/Users/lucid/Downloads/hyperia-native219-grass-census.json), SHA256 `e3f6ca44125f872487291ef5591a39d44fddcb80b687bcda7344639ef7ae8280`, is not a performance sample. After inspecting those source sizes, the reviewed bound becomes512 programs/67,108,864 characters and actual programs must contain the known grass-albedo marker. No ownership, timing or geometry guard is relaxed. Final private helper SHA256 `72187b837b236882c7254f0976c917ea12e33939f85355943bdd434b8f27136d`.
+
+### Cleanup and next implementation
+
+Both runs finish restored with empty errors, all four hook descriptors restored, all94 clones disposed and originals unchanged. [Cleanup receipt](/Users/lucid/Downloads/hyperia-native219-cleanup.json), SHA256 `2c10b84f7c0e672ae9f371ac8a5f6e859aca148a46b1b7c40d2bdf0f453b763a`, separately verifies camera/clock/environment/renderer exposure, original renderer entries/callback/ordinary loop, idle preparation, absent diagnostic owners and unchanged2× canvas. Owned game/DevTools close, preserving New Tab.
+
+Private `runtime-native219-grass01` stops at2026-10-02T11:18:48.088Z: empty errors, protected state unchanged, disposable database removed, four private ports free. Process SHA256 `45882ac5bf0af7468d7c06abd3d5645b6100428365ad1fb1d03572582e6918ae`. Two temporary served modules are removed; runtime helper returns to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax. All42 unrelated hashes and five production source pins match. Public3333/build174, saved database and assets remain unchanged. Native216 product-source tests remain the unchanged source baseline; this checkpoint adds native diagnostic evidence, not another product implementation.
+
+**Next: implement a default-off specialized rough-leaf lighting candidate.** Retain full-resolution five-tap sun reception, broad tree shade, folded/canopy normals, diffuse/SSS backlighting, root AO, day/night transitions, exact geometry/wind/coverage and main/mirror ownership. Specialize the fixed roughness1/metalness0 path and target its generic indirect environment response with a bounded preintegrated leaf response. Any environment approximation is explicitly unqualified until matched day/night/backlit/shadow-edge/pond views and repeated complete-content timings pass. Keep original lighting as fallback; do not promote based on shader size or this unlit upper envelope. This is distinct from the prior shared-PMREM-node experiment, which did not demonstrate a benefit.
+
+Native206's same-run whole-terrain then whole-grass ordering remains authoritative; Native208 reflection overlaps both. Native219 identifies a substantial component inside grass, whereas Native218 normal/AO has a smaller marginal signal. Different diagnostic scopes/builds/resolutions are not an exclusive additive budget, and no prior delta may be subtracted to invent one. Remaining postprocessing/actors/tree attribution and sustained16.67ms acceptance stay open.
+
 ## Native218 — terrain normal/AO attribution repeats a 3.45–4.05 ms effect
 
 **Result: useful cost attribution, not a shipping optimization.** Two full/normal-AO-substitution/full/substitution/full comparisons complete at **3024×1724, DPR 2, MSAA 4, High shadows**, ordinary player pose and unchanged canonical build208. Relative to the average of neighboring full arms, median wall-cadence reductions are **3.750 /4.050 /3.450 /3.800 ms**. CPU does not consistently improve. No production source, default, public build or asset changes are made.
