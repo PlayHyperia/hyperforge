@@ -27,6 +27,7 @@ import {
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
+  resolveCompactTerrainBankEvaluation,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -64,6 +65,90 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit regional terrain bank evaluation (no quality defaults)", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string) => {
+    dom.reconfigure({ url: `http://localhost:3344/?${query}` });
+    return dom.window as unknown as Window;
+  };
+  it("is absent independently of peer modes and admits one exact selector", () => {
+    for (const query of [
+      "",
+      "terrainTextureMatrix=invalid",
+      "groundSampling=invalid",
+    ])
+      expect(resolveCompactTerrainBankEvaluation(visit(query))).toBeUndefined();
+    expect(
+      resolveCompactTerrainBankEvaluation(
+        visit("terrainBankEvaluation=regional-v1"),
+      ),
+    ).toBe("regional-v1");
+    for (const value of [
+      "",
+      "REGIONAL-V1",
+      "regional-v1%20",
+      "%20regional-v1",
+      "off",
+      "regional-v1&terrainBankEvaluation=regional-v1",
+      "&terrainBankEvaluation=regional-v1",
+    ])
+      expect(() =>
+        resolveCompactTerrainBankEvaluation(
+          visit(`terrainBankEvaluation=${value}`),
+        ),
+      ).toThrow("bank evaluation candidate");
+  });
+  it.each([false, true])(
+    "captures selected=%s once without renderer dependencies",
+    (selected) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(selected ? "terrainBankEvaluation=regional-v1" : ""),
+      });
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      try {
+        expect(terrain["getCompactTerrainBankEvaluation"]()).toBe(
+          selected ? "regional-v1" : undefined,
+        );
+        visit("terrainBankEvaluation=invalid");
+        expect(terrain["getCompactTerrainBankEvaluation"]()).toBe(
+          selected ? "regional-v1" : undefined,
+        );
+        expect(terrain.getDependencies()).toEqual({});
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+  it("rejects non-sculpt terrain and keeps the server default absent", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("terrainBankEvaluation=regional-v1"),
+    });
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+    try {
+      expect(() => terrain["getCompactTerrainBankEvaluation"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      Reflect.deleteProperty(globalThis, "window");
+      expect(resolveCompactTerrainBankEvaluation()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
 
 describe("explicit identity terrain texture matrix (no quality defaults)", () => {
   const dom = new JSDOM("", { url: "http://localhost:3344/" });

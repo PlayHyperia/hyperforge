@@ -503,6 +503,20 @@ export function resolveCompactTerrainTextureMatrix(
   return "identity-v1";
 }
 
+/** Skip only the exactly neutral pond-bank domain; no quality default changes. */
+export function resolveCompactTerrainBankEvaluation(
+  win?: Window,
+): "regional-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values =
+    getSearchParams(windowRef)?.getAll("terrainBankEvaluation") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "regional-v1")
+    throw new Error("Unknown or duplicate terrain bank evaluation candidate");
+  return "regional-v1";
+}
+
 /** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
 export function resolveCompactSurfaceBlendCandidate(
   win?: Window,

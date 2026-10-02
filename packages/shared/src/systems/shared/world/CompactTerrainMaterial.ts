@@ -9,6 +9,7 @@ import THREE, {
   vec3,
   vec4,
   mat3,
+  mat4,
   Fn,
   If,
   mix,
@@ -156,6 +157,7 @@ export type CompactGroundSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
 export type CompactTerrainTextureEncoding = "uastc-v1";
 export type CompactTerrainTextureMatrix = "identity-v1";
+export type CompactTerrainBankEvaluation = "regional-v1";
 type CompactTerrainCompressedFormat = NonNullable<
   ReturnType<typeof getKTX2TerrainFormat>
 >;
@@ -2973,11 +2975,17 @@ const compactPondBankMath: CompactPondBankMath<Node<"float">> = {
 /** Actual bank knots/overlap own both this graph and CPU root appearance. */
 export function createCompactPondBankComposition(
   input: CompactPondBankCompositionInput<Node<"float">>,
+  evaluation?: CompactTerrainBankEvaluation,
 ): CompactPondBankComposition<Node<"float">> {
-  const result = createCompactTerrainColorOperations().bankComposition(
-    { ...input, includeAppearance: true },
-    compactPondBankMath,
-  );
+  if (evaluation !== undefined && evaluation !== "regional-v1")
+    throw new Error("Invalid compact terrain bank evaluation");
+  const result =
+    evaluation && input.field
+      ? createRegionalPondBankComposition(input, input.field)
+      : createCompactTerrainColorOperations().bankComposition(
+          { ...input, includeAppearance: true },
+          compactPondBankMath,
+        );
   return {
     soilToGrass: result.soilToGrass.toVar("compactPondBankSoilToGrass"),
     soilToRock: result.soilToRock.toVar("compactPondBankSoilToRock"),
@@ -3018,6 +3026,116 @@ export function createCompactPondBankComposition(
     groundCoverGrassShare: result.groundCoverGrassShare.toVar(
       "compactPondBankGroundCoverGrassShare",
     ),
+  };
+}
+
+/** Defer only the bank-owned scalar recipe, never its texture/normal inputs.
+ * Every effect contains the exact radial region; its zero-domain result is
+ * neutral. No epsilon, altered radius, source texture or placement mask is used.
+ */
+function createRegionalPondBankComposition(
+  input: CompactPondBankCompositionInput<Node<"float">>,
+  field: NonNullable<CompactPondBankCompositionInput<Node<"float">>["field"]>,
+): CompactPondBankComposition<Node<"float">> {
+  const mineral = field.sectors.some(
+    (sector) => sector.surface === "mineral-shore",
+  );
+  const substrate = field.sectors.some(
+    (sector) => sector.surface === "cutbank",
+  );
+  const packed = Fn(() => {
+    // VarNode assignments enter this enclosing stack before the nonuniform If.
+    // These inputs may contain implicit texture samples or normal derivatives;
+    // evaluating only the scalar bank recipe conditionally keeps them uniform.
+    const x = input.x.toVar("compactPondBankRegionalX");
+    const z = input.z.toVar("compactPondBankRegionalZ");
+    const height = input.height.toVar("compactPondBankRegionalHeight");
+    const slope = input.slope.toVar("compactPondBankRegionalSlope");
+    const distortNoise = input.distortNoise.toVar(
+      "compactPondBankRegionalNoise",
+    );
+    const roadInfluence = input.roadInfluence.toVar(
+      "compactPondBankRegionalRoad",
+    );
+    // Match bankComposition's scalar operation order and immutable field owner.
+    // The separate pond uniform is not an interchangeable domain authority.
+    const dx = x.sub(field.centerX),
+      dz = z.sub(field.centerZ);
+    const radius = dx.mul(dx).add(dz.mul(dz)).sqrt();
+    const outerRadius =
+      field.pond.radius + COMPACT_TERRAIN_COMPOSITION.pondBankReach;
+    const region = float(1)
+      .sub(
+        smoothstep(
+          float(outerRadius - COMPACT_TERRAIN_COMPOSITION.pondRadialFade),
+          float(outerRadius),
+          radius,
+        ),
+      )
+      .toVar("compactPondBankRegionalRegion");
+    const result = mat4(vec4(0), vec4(1, 0, 0, 0), vec4(0), vec4(0)).toVar(
+      "compactPondBankRegional",
+    );
+    If(region.notEqual(0), () => {
+      // Construct the original graph here. Wrapping its already-materialized
+      // outputs would still execute its trigonometry and sector loops eagerly.
+      const bank = createCompactTerrainColorOperations().bankComposition(
+        {
+          x,
+          z,
+          height,
+          slope,
+          distortNoise,
+          roadInfluence,
+          field,
+          includeAppearance: true,
+        },
+        compactPondBankMath,
+      );
+      result.assign(
+        mat4(
+          vec4(
+            bank.soilToGrass,
+            bank.soilToRock,
+            bank.grassToSoil,
+            bank.grassToRock,
+          ),
+          vec4(
+            bank.grassShade,
+            bank.groundCoverWeight,
+            bank.groundCoverGrassShare,
+            bank.mineralSoilToRock ?? float(0),
+          ),
+          vec4(
+            bank.substrateSoilToRock ?? float(0),
+            bank.mineralAppearance!,
+            bank.siltAppearance!,
+            0,
+          ),
+          vec4(0),
+        ),
+      );
+    });
+    return result;
+  })().toVar("compactPondBankRegionalResult") as unknown as Node<"mat4"> & {
+    // The installed declarations omit the matrix ArrayElementNode overload.
+    element(index: 0 | 1 | 2): Node<"vec4">;
+  };
+  const transfer = packed.element(0),
+    cover = packed.element(1),
+    appearance = packed.element(2);
+  return {
+    soilToGrass: transfer.x,
+    soilToRock: transfer.y,
+    grassToSoil: transfer.z,
+    grassToRock: transfer.w,
+    grassShade: cover.x,
+    groundCoverWeight: cover.y,
+    groundCoverGrassShare: cover.z,
+    ...(mineral ? { mineralSoilToRock: cover.w } : {}),
+    ...(substrate ? { substrateSoilToRock: appearance.x } : {}),
+    mineralAppearance: appearance.y,
+    siltAppearance: appearance.z,
   };
 }
 

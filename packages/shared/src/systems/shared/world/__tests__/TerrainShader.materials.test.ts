@@ -3,6 +3,11 @@ import { JSDOM } from "jsdom";
 import type { Node, UniformNode } from "three/webgpu";
 
 import THREE from "../../../../extras/three/three";
+import { createCompactTerrainColorOperations } from "../CompactTerrainPalette";
+import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  validateWorldTerrainProfile,
+} from "../WorldTerrainProfile";
 import {
   MAX_VERTEX_LIGHTS,
   TERRAIN_SHADE,
@@ -13,6 +18,121 @@ import {
 } from "../TerrainShader";
 
 describe("TerrainShader material graph", () => {
+  it("admits regional bank evaluation only for a bound compact bank and pins its receipt", () => {
+    type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
+    const invalid: Options = { compactPbr: true };
+    Reflect.set(invalid, "compactTerrainBankEvaluation", "regional-v2");
+    expect(() => createTerrainMaterial(undefined, invalid)).toThrow(
+      "Invalid compact terrain bank evaluation",
+    );
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        compactTerrainBankEvaluation: "regional-v1",
+      }),
+    ).toThrow("requires the compact PBR material");
+    expect(() =>
+      createTerrainMaterial(undefined, {
+        compactPbr: true,
+        compactTerrainBankEvaluation: "regional-v1",
+      }),
+    ).toThrow("requires an admitted pond bank field");
+    const pond = {
+      id: "bank_test_water",
+      centerX: 343,
+      centerZ: 302,
+      radius: 7.5,
+      surfaceY: 27.8,
+    };
+    const bank = createCompactTerrainColorOperations().pondBankField(
+      {
+        id: "bank_test_floor",
+        centerX: 343,
+        centerZ: 302,
+        width: 22,
+        depth: 22,
+        height: 26.6,
+        blendRadius: 2,
+        radialPond: {
+          bedRadius: 5,
+          bankInnerRadius: 6.5,
+          bankOuterRadius: 9,
+          bankHeight: 28.08,
+          shorelineAmplitude: 0.9,
+          bankSectors: [
+            {
+              bearing: 0.7,
+              halfWidth: 0.55,
+              innerRadius: 6.4,
+              innerHeight: 27.86,
+            },
+          ],
+          bankComposition: {
+            schemaVersion: 1,
+            sectors: [{ sectorIndex: 0, surface: "cutbank" }],
+          },
+        },
+      },
+      pond,
+    )!;
+    const options: Options = {
+      compactPbr: true,
+      compactProfile: validateWorldTerrainProfile({
+        ...SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        southernMeadow: {
+          schemaVersion: 1,
+          minX: 304,
+          maxX: 500,
+          minZ: 345,
+          maxZ: 535,
+          featherX: 24,
+          featherZ: 24,
+          northHeight: 26.8,
+          southHeight: 25.3,
+          crossFall: 1,
+          rollAmplitude: 0.65,
+          rollWavelength: 100,
+        },
+      }),
+      compactSurfaceBlend: "height-v1",
+      compactPondBlend: "composition-v1",
+      compactPond: pond,
+      compactPondBankField: bank,
+    };
+    const baseline = createTerrainMaterial(undefined, options);
+    const candidate = createTerrainMaterial(undefined, {
+      ...options,
+      compactTerrainBankEvaluation: "regional-v1",
+    });
+    try {
+      expect(baseline).not.toHaveProperty("compactTerrainBankEvaluation");
+      expect(candidate.compactTerrainBankEvaluation).toBe("regional-v1");
+      expect(
+        Object.getOwnPropertyDescriptor(
+          candidate,
+          "compactTerrainBankEvaluation",
+        ),
+      ).toEqual({
+        value: "regional-v1",
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+      expect(candidate.compactPondBankField).toEqual(
+        baseline.compactPondBankField,
+      );
+      for (const material of [baseline, candidate]) {
+        expect(material).not.toHaveProperty("compactGroundSampling");
+        expect(material).not.toHaveProperty("compactRockSampling");
+        const receipt = material.compactTerrainSurface!.getReceipt();
+        expect(receipt).not.toHaveProperty("textureMatrix");
+        expect(receipt).not.toHaveProperty("textureEncoding");
+        expect(receipt.textures).toHaveLength(7);
+      }
+    } finally {
+      baseline.dispose();
+      candidate.dispose();
+    }
+  });
   it("admits identity terrain texture matrices only explicitly for independent compact materials", () => {
     type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
     const invalid: Options = { compactPbr: true };

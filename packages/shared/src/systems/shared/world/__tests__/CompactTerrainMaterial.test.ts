@@ -107,6 +107,8 @@ import {
   type CompactGrassColorGrade,
   type CompactPondMarginInput,
   type CompactPondBankMath,
+  type CompactPondBankField,
+  type CompactPondBankComposition,
 } from "../CompactTerrainPalette";
 import type { FlatZone } from "../../../../types/world/terrain";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
@@ -1378,6 +1380,23 @@ function vectorValue(
       return values;
     }
     if (node.type === "VarNode") return child("node");
+    if (node.type === "ArrayElementNode") {
+      // The regional bank packs scalar results into a real mat4. Only that
+      // concrete column access is admitted; this is not GPU indexing emulation.
+      const values = child("node"),
+        index = child("indexNode");
+      if (
+        values.length !== 16 ||
+        index.length !== 1 ||
+        !Number.isInteger(index[0]) ||
+        index[0] < 0 ||
+        index[0] > 3
+      )
+        throw new Error(
+          "Numeric matrix access requires a concrete mat4 column",
+        );
+      return values.slice(index[0] * 4, index[0] * 4 + 4);
+    }
     if (node.type === "ContextNode") {
       // Arithmetic is unchanged by this narrowly scoped codegen setting. The
       // native gate below, not this evaluator, verifies its control flow.
@@ -1703,6 +1722,472 @@ describe("composition-v1 shared actual bank material graph", () => {
       undefined,
       composition,
     );
+  describe("regional pond-bank evaluation (real arithmetic and TSL, not native qualification)", () => {
+    const keys = [
+      "soilToGrass",
+      "soilToRock",
+      "grassToSoil",
+      "grassToRock",
+      "grassShade",
+      "groundCoverWeight",
+      "groundCoverGrassShare",
+      "mineralSoilToRock",
+      "substrateSoilToRock",
+      "mineralAppearance",
+      "siltAppearance",
+    ] as const;
+    const symbolic = (bank: CompactPondBankField | null = field) => ({
+      x: positionWorld.x,
+      z: positionWorld.z,
+      height: positionWorld.y,
+      slope: float(0.12345).toVar("bankTestSlope"),
+      roadInfluence: float(0.23456).toVar("bankTestRoad"),
+      distortNoise: float(0.34567).toVar("bankTestNoise"),
+      field: bank,
+    });
+    const bindings = (
+      nodes: ReturnType<typeof symbolic>,
+      p: ReturnType<typeof input>,
+    ) =>
+      new Map<Node, readonly number[]>([
+        [nodes.x, [p.x]],
+        [nodes.z, [p.z]],
+        [nodes.height, [p.height]],
+        [nodes.slope, [p.slope]],
+        [nodes.roadInfluence, [p.roadInfluence]],
+        [nodes.distortNoise, [p.distortNoise]],
+      ]);
+    const evaluate = (
+      nodes: CompactPondBankComposition<Node<"float">>,
+      values?: ReadonlyMap<Node, readonly number[]>,
+      cache = new Map<Node, number[]>(),
+    ) =>
+      Object.fromEntries(
+        keys
+          .filter((key) => nodes[key] !== undefined)
+          .map((key) => [key, vectorValue(nodes[key]!, values, cache)[0]]),
+      );
+    const expanded = (roots: readonly Node[]) => {
+      const seen = new Set<Node>();
+      const visit = (node: Node) => {
+        if (seen.has(node)) return;
+        seen.add(node);
+        if (node === positionWorld) return;
+        const stack = numericShaderStack(node);
+        if (stack) visit(stack);
+        else for (const child of node.getChildren()) visit(child);
+      };
+      roots.forEach(visit);
+      return seen;
+    };
+    const bankVariants = () => {
+      const authored = structuredClone(zone);
+      authored.radialPond!.bankComposition!.sectors = [
+        {
+          sectorIndex: 0,
+          surface: "sedge-shelf",
+          groundCover: { emergenceHeight: 0.11, fullHeight: 0.24 },
+        },
+        { sectorIndex: 1, surface: "cutbank" },
+        { sectorIndex: 2, surface: "mineral-shore" },
+        { sectorIndex: 3, surface: "dry-turf" },
+      ];
+      return [field, ops.pondBankField(authored, pond)!];
+    };
+    // Adjacent representable input coordinates, not a claim that the arithmetic
+    // evaluator emulates GPU f32 operations or shader transcendental accuracy.
+    const adjacentF32 = (value: number, direction: -1 | 1) => {
+      const floats = new Float32Array([value]);
+      const bits = new Uint32Array(floats.buffer);
+      bits[0] += direction;
+      return floats[0];
+    };
+
+    it("retains every output at center, warped sectors, angle seams and outer-domain f32 neighbors", () => {
+      let compared = 0;
+      for (const bank of bankVariants()) {
+        const nodes = symbolic(bank),
+          original = createCompactPondBankComposition(nodes),
+          candidate = createCompactPondBankComposition(nodes, "regional-v1");
+        expect(Object.keys(candidate).sort()).toEqual(
+          Object.keys(original).sort(),
+        );
+        const outer = bank.pond.radius + ops.getComposition().pondBankReach;
+        const samples = [
+          -Math.PI,
+          -Math.PI + 1e-8,
+          -2.8,
+          -2.2,
+          -1.9,
+          -1.7,
+          0.7,
+          3.05,
+          Math.PI - 1e-8,
+          Math.PI,
+        ].flatMap((angle) =>
+          [
+            0,
+            bank.bedRadius,
+            6.8,
+            8,
+            9.8,
+            outer - ops.getComposition().pondRadialFade,
+            outer,
+            outer + 1,
+          ].map((radius) => input(angle, radius)),
+        );
+        const boundaryX = bank.centerX + outer;
+        for (const x of [
+          adjacentF32(boundaryX, -1),
+          boundaryX,
+          adjacentF32(boundaryX, 1),
+          bank.centerX + outer - 1e-4,
+        ])
+          samples.push({ ...input(), x, z: bank.centerZ });
+        for (const p of samples) {
+          const values = bindings(nodes, p),
+            actual = evaluate(candidate, values),
+            baseline = evaluate(original, values),
+            cpu = ops.bankComposition(
+              { ...p, field: bank, includeAppearance: true },
+              numeric,
+            );
+          expect(Object.keys(actual).sort()).toEqual(Object.keys(cpu).sort());
+          for (const key of keys)
+            if (cpu[key] !== undefined) {
+              expect(Number.isFinite(actual[key])).toBe(true);
+              expect(actual[key]).toBe(baseline[key]);
+              expect(actual[key]).toBeCloseTo(cpu[key]!, 12);
+            }
+          compared++;
+        }
+      }
+      expect(compared).toBe(168);
+    });
+
+    it("preserves optional property presence, ground-cover emergence and all live inputs", () => {
+      const rich = bankVariants()[1];
+      for (const bank of [
+        null,
+        { ...rich, sectors: [] },
+        ...bankVariants(),
+        {
+          ...rich,
+          sectors: rich.sectors.filter((s) => s.surface === "mineral-shore"),
+        },
+      ]) {
+        const nodes = symbolic(bank),
+          original = createCompactPondBankComposition(nodes),
+          candidate = createCompactPondBankComposition(nodes, "regional-v1");
+        expect(Object.keys(candidate).sort()).toEqual(
+          Object.keys(original).sort(),
+        );
+        expect(Object.hasOwn(candidate, "mineralSoilToRock")).toBe(
+          !!bank?.sectors.some((s) => s.surface === "mineral-shore"),
+        );
+        expect(Object.hasOwn(candidate, "substrateSoilToRock")).toBe(
+          !!bank?.sectors.some((s) => s.surface === "cutbank"),
+        );
+        expect(Object.hasOwn(candidate, "mineralAppearance")).toBe(
+          bank !== null,
+        );
+        expect(Object.hasOwn(candidate, "siltAppearance")).toBe(bank !== null);
+        for (const height of [27.7, 27.8, 27.91, 28.04, 28.3, 29.8])
+          for (const slope of [0, 0.04, 0.21, 0.6])
+            for (const road of [0, 0.4, 0.8])
+              for (const distortNoise of [0, 0.5, 1]) {
+                const p = {
+                  ...input(-2.0, 8, height, slope, road),
+                  distortNoise,
+                };
+                const values = bindings(nodes, p);
+                expect(evaluate(candidate, values)).toEqual(
+                  evaluate(original, values),
+                );
+              }
+      }
+    });
+
+    it("does not evaluate bank trigonometry outside exact zero but preserves tiny positive domains", () => {
+      const bank = bankVariants()[1],
+        nodes = symbolic(bank);
+      const original = createCompactPondBankComposition(nodes),
+        candidate = createCompactPondBankComposition(nodes, "regional-v1");
+      const outer = bank.pond.radius + ops.getComposition().pondBankReach;
+      let tinyPositive = false;
+      for (const x of [
+        bank.centerX,
+        bank.centerX + outer - 1e-4,
+        adjacentF32(bank.centerX + outer, -1),
+        bank.centerX + outer,
+        adjacentF32(bank.centerX + outer, 1),
+        bank.centerX + outer + 100,
+      ]) {
+        const p = { ...input(), x, z: bank.centerZ },
+          values = bindings(nodes, p),
+          cache = new Map<Node, number[]>();
+        const result = evaluate(candidate, values, cache);
+        expect(result).toEqual(evaluate(original, values));
+        const radius = Math.sqrt((x - bank.centerX) ** 2);
+        const region =
+          1 -
+          numeric.smoothstep(
+            outer - ops.getComposition().pondRadialFade,
+            outer,
+            radius,
+          );
+        tinyPositive ||= region > 0 && region < 1e-6;
+        const methods = [...cache.keys()].map((node) =>
+          Reflect.get(node, "method"),
+        );
+        expect(methods.includes("sin")).toBe(region !== 0);
+        expect(methods.includes("atan")).toBe(region !== 0);
+        if (region === 0)
+          for (const [key, value] of Object.entries(result))
+            expect(value).toBe(key === "grassShade" ? 1 : 0);
+      }
+      expect(tinyPositive).toBe(true);
+    });
+
+    it("keeps the omitted/default graph unbranched and rejects unknown modes", () => {
+      const nodes = symbolic();
+      const baseline = createCompactPondBankComposition(nodes);
+      expect(
+        [...expanded(Object.values(baseline))].some(
+          (n) => numericShaderStack(n) !== null,
+        ),
+      ).toBe(false);
+      expect(
+        evaluate(
+          createCompactPondBankComposition(nodes, undefined),
+          bindings(nodes, input()),
+        ),
+      ).toEqual(evaluate(baseline, bindings(nodes, input())));
+      for (const invalid of [
+        null,
+        false,
+        "",
+        "standard",
+        "REGIONAL-V1",
+        "regional-v2",
+        1,
+      ])
+        expect(() =>
+          Reflect.apply(createCompactPondBankComposition, undefined, [
+            { ...nodes, field: null },
+            invalid,
+          ]),
+        ).toThrow(/bank evaluation/i);
+      const absent = createCompactPondBankComposition(
+        { ...nodes, field: null },
+        "regional-v1",
+      );
+      expect(
+        [...expanded(Object.values(absent))].some(
+          (n) => numericShaderStack(n) !== null,
+        ),
+      ).toBe(false);
+      expect(evaluate(absent)).toEqual({
+        soilToGrass: 0,
+        soilToRock: 0,
+        grassToSoil: 0,
+        grassToRock: 0,
+        grassShade: 1,
+        groundCoverWeight: 0,
+        groundCoverGrassShare: 0,
+      });
+    });
+
+    it("hoists real sampled and derivative inputs before its only regional branch without eager bank work", () => {
+      const map = new THREE.DataTexture(
+        new Uint8Array([128, 64, 192, 255]),
+        1,
+        1,
+      );
+      try {
+        const sampled = texture(map, positionWorld.xz.mul(0.1));
+        const nodes = {
+          ...symbolic(bankVariants()[1]),
+          height: positionWorld.y.add(sampled.r),
+          slope: positionWorld.dFdx().length(),
+          roadInfluence: sampled.g,
+          distortNoise: sampled.b,
+        };
+        const candidate = createCompactPondBankComposition(
+          nodes,
+          "regional-v1",
+        );
+        const all = expanded(Object.values(candidate));
+        const results = [...all].filter(
+          (node) =>
+            Reflect.get(node, "name") === "compactPondBankRegionalResult",
+        );
+        expect(results).toHaveLength(1);
+        for (const output of Object.values(candidate))
+          expect(graph(output).has(results[0])).toBe(true);
+        let call: Node = Reflect.get(results[0], "node");
+        expect(call instanceof THREE.Node).toBe(true);
+        while (call.type === "ConvertNode" || call.type === "VarNode")
+          call = Reflect.get(call, "node");
+        const stack = numericShaderStack(call)!;
+        expect(stack?.type).toBe("StackNode");
+        const statements: unknown = Reflect.get(stack, "nodes");
+        if (
+          !Array.isArray(statements) ||
+          statements.some((node) => !(node instanceof THREE.Node))
+        )
+          throw new Error("Expected actual bank stack statements");
+        const expectedNames = [
+          "X",
+          "Z",
+          "Height",
+          "Slope",
+          "Noise",
+          "Road",
+        ].map((name) => "compactPondBankRegional" + name);
+        expect(
+          statements.slice(0, 6).map((node) => Reflect.get(node, "name")),
+        ).toEqual(expectedNames);
+        const hoists = statements.slice(0, 6) as Node[];
+        const supplied = [
+          nodes.x,
+          nodes.z,
+          nodes.height,
+          nodes.slope,
+          nodes.distortNoise,
+          nodes.roadInfluence,
+        ];
+        hoists.forEach((node, i) =>
+          expect(Reflect.get(node, "node")).toBe(supplied[i]),
+        );
+        const branches = statements.filter(
+          (node) => node.type === "ConditionalNode",
+        ) as Node[];
+        expect(branches).toHaveLength(1);
+        const branch = branches[0];
+        expect(statements.indexOf(branch)).toBeGreaterThan(5);
+        let condition = Reflect.get(branch, "condNode") as Node;
+        while (condition.type === "VarNode")
+          condition = Reflect.get(condition, "node");
+        expect(Reflect.get(condition, "op")).toBe("!=");
+        expect(Reflect.get(Reflect.get(condition, "aNode"), "name")).toBe(
+          "compactPondBankRegionalRegion",
+        );
+        expect(vectorValue(Reflect.get(condition, "bNode"))).toEqual([0]);
+        expect(Reflect.get(branch, "elseNode")).toBeNull();
+        // Stop at already-materialized inputs: textures/derivatives belong to
+        // the enclosing stack, not newly introduced work under nonuniform If.
+        const localGraph = (root: Node) => {
+          const visited = new Set<Node>();
+          const visit = (node: Node) => {
+            if (visited.has(node)) return;
+            visited.add(node);
+            if (hoists.includes(node)) return;
+            const nested = numericShaderStack(node);
+            if (nested) visit(nested);
+            else for (const child of node.getChildren()) visit(child);
+          };
+          visit(root);
+          return [...visited];
+        };
+        for (const statement of statements.slice(6, statements.indexOf(branch)))
+          expect(
+            localGraph(statement).some((node) =>
+              ["sin", "atan"].includes(String(Reflect.get(node, "method"))),
+            ),
+          ).toBe(false);
+        const inner = localGraph(Reflect.get(branch, "ifNode"));
+        expect(
+          inner.some((node) => Reflect.get(node, "method") === "sin"),
+        ).toBe(true);
+        expect(
+          inner.some((node) => Reflect.get(node, "method") === "atan"),
+        ).toBe(true);
+        expect(
+          inner.some(
+            (node) =>
+              Reflect.get(node, "isTextureNode") === true ||
+              ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+          ),
+        ).toBe(false);
+        expect(inner.filter((node) => node.type === "AssignNode")).toHaveLength(
+          1,
+        );
+        expect(
+          [...all].some((node) => Reflect.get(node, "isTextureNode") === true),
+        ).toBe(true);
+        expect(
+          [...all].some((node) => Reflect.get(node, "method") === "dFdx"),
+        ).toBe(true);
+      } finally {
+        map.dispose();
+      }
+    });
+
+    it("preserves downstream weights, shaded grass and every bank material channel", () => {
+      const nodes = symbolic(bankVariants()[1]),
+        original = createCompactPondBankComposition(nodes),
+        candidate = createCompactPondBankComposition(nodes, "regional-v1");
+      const soil: CompactTerrainLayer = {
+        albedo: vec3(0.24, 0.15, 0.08),
+        roughness: float(0.88),
+        ao: float(0.83),
+        worldNormal: vec3(0.1, 0.99, 0),
+        height: float(0.37),
+      };
+      const rock: CompactTerrainLayer = {
+        albedo: vec3(0.4, 0.36, 0.31),
+        roughness: float(0.72),
+        ao: float(0.7),
+        worldNormal: vec3(0, 0.99, 0.1),
+        rawRockAo: float(0.61),
+      };
+      const before = applyCompactPondBankMaterials(soil, rock, original),
+        after = applyCompactPondBankMaterials(soil, rock, candidate);
+      for (const angle of [-2.2, -1.7, 0.7, 3.05])
+        for (const radius of [0, 8, 10.5, 12]) {
+          const values = bindings(nodes, input(angle, radius, 28.03, 0.2));
+          for (const weights of [
+            vec4(0.3, 0.4, 0.2, 0.1),
+            vec4(0, 1, 0, 0),
+            vec4(1, 0, 0, 0),
+          ])
+            expect(
+              vectorValue(
+                applyCompactPondBankCompositionWeights(weights, candidate),
+                values,
+              ),
+            ).toEqual(
+              vectorValue(
+                applyCompactPondBankCompositionWeights(weights, original),
+                values,
+              ),
+            );
+          expect(
+            vectorValue(
+              applyCompactPondBankGrass(soil, candidate).albedo,
+              values,
+            ),
+          ).toEqual(
+            vectorValue(
+              applyCompactPondBankGrass(soil, original).albedo,
+              values,
+            ),
+          );
+          for (const family of ["soil", "rock"] as const)
+            for (const channel of [
+              "albedo",
+              "roughness",
+              "ao",
+              "worldNormal",
+            ] as const)
+              expect(vectorValue(after[family][channel], values)).toEqual(
+                vectorValue(before[family][channel], values),
+              );
+        }
+    });
+  });
+
   it("matches the actual CPU kernel through warped knots, overlaps, angle seam and neutral water/road bounds", () => {
     for (const angle of [
       -Math.PI + 1e-8,

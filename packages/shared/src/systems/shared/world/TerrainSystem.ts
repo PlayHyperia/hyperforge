@@ -205,6 +205,7 @@ import {
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
+  resolveCompactTerrainBankEvaluation,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -472,6 +473,9 @@ export class TerrainSystem extends System {
   private compactTerrainTextureMatrix: ReturnType<
     typeof resolveCompactTerrainTextureMatrix
   > | null;
+  private compactTerrainBankEvaluation: ReturnType<
+    typeof resolveCompactTerrainBankEvaluation
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -684,6 +688,7 @@ export class TerrainSystem extends System {
       compactRockSampling: this.getCompactRockSampling(),
       compactGroundSampling: this.getCompactGroundSampling(),
       compactTerrainTextureMatrix: this.getCompactTerrainTextureMatrix(),
+      compactTerrainBankEvaluation: this.getCompactTerrainBankEvaluation(),
       ...(textureEncoding
         ? {
             compactTerrainTextureEncoding: textureEncoding,
@@ -928,6 +933,21 @@ export class TerrainSystem extends System {
     const selection = this.compactTerrainTextureMatrix ?? undefined;
     if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
       throw new Error("Terrain texture matrix requires compact sculpt terrain");
+    return selection;
+  }
+
+  /** Capture both absence and selection once, independently of dirt projection. */
+  private getCompactTerrainBankEvaluation(): ReturnType<
+    typeof resolveCompactTerrainBankEvaluation
+  > {
+    if (this.compactTerrainBankEvaluation === undefined)
+      this.compactTerrainBankEvaluation =
+        resolveCompactTerrainBankEvaluation() ?? null;
+    const selection = this.compactTerrainBankEvaluation ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain bank evaluation requires compact sculpt terrain",
+      );
     return selection;
   }
 

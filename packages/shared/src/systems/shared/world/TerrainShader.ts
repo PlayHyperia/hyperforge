@@ -66,6 +66,7 @@ import {
   type CompactGroundSampling,
   type CompactTerrainTextureEncoding,
   type CompactTerrainTextureMatrix,
+  type CompactTerrainBankEvaluation,
   type CompactSurfaceBlend,
   type CompactPondBlend,
   type CompactCoastBlend,
@@ -1200,6 +1201,7 @@ export function createTerrainMaterial(
     compactGroundSampling?: CompactGroundSampling;
     compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
     compactTerrainTextureMatrix?: CompactTerrainTextureMatrix;
+    compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
     compactTextureRenderer?: THREE.WebGPURenderer;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
@@ -1216,6 +1218,7 @@ export function createTerrainMaterial(
   compactTerrainSurface?: CompactTerrainTextureSet;
   compactRockSampling?: CompactRockSampling;
   compactGroundSampling?: CompactGroundSampling;
+  compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
   compactPondBlend?: CompactPondBlend;
   compactCoastBlend?: CompactCoastBlend;
   compactPondBankField?: CompactPondBankField;
@@ -1256,6 +1259,14 @@ export function createTerrainMaterial(
     if (!options.compactPbr)
       throw new Error(
         "Terrain texture matrix requires the compact PBR material",
+      );
+  }
+  if (options.compactTerrainBankEvaluation !== undefined) {
+    if (options.compactTerrainBankEvaluation !== "regional-v1")
+      throw new Error("Invalid compact terrain bank evaluation");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain bank evaluation requires the compact PBR material",
       );
   }
   if (options.compactGroundSampling !== undefined) {
@@ -1323,6 +1334,10 @@ export function createTerrainMaterial(
   if (pondServiceGround && (!macroField || !grassColorGrade))
     throw new Error(
       "Pond service ground requires the graded compact terrain material",
+    );
+  if (options.compactTerrainBankEvaluation && !macroField?.pondBankField)
+    throw new Error(
+      "Terrain bank evaluation requires an admitted pond bank field",
     );
   if (options.compactCoastBlend !== undefined && !macroField?.coastalMeadow)
     throw new Error("Coast blending requires an admitted coastal macro domain");
@@ -1899,15 +1914,18 @@ export function createTerrainMaterial(
       pondMargin,
     );
   const pondBankComposition = macroField?.pondBankField
-    ? createCompactPondBankComposition({
-        x: worldPos.x,
-        z: worldPos.z,
-        height: worldPos.y,
-        slope,
-        distortNoise,
-        roadInfluence: roadInfluenceRaw,
-        field: macroField.pondBankField,
-      })
+    ? createCompactPondBankComposition(
+        {
+          x: worldPos.x,
+          z: worldPos.z,
+          height: worldPos.y,
+          slope,
+          distortNoise,
+          roadInfluence: roadInfluenceRaw,
+          field: macroField.pondBankField,
+        },
+        options.compactTerrainBankEvaluation,
+      )
     : undefined;
   if (compactLayers && pondBankComposition && !preparedGround)
     compactLayers.grass = applyCompactPondBankGrass(
@@ -2372,6 +2390,7 @@ export function createTerrainMaterial(
     compactTerrainSurface?: CompactTerrainTextureSet;
     compactRockSampling?: CompactRockSampling;
     compactGroundSampling?: CompactGroundSampling;
+    compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
     compactPondBankField?: CompactPondBankField;
@@ -2386,6 +2405,13 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (options.compactTerrainBankEvaluation !== undefined)
+    Object.defineProperty(result, "compactTerrainBankEvaluation", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactTerrainBankEvaluation,
+    });
   if (options.compactGroundSampling !== undefined)
     Object.defineProperty(result, "compactGroundSampling", {
       enumerable: true,

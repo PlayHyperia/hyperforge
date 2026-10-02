@@ -1,5 +1,42 @@
 # Grass canopy visibility: research checkpoint
 
+## Native214 — regional bank branch verified; negligible complete-scene gain
+
+The explicit, **default-off** `terrainBankEvaluation=regional-v1` candidate now skips the original pond-bank recipe only where its existing radial influence is **exactly zero**. Four complete-content A/B/B/A samples show only a **0.2–0.45 ms** median wall-interval difference. This is not a material step toward the **16.67 ms / 60 FPS at 2×** target and does not justify promotion. Do not spend another primary-work batch tuning this small branch.
+
+### Source and actual GPU shader verification
+
+Seven source/test files add a strict captured selector, immutable material provenance, one shared packed result and boundary/optional-output tests. Six inputs are evaluated before the branch; active bank arithmetic is unchanged. No texture, geometry, population, lighting, resolution or default changes are made. The independent root run passes **827 tests / two existing native-only skips across four suites**. Scoped ESLint, Prettier and diff checks pass. Root typecheck still reports the same five inherited procgen declaration errors, none in these changed files; this is not a clean project-wide typecheck.
+
+Canonical **build207** is built from source HEAD `cdb4e6a715` plus the four owned production changes, with nine bundles, zero virtual overrides and exact canonical production bytes. [Build report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/isolated-build207-report.json) SHA256: `d6da79ef9843e6e80dd93d7d7332d7e018e377102ed8344bf80495db25b18a48`; framework SHA256: `9a5977845757e110900bfd8fe28070d34f59e90e5a9e18c9358980b70059e7d1`. The protection receipt verifies **409 files / 438 links** unchanged.
+
+The [baseline census](/Users/lucid/Downloads/hyperia-native214-terrain-shader.json) is byte-identical to Native213's baseline in both full fragment and vertex shader strings. The [candidate census](</Users/lucid/Downloads/hyperia-native214-terrain-shader (1).json>), SHA256 `7592171f521d35ac8a6694a3fb568074e15d9a9175212b35d3bbe70fc1de093e`, records the actual drawn primary/mirror programs. Each has **one** regional branch; all six input producers execute at uniform main scope before it. The branch contains no texture or derivative operations. Independent expression expansion verifies all ten present bank outputs against baseline arithmetic, including the unchanged angle-origin guard; the neutral packed result is shared once.
+
+Both candidate fragments are identical, SHA256 `8605cacaf6306d57b1e8be05cc64167a53543c41a20b4b6e17d4a46c9ebd6e1e`. All55 texture operations remain: seven implicit,43 gradient (including35 packed-surface samples), five comparison samples;13 dpdx/13 dpdy remain. Update-node counts remain94/80 OBJECT/66 texture-matrix. Vertex arithmetic matches after generated-name normalization and reordering an independent road-varying assignment; headers/attribute locations are not byte-identical. These checks prove shader structure, **not native instruction count or pixel identity**.
+
+### Full-content 2× timing
+
+All four receipts complete/restored/ownerAbsent with empty errors, unchanged installer source, visible/focused metadata, identical camera/player/quality/texture bytes and **zero omitted draws**. Each lasts25 seconds, excluding five seconds warmup. Canvas is **3024×1724, DPR2, MSAA4, High shadows**, with actual reflections/composer/bloom enabled, phase0.56/exposure0.850240084; effective depth blur is off. All52 terrain/94 grass owners and35 terrain/85 grass draw attempts per tick remain. Wind, water and actors stay live.
+
+| Run / receipt | Measured ticks / intervals | Wall interval median / p95 (ms) | Synchronous tick CPU median / p95 (ms) |
+| --- | ---: | ---: | ---: |
+| [A1 baseline](/Users/lucid/Downloads/hyperia-native214-full-content-timing.json) | 450 / 449 | 44.60 / 47.50 | 12.10 / 19.00 |
+| [B1 regional](</Users/lucid/Downloads/hyperia-native214-full-content-timing (1).json>) | 453 / 452 | 44.15 / 47.20 | 11.10 / 12.90 |
+| [B2 regional](</Users/lucid/Downloads/hyperia-native214-full-content-timing (2).json>) | 451 / 450 | 44.20 / 47.60 | 11.10 / 13.20 |
+| [A2 baseline](</Users/lucid/Downloads/hyperia-native214-full-content-timing (3).json>) | 449 / 448 | 44.40 / 47.40 | 12.20 / 14.40 |
+
+Medians use the midpoint for even counts; p95 uses sorted index `floor(0.95 × (n − 1))`. CPU includes the draw observer; wall intervals include guard overhead. These are **ordinary tick intervals, not displayed FPS, GPU completion or sustained acceptance**. The small favorable median difference is under1.1%; p95 ranges overlap. The lower absolute cadence versus Native213 is a separate-session condition change, not a causal improvement credited to this candidate.
+
+### Visual controls and cleanup
+
+Root reviewed both [wide baseline](/Users/lucid/Downloads/hyperia-native214-baseline-wide-day.png) / [candidate](/Users/lucid/Downloads/hyperia-native214-candidate-wide-day.png) and [close baseline](/Users/lucid/Downloads/hyperia-native214-baseline-close-day.png) / [candidate](/Users/lucid/Downloads/hyperia-native214-candidate-close-day.png). No obvious material/coverage regression is visible. Paired JSON metadata matches camera/player/canvas/quality/owners and all seven texture digests/settings, excluding per-runtime texture UUIDs. Light direction/color/intensity match; sun-position rounding differs by at most2.843e-13 world units. These live stills are not pixel-identical or all-view/all-day acceptance.
+
+All three private runtimes (`runtime-native214-baseline01`, `runtime-native214-candidate02`, `runtime-native214-baseline03`) are **STOPPED**, with empty errors, protected state unchanged, disposable test databases removed and private ports free. Camera/clock/exposure and observer restoration pass. Owned game/DevTools tabs close; the original New Tab remains. Two temporary repository modules are removed, with evidence copies retained outside the repository. The original runtime helper restores to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax checking. All42 unrelated file hashes remain unchanged. Public build174, saved database and production defaults are untouched.
+
+**Next priority:** isolate the cost of bulk terrain surface evaluation, retaining geometry, ordinary lighting/shadows/depth, full scene and2× settings. A temporary cheap-surface attribution is diagnostic only, never an acceptable visual downgrade. Use its result to decide whether a reusable terrain surface cache is justified; footprint/mip/normal fidelity and dynamic invalidation would require explicit verification. Terrain/grass/repeated planar capture remain the leading measured priorities; their overlapping scopes below must not be added.
+
+Primary guidance supports investigating material reuse rather than blindly adding passes: [Epic describes runtime virtual textures as a shading cache for complex landscape materials](https://dev.epicgames.com/documentation/unreal-engine/runtime-virtual-texturing-in-unreal-engine). [Apple explains why a performance-only depth prepass may duplicate its GPU hidden-surface removal](https://developer.apple.com/videos/play/wwdc2020/10632/). These are architectural references, not proof that either method improves this WebGPU scene. A cache must still preserve acceptable filtering, detail and dynamic behavior within a measured memory budget.
+
 ## Native213 — identity matrix work removed; full-content cadence gain not established
 
 The explicit `terrainTextureMatrix=identity-v1` candidate runs in the real WebGPU world and removes its intended work, but **full-content A/B/B/A timing does not establish a repeatable benefit**. It remains **default-off and unpromoted**. Sustained 60 FPS at 2× and comprehensive visual acceptance remain open.
@@ -31,7 +68,7 @@ The earlier candidate retry encounters `already_logged_in`, then player `[350,28
 
 All three private runtimes—`runtime-identity213-qual01`, `runtime-identity213-candidate02`, `runtime-identity213-baseline03`—are **STOPPED**, with empty errors, protected resources unchanged, disposable databases removed and ports3344/5565/5566/57841 empty. Observers and camera/clock/exposure controls restore; owned game/DevTools tabs close, preserving New Tab. Two temporary repository modules are removed. The original runtime helper is restored to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax checking; all42 unrelated hashes remain unchanged. No production defaults/public build are promoted.
 
-**Next bounded target:** skip existing pond-bank shaping ALU only where its influence is already exactly zero, preserving samples, neutral outputs, content and2× quality. **Not implemented or measured yet**: boundary/output tests, native shaders, matched images and repeated complete-content timing are required. Terrain/grass/repeated planar capture remain the leading measured priorities; Native212's overlapping, non-additive ranking below is unchanged.
+**Historical next target:** the exact-zero pond-bank ALU gate was then unimplemented. Native214 above now records its source, actual shader/image verification and negligible complete-content timing result. Terrain/grass/repeated planar capture remain the leading measured priorities; Native212's overlapping, non-additive ranking below is unchanged.
 
 ## Source213 — guarded identity texture-matrix candidate; native qualification open
 
