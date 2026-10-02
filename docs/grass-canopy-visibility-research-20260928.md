@@ -1,5 +1,45 @@
 # Grass canopy visibility: research checkpoint
 
+## Native221 — matched grass images pass; two primary depth copies observed
+
+**Progress: the faster grass candidate passes bounded day, low-sun and night front-view regression checks; the next performance target is an observed duplicate-sized depth-copy boundary, not another visual-quality change.** Product source remains exactly Source220/commit583211. No defaults, density, geometry, shadows, resolution, reflection or public build changes occur in this checkpoint. Native220's repeated2.35–2.80ms improvement is unchanged; **41.2–41.6ms is still not16.67ms or60FPS**.
+
+### Matched completed-frame images
+
+Each accepted set records stock / rough-leaf / restored-original PNGs from ordinary completed World.tick frames at **3024×1724, DPR2, MSAA4, High shadows**. Stock uses94 isolated canonical MeshSSSNodeMaterial copies in beauty draw arguments; original objects/materials remain unchanged. One-second warmup and at least10 stable frames precede each capture, with a30second overall bound. Wind, clouds, water, actors and particles remain live: these are qualitative matched regression screens, **not pixel identity, temporal acceptance or timing samples**.
+
+| Accepted set | Held phase / exposure | Recorded frames / duration | Main calls / triangle slots | Mirror calls / triangle slots |
+| --- | --- | --- | --- | --- |
+| [Day](/Users/lucid/Downloads/hyperia-native221-day-front.json) | 0.56 /0.850240084 | 172 /8.3877s | 329 /4,898,452 | 318 /4,418,057 |
+| [Low sun](/Users/lucid/Downloads/hyperia-native221-low-sun.json) | 0.2700000000000001 /0.8539120052837473 | 172 /8.4059s | 329 /4,898,452 | 318 /4,418,057 |
+| [Night](/Users/lucid/Downloads/hyperia-native221-night-warm.json) | 0.125 /1.1 | 172 /8.2592s | 326 /4,898,356 | 315 /4,417,961 |
+
+Within each set, every row and all three captures match the full four-view coverage/order signature, with one mirror and two shadow refreshes (each108 calls/622,572 triangle slots). Camera, exposure, lighting, phase, quality, seven terrain textures and24 environment maps match exactly across captured conditions. Cross-phase actor/effect counts are not treated as equivalent. Each set captures170 actual program states (45 primary +40 mirror per condition), retaining all five receiver-shadow sample sites. All nine PNG headers are3024×1724 and their disk byte sizes/SHA256 hashes match the receipts.
+
+Root and independent visual review see **no obvious grass lighting, coverage/culling or shadow regression** in these three front-view comparisons. [Day stock](/Users/lucid/Downloads/hyperia-native221-day-front-stock.png) / [candidate](/Users/lucid/Downloads/hyperia-native221-day-front-roughLeaf.png); [low-sun stock](/Users/lucid/Downloads/hyperia-native221-low-sun-stock.png) / [candidate](/Users/lucid/Downloads/hyperia-native221-low-sun-roughLeaf.png); [night stock](/Users/lucid/Downloads/hyperia-native221-night-warm-stock.png) / [candidate](/Users/lucid/Downloads/hyperia-native221-night-warm-roughLeaf.png). All four hooks restore and94/94 private clones dispose per set.
+
+Receipt SHA256: day `6daef8700eac793b65935edb56edb7a32c6cf3521a8231fb792b67daec0c74e4`; low sun `7b6e3889d0f1c873b7765f47feb3bf4116b7e27913acca9d35edeb6580febff4`; night `47e91b198674f5160ffafa1e5578eff6860776767996c093786851ad66c9caa9`.
+
+[First night attempt](/Users/lucid/Downloads/hyperia-native221-night-front.json) refuses during stock shader compilation because the guarded light/shadow transform continues settling at approximately1e-9 world units. Zero captures are accepted; original hooks/materials restore. The naturally warmed retry passes without weakening the light guard. Two setup-only console errors (calling a nonexistent exposure receipt method and comparing0.27 with its floating-point sky representation by strict equality) occur outside acceptance; neither changes product source. Phase setup then uses an explicit1e-12 tolerance without rounding live state.
+
+**Still open before default/public promotion:** reverse/backlight and nearby tree-shadow-edge views, moving-camera/pond temporal checks, complete-material stock fallback and device/preparation lifecycle checks. These three screens do not close those gates.
+
+### New native evidence: two primary depth copies and three MSAA render segments
+
+A separate read-only, one-ordinary-tick [attachment census](/Users/lucid/Downloads/hyperia-native221-msaa-attachment-census.json), SHA256 `984c4c1163ad4be2c90998f7e6b92388a79571f239c548159be6be01bc69b401`, completes/restores with22 events,6 contexts,2 copies and no errors. The observer forwards original backend methods and records existing descriptors/current-pass identities; it neither changes attachment settings nor intercepts GPUCommandEncoder calls.
+
+The primary3024×1724 RGBA16F scene target is4× multisampled. **Two distinct full-resolution depth destinations** trigger successive pass identity transitions12→26→38. The first copy precedes reflection; the second follows it. Both restart with color/depth LOAD, color STORE+resolve and depth STORE. Mirror1512×862, minimap126×72, both4096² shadow contexts and final fullscreen output are single-sample. There is no redundant fullscreen or mirror MSAA to remove.
+
+Do **not** globally disable multisample color storage: these resumed passes require the prior color. [Three's RenderTarget documentation](https://threejs.org/docs/pages/RenderTarget.html) explicitly requires retention for mid-pass framebuffer copies, and depth retention when subsequently sampled. Changing a descriptor at finishRender is too late; store behavior is fixed when the GPU pass begins. One raw full-resolution4× RGBA16F attachment contains159.1MiB, but this is **not measured traffic or a speedup estimate**.
+
+**Next bounded implementation hypothesis:** WaterSystem constructs `viewportDepthTexture()` inside the `axisDepthGap` Fn; separate expansion/update owners may explain the two copies. First inspect actual water draw-owned updateBeforeNodes against both destination UUIDs and verify that no primary depth-writing draw intervenes. If both copy the same pre-water depth, hoist one shared node outside the Fn, preserving all pre-existing WaterSystem edits. Acceptance requires one fewer copy/pass boundary, unchanged complete draw coverage/quality, actual shader/data-flow and matched image validation, then repeated full-content2× timing. If depth contents differ, do not merge them. Final-only MSAA discard is secondary and needs explicit safe continuation semantics; broad terrain caching remains a more approximate/memory-heavy option.
+
+### Cleanup and checkpoint integrity
+
+[Native cleanup](/Users/lucid/Downloads/hyperia-native221-cleanup.json) verifies accepted/refused observers restored, camera/clock and exposure restored, original render entry points and idle preparation. Owned test game/DevTools close, preserving New Tab and public3333. Private runtime stops2026-10-02T13:23:07.087Z with errors empty, protected state unchanged, disposable database removed and all four private ports free. Process receipt SHA256 `5bbd0e890c2439724a660ab26d25e27f2bed52edfe9bb23f3b5c57827b9f676b`.
+
+Three served diagnostic modules are removed; external evidence helpers remain. Runtime helper restores to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. All414 protected file hashes,438 symlinks,42 unrelated dirty-file hashes and10 Source220 code/test pins verify unchanged. This is native qualification/research on the previously817-pass/1-skip source, not a new source-test run or clean whole-project typecheck.
+
 ## Native220 — rough-leaf lighting candidate repeats a 2.35–2.80 ms improvement
 
 **Implemented, opt-in, not promoted.** Two full-content native comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** show a repeatable **2.35–2.80 ms** reduction in median wall tick intervals. Candidate medians remain **41.20–41.60 ms**, far above the **16.67 ms** target. These short instrumented intervals are not presented FPS or sustained 60 FPS acceptance. No density, geometry, shadow-quality, reflection, postprocessing or resolution setting is reduced.
@@ -16,7 +56,7 @@ OutdoorEnvironment optionally prepares12 owned129×65 RGBA16F linear radiance fi
 
 Each run uses stock / candidate / stock / candidate / stock, at least3seconds warmup and10seconds measured per arm, with the candidate prewarmed. The first interval in each arm is excluded. Camera, player, phase0.56/exposure0.850240084, all render settings and owners are pinned. No extra render loop, GPU fence or readback occurs during timing. Stock-arm clones are actual canonical MeshSSSNodeMaterials; merely clearing a subclass clone's environment would incorrectly reactivate the candidate from the existing object hook.
 
-| Run / arm | Same-arm intervals | Wall median / p95 (ms) | Tick CPU median (ms) |
+| Run / arm | Measured ticks | Wall median / p95 (ms) | Tick CPU median (ms) |
 | --- | ---: | ---: | ---: |
 | 1 stock A1 | 230 | 44.10 /46.60 | 12.00 |
 | 1 candidate B1 | 243 | 41.30 /44.70 | 11.70 |
