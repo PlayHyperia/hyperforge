@@ -211,6 +211,14 @@ class TreePool {
         : node instanceof THREE.BatchedMesh,
     );
   }
+  ownership(
+    expectedWorld = this.world,
+    expectedScene = this.world.stage.scene,
+  ) {
+    return this.kind === "single"
+      ? single.getGLBTreeRenderOwnership(expectedWorld, expectedScene)
+      : batched.getGLBTreeBatchedRenderOwnership(expectedWorld, expectedScene);
+  }
 }
 
 function newWorld(): World {
@@ -479,6 +487,179 @@ async function withTreeViewport(
     dom.window.close();
   }
 }
+
+describe("actual GLB tree read-only render ownership", () => {
+  for (const kind of ["single", "batched"] as const) {
+    it(`${kind}: refuses uninitialized/foreign owners and observes cold publication without loading or mutating it`, async () => {
+      await withTrees(
+        kind,
+        async ({ pool, requested, release, track }) => {
+          pool.destroy();
+          expect(pool.ownership()).toBeNull();
+          pool.init("connected-v1");
+          const empty = pool.ownership();
+          expect(empty).not.toBeNull();
+          expect(empty!.records).toHaveLength(0);
+          const otherWorld = newWorld();
+          try {
+            expect(pool.ownership(otherWorld)).toBeNull();
+            expect(pool.ownership(pool.world, new THREE.Scene())).toBeNull();
+            expect(
+              pool.ownership(otherWorld, otherWorld.stage.scene),
+            ).toBeNull();
+            expect(pool.ownership()).toEqual(empty);
+          } finally {
+            otherWorld.destroy();
+          }
+          const add = track(pool.add(0, "owner"));
+          await requested;
+          const children = pool.world.stage.scene.children.slice();
+          expect(pool.ownership()).toEqual(empty);
+          expect(pool.ownership()).toEqual(empty);
+          expect(pool.world.stage.scene.children).toEqual(children);
+          expect(pool.has("owner")).toBe(false);
+          release();
+          expect(await add).toBe(true);
+          const snapshot = pool.ownership()!;
+          expect(snapshot.generation).toBe(empty!.generation);
+          expect(empty!.records).toHaveLength(0);
+          expect(snapshot.records).toHaveLength(6);
+          expect(
+            snapshot.records.map(({ lod, materialSlot }) => [
+              lod,
+              materialSlot,
+            ]),
+          ).toEqual([
+            [0, 0],
+            [0, 1],
+            [1, 0],
+            [1, 1],
+            [2, 0],
+            [2, 1],
+          ]);
+          expect(new Set(snapshot.records.map((row) => row.pool))).toEqual(
+            new Set([kind === "single" ? pool.urls[0] : pool.treeType]),
+          );
+          expect(new Set(snapshot.records.map((row) => row.mesh))).toEqual(
+            new Set(pool.meshes()),
+          );
+          expect(Object.isFrozen(snapshot)).toBe(true);
+          expect(Object.isFrozen(snapshot.records)).toBe(true);
+          expect(Reflect.set(snapshot, "generation", -1)).toBe(false);
+          expect(Reflect.set(snapshot.records, "length", 0)).toBe(false);
+          const before = snapshot.records.map(
+            ({ mesh, geometry, material }) => ({
+              mesh,
+              geometry,
+              material,
+              visible: mesh.visible,
+              parent: mesh.parent,
+              count:
+                mesh instanceof THREE.InstancedMesh
+                  ? mesh.count
+                  : mesh.instanceCount,
+              materialVersion: material.version,
+              positions: Array.from(geometry.getAttribute("position").array),
+            }),
+          );
+          for (const row of snapshot.records) {
+            expect(Object.isFrozen(row)).toBe(true);
+            expect(Reflect.set(row, "mesh", row.mesh)).toBe(false);
+            expect(Object.isFrozen(row.mesh)).toBe(false);
+            expect(row.geometry).toBe(row.mesh.geometry);
+            expect(row.material).toBe(row.mesh.material);
+          }
+          expect(pool.ownership()).toEqual(snapshot);
+          expect(
+            snapshot.records.map(({ mesh, geometry, material }) => ({
+              mesh,
+              geometry,
+              material,
+              visible: mesh.visible,
+              parent: mesh.parent,
+              count:
+                mesh instanceof THREE.InstancedMesh
+                  ? mesh.count
+                  : mesh.instanceCount,
+              materialVersion: material.version,
+              positions: Array.from(geometry.getAttribute("position").array),
+            })),
+          ).toEqual(before);
+          expect(before.filter((row) => row.count === 0)).toHaveLength(4);
+          const first = snapshot.records[0];
+          const foreign = new THREE.MeshBasicMaterial();
+          try {
+            first.mesh.material = foreign;
+            expect(pool.ownership()).toBeNull();
+            expect(first.mesh.material).toBe(foreign);
+            first.mesh.material = [first.material];
+            expect(pool.ownership()).toBeNull();
+          } finally {
+            first.mesh.material = first.material;
+            foreign.dispose();
+          }
+          expect(pool.ownership()).toEqual(snapshot);
+        },
+        { heldPath: "/a.glb" },
+      );
+    }, 15_000);
+
+    it(`${kind}: retains hidden/empty membership, detects additional pools, and separates destroyed/reinitialized lifetimes`, async () => {
+      await withTrees(kind, async ({ pool, track }) => {
+        expect(await track(pool.add(0, "first"))).toBe(true);
+        const first = pool.ownership()!;
+        const otherPool = new TreePool(
+          kind,
+          pool.world,
+          pool.urls,
+          "second-owner",
+        );
+        expect(await track(otherPool.add(1, "second"))).toBe(true);
+        const expanded = pool.ownership()!;
+        expect(expanded.generation).toBe(first.generation);
+        expect(first.records).toHaveLength(6);
+        expect(expanded.records).toHaveLength(12);
+        for (const lod of [0, 1, 2] as const) {
+          pool.update(lod);
+          expect(pool.ownership()).toEqual(expanded);
+        }
+        pool.remove("first");
+        otherPool.remove("second");
+        for (const row of expanded.records) row.mesh.visible = false;
+        expect(pool.ownership()).toEqual(expanded);
+        expect(activeRows(pool)).toHaveLength(0);
+        const disposed = new Map<
+          THREE.BufferGeometry | THREE.Material,
+          number
+        >();
+        for (const row of expanded.records) {
+          for (const resource of [row.geometry, row.material]) {
+            disposed.set(resource, 0);
+            resource.addEventListener("dispose", () => {
+              disposed.set(resource, disposed.get(resource)! + 1);
+            });
+          }
+        }
+        pool.ownership();
+        expect([...disposed.values()]).toEqual(Array(disposed.size).fill(0));
+        pool.destroy();
+        expect(pool.ownership()).toBeNull();
+        expect([...disposed.values()]).toEqual(Array(disposed.size).fill(1));
+        pool.init("connected-v1");
+        const successor = pool.ownership()!;
+        expect(successor.generation).toBeGreaterThan(expanded.generation);
+        expect(successor.records).toHaveLength(0);
+        expect(await track(pool.add(0, "successor"))).toBe(true);
+        const oldMeshes = new Set(expanded.records.map((row) => row.mesh));
+        expect(pool.ownership()!.records).toHaveLength(6);
+        expect(
+          pool.ownership()!.records.every((row) => !oldMeshes.has(row.mesh)),
+        ).toBe(true);
+        expect([...disposed.values()]).toEqual(Array(disposed.size).fill(1));
+      });
+    }, 15_000);
+  }
+});
 
 describe("actual GLB projected tree LOD candidate", () => {
   it("encloses actual legacy COLOR.R wind without changing source vertices", async () => {

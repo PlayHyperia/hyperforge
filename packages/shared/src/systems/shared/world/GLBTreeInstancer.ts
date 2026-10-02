@@ -119,6 +119,65 @@ const pools = new Map<string, ModelPool>();
 const entityToModel = new Map<string, string>();
 const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
 
+/** Borrowed render handles; only snapshot metadata is immutable. */
+export type GLBTreeRenderOwnership<T extends THREE.Mesh> = Readonly<{
+  generation: number;
+  records: readonly Readonly<{
+    pool: string;
+    lod: 0 | 1 | 2;
+    materialSlot: number;
+    mesh: T;
+    geometry: THREE.BufferGeometry;
+    material: THREE.Material;
+  }>[];
+}>;
+
+/** Inspect an already initialized owner without loading or updating anything.
+ * Includes empty/hidden LOD members. Generation identifies the world lifetime,
+ * not subsequent pool publication: consumers must compare fresh full membership
+ * and mesh/geometry/material identities as well before omitting any draw.
+ * Foreign material replacements refuse the snapshot. Handles remain borrowed
+ * and must never be disposed by a diagnostic. */
+export function getGLBTreeRenderOwnership(
+  expectedWorld: World,
+  expectedScene: THREE.Scene,
+): GLBTreeRenderOwnership<THREE.InstancedMesh> | null {
+  if (!world || !scene || world !== expectedWorld || scene !== expectedScene)
+    return null;
+  const records: Array<
+    GLBTreeRenderOwnership<THREE.InstancedMesh>["records"][number]
+  > = [];
+  for (const [pool, owner] of pools) {
+    const lods = [owner.lod0, owner.lod1, owner.lod2] as const;
+    for (const lod of [0, 1, 2] as const) {
+      const member = lods[lod];
+      if (!member) continue;
+      for (const [materialSlot, mesh] of member.meshes.entries()) {
+        const material = mesh.material;
+        if (
+          Array.isArray(material) ||
+          material !== member.materials[materialSlot]
+        )
+          return null;
+        records.push(
+          Object.freeze({
+            pool,
+            lod,
+            materialSlot,
+            mesh,
+            geometry: mesh.geometry,
+            material,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    generation: poolGeneration,
+    records: Object.freeze(records),
+  });
+}
+
 // ---- Geometry extraction (reference, not clone) ----
 
 interface MeshPart {

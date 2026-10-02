@@ -321,6 +321,32 @@ interface WindMat extends THREE.MeshStandardNodeMaterial {
 
 type LODKey = "lod0" | "lod1" | "lod2";
 
+/** Immutable metadata only; the Three.js render handles remain borrowed. */
+export type ProcgenTreeRenderOwnershipRecord = Readonly<{
+  kind:
+    | "pool"
+    | "shadow"
+    | "impostor"
+    | "global-leaves"
+    | "global-clusters"
+    | "debug-impostor"
+    | "debug-atlas-color"
+    | "debug-atlas-normal"
+    | "debug-atlas-depth";
+  preset: string | null;
+  lod: LODKey | null;
+  mesh: THREE.InstancedMesh;
+  geometry: THREE.BufferGeometry;
+  material: THREE.Material | THREE.Material[];
+}>;
+
+export type ProcgenTreeRenderOwnership = Readonly<{
+  owner: ProcgenTreeInstancer;
+  world: World;
+  scene: THREE.Scene;
+  records: readonly ProcgenTreeRenderOwnershipRecord[];
+}>;
+
 interface LeafNodeMaterial extends THREE.MeshStandardNodeMaterial {
   leafUniforms: {
     time: UniformNode<"float", number>;
@@ -810,6 +836,10 @@ class GlobalLeafInstancer {
       capacity: MAX_GLOBAL_LEAVES,
       drawCalls: 1, // Always 1!
     };
+  }
+
+  getRenderMesh(): THREE.InstancedMesh {
+    return this.mesh;
   }
 
   dispose(): void {
@@ -1911,6 +1941,10 @@ class GlobalLeafClusterInstancer {
     };
   }
 
+  getRenderMesh(): THREE.InstancedMesh {
+    return this.mesh;
+  }
+
   dispose(): void {
     this.mesh.parent?.remove(this.mesh);
     this.geometry.dispose();
@@ -2362,6 +2396,77 @@ export class ProcgenTreeInstancer {
       ProcgenTreeInstancer.inst = new ProcgenTreeInstancer(world);
     }
     return ProcgenTreeInstancer.inst;
+  }
+
+  /**
+   * Inspect only an existing owner; never create, load, or update trees.
+   * Includes hidden/empty render members. The owner identifies its lifetime,
+   * not later preset publication: consumers must revalidate the complete fresh
+   * mapping and each handle before classifying draws. Do not mutate or dispose
+   * any borrowed mesh, geometry, material, world, or scene through this snapshot.
+   */
+  static getRenderOwnership(
+    expectedWorld: World,
+    expectedScene: THREE.Scene,
+  ): ProcgenTreeRenderOwnership | null {
+    const owner = ProcgenTreeInstancer.inst;
+    if (
+      !owner ||
+      owner.world !== expectedWorld ||
+      owner.scene !== expectedScene
+    ) {
+      return null;
+    }
+    const records: ProcgenTreeRenderOwnershipRecord[] = [];
+    const append = (
+      kind: ProcgenTreeRenderOwnershipRecord["kind"],
+      preset: string | null,
+      lod: LODKey | null,
+      mesh: THREE.InstancedMesh,
+    ): void => {
+      records.push(
+        Object.freeze({
+          kind,
+          preset,
+          lod,
+          mesh,
+          geometry: mesh.geometry,
+          material: mesh.material,
+        }),
+      );
+    };
+    for (const [preset, lods] of owner.meshes) {
+      for (const [lod, member] of lods) {
+        append("pool", preset, lod, member.mesh);
+        if (member.shadowMesh) append("shadow", preset, lod, member.shadowMesh);
+      }
+    }
+    for (const [preset, member] of owner.impostors)
+      append("impostor", preset, null, member.mesh);
+    if (owner.globalLeaves)
+      append("global-leaves", null, null, owner.globalLeaves.getRenderMesh());
+    if (owner.globalClusters)
+      append(
+        "global-clusters",
+        null,
+        null,
+        owner.globalClusters.getRenderMesh(),
+      );
+    for (const [preset, member] of owner.debugImpostors)
+      append("debug-impostor", preset, null, member.mesh);
+    for (const [preset, member] of owner.debugAtlasPlanes) {
+      append("debug-atlas-color", preset, null, member.colorMesh);
+      if (member.normalMesh)
+        append("debug-atlas-normal", preset, null, member.normalMesh);
+      if (member.depthMesh)
+        append("debug-atlas-depth", preset, null, member.depthMesh);
+    }
+    return Object.freeze({
+      owner,
+      world: owner.world,
+      scene: owner.scene,
+      records: Object.freeze(records),
+    });
   }
 
   private checkWebGPU(): boolean {

@@ -42,6 +42,17 @@ export {
 } from "./runtime/createEditorWorld";
 export type { EditorWorldOptions } from "./runtime/createEditorWorld";
 export { World } from "./core/World";
+// Inspection only: these accessors never initialize or load tree render pools.
+export {
+  getGLBTreeRenderOwnership,
+  type GLBTreeRenderOwnership,
+} from "./systems/shared/world/GLBTreeInstancer";
+export { getGLBTreeBatchedRenderOwnership } from "./systems/shared/world/GLBTreeBatchedInstancer";
+export {
+  ProcgenTreeInstancer,
+  type ProcgenTreeRenderOwnership,
+  type ProcgenTreeRenderOwnershipRecord,
+} from "./systems/shared/world/ProcgenTreeInstancer";
 // Explicit construction only. No default profile or render-loop integration;
 // native contact-lighting qualification uses the normal compiled client module.
 export { CompactContactAO } from "./utils/rendering/CompactContactAO";

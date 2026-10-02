@@ -43,7 +43,10 @@ import {
   resolveTreeLodCandidate,
   shouldStreamVegetationBackgroundLods,
 } from "../../../runtime/clientViewportMode";
-import type { TreeInstanceLifetime } from "./GLBTreeInstancer";
+import type {
+  GLBTreeRenderOwnership,
+  TreeInstanceLifetime,
+} from "./GLBTreeInstancer";
 import {
   assertTreeWindInstanceMatrix,
   cloneGeometryWithTreeWind,
@@ -153,6 +156,52 @@ const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, TreeTypePool>();
 const entityToTreeType = new Map<string, string>();
 const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
+
+/** Read-only snapshot of an existing owner, including empty/hidden LOD slots.
+ * Never initializes, loads, or updates a pool. Consumers must compare lifetime
+ * generation AND fresh complete membership/handle identities before omission;
+ * generation alone does not track later pool publication. All handles are
+ * borrowed: callers must not dispose or mutate the render resources. Foreign
+ * material replacements refuse the snapshot. */
+export function getGLBTreeBatchedRenderOwnership(
+  expectedWorld: World,
+  expectedScene: THREE.Scene,
+): GLBTreeRenderOwnership<THREE.BatchedMesh> | null {
+  if (!world || !scene || world !== expectedWorld || scene !== expectedScene)
+    return null;
+  const records: Array<
+    GLBTreeRenderOwnership<THREE.BatchedMesh>["records"][number]
+  > = [];
+  for (const [pool, owner] of pools) {
+    const lods = [owner.lod0, owner.lod1, owner.lod2] as const;
+    for (const lod of [0, 1, 2] as const) {
+      const member = lods[lod];
+      if (!member) continue;
+      for (const [materialSlot, mesh] of member.batches.entries()) {
+        const material = mesh.material;
+        if (
+          Array.isArray(material) ||
+          material !== member.materials[materialSlot]
+        )
+          return null;
+        records.push(
+          Object.freeze({
+            pool,
+            lod,
+            materialSlot,
+            mesh,
+            geometry: mesh.geometry,
+            material,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    generation: poolGeneration,
+    records: Object.freeze(records),
+  });
+}
 
 // ---- Geometry extraction ----
 

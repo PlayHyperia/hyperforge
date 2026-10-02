@@ -1,5 +1,53 @@
 # Grass canopy visibility: research checkpoint
 
+## Source229 — exact tree ownership and native scene volatility
+
+**Outcome: measurement support and a diagnosed attribution obstacle, not an FPS improvement.** The performance-only goal remains sustained 60 FPS / 16.67 ms at actual 2×. Default rendering, public3333 and saved-player data are unchanged.
+
+### Source boundary and verification
+
+The browser entry now exports inspection-only GLB tree ownership APIs and the existing procgen class inspection entry. GLB single/batched records require the exact existing world and scene, return null for unavailable/foreign owners, include hidden and empty LOD members, and never initialize or update pools. Procgen inspection likewise never calls its creating singleton getter; records cover existing pool, shadow, impostor, global-leaf/cluster and debug meshes. Metadata is frozen; actual Three resources are borrowed, not frozen or transferred. Callers must recheck the full mapping because the GLB generation identifies the world lifetime, not every later membership publication. GLB records reject a mesh/source-pool material mismatch or unsupported material array; procgen records expose the actual existing material handles.
+
+Root repeats **130 tests across three suites, all passing**, plus scoped ESLint, formatting and diff checks. Independent source reviews pass. Shared typecheck still reports the same five inherited procgen API errors and no new errors in the changed files. The procgen suite includes four new real-world/scene public-registration tests; GPU/debug/impostor branches are source-enumerated, not all CPU-fixture exercised. [Root verification and seven source pins](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source229-root-verification.json), SHA256 `012df5364efc3da819898801f09b4ceb928c6840155b5e6d6cc26c1d2f3e7567`.
+
+Canonical build212 completes nine bundles with980 inputs and zero overrides. Report SHA256 `4901d6cf93db58880a262a07db8f4170b325bba20fca8018a8e55b0780c8df2e`; framework-client SHA256 `76cfe03edafe69a512eeaa77e26028423738a06fc2ef53926cf539a711131c5f`. Protected build preflight covers429 files/438 links and42 unrelated dirty files.
+
+### Completed unchanged-content census
+
+[Native229 census](/Users/lucid/Downloads/hyperia-native229-scene-census.json), SHA256 `d98c8b826755e8cd9a9291ed2bb95974eb399853604e1d3ae79dea2b7fffc7a0`, records one ordinary frame at3024×1724, DPR2/MSAA4/High shadows/full reflections. Phase0.56/exposure0.850240084 and camera are held; wind and actors stay live. The pose differs slightly from older223, so absolute cross-run comparisons are not causal.
+
+All three observers restore, errors are empty, and actual counters total **864 issued calls /10,555,544 repeated-view triangle slots** from890 backend attempts. Primary is328 calls/4,889,601 triangles, mirror318/4,417,648, both sun captures together216/1,244,326, and other2/3,969. Exact canonical ownership finds42 batched-tree records, no single-GLB records and no initialized procgen singleton; absence is not treated as failure or initialized for inspection.
+
+| Exact category | Repeated-view triangle slots |
+| --- | ---: |
+| Grass |6,971,913|
+| Terrain |965,676|
+| Mushrooms |822,132|
+| Rooted flowers |496,928|
+| Trees |478,284|
+| Actors |104,992|
+| Remaining/output |715,619|
+
+This is **geometry accounting, not a time ranking, unique scene-triangle count or duplicate-avatar proof**. The output transform remains one fullscreen triangle. No category's millisecond cost can be inferred from its triangle share.
+
+### Refused screen and identified live-scene change
+
+The [seven-arm category screen](/Users/lucid/Downloads/hyperia-native229-category-contributions.json), SHA256 `98c553953639738c37f9af819a91403d945365b9fcbf75c4e1d03289b4d45355`, retains350 rows and stops after14.52 seconds on its strict attempted-order/work guard—not focus. Only full143 measured rows and partial tree-omission112 measured rows exist; later arms do not run. All render/draw/tick hooks restore. **No category timing rank or speedup is accepted.** Its failed frame was not retained, so its exact cause remains unknown.
+
+One separate, read-only full-scene volatility probe then captures baseline and first-failed draw tuples, bounded to4096 records/65,536 batch items per frame. It forwards every original draw, performs no omissions and records no measured timing samples. The [volatility receipt](/Users/lucid/Downloads/hyperia-native229-full-scene-volatility.json), SHA256 `e7f0eb07c59ba383a5dd47f7a159b4f5c09d63b2b1b0c93ca576d4170b546c14`, stops after1.269 seconds with30 accepted diagnostic rows, all three hooks restored.
+
+Root and independent review identify the change: primary positions386–389 exchange two `FishingSpotGlow` objects, each with front/back draws of one call/16 triangles. One moves from[412.5,24.65,398.5] to[416.5,24.65,399.5]. These are positive transparent draws with depth writes disabled, not harmless zero-issued reorder. All890 semantic draw records retain the same multiset excluding matrices; mirror/shadow/other order and category totals stay equal. Two actors also rotate in place. This proves live scene variation in the new diagnostic, **not retrospectively the first screen's missing failure frame**. Allocation-heavy volatility timings are not benchmark evidence. Frozen reviewed helper SHA256 `3803d4d342e7c0575b44a23058aa35e4658f38307a4106f025f7bb8a60a8a626`.
+
+### Cleanup and next useful work
+
+[Cleanup record](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native229-cleanup.json) preserves direct native-console verification of exposure/camera/clock restoration, absent observer/UI owners and released exposure subscription. Owned game/DevTools close and no established5566 socket remains before shutdown. Runtime stops2026-10-02T23:35:59.533Z, errors empty, protected state unchanged, disposable database removed and four private ports free. Process SHA256 `b6de97b4e3cc86c5e3059b558a4c0e919cfe32818b226db20d79d300138e2c0e`. Three temporary served helpers are removed; evidence originals remain. Runtime helper matches its original hash and all57 source/unrelated pins match.
+
+Do not repeat the unchanged strict screen or quietly waive positive transparent reordering. A future category comparison needs controlled/repeated matched states or explicitly qualified live-scene statistics with motion/content variation reported. Ordinary gameplay must remain the final acceptance test.
+
+Reuse the existing successful sparse native GPU timestamp core from `native-pass-timing.mjs`: at most1Hz and two pending asynchronous readbacks, unique pairs for each physical initial/resumed pass, current exact primary/mirror/sun/output owners, and bounded cleanup. The [official WebGPU timestamp sample](https://raw.githubusercontent.com/webgpu/webgpu-samples/main/sample/timestampQuery/main.ts) also demonstrates asynchronous query resolution/readback. Report raw intervals, category unions and overlap—not additive exclusive percentages. Three r186's aggregate logical-render timestamps reuse the descriptor across water depth-copy restarts and are insufficient for this attribution. GPU pass timing supplements category A/B because trees, grass and actors share passes.
+
+Terrain then grass remain the directly measured within-run ordering; repeated planar capture is a large overlapping scope. Native227's terrain-surface lead remains unreplicated and unpromoted. Focus substantial work there rather than turning this successful census into a performance claim.
+
 ## Native228 — repeat not qualified; batched accounting corrected; cleanup verified
 
 **No new performance result and no production change.** The Native227 single-pair lead remains unreplicated. The true2× / sustained16.67ms goal is not achieved. Canonical build211 and all50 pinned source/unrelated files remain unchanged.
