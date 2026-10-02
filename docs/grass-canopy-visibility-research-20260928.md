@@ -1,6 +1,56 @@
 # Grass canopy visibility: research checkpoint
 
+## Native226 — fresh-tab clump-cache comparison completed; pilot rejected
+
+**Decision: keep `grassDynamics=clump-frame-v1` disabled and stop expanding this pilot.** Its healthy GPU output does not produce a useful complete-content performance gain in the tested view. Product source and public defaults remain unchanged. The 60 FPS / 16.67 ms target at actual 2× is still unmet.
+
+### Same-build, full-content A / B / B / A result
+
+Four genuinely fresh Chrome tabs run canonical build210 in order A1 (off), B1 (on), B2 (on), A2 (off). Each sample lasts 25 seconds with its first 5 seconds excluded. DevTools is closed during sampling. Each finished tab is actually closed, with private connectedUserCount zero and no established 5566 socket checked twice before the next load. Shader/readiness gates must pass before capture; B2's first premature arm is refused before observer installation, then succeeds after readiness. Time since initial navigation is not identical, so these are readiness-gated warmed runs, not an equal-duration loading benchmark.
+
+| Run | Measured ticks / intervals | Wall median / p95 / p99 (ms) | Original-tick CPU median / p95 (ms) |
+| --- | ---: | ---: | ---: |
+| [A1 baseline](</Users/lucid/Downloads/hyperia-native214-full-content-timing (5).json>) | 486 / 485 | 41.50 / 44.30 / 45.90 | 12.20 / 15.20 |
+| [B1 cache](</Users/lucid/Downloads/hyperia-native214-full-content-timing (6).json>) | 469 / 468 | 42.70 / 45.70 / 47.80 | 13.50 / 18.30 |
+| [B2 cache](</Users/lucid/Downloads/hyperia-native214-full-content-timing (7).json>) | 468 / 467 | 42.90 / 45.80 / 46.80 | 13.50 / 15.70 |
+| [A2 baseline](</Users/lucid/Downloads/hyperia-native214-full-content-timing (8).json>) | 480 / 479 | 41.90 / 45.10 / 46.80 | 15.30 / 18.80 |
+
+The baseline midpoint is 41.70 ms. B1/B2 are 1.00/1.20 ms slower (approximately 2.4%/2.9%); each candidate is slower than both baseline endpoints. All four input-timestamp medians are 41.70 ms. CPU baseline drift from 12.20 to 15.30 ms prevents a consistent CPU-regression claim or attribution of the difference specifically to GPU work. This bounded fixed-view result is sufficient to reject promotion, not to prove a universal regression. These measurements are instrumented ordinary-tick cadence and synchronous CPU spans, **not exclusive GPU time, GPU completion or physical-display FPS**.
+
+Root and an independent reviewer reproduce 2,369 recorded rows, 1,903 measured ticks and 1,899 valid intervals. All four receipts complete and restore with no errors; every recorded row retains 85 grass and 35 terrain draw attempts and zero omissions. These are attempt counters, not a whole-scene issued-triangle census. All 100 periodic focus observations are true. Quality, pose, helper source strings and texture semantics match; URLs differ only by the cache selector.
+
+Full **3024 × 1724 / DPR 2 / MSAA 4**, High PCF shadows, reflections, effective composer routing, phase 0.56 and exposure 0.850240084 are retained. LUT and depth blur remain inactive; the bloom preference alone does not prove active bloom work. Four canonical class identities pass. Baseline caches are null before/after; both candidates remain healthy at 94 owners / 162,508 clumps / zero retained bindings, with distinct fresh output textures and advancing generation/submission counters. Those snapshots bracket more than the measured window and do not independently establish one dispatch per timed tick.
+
+The unchanged Native214 helper includes candidate preparation/compute submission in original World.tick cost and adds no GPU fences, timestamp queries or readbacks during timing. Its inherited prose names an older bank comparison; the actual URLs and Native226 metadata define this cache-only comparison. Medians use the middle pair where needed; p95/p99 use sorted index floor(q × (n − 1)).
+
+Receipt SHA256 values, in A1/B1/B2/A2 order:
+
+- `18b9e91b8de5aad75c7362a442f5fd56eee97abbef0cdbf7cce7c7370ce6dadb`
+- `f213fc3081b4a776ee118140c4c9c9f935c34192d40bf8db2ed776989e929d88`
+- `b34a2f339b29b8b24fbdc96a1f3bd58cb37f037a8504b26c8ad3dc1c5f91c494`
+- `b712fe65c9c7a3c9569ecc6ac87a12ebb789eb4dbc65c25521ed60398dceb118`
+
+### Cleanup and interrupted-run resolution
+
+All four Native226 cleanup receipts verify exact timing, camera/clock and environment/renderer exposure restoration plus diagnostic-owner removal. Every test game tab is closed; Chrome is left on one blank tab. Runtime `runtime-native226-clump-timing02` stops by owned SIGTERM at 2026-10-02T20:47:55.191Z with empty errors, protected state unchanged, disposable database removed and all four private ports free. Process-receipt SHA256 is `62ae0bacf4f549305c8fdd2e9de978fe57e7dbfdb1a842cd8866ac7f44837cdc`. The temporary served helper is removed, its external evidence copy retained, and runtime helper restored to baseline `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. All six committed source pins and 42 unrelated working-file hashes match. Public3333 and saved-player data remain untouched.
+
+On manual unlock at approximately 20:16 UTC, Native225's old B1 tab contains a network-error document, not recoverable game state, and no exported B1 timing exists. That exact tab is closed before Native226. **The old B1 result is lost/excluded; exact restoration of its former page hooks cannot be claimed.** This resolves the pending browser-retirement action, not the missing measurement.
+
+### Remaining ranked priorities
+
+| Priority / scope | Best retained evidence | Interpretation |
+| --- | --- | --- |
+| Terrain rendering | Native206: 29.1–29.8 ms omission effect at 3800 × 1886 | Largest of the two directly matched category screens. |
+| Grass rendering | Native206: 25.45–26.3 ms, same run/canvas | Second within that same screen; current rough-leaf shading has a separately repeated 2.35–2.80 ms gain, still unpromoted. |
+| Repeated planar reflection render | Native208: 12.6–13.6 ms at 3024 × 1724 | Large overlapping scope, not a numerically comparable third-place exclusive cost. |
+| Actors, exact tree owners, mushrooms/flowers, output transform and remaining scenery | Native223 ownership/triangle evidence; complete matched timing still missing | Unranked until measured; triangle counts do not establish milliseconds. |
+
+Do not add these deltas, turn them into budget percentages, subtract cross-run results, or call this an exhaustive most-to-least GPU ranking. Stop cache-promotion work absent a new measured hypothesis. Complete the missing current-build attribution and select a substantial terrain/grass/repeated-rendering optimization from measured evidence. The small Native222 MSAA-continuation lead remains secondary and unreplicated; it does not justify a speculative backend rewrite. Sustained moving-view 16.67 ms at unchanged 2× remains the launch gate.
+
+
 ## Native225 — preliminary cadence; fresh-tab comparison interrupted
+
+Historical record: the pending browser recovery below is resolved by Native226 above. The old B1 result was lost, its exact tab was closed, and the causal comparison was repeated from fresh tabs.
 
 The unchanged Native214 full-content helper is reused for same-build210 cache-off/cache-on screening. Each arm is25 seconds with the first5 seconds excluded; it measures original World.tick CPU and ordinary input/wall cadence, including cache preparation and compute submission when enabled. It does not measure GPU completion or physical display throughput. Its inherited receipt description still names the old regional-bank comparison: Native225's actual URLs/custody establish that the intended changed selector is only `grassDynamics=clump-frame-v1`, with the bank selector absent in both.
 
