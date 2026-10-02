@@ -1,5 +1,48 @@
 # Grass canopy visibility: research checkpoint
 
+## Native217 — dirt-cache usefulness rejected after matched native repeats
+
+**Decision: stop expanding this dirt-only page.** Two complete same-graph comparisons at **3024×1724, DPR 2, MSAA 4, High shadows** show no consistent benefit. Active-arm median wall-cadence savings against adjacent inactive-arm averages are **+0.250, −1.425, −0.650 and −0.950 ms**; three of four active arms are slower. This does not prove a causal regression, but does not justify promotion, paging expansion or another small cache-tuning batch. The default-off Native216 implementation remains unchanged.
+
+### Visible eligibility before timing
+
+Reuse canonical build208 and its unchanged production source at checkpoint `8302020a57d8b1d400e210001ff9cdb63991eefa`; no new production build, quality change or material simplification. Page origin is now **(385,390)**, covering a northwest bank sector in the private assets-v10 fixture (pond center410,415). The [ordinary wide marker frame](/Users/lucid/Downloads/hyperia-native217-marked-wide.png) has no obvious magenta. Lobby/grass occlusion and conservative close/grazing footprint rejection limit visibility; the image alone cannot separate these causes or prove zero eligible pixels.
+
+The [overhead marker frame](/Users/lucid/Downloads/hyperia-native217-marked-overhead.png) proves a contiguous visible eligible patch. Held eye(385,78,373), target(398,25,403), FOV70; player remains at the ordinary spawn. Magenta identifies **raw dirt-page eligibility**, not dirt blend weight, pixel coverage percentage or useful visible dirt contribution. It is a qualitative mechanism check, not appearance acceptance. The marker uses a temporary output-only clone in ordinary main/mirror terrain draws; scene materials, geometry and shadows stay unchanged. The [restored overhead frame](/Users/lucid/Downloads/hyperia-native217-original-overhead.png) has no magenta. The [marker receipt](/Users/lucid/Downloads/hyperia-native217-dirt-marker.json), SHA256 `6c821fd450fb059cf0a85e7c807fcc9a267ebb5db31f522ef2f0da0d15a508ea`, verifies original main/mirror refresh with identical terrain counts before clone/hook retirement.
+
+### Two completed full-content usefulness pilots
+
+Each run uses **inactive / active / inactive / active / inactive**, public invalidation/rebaking and the **same original conditional material graph throughout**. Serialized preparation and at least3seconds of stable ordinary rendering are excluded before a separate10second measurement window per arm. The first measured interval is excluded to avoid a warmup-boundary interval. No extra render loop, draw omission, quality/resolution reduction, GPU fence or timestamp collection is used during measurement.
+
+| Run / arm | Measured ticks | Wall interval median / p95 / p99 (ms) | Synchronous tick CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| 1 inactive A1 | 178 | 57.60 / 60.70 / 61.40 | 11.8 |
+| 1 active B1 | 179 | 56.55 / 60.00 / 61.00 | 11.8 |
+| 1 inactive A2 | 180 | 56.00 / 59.80 / 61.10 | 11.8 |
+| 1 active B2 | 177 | 57.75 / 60.50 / 61.90 | 11.7 |
+| 1 inactive A3 | 179 | 56.65 / 59.90 / 60.50 | 11.7 |
+| 2 inactive A1 | 178 | 57.50 / 60.60 / 61.40 | 11.7 |
+| 2 active B1 | 179 | 57.15 / 60.80 / 61.40 | 11.7 |
+| 2 inactive A2 | 181 | 55.50 / 60.00 / 61.60 | 11.6 |
+| 2 active B2 | 178 | 57.30 / 60.40 / 62.90 | 11.6 |
+| 2 inactive A3 | 178 | 57.20 / 60.70 / 62.30 | 11.8 |
+
+[First receipt](/Users/lucid/Downloads/hyperia-native217-dirt-same-graph-timing.json), SHA256 `1721408f8cb91ce299a4e6f78eb05a5707873d9a40163e60f9682d2c277c75bd`; [repeat](</Users/lucid/Downloads/hyperia-native217-dirt-same-graph-timing (1).json>), SHA256 `5cff31611bd0ed9630ea6cdb12bdffb241863c5651c75a2d50158f525b7814b0`. Independent analysis verifies **2,330 recorded ticks /1,787 measured /1,777 same-arm intervals**, zero boundary/cadence arithmetic errors and matching quality, pose, held lighting, source-texture/target/material identities and installer source across runs. Input-timestamp cadence medians are58.3ms in every arm. Median uses midpoint; p95/p99 use sorted index floor(q×(n−1)). Roughly178 intervals per arm are insufficient for strong tail conclusions; these are ordinary tick-cadence observations, **not displayed FPS, exclusive GPU time or sustained60FPS acceptance**.
+
+Every recorded tick retains **854 issued calls /11,894,514 repeated-view triangle slots**: main327/5,239,971; mirror323/5,268,997; each of two shadow views102/692,773. Main/mirror terrain are18/516,112 and15/490,786; grass47/3,960,495 and45/4,023,351. There is one mirror capture and two sun-map refreshes per tick. Actual main/mirror fragment shaders retain Native216 digest `fe3fffac13c0b20c6b6410bc354299157b5666eff8ecd0c641565d0073d19f03`, with101 update registrations. Public page state/source receipt remains stable within each arm.
+
+The four in-run rebakes cost **1313.3–1511.1ms**, excluded from steady-state measurements, not eliminated. Logical mip payload remains10.667MiB. This is **cache-ready versus fallback inside the candidate graph**, not candidate versus default: branch/update overhead common to both arms is not isolated. The overhead camera is not representative of ordinary player-view benefit. Native215 uses another pose/build; its approximately11ms altered-surface effect cannot be inferred from these timings or multiplied by texture-read ratios.
+
+### Cleanup and changed next action
+
+Both timing receipts complete with empty errors, unchanged original material and all three observer descriptors restored. They intentionally leave the caller-owned page invalidated; [final cleanup](/Users/lucid/Downloads/hyperia-native217-cleanup.json), SHA256 `a67f0bae846b5488ac51632a9e316953b7384bf1618a51b8c0727385eadd7492`, separately disposes the page (logical bytes0), restores camera/clock/exposure, verifies absent diagnostic owners, idle preparation, original renderer entries and public builder callback. An attempted call to a non-exported download helper fails only after cleanup and after both measurements; a trusted export button saves the verified receipt. It is not a game/GPU failure or timing sample.
+
+Owned game and DevTools close, preserving New Tab. Runtime `runtime-native217-dirtpilot01` is STOPPED with empty errors, protected state unchanged, disposable database removed and all four private ports free; process SHA256 `18b8ffbe339f0b711b183efe8403922206c8e67e58595b4afc11ab80e4333fcf`. Four temporary served modules are removed. Runtime helper restores to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`; all42 unrelated file hashes match. Public3333/build174, saved database, assets and defaults are untouched.
+
+Private timing helper SHA256 `e0620c004cf3afb933b805d2a3523b1be5c602be83a5edcc02b8422a43ac4ea7`; marker `686765cfa7c0ec1af00ad3e9f15b4d2235e7cb3442c560b79a58441853e02e23`. Both pass syntax and independent safety review. No new production source changes require a new product-test run; Native216's source verification remains the baseline.
+
+**Next:** one bounded normal/AO-only terrain attribution at the ordinary player pose, retaining original color, roughness, height/weights, PBR lighting, fog, geometry, shadows and reflection. Check actual emitted samples: the current exact-zero rock path excludes coast cavity, but packs normal/AO and raw AO with retained albedo/roughness in a shared matrix branch. Consequently all nine rock normal/AO sites may remain emitted; only the two grass and three dirt normal/AO sites are clearly graph-prunable. Native compiler elimination cannot be inferred from source counts. This is a diagnostic to select the next substantial quality-preserving implementation, not permission to ship flat lighting. If it does not reveal a large opportunity, move to remaining grass/shadow-receiver/postprocessing attribution. Do not expand this page, loosen its quality safeguards or repeat tiny coefficient/cache sweeps. Terrain and grass remain the within-run ranked leaders; reflection overlaps both. Sustained16.67ms at2× remains open.
+
 ## Native216 — bounded dirt cache executes on GPU; usefulness remains unmeasured
 
 Implemented the first **default-off** terrain surface-reuse prototype, `terrainDirtSurfaceCache=dirt-page-v1`. Native WebGPU verifies the bake, cache selection, original fallback and actual main/mirror shader branching at **3024×1724, DPR2, MSAA4**. This is a working bounded experiment, **not a shipping speedup, visual acceptance or 60 FPS result**. No new complete-content timing is claimed.
