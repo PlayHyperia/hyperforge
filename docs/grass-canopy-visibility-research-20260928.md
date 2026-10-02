@@ -1,5 +1,60 @@
 # Grass canopy visibility: research checkpoint
 
+## Native209 — native compressed terrain loading verified; no consistent cadence win
+
+The six-map UASTC terrain candidate now loads through the actual initialized WebGPU renderer on private canonical build203. **Keep it opt-in and unqualified: the PNG / UASTC / UASTC / PNG screen does not demonstrate a consistent performance improvement.** The 60 FPS at 2× goal remains unmet. This section supersedes Native208's “next implementation” status, not its reflection-attribution result.
+
+### Implemented candidate and actual native admission
+
+Only the explicit, captured `terrainTextureEncoding=uastc-v1` selector enables compressed appearance maps; absent selection retains the existing PNG route and server/default initialization dependencies. The candidate requires the registered client graphics owner and its initialized renderer. The renderer-owned KTX2 loader uses the installed three@0.186.0 decoder, two workers, guarded asynchronous initialization/retirement and one-time disposal. Unsupported ASTC/BC7 capability falls back to PNG; failed integrity, decoding or format admission is not silently relabelled a successful compressed load. Fetch byte/hash checks, actual compressed-texture format/mip/color checks and existing cancellation/late-result disposal remain in force. Original maps and the PNG ground-height field are preserved.
+
+Both native B runs record seven loaded entries: **six actual ASTC 4×4 textures**, format37808, each 1024×1024 with all 11 explicit mip levels, `generateMipmaps=false`, `flipY=false`, no premultiplication and anisotropy16; the seventh is the unchanged PNG height map. Albedo RGB uses sRGB; normal RGB and packed roughness/AO data retain their intended interpretation. The effective encoding is `uastc-v1`, with no capability fallback. All six paths/hashes/byte counts match the offline and runtime manifests. This is positive native loader/decoder/format evidence, not merely a constructed-texture test.
+
+The six appearance mip chains contain 1,398,128 logical compressed bytes each. Including the retained full RGBA8 height chain, the seven-map logical payload falls from 39,146,828 to 13,981,172 bytes (about37.33→13.33MiB, **64.29%**). This excludes device allocation overhead, staging/worker memory and other scene textures. It is **not a measured total-VRAM, bandwidth, GPU-time or FPS reduction**.
+
+### Bracketed complete-content screen
+
+All four accepted runs use actual **3024×1724, DPR2, MSAA4**, High shadows, reflections, postprocessing and bloom, `depthBlur=false`, phase0.56 and exposure0.850240084. Player position `[385,28.919301523097687,374]`, camera `[385,31.851440846086817,368.1885010332282]`, quaternion `[0,0.9930916123118833,0.11734159346022194,0]`, FOV70, owner counts94 grass/52 terrain and device features match exactly. Each run lasts25 seconds including five seconds of excluded warmup. Every tick records85 grass and35 terrain original-material draw attempts with **zero omissions**. Receipt completion, observer restoration and owner-absence checks pass; errors are empty and all serialized focus/light observations match.
+
+| Run, chronological order | Total / measured ticks / valid intervals | Wall tick median / p95 | Input-timestamp median / p95 | Synchronous CPU median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| PNG A1 | 590 / 471 / 470 | 42.70 / 45.60 ms | 41.70 / 50.00 ms | 11.60 / 17.30 ms |
+| UASTC B1 | 607 / 485 / 484 | 41.30 / 44.90 ms | 41.70 / 49.90 ms | 11.80 / 14.40 ms |
+| UASTC B2 | 621 / 497 / 496 | 40.20 / 43.70 ms | 41.60 / 45.30 ms | 11.40 / 13.20 ms |
+| PNG A2 | 605 / 484 / 483 | 41.10 / 45.10 ms | 41.70 / 49.90 ms | 11.80 / 14.10 ms |
+
+Root and independent analysis reproduce the arithmetic and matching invariants. Medians average both central values for even arrays; p95 uses nearest rank. Cadence excludes warmup and the first measured tick, whose preceding interval crosses warmup. **PNG itself improves1.6ms between brackets. B1 is0.2ms slower than A2; B2 is0.9ms faster.** The apparent1.4–2.5ms advantage against A1 therefore is not a consistently replicated causal win. CPU medians show no consistent reduction either. B1/B2 reuse the same browser world and texture UUIDs rather than independent reloads; A2 is a fresh session after an initial “already connected” attempt was retired by closing the owned tab and waiting before reopening.
+
+These are ordinary world-tick wall/input intervals and synchronous original-tick CPU spans including draw-observer overhead, **not GPU completion, displayed FPS or sustained gameplay acceptance**. No geometry, shadow or reflection omissions, emulated viewport, resolution reduction, GPU fence or forced render is used. Wind, water and actors remain live; short fixed-view samples on a shared host do not isolate thermal/background scheduling or establish image parity. Do not compare these values causally with Native208, which records `depthBlur=true`, or with differently sized/illuminated earlier runs.
+
+### Bounded image review and completed cleanup
+
+Root and an independent reviewer inspect matched native daylight shoreline images at 3024×1724, phase0.56 and exposure0.850240084, camera `[390,29.505348563851406,395]` targeting `[397,26.125446394202974,401]`, FOV55. The PNG and ASTC images show no obvious missing/flipped texture, major color shift, block artifact or new shoreline seam in this view. Ground, grass and pond shore are visible, but rock appearance is not adequately represented. Wind/water/actors are live and the inspection preview is downsampled; these are not pixel-identical frames or proof against subtle original-resolution defects. All-day, motion, grass-normal and rock acceptance remain open. Captures use the existing completed-frame subscriber after timing, not a forced render.
+
+- [PNG close view](/Users/lucid/Downloads/hyperia-native209-png-close-day.png), SHA256 `59777c701c1bb5b897a671d3686ddfed38e650d64d29599de862752862856fb8`; [metadata](/Users/lucid/Downloads/hyperia-native209-png-close-day.json), `4872b15d9773e208b9f43416888e0de036132b66b132d18d41c06fd60bde49ae`.
+- [ASTC close view](/Users/lucid/Downloads/hyperia-native209-uastc-close-day.png), SHA256 `868d593f69a378b576cebe60f4e9f0c2ee33b36db37179726c2f0c2c21148dc9`; [metadata](/Users/lucid/Downloads/hyperia-native209-uastc-close-day.json), `fc919a04788192b56175853011bede8c3c4e61500f8922d057f054baa22868cb`.
+- [Exact native control sources](/Users/lucid/Downloads/hyperia-native209-controls.json), SHA256 `43f9f8818bba36bc72a75e8a284bdae5d21650e3350fdf3b67ba858469b17e73`.
+
+Every timing receipt confirms observer restoration. Native UI separately confirms camera/clock and environment/renderer exposure restoration for all three world lifetimes. Owned game and DevTools tabs close, retaining New Tab. Runtime209 stops normally at `2026-10-02T03:50:36.910Z`, with no errors, protected state unchanged and disposable database removed; all four private ports are free and the exact Docker container is absent. [Process receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-terrain209-pair01/process.json), SHA256 `8a88eb88b10d60d4c6f7fb7f7c14dd76e7e8cc1638e1c2cbb20917bb545187fd`. The temporary build203 admission edits are removed; `runtime.mjs` returns to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes Node22 syntax checking. Public174 and saved state are not promoted or changed.
+
+An ordinary same-tab PNG→candidate navigation initially reports that the character is already connected, and one retry still fails. Closing the owned tab, waiting for disconnect grace and opening a fresh tab succeeds; the final PNG return uses that same clean transition. This remains a re-entry limitation, not a fixed startup issue or evidence that compression caused it.
+
+### Source verification, risks and evidence
+
+- The final scoped author run passes **849 tests with two existing native-only skips** across `clientViewportMode`, `CompactTerrainMaterial`, `TerrainShader.materials` and `TerrainShader` suites, including actual derivative and unchanged PNG pins. Root independently reports all 11 offline packing tests passing. Scoped typechecking retains five unrelated existing procgen diagnostics, with none in changed files. The author's test/typecheck results are retained in tool output rather than standalone log receipts. These scopes are not whole-project, visual or sustained-performance acceptance.
+- Offline tests execute the actual retained r186 Basis WASM decoder for every level of every map, compare RGBA decoding with the official KTX reference hashes/metrics and verify ASTC/BC7 block lengths. Explicit mip levels use previous-level2×2 filtering: sRGB decode/filter/encode for albedo RGB, linear filtering for alpha and normal data, no premultiplication or normal renormalization. Rows are physically flipped exactly once before mip generation; normal green is unchanged. Native GPU rounding/filtering parity is not implied by offline byte checks.
+- Compression is lossy. Grass normal mip0 has offline angular error mean9.33°/p9521.31° and AO alpha p95 error19/255. These measurements are not a visual acceptance threshold; promotion still needs matched native appearance checks. BC7 structural transcoding is not native BC7-device acceptance.
+- Candidate regeneration **and its CLI `--check` require the pinned macOS ARM64 KTX package/toolchain**, including Apple signature utilities; do not advertise cross-platform regeneration. All six assets are validated before publication, but sequential direct output writes are not transactional: interruption/write failure can leave a partial derivative/manifest/decoder set. Original PNGs are not written and runtime texture integrity fails closed; there is no publish-failure recovery test. Freeze and verify the candidate before serving it.
+
+Raw receipts and SHA256:
+
+- [PNG A1](/Users/lucid/Downloads/hyperia-native209-png-a1.json): `7cf2a61b04638d6cc0dcf30567bb04364d852d924e5131a37a0a52a55d5a9488`.
+- [UASTC B1](/Users/lucid/Downloads/hyperia-native209-uastc-b1.json): `bf4d31c68b28e4b7b76f5405c1cf3b78fa434fdf3f9aad9fd43077c99dddc2cf`.
+- [UASTC B2](/Users/lucid/Downloads/hyperia-native209-uastc-b2.json): `cec37cc2d7e0d081646e81b2d3e0a39bc79841e0b9c3ab9b3acd7758a8f54686`.
+- [PNG A2](/Users/lucid/Downloads/hyperia-native209-png-a2.json): `71dbcf200cc1717ed123b4db79ec186dccc7b281d93e9095ea5f957949f8d092`.
+
+**Next:** retain the default PNG path and the unpromoted compressed candidate. Return the primary performance effort to the measured terrain/grass and repeated-reflection owners, selecting a complete-content change with meaningful expected savings and matched native verification. Do not repeat small compression/ground-sampling timing sweeps without a new causal hypothesis; broader shadow/postprocessing/actor attribution and sustained2× qualification remain open.
+
 ## Native208 — repeated planar-capture contribution verified; no shipping gain
 
 The current canonical build201 completes a focused **full / omit capture / full / omit capture / full** screen. Omitting repeated capture reduces median ordinary wall tick intervals by **12.6–13.6 ms** against both adjacent full arms; synchronous tick CPU medians fall by **4.3 ms**. This identifies a substantial repeated-rendering opportunity, **not an implemented optimization or an exclusive GPU cost**. The 60 FPS at 2× target remains unmet.

@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { compileFunction } from "node:vm";
 import test from "node:test";
 import { PNG } from "pngjs";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 import {
   buildPackedTerrain,
   decodePng,
@@ -18,6 +21,13 @@ import {
   validatePolyhavenDirtSource,
   validateRockFace03Provenance,
   validateRockFace03Source,
+  UASTC_CANDIDATE,
+  UASTC_MAP_KEYS,
+  UASTC_MIP_BYTES,
+  buildUastcReferenceMipChain,
+  inspectUastcCandidate,
+  measureUastcRgbaError,
+  parseUastcOptions,
 } from "./pack-compact-terrain-textures.mjs";
 
 const assetRoot = new URL("../packages/server/world/assets/", import.meta.url);
@@ -582,5 +592,220 @@ test("ordinary CLI --check follows installed sources and does not rewrite any ou
       (await stat(new URL(receipt.name, packedRoot))).mtimeMs,
       receipt.mtime,
     );
+  }
+});
+
+test("offline UASTC operation requires explicit pinned tool paths and rejects ambiguous flags", () => {
+  assert.deepEqual(
+    parseUastcOptions([
+      "--uastc-candidate",
+      "--check",
+      "--ktx=/tmp/ktx",
+      "--ktx-package=/tmp/ktx.pkg",
+    ]),
+    { check: true, ktx: "/tmp/ktx", packagePath: "/tmp/ktx.pkg" },
+  );
+  for (const args of [
+    ["--uastc-candidate"],
+    ["--uastc-candidate", "--ktx=/tmp/ktx", "--ktx=/tmp/other"],
+    ["--uastc-candidate", "--normal-mode"],
+    ["--uastc-candidate", "--generate-mipmap"],
+  ])
+    assert.throws(() => parseUastcOptions(args));
+});
+
+test("six real UASTC assets preserve sources, packed semantics, explicit flipped mips and pinned r186 decoder", async () => {
+  const receipt = JSON.parse(
+    await readFile(new URL("uastc-v1-manifest.json", packedRoot)),
+  );
+  assert.equal(receipt.candidate, "uastc-v1");
+  assert.deepEqual(Object.keys(receipt.maps), [...UASTC_MAP_KEYS]);
+  assert.equal(
+    sha256(await readFile(new URL("packing-manifest.json", packedRoot))),
+    receipt.sourcePackingManifest.sha256,
+  );
+  assert.equal(
+    sha256(await readFile(new URL("ground-height.png", packedRoot))),
+    UASTC_CANDIDATE.groundHeightSha256,
+  );
+  const decoderRoot = new URL(
+    `${UASTC_CANDIDATE.decoderDirectory}/`,
+    assetRoot,
+  );
+  for (const [name, file] of Object.entries(receipt.decoder.files)) {
+    const bytes = await readFile(new URL(name, decoderRoot));
+    assert.equal(bytes.length, file.bytes);
+    assert.equal(sha256(bytes), file.sha256);
+    if (
+      ["basis_transcoder.js", "basis_transcoder.wasm", "README.md"].includes(
+        name,
+      )
+    )
+      assert.deepEqual(
+        bytes,
+        await readFile(
+          new URL(
+            `../node_modules/three/examples/jsm/libs/basis/${name}`,
+            import.meta.url,
+          ),
+        ),
+      );
+  }
+  // Execute the real installed Emscripten module, not an emulated encoder/loader.
+  const wrapper = await readFile(
+    new URL("basis_transcoder.js", decoderRoot),
+    "utf8",
+  );
+  const factory = compileFunction(`${wrapper}\nreturn BASIS;`, [
+    "require",
+    "__dirname",
+    "__filename",
+    "module",
+    "exports",
+  ])(
+    createRequire(import.meta.url),
+    decoderRoot.pathname,
+    new URL("basis_transcoder.js", decoderRoot).pathname,
+    { exports: {} },
+    {},
+  );
+  const basis = await factory({
+    wasmBinary: await readFile(new URL("basis_transcoder.wasm", decoderRoot)),
+  });
+  basis.initializeBasis();
+  for (const key of UASTC_MAP_KEYS) {
+    const record = receipt.maps[key];
+    const srgb = key.endsWith("albedo-roughness");
+    const sourceBytes = await readFile(new URL(`${key}.png`, packedRoot));
+    assert.equal(sha256(sourceBytes), record.source.sha256);
+    const source = decodePng(sourceBytes);
+    const mips = buildUastcReferenceMipChain(source, srgb);
+    assert.equal(mips.length, 11);
+    for (let row = 0; row < 1024; row++)
+      assert.deepEqual(
+        mips[0].data.subarray(row * 4096, (row + 1) * 4096),
+        source.data.subarray((1023 - row) * 4096, (1024 - row) * 4096),
+      );
+    // Independent real-image spot checks of previous-level RGB/alpha filtering.
+    // Alpha is never sRGB-filtered, premultiplied or normal-renormalized.
+    for (let level = 1; level < mips.length; level++) {
+      const previous = mips[level - 1];
+      const current = mips[level];
+      for (const x of [0, Math.floor(current.width / 2), current.width - 1]) {
+        for (const y of [
+          0,
+          Math.floor(current.height / 2),
+          current.height - 1,
+        ]) {
+          for (let channel = 0; channel < 4; channel++) {
+            const p = (y * 2 * previous.width + x * 2) * 4 + channel;
+            const offsets = [
+              p,
+              p + 4,
+              p + previous.width * 4,
+              p + previous.width * 4 + 4,
+            ];
+            const linearMean =
+              offsets.reduce((sum, index) => {
+                const value = previous.data[index] / 255;
+                return (
+                  sum +
+                  (srgb && channel < 3
+                    ? value <= 0.04045
+                      ? value / 12.92
+                      : Math.pow((value + 0.055) / 1.055, 2.4)
+                    : value)
+                );
+              }, 0) / 4;
+            const encodedMean =
+              srgb && channel < 3
+                ? linearMean <= 0.0031308
+                  ? linearMean * 12.92
+                  : 1.055 * Math.pow(linearMean, 1 / 2.4) - 0.055
+                : linearMean;
+            assert.equal(
+              current.data[(y * current.width + x) * 4 + channel],
+              srgb && channel < 3
+                ? Math.round(encodedMean * 255)
+                : Math.round(
+                    offsets.reduce(
+                      (sum, index) => sum + previous.data[index],
+                      0,
+                    ) / 4,
+                  ),
+            );
+          }
+        }
+      }
+    }
+    const encoded = await readFile(new URL(`${key}.uastc-v1.ktx2`, packedRoot));
+    assert.equal(encoded.length, record.bytes);
+    assert.equal(sha256(encoded), record.sha256);
+    assert.equal(inspectUastcCandidate(encoded, srgb).gpuBytes, 1398128);
+    assert.throws(
+      () => inspectUastcCandidate(encoded, !srgb),
+      "Wrong color interpretation rejected",
+    );
+    for (const forbidden of [
+      "--normal-mode",
+      "--normalize",
+      "--generate-mipmap",
+      "--uastc-rdo",
+      "--convert-tf",
+    ])
+      assert(!record.encodeArgv.includes(forbidden), forbidden);
+    const file = new basis.KTX2File(new Uint8Array(encoded));
+    try {
+      assert(file.isValid());
+      assert(file.isUASTC());
+      assert(file.getHasAlpha());
+      assert.equal(file.getDFDFlags(), 0);
+      assert.equal(file.getWidth(), 1024);
+      assert.equal(file.getHeight(), 1024);
+      assert.equal(file.getLevels(), 11);
+      assert(file.startTranscoding());
+      for (let level = 0; level < 11; level++) {
+        assert.equal(
+          sha256(mips[level].data),
+          record.mips[level].referenceRgbaSha256,
+        );
+        for (const format of [
+          KTX2Loader.TranscoderFormat.ASTC_4x4,
+          KTX2Loader.TranscoderFormat.BC7_M5,
+          KTX2Loader.TranscoderFormat.RGBA32,
+        ]) {
+          // ASTC/BC7 tests validate generated block streams and lengths only.
+          // Error metrics use UASTC -> RGBA32, not GPU-decoded ASTC or BC7.
+          // Native format decompression, filtering and visuals remain untested.
+          const bytes = new Uint8Array(
+            file.getImageTranscodedSizeInBytes(level, 0, 0, format),
+          );
+          assert.equal(
+            bytes.length,
+            format === KTX2Loader.TranscoderFormat.RGBA32
+              ? mips[level].data.length
+              : UASTC_MIP_BYTES[level],
+          );
+          assert(file.transcodeImage(bytes, level, 0, 0, format, 0, -1, -1));
+          if (format === KTX2Loader.TranscoderFormat.RGBA32) {
+            assert.equal(
+              sha256(bytes),
+              record.mips[level].decodedRgbaSha256,
+              "r186 WASM and official KTX RGBA decoder agree",
+            );
+            const metrics = measureUastcRgbaError(mips[level], bytes, !srgb);
+            assert.deepEqual(metrics.channels, record.mips[level].channels);
+            if (!srgb)
+              assert.deepEqual(
+                metrics.normalAngularDegrees,
+                record.mips[level].normalAngularDegrees,
+              );
+          }
+        }
+      }
+    } finally {
+      file.close();
+      file.delete();
+    }
   }
 });

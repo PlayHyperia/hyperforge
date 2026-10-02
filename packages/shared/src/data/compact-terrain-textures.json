@@ -4,5 +4,40 @@
   "dirt-albedo-roughness": "357b327ed327304b25193ce2a3924bf71b139764e93411a54b8c7469a296baef",
   "dirt-normal-ao": "5e860d999d7d9545740fa12dbff729b2b9233b22179f46e46c6fd2f5facca7d3",
   "rock-albedo-roughness": "97f2d36833a7ce119d021cfa9728c42d292044297b172772c02f07f34403311a",
-  "rock-normal-ao": "056c1754f2e2315a22480025ffe798497d6674fc76b05d8c7f42b3c928268aa4"
+  "rock-normal-ao": "056c1754f2e2315a22480025ffe798497d6674fc76b05d8c7f42b3c928268aa4",
+  "uastc-v1": {
+    "status": "private-candidate-unqualified",
+    "maps": {
+      "grass-albedo-roughness": {
+        "path": "terrain/textures/compact-pbr/grass-albedo-roughness.uastc-v1.ktx2",
+        "sha256": "ef1bcb3a23f1d13584d278560880e6446ae4111552cb2a25376c25644c732345",
+        "bytes": 1337601
+      },
+      "grass-normal-ao": {
+        "path": "terrain/textures/compact-pbr/grass-normal-ao.uastc-v1.ktx2",
+        "sha256": "a353be9384c267fc9c90e27bbab1bfb5261c564bee7022b89144774f6774cab2",
+        "bytes": 1361903
+      },
+      "dirt-albedo-roughness": {
+        "path": "terrain/textures/compact-pbr/dirt-albedo-roughness.uastc-v1.ktx2",
+        "sha256": "66e5d412a078cb34e7c7c090a8a75f7f078602adfc4957bd56abed8de891dc94",
+        "bytes": 1041271
+      },
+      "dirt-normal-ao": {
+        "path": "terrain/textures/compact-pbr/dirt-normal-ao.uastc-v1.ktx2",
+        "sha256": "fe2c2fa1cb55e47b48dd551a77bfafab9dc61e5f254e173bfa9fdf391a4a78d7",
+        "bytes": 1262147
+      },
+      "rock-albedo-roughness": {
+        "path": "terrain/textures/compact-pbr/rock-albedo-roughness.uastc-v1.ktx2",
+        "sha256": "4cd83ee99ddbe227fb45a01d92d0429d0956b11d4b32c88c29e5947220fb4dbe",
+        "bytes": 1130427
+      },
+      "rock-normal-ao": {
+        "path": "terrain/textures/compact-pbr/rock-normal-ao.uastc-v1.ktx2",
+        "sha256": "68437e3d889f69e1761d0358585a206fa840f66da60bba2bbf01f09b65c6d73b",
+        "bytes": 1306267
+      }
+    }
+  }
 }

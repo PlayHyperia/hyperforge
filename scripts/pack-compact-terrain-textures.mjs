@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, writeFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
+import { read as readKtx } from "three/addons/libs/ktx-parse.module.js";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const assets = path.join(repo, "packages/server/world/assets");
@@ -29,6 +33,37 @@ const inputs = {
   ],
 };
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
+const execute = promisify(execFile);
+export const UASTC_CANDIDATE = Object.freeze({
+  id: "uastc-v1",
+  version: "v4.4.2",
+  packageUrl:
+    "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Darwin-arm64.pkg",
+  packageSha256:
+    "500bd8f9d63358c3f3a0d83b724c8574436a72c37dc0e4bad90ec1ca38032c3c",
+  executableSha256:
+    "abd30109cbf84859b2f34951f7967e801111abadaac588468d98ed075100ad37",
+  librarySha256:
+    "bd26f0747b7a800384b7b3c9221dafeb3943ef565a560ab98238cade597c0947",
+  decoderDirectory: "terrain/textures/compact-pbr/decoders/three-r186/basis",
+  basisLicenseUrl:
+    "https://raw.githubusercontent.com/BinomialLLC/basis_universal/master/LICENSE",
+  basisLicenseSha256:
+    "065fcf48d6af21c0b75e23be5ed5753aee75c892e1c2cf178fa6736305614a5c",
+  groundHeightSha256:
+    "f83da0f031244f046d72adf229723da5857d36a6cd5fc542d11db019a60bc06c",
+});
+export const UASTC_MAP_KEYS = Object.freeze(
+  ["grass", "dirt", "rock"].flatMap((layer) =>
+    ["albedo-roughness", "normal-ao"].map((kind) => `${layer}-${kind}`),
+  ),
+);
+export const UASTC_MIP_BYTES = Object.freeze(
+  Array.from(
+    { length: 11 },
+    (_, level) => Math.max(1, Math.ceil((1024 >> level) / 4)) ** 2 * 16,
+  ),
+);
 const grass004Directory = "terrain/textures/ambientcg-grass004";
 export const GRASS004_PROVENANCE = Object.freeze({
   schemaVersion: 1,
@@ -619,7 +654,499 @@ async function readOptional(filename) {
   }
 }
 
+/** Match the previous-level WebGPU box-filter semantics, not direct-base resizing.
+ * RGB is decoded/re-encoded only for sRGB albedo; packed alpha is always linear.
+ * Each level is quantized to RGBA8. Native GPU rounding still requires visual QA.
+ */
+export function buildUastcReferenceMipChain(source, srgb) {
+  assert.equal(source.width, 1024);
+  assert.equal(source.height, 1024);
+  assert.equal(source.data.length, 1024 * 1024 * 4);
+  const base = new PNG({ width: 1024, height: 1024 });
+  for (let y = 0; y < 1024; y++)
+    base.data.set(
+      source.data.subarray(y * 4096, (y + 1) * 4096),
+      (1023 - y) * 4096,
+    );
+  const decode = Array.from({ length: 256 }, (_, byte) => {
+    const value = byte / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  const encode = (value) =>
+    Math.round(
+      255 *
+        (value <= 0.0031308
+          ? 12.92 * value
+          : 1.055 * value ** (1 / 2.4) - 0.055),
+    );
+  const levels = [base];
+  while (levels.at(-1).width > 1) {
+    const previous = levels.at(-1);
+    const next = new PNG({
+      width: previous.width / 2,
+      height: previous.height / 2,
+    });
+    for (let y = 0; y < next.height; y++) {
+      for (let x = 0; x < next.width; x++) {
+        const p = (y * 2 * previous.width + x * 2) * 4;
+        for (let c = 0; c < 4; c++) {
+          const values = [
+            p + c,
+            p + c + 4,
+            p + c + previous.width * 4,
+            p + c + previous.width * 4 + 4,
+          ];
+          const total = values.reduce(
+            (sum, index) =>
+              sum +
+              (srgb && c < 3
+                ? decode[previous.data[index]]
+                : previous.data[index]),
+            0,
+          );
+          next.data[(y * next.width + x) * 4 + c] =
+            srgb && c < 3 ? encode(total / 4) : Math.round(total / 4);
+        }
+      }
+    }
+    levels.push(next);
+  }
+  return levels;
+}
+
+export function inspectUastcCandidate(bytes, srgb) {
+  const texture = readKtx(bytes);
+  assert.equal(texture.vkFormat, 0);
+  assert.equal(texture.pixelWidth, 1024);
+  assert.equal(texture.pixelHeight, 1024);
+  assert.equal(texture.pixelDepth, 0);
+  assert.equal(texture.layerCount, 0);
+  assert.equal(texture.faceCount, 1);
+  assert.equal(texture.levelCount, 11);
+  assert.equal(texture.supercompressionScheme, 2, "Zstandard supercompression");
+  assert.equal(texture.keyValue.KTXorientation, "ru");
+  assert.equal(texture.keyValue.KTXswizzle, undefined);
+  assert.equal(texture.dataFormatDescriptor.length, 1);
+  const descriptor = texture.dataFormatDescriptor[0];
+  assert.equal(descriptor.colorModel, 166, "UASTC LDR 4x4");
+  assert.equal(descriptor.colorPrimaries, srgb ? 1 : 0);
+  assert.equal(descriptor.transferFunction, srgb ? 2 : 1);
+  assert.equal(descriptor.flags, 0, "Never premultiply packed scalar alpha");
+  assert.deepEqual(descriptor.texelBlockDimension, [3, 3, 0, 0]);
+  assert(
+    descriptor.samples.some((sample) => (sample.channelType & 15) === 3),
+    "UASTC RGBA including scalar alpha",
+  );
+  assert.deepEqual(
+    texture.levels.map((level) => level.uncompressedByteLength),
+    UASTC_MIP_BYTES,
+  );
+  return {
+    colorModel: descriptor.colorModel,
+    colorPrimaries: descriptor.colorPrimaries,
+    transferFunction: descriptor.transferFunction,
+    flags: descriptor.flags,
+    orientation: texture.keyValue.KTXorientation,
+    gpuBytes: UASTC_MIP_BYTES.reduce((sum, bytes) => sum + bytes, 0),
+  };
+}
+
+export function measureUastcRgbaError(reference, decoded, normal) {
+  assert.equal(
+    decoded.length,
+    reference.data.length,
+    "Decoded RGBA byte count",
+  );
+  const pixels = decoded.length / 4;
+  const histograms = Array.from({ length: 4 }, () => new Uint32Array(256));
+  const totals = [0, 0, 0, 0];
+  const maxima = [0, 0, 0, 0];
+  const angles = normal ? new Float64Array(pixels) : null;
+  let angleSum = 0;
+  for (let p = 0; p < decoded.length; p += 4) {
+    for (let c = 0; c < 4; c++) {
+      const error = Math.abs(reference.data[p + c] - decoded[p + c]);
+      histograms[c][error]++;
+      totals[c] += error;
+      maxima[c] = Math.max(maxima[c], error);
+    }
+    if (normal) {
+      let dot = 0,
+        sourceLength = 0,
+        decodedLength = 0;
+      for (let c = 0; c < 3; c++) {
+        const a = reference.data[p + c] / 127.5 - 1;
+        const b = decoded[p + c] / 127.5 - 1;
+        dot += a * b;
+        sourceLength += a * a;
+        decodedLength += b * b;
+      }
+      const cosine = dot / Math.sqrt(sourceLength * decodedLength);
+      const angle =
+        (Math.acos(Math.max(-1, Math.min(1, cosine))) * 180) / Math.PI;
+      assert(Number.isFinite(angle));
+      angles[p / 4] = angle;
+      angleSum += angle;
+    }
+  }
+  const channels = Object.fromEntries(
+    ["r", "g", "b", "a"].map((name, c) => {
+      let count = 0,
+        p95 = 0;
+      while (
+        p95 < 255 &&
+        (count += histograms[c][p95]) < Math.ceil(pixels * 0.95)
+      )
+        p95++;
+      return [name, { mae: totals[c] / pixels, p95, max: maxima[c] }];
+    }),
+  );
+  const result = {
+    channelErrorUnits:
+      "RGBA8 code values (0..255); alpha is linear roughness or AO",
+    channels,
+  };
+  if (normal) {
+    angles.sort();
+    result.normalAngularDegrees = {
+      mean: angleSum / pixels,
+      p95: angles[Math.ceil(pixels * 0.95) - 1],
+      max: angles[pixels - 1],
+    };
+  }
+  return result;
+}
+
+export function parseUastcOptions(args) {
+  const options = { check: false, ktx: null, packagePath: null };
+  const seen = new Set();
+  for (const arg of args) {
+    const name = arg.split("=", 1)[0];
+    assert(!seen.has(name), `Duplicate UASTC option: ${name}`);
+    seen.add(name);
+    if (arg === "--uastc-candidate") continue;
+    if (arg === "--check") options.check = true;
+    else if (arg.startsWith("--ktx=")) options.ktx = path.resolve(arg.slice(6));
+    else if (arg.startsWith("--ktx-package="))
+      options.packagePath = path.resolve(arg.slice(14));
+    else assert.fail(`Unknown UASTC option: ${arg}`);
+  }
+  assert(seen.has("--uastc-candidate"));
+  assert(
+    options.ktx && options.packagePath,
+    "Provide explicit --ktx and --ktx-package paths from verified official KTX 4.4.2 ARM64 package",
+  );
+  return options;
+}
+
+async function verifyUastcTool(options) {
+  assert.equal(
+    sha256(await readFile(options.packagePath)),
+    UASTC_CANDIDATE.packageSha256,
+  );
+  assert.equal(
+    sha256(await readFile(options.ktx)),
+    UASTC_CANDIDATE.executableSha256,
+  );
+  assert.equal(
+    sha256(
+      await readFile(
+        path.resolve(path.dirname(options.ktx), "../lib/libktx.4.4.2.dylib"),
+      ),
+    ),
+    UASTC_CANDIDATE.librarySha256,
+  );
+  const signature = await execute("/usr/sbin/pkgutil", [
+    "--check-signature",
+    options.packagePath,
+  ]);
+  assert.match(signature.stdout, /The Khronos Group, Inc\. \(TD2656HYNK\)/);
+  assert.match(signature.stdout, /trusted by the Apple notary service/);
+  await execute("/usr/bin/codesign", ["--verify", "--strict", options.ktx]);
+  const version = await execute(options.ktx, ["--version"]);
+  assert.equal(version.stdout.trim(), "ktx version: v4.4.2");
+}
+
+async function collectUastcDecoderFiles(check) {
+  const threeRoot = path.join(repo, "node_modules/three");
+  assert.equal(
+    JSON.parse(await readFile(path.join(threeRoot, "package.json"))).version,
+    "0.186.0",
+  );
+  const files = new Map();
+  for (const name of [
+    "basis_transcoder.js",
+    "basis_transcoder.wasm",
+    "README.md",
+  ])
+    files.set(
+      name,
+      await readFile(path.join(threeRoot, "examples/jsm/libs/basis", name)),
+    );
+  files.set(
+    "THREE-LICENSE.txt",
+    await readFile(path.join(threeRoot, "LICENSE")),
+  );
+  const licensePath = path.join(
+    assets,
+    UASTC_CANDIDATE.decoderDirectory,
+    "BASIS-LICENSE.txt",
+  );
+  let license = await readOptional(licensePath);
+  if (!license) {
+    assert(!check, "Local Basis license missing");
+    const response = await fetch(UASTC_CANDIDATE.basisLicenseUrl);
+    assert(response.ok, `Basis license HTTP ${response.status}`);
+    license = Buffer.from(await response.arrayBuffer());
+  }
+  assert.equal(sha256(license), UASTC_CANDIDATE.basisLicenseSha256);
+  files.set("BASIS-LICENSE.txt", license);
+  return files;
+}
+
+/** Explicit offline candidate only; neither original maps nor runtime selection are changed. */
+export async function buildUastcCandidate(options) {
+  await verifyUastcTool(options);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "hyperia-uastc-mips-"));
+  const original = new Map();
+  const files = new Map();
+  try {
+    const packingBytes = await readFile(
+      path.join(output, "packing-manifest.json"),
+    );
+    original.set("packing-manifest.json", packingBytes);
+    const packing = JSON.parse(packingBytes);
+    const ground = await readFile(path.join(output, "ground-height.png"));
+    original.set("ground-height.png", ground);
+    assert.equal(sha256(ground), UASTC_CANDIDATE.groundHeightSha256);
+    const decoderFiles = await collectUastcDecoderFiles(options.check);
+    const manifest = {
+      schemaVersion: 1,
+      candidate: UASTC_CANDIDATE.id,
+      status:
+        "Offline lossy candidate. Not default; native visual and performance acceptance required.",
+      sourcePackingManifest: {
+        path: "terrain/textures/compact-pbr/packing-manifest.json",
+        sha256: sha256(packingBytes),
+      },
+      encoder: {
+        version: UASTC_CANDIDATE.version,
+        platform: "darwin-arm64",
+        packageUrl: UASTC_CANDIDATE.packageUrl,
+        packageSha256: UASTC_CANDIDATE.packageSha256,
+        executableSha256: UASTC_CANDIDATE.executableSha256,
+        librarySha256: UASTC_CANDIDATE.librarySha256,
+        signature:
+          "Developer ID Installer: The Khronos Group, Inc. (TD2656HYNK); trusted Apple notarization; executable codesign verification passed",
+        quality: 4,
+        rdo: false,
+        threads: 1,
+        zstd: 18,
+      },
+      mipFilter:
+        "11 explicit RGBA8 levels; each is a 2x2 box of the preceding quantized level. Albedo RGB sRGB decode/filter/encode; all alpha and normal RGB linear; no alpha premultiplication or normal renormalization. GPU rounding parity unverified.",
+      orientation:
+        "Rows physically flipped once before mip generation to match existing createImageBitmap(imageOrientation=flipY), then flipY=false. KTXorientation=ru. Normal green unchanged.",
+      validation:
+        "Official ktx validate --warnings-as-errors; all 11 levels decoded with official ktx extract --transcode rgba8 --raw; encoded ASTC/BC7 conversion structurally checked. Metrics describe offline RGBA decoding, not native sampling or rendered visual acceptance.",
+      unchangedGroundHeight: {
+        path: "terrain/textures/compact-pbr/ground-height.png",
+        sha256: sha256(ground),
+        bytes: ground.length,
+      },
+      decoder: {
+        threeVersion: "0.186.0",
+        source:
+          "Installed three@0.186.0 examples/jsm/libs/basis, copied unchanged with upstream README and licenses",
+        licenseUrl: UASTC_CANDIDATE.basisLicenseUrl,
+        files: Object.fromEntries(
+          [...decoderFiles].map(([name, bytes]) => [
+            name,
+            {
+              path: `${UASTC_CANDIDATE.decoderDirectory}/${name}`,
+              bytes: bytes.length,
+              sha256: sha256(bytes),
+            },
+          ]),
+        ),
+      },
+      maps: {},
+    };
+    for (const key of UASTC_MAP_KEYS) {
+      const srgb = key.endsWith("albedo-roughness");
+      const layer = key.split("-")[0];
+      const packedReceipt =
+        packing.layers[layer].outputs[srgb ? "albedoRoughness" : "normalAo"];
+      const source = await readFile(path.join(output, `${key}.png`));
+      original.set(`${key}.png`, source);
+      assert.equal(sha256(source), packedReceipt.sha256, `${key} source hash`);
+      const mips = buildUastcReferenceMipChain(decodePng(source), srgb);
+      const inputs = mips.map((_, level) => `${key}.mip-${level}.png`);
+      for (let level = 0; level < mips.length; level++)
+        await writeFile(
+          path.join(scratch, inputs[level]),
+          PNG.sync.write(mips[level], { colorType: 6, inputColorType: 6 }),
+        );
+      const name = `${key}.uastc-v1.ktx2`;
+      const argv = [
+        "create",
+        "--format",
+        srgb ? "R8G8B8A8_SRGB" : "R8G8B8A8_UNORM",
+        "--assign-tf",
+        srgb ? "srgb" : "linear",
+        "--assign-primaries",
+        srgb ? "bt709" : "none",
+        "--assign-texcoord-origin",
+        "bottom-left",
+        "--levels",
+        "11",
+        "--encode",
+        "uastc",
+        "--uastc-quality",
+        "4",
+        "--threads",
+        "1",
+        "--zstd",
+        "18",
+        "--fail-on-color-conversions",
+        "--fail-on-origin-changes",
+        ...inputs,
+        name,
+      ];
+      const generatedPath = path.join(scratch, name);
+      if (options.check)
+        await writeFile(generatedPath, await readFile(path.join(output, name)));
+      else
+        await execute(options.ktx, argv, {
+          cwd: scratch,
+          timeout: 600000,
+          maxBuffer: 1024 * 1024,
+        });
+      const compressed = await readFile(generatedPath);
+      const info = inspectUastcCandidate(compressed, srgb);
+      const validation = await execute(
+        options.ktx,
+        ["validate", "--warnings-as-errors", name],
+        { cwd: scratch },
+      );
+      const mipReports = [];
+      for (let level = 0; level < mips.length; level++) {
+        const decodeArgv = [
+          "extract",
+          "--transcode",
+          "rgba8",
+          "--raw",
+          "--level",
+          String(level),
+          name,
+          "-",
+        ];
+        const { stdout: decoded } = await execute(options.ktx, decodeArgv, {
+          cwd: scratch,
+          encoding: "buffer",
+          maxBuffer: 8 * 1024 * 1024,
+        });
+        mipReports.push({
+          level,
+          width: mips[level].width,
+          height: mips[level].height,
+          referenceRgbaSha256: sha256(mips[level].data),
+          decodedRgbaSha256: sha256(decoded),
+          gpuBytes: UASTC_MIP_BYTES[level],
+          ...measureUastcRgbaError(mips[level], decoded, !srgb),
+        });
+      }
+      const transcodes = {};
+      for (const target of ["astc", "bc7"]) {
+        const targetName = `${key}.${target}.ktx2`;
+        await execute(
+          options.ktx,
+          ["transcode", "--target", target, name, targetName],
+          { cwd: scratch },
+        );
+        const transcodedBytes = await readFile(path.join(scratch, targetName));
+        const transcoded = readKtx(transcodedBytes);
+        assert.equal(
+          transcoded.vkFormat,
+          target === "astc" ? (srgb ? 158 : 157) : srgb ? 146 : 145,
+        );
+        assert.deepEqual(
+          transcoded.levels.map((level) => level.levelData.length),
+          UASTC_MIP_BYTES,
+        );
+        transcodes[target] = {
+          vkFormat: transcoded.vkFormat,
+          mipBytes: [...UASTC_MIP_BYTES],
+          sha256: sha256(transcodedBytes),
+        };
+      }
+      manifest.maps[key] = {
+        path: `terrain/textures/compact-pbr/${name}`,
+        bytes: compressed.length,
+        sha256: sha256(compressed),
+        source: {
+          path: packedReceipt.path,
+          bytes: source.length,
+          sha256: sha256(source),
+        },
+        ...info,
+        encodeArgv: argv,
+        officialValidation:
+          validation.stdout.trim() || "passed without errors or warnings",
+        transcodes,
+        mips: mipReports,
+      };
+      files.set(name, compressed);
+      console.log(
+        `UASTC ${options.check ? "verified" : "encoded"}: ${key}; ${compressed.length} bytes, all 11 decoded mip levels measured.`,
+      );
+    }
+    files.set(
+      "uastc-v1-manifest.json",
+      Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`),
+    );
+    // Detect source changes during encoding before publishing any derivative.
+    for (const [name, before] of original)
+      assert.deepEqual(
+        await readFile(path.join(output, name)),
+        before,
+        `${name} preservation`,
+      );
+    return { manifest, files, decoderFiles };
+  } finally {
+    assert(path.basename(scratch).startsWith("hyperia-uastc-mips-"));
+    await rm(scratch, { recursive: true, force: false });
+  }
+}
+
 async function main() {
+  if (process.argv.slice(2).includes("--uastc-candidate")) {
+    const options = parseUastcOptions(process.argv.slice(2));
+    const candidate = await buildUastcCandidate(options);
+    for (const [directory, files] of [
+      [output, candidate.files],
+      [
+        path.join(assets, UASTC_CANDIDATE.decoderDirectory),
+        candidate.decoderFiles,
+      ],
+    ]) {
+      if (!options.check) await mkdir(directory, { recursive: true });
+      for (const [name, bytes] of files) {
+        const target = path.join(directory, name);
+        if (options.check)
+          assert.deepEqual(
+            await readFile(target),
+            bytes,
+            `${name} candidate check`,
+          );
+        else await writeFile(target, bytes);
+      }
+    }
+    console.log(
+      "Offline UASTC candidate complete; original PNG maps, packing manifest and runtime selection untouched.",
+    );
+    return;
+  }
   const installed = await readOptional(
     path.join(output, "packing-manifest.json"),
   );

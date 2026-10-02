@@ -11,10 +11,34 @@
 
 import { KTX2Loader } from "three/examples/jsm/loaders/KTX2Loader.js";
 import * as THREE from "./three";
+import { isWebGPURenderer } from "../../utils/rendering/RendererFactory";
 
-// Singleton KTX2 loader with transcoder
+// Renderer-owned, app-lifetime loader: ClientGraphics intentionally reuses its
+// module-level renderer across world destruction/re-entry. Terrain disposes only
+// its textures, never these shared workers. A real renderer replacement must
+// explicitly retire this owner with disposeKTX2Loader before initialization.
 let ktx2Loader: KTX2Loader | null = null;
+let ktx2Renderer: THREE.WebGPURenderer | null = null;
 let ktx2LoaderPromise: Promise<KTX2Loader> | null = null;
+let ktx2Generation = 0;
+let ktx2TranscoderPath: string | null = null;
+let retireKTX2Loader: (() => void) | null = null;
+
+export const KTX2_TRANSCODER_PATH =
+  "/terrain/textures/compact-pbr/decoders/three-r186/basis/";
+
+/** Capability-only choice. No worker, fetch or renderer initialization here. */
+export function getKTX2TerrainFormat(
+  renderer: THREE.WebGPURenderer,
+): typeof THREE.RGBA_ASTC_4x4_Format | typeof THREE.RGBA_BPTC_Format | null {
+  if (!renderer.hasInitialized() || !isWebGPURenderer(renderer))
+    throw new Error("KTX2 terrain requires the initialized WebGPU renderer");
+  if (renderer.hasFeature("texture-compression-astc"))
+    return THREE.RGBA_ASTC_4x4_Format;
+  if (renderer.hasFeature("texture-compression-bc"))
+    return THREE.RGBA_BPTC_Format;
+  return null;
+}
 
 // PERFORMANCE: Singleton TextureLoader (avoid creating new loader per texture)
 const cachedTextureLoader = new THREE.TextureLoader();
@@ -37,36 +61,72 @@ function shouldTraceKTX2(): boolean {
  */
 export function initKTX2Loader(
   renderer: THREE.WebGPURenderer,
+  transcoderPath = KTX2_TRANSCODER_PATH,
 ): Promise<KTX2Loader> {
-  if (ktx2Loader) {
-    return Promise.resolve(ktx2Loader);
-  }
-
-  if (ktx2LoaderPromise) {
-    return ktx2LoaderPromise;
-  }
-
-  ktx2LoaderPromise = new Promise((resolve) => {
-    const loader = new KTX2Loader();
-
-    // Set the path to the basis transcoder WASM files
-    // These are hosted on CDN or can be bundled locally
-    // Using the three.js examples path which is commonly available
-    loader.setTranscoderPath(
-      "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/basis/",
+  if (!renderer.hasInitialized() || !isWebGPURenderer(renderer))
+    return Promise.reject(
+      new Error("KTX2 loader requires the initialized WebGPU renderer"),
     );
-
-    // Detect renderer and set up transcoder
+  if (
+    ktx2Renderer &&
+    (ktx2Renderer !== renderer || ktx2TranscoderPath !== transcoderPath)
+  )
+    return Promise.reject(
+      new Error("KTX2 loader belongs to another renderer or decoder path"),
+    );
+  if (ktx2LoaderPromise) return ktx2LoaderPromise;
+  try {
+    const loader = new KTX2Loader();
+    loader.setTranscoderPath(transcoderPath);
+    loader.setWorkerLimit(2);
     loader.detectSupport(renderer);
-
-    ktx2Loader = loader;
-    if (shouldTraceKTX2()) {
-      console.debug("[KTX2Loader] Initialized with basis transcoder");
-    }
-    resolve(loader);
-  });
-
-  return ktx2LoaderPromise;
+    const generation = ktx2Generation;
+    let initialized = false;
+    let retired = false;
+    let disposed = false;
+    const disposeOnce = () => {
+      if (disposed) return;
+      disposed = true;
+      loader.dispose();
+    };
+    retireKTX2Loader = () => {
+      retired = true;
+      // Three has not created its worker-source URL until init settles. Its
+      // dispose is not idempotent; reclaim it once, after that await if needed.
+      if (initialized) disposeOnce();
+    };
+    ktx2Renderer = renderer;
+    ktx2TranscoderPath = transcoderPath;
+    // Three initializes the WASM and worker source asynchronously. A shutdown
+    // can retire this owner during that await; never publish it afterwards.
+    ktx2LoaderPromise = loader
+      .init()
+      .then(() => {
+        initialized = true;
+        if (retired || generation !== ktx2Generation) {
+          disposeOnce();
+          throw new Error("KTX2 loader retired during initialization");
+        }
+        ktx2Loader = loader;
+        if (shouldTraceKTX2())
+          console.debug("[KTX2Loader] Initialized with basis transcoder");
+        return loader;
+      })
+      .catch((error: unknown) => {
+        disposeOnce();
+        if (generation === ktx2Generation) {
+          ktx2Loader = null;
+          ktx2LoaderPromise = null;
+          ktx2Renderer = null;
+          ktx2TranscoderPath = null;
+          retireKTX2Loader = null;
+        }
+        throw error;
+      });
+    return ktx2LoaderPromise;
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
 /**
@@ -245,13 +305,15 @@ export function clearKTX2Cache(): void {
 
 /**
  * Dispose of the KTX2 loader
- * Call this when shutting down
+ * Call only when retiring the owning renderer/application, not a terrain/world.
  */
 export function disposeKTX2Loader(): void {
-  if (ktx2Loader) {
-    ktx2Loader.dispose();
-    ktx2Loader = null;
-    ktx2LoaderPromise = null;
-  }
+  ktx2Generation++;
+  retireKTX2Loader?.();
+  retireKTX2Loader = null;
+  ktx2Loader = null;
+  ktx2Renderer = null;
+  ktx2LoaderPromise = null;
+  ktx2TranscoderPath = null;
   noKtx2Cache.clear();
 }

@@ -6,6 +6,7 @@ import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
+import compactTextureDigests from "../../../../data/compact-terrain-textures.json";
 import type { Browser } from "playwright";
 import THREE, {
   float,
@@ -29,6 +30,8 @@ import {
 } from "../TerrainShader";
 import {
   COMPACT_TERRAIN_BITMAP_OPTIONS,
+  COMPACT_TERRAIN_COMPRESSED_MIP_BYTES,
+  validateCompactTerrainCompressedTexture,
   COMPACT_TERRAIN_MATERIAL,
   COMPACT_GRASS_SUBSTRATE,
   COMPACT_TERRAIN_TEXTURE_SHA256,
@@ -134,6 +137,176 @@ function createTerrainMaterial(
   }
   return material;
 }
+
+describe("opt-in UASTC terrain texture admission (real Three textures, not visual proof)", () => {
+  it("pins all six actual derivative bytes without changing PNG source admission", async () => {
+    for (const [key, descriptor] of Object.entries(
+      compactTextureDigests["uastc-v1"].maps,
+    )) {
+      const bytes = await readFile(
+        new URL(
+          `../../../../../../server/world/assets/${descriptor.path}`,
+          import.meta.url,
+        ),
+      );
+      expect(bytes.length).toBe(descriptor.bytes);
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+        descriptor.sha256,
+      );
+      const png = await readFile(
+        new URL(
+          `../../../../../../server/world/assets/terrain/textures/compact-pbr/${key}.png`,
+          import.meta.url,
+        ),
+      );
+      expect(createHash("sha256").update(png).digest("hex")).toBe(
+        COMPACT_TERRAIN_TEXTURE_SHA256[
+          key as keyof typeof COMPACT_TERRAIN_TEXTURE_SHA256
+        ],
+      );
+    }
+    expect(Object.keys(COMPACT_TERRAIN_TEXTURE_SHA256)).toHaveLength(6);
+  });
+  function compressed(
+    channel: "albedo-roughness" | "normal-ao",
+    format: typeof THREE.RGBA_ASTC_4x4_Format | typeof THREE.RGBA_BPTC_Format,
+  ) {
+    const image = new THREE.CompressedTexture(
+      COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.map((bytes, level) => ({
+        width: Math.max(1, 1024 >> level),
+        height: Math.max(1, 1024 >> level),
+        data: new Uint8Array(bytes),
+      })),
+      1024,
+      1024,
+      format,
+    );
+    image.colorSpace =
+      channel === "albedo-roughness"
+        ? THREE.SRGBColorSpace
+        : THREE.NoColorSpace;
+    return image;
+  }
+
+  it("admits only 11 complete 4x4/16-byte block levels and semantic color spaces", () => {
+    expect(
+      COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.reduce((a, b) => a + b, 0),
+    ).toBe(1398128);
+    for (const format of [
+      THREE.RGBA_ASTC_4x4_Format,
+      THREE.RGBA_BPTC_Format,
+    ] as const)
+      for (const channel of ["albedo-roughness", "normal-ao"] as const) {
+        const image = compressed(channel, format);
+        try {
+          expect(() =>
+            validateCompactTerrainCompressedTexture(image, channel, format),
+          ).not.toThrow();
+          expect(image.generateMipmaps).toBe(false);
+          expect(image.flipY).toBe(false);
+          expect(image.premultiplyAlpha).toBe(false);
+        } finally {
+          image.dispose();
+        }
+      }
+  });
+
+  it("rejects wrong format, mip chain/bytes, dimensions, type, color space, orientation and premultiplication", () => {
+    const mutations: Array<(image: THREE.CompressedTexture) => void> = [
+      (image) => {
+        image.format = THREE.RGBA_BPTC_Format;
+      },
+      (image) => {
+        image.mipmaps.pop();
+      },
+      (image) => {
+        image.mipmaps[10].data = new Uint8Array(4);
+      },
+      (image) => {
+        image.mipmaps[5].width = 31;
+      },
+      (image) => {
+        image.image.height = 512;
+      },
+      (image) => {
+        image.type = THREE.FloatType;
+      },
+      (image) => {
+        image.colorSpace = THREE.LinearSRGBColorSpace;
+      },
+      (image) => {
+        image.flipY = true;
+      },
+      (image) => {
+        image.generateMipmaps = true;
+      },
+      (image) => {
+        image.premultiplyAlpha = true;
+      },
+    ];
+    for (const mutate of mutations) {
+      const image = compressed("normal-ao", THREE.RGBA_ASTC_4x4_Format);
+      try {
+        mutate(image);
+        expect(() =>
+          validateCompactTerrainCompressedTexture(
+            image,
+            "normal-ao",
+            THREE.RGBA_ASTC_4x4_Format,
+          ),
+        ).toThrow("compact terrain compressed");
+      } finally {
+        image.dispose();
+      }
+    }
+    const uncompressed = new THREE.DataTexture(new Uint8Array(4), 1, 1);
+    try {
+      expect(() =>
+        validateCompactTerrainCompressedTexture(
+          uncompressed,
+          "normal-ao",
+          THREE.RGBA_ASTC_4x4_Format,
+        ),
+      ).toThrow();
+    } finally {
+      uncompressed.dispose();
+    }
+  });
+
+  it("keeps default PNG URL/receipt/owner counts and requires a renderer only for the candidate", () => {
+    const baseline = new CompactTerrainTextureSet(
+      "https://assets.example.invalid",
+      undefined,
+      "height-v1",
+    );
+    try {
+      const receipt = baseline.getReceipt();
+      expect(receipt).not.toHaveProperty("textureEncoding");
+      expect(receipt.textures).toHaveLength(7);
+      expect(receipt.textures.every((row) => row.url.endsWith(".png"))).toBe(
+        true,
+      );
+      expect(
+        () =>
+          new CompactTerrainTextureSet(
+            "https://assets.example.invalid",
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            "uastc-v1",
+          ),
+      ).toThrow("initialized renderer");
+      expect(() =>
+        createTerrainMaterial(undefined, {
+          compactTerrainTextureEncoding: "uastc-v1",
+        }),
+      ).toThrow("compact PBR");
+    } finally {
+      baseline.dispose();
+    }
+  });
+});
 
 describe("opt-in Haven habitat material (actual TSL graph, not GPU proof)", () => {
   const habitat = validateCompactHabitatComposition(

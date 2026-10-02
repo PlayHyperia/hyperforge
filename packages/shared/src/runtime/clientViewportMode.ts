@@ -475,6 +475,20 @@ export function resolveCompactGroundSampling(
   return "exact-zero-v1";
 }
 
+/** Storage-only candidate. Absence does not inspect/change other selections. */
+export function resolveCompactTerrainTextureEncoding(
+  win?: Window,
+): "uastc-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values =
+    getSearchParams(windowRef)?.getAll("terrainTextureEncoding") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "uastc-v1")
+    throw new Error("Unknown or duplicate terrain texture encoding candidate");
+  return "uastc-v1";
+}
+
 /** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
 export function resolveCompactSurfaceBlendCandidate(
   win?: Window,

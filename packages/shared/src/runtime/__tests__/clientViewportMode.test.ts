@@ -5,6 +5,7 @@ import { World } from "../../core/World";
 import { DataManager } from "../../data/DataManager";
 import { ALL_WORLD_AREAS } from "../../data/world-areas";
 import { TerrainSystem } from "../../systems/shared/world/TerrainSystem";
+import { ClientGraphics } from "../../systems/client/ClientGraphics";
 import { createCompactTerrainColorOperations } from "../../systems/shared/world/CompactTerrainPalette";
 import {
   COMPACT_WORLD_TERRAIN_PROFILE,
@@ -24,6 +25,7 @@ import {
   resolveCompactRockProjectionCandidate,
   resolveCompactRockSampling,
   resolveCompactGroundSampling,
+  resolveCompactTerrainTextureEncoding,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -61,6 +63,111 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("explicit UASTC terrain encoding (no renderer or quality defaults)", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string) => {
+    dom.reconfigure({ url: `http://localhost:3344/?${query}` });
+    return dom.window as unknown as Window;
+  };
+
+  it("is absent by default and does not inspect peer shader selectors", () => {
+    for (const query of [
+      "",
+      "groundSampling=invalid",
+      "rockSampling=",
+      "terrainBlend=invalid",
+    ])
+      expect(
+        resolveCompactTerrainTextureEncoding(visit(query)),
+      ).toBeUndefined();
+    expect(
+      resolveCompactTerrainTextureEncoding(
+        visit("terrainTextureEncoding=uastc-v1"),
+      ),
+    ).toBe("uastc-v1");
+  });
+
+  it("rejects empty, unknown, nonexact and duplicate selectors", () => {
+    for (const value of [
+      "",
+      "png",
+      "UASTC-V1",
+      "%20uastc-v1",
+      "uastc-v1%20",
+      "uastc-v1&terrainTextureEncoding=uastc-v1",
+      "&terrainTextureEncoding=uastc-v1",
+    ])
+      expect(() =>
+        resolveCompactTerrainTextureEncoding(
+          visit(`terrainTextureEncoding=${value}`),
+        ),
+      ).toThrow("texture encoding candidate");
+  });
+
+  it.each([false, true])(
+    "changes the real client init graph only when selected=%s and captures once",
+    (selected) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(selected ? "terrainTextureEncoding=uastc-v1" : ""),
+      });
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      const graphics = world.register(
+        "graphics",
+        ClientGraphics,
+      ) as ClientGraphics;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      try {
+        expect(terrain.getDependencies()).toEqual(
+          selected ? { required: ["graphics"] } : {},
+        );
+        expect(world.groupSystemsByDepth([terrain, graphics])).toEqual(
+          selected ? [[graphics], [terrain]] : [[terrain, graphics]],
+        );
+        expect(world.topologicalSort([terrain, graphics])).toEqual(
+          selected ? [graphics, terrain] : [terrain, graphics],
+        );
+        visit("terrainTextureEncoding=invalid");
+        expect(terrain["getCompactTerrainTextureEncoding"]()).toBe(
+          selected ? "uastc-v1" : undefined,
+        );
+        expect(terrain.getDependencies()).toEqual(
+          selected ? { required: ["graphics"] } : {},
+        );
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+
+  it("never requires unregistered graphics or adds GPU dependencies to a real server-side World", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("terrainTextureEncoding=uastc-v1"),
+    });
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    try {
+      expect(terrain.getDependencies()).toEqual({});
+      Reflect.deleteProperty(globalThis, "window");
+      expect(terrain["resolveRuntimeRole"]().isServer).toBe(true);
+      world.register("graphics", ClientGraphics);
+      expect(terrain.getDependencies()).toEqual({});
+      expect(resolveCompactTerrainTextureEncoding()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
 
 describe("explicit local playable world preview", () => {
   const query =

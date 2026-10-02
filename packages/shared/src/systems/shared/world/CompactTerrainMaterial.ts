@@ -20,6 +20,11 @@ import THREE, {
 } from "../../../extras/three/three";
 import type { Node, TextureNode } from "three/webgpu";
 import {
+  getKTX2TerrainFormat,
+  initKTX2Loader,
+  KTX2_TRANSCODER_PATH,
+} from "../../../extras/three/ktx2TextureLoader";
+import {
   COMPACT_TERRAIN_COMPOSITION,
   createCompactTerrainColorOperations,
   type CompactGrassColorGrade,
@@ -125,7 +130,15 @@ export type CompactGrassSubstrate = typeof COMPACT_GRASS_SUBSTRATE.id;
 
 // Paired with the lossless packing manifest: stale CDN maps fail admission.
 export const COMPACT_TERRAIN_TEXTURE_SHA256 = Object.freeze({
-  ...compactTerrainTextureDigests,
+  "grass-albedo-roughness":
+    compactTerrainTextureDigests["grass-albedo-roughness"],
+  "grass-normal-ao": compactTerrainTextureDigests["grass-normal-ao"],
+  "dirt-albedo-roughness":
+    compactTerrainTextureDigests["dirt-albedo-roughness"],
+  "dirt-normal-ao": compactTerrainTextureDigests["dirt-normal-ao"],
+  "rock-albedo-roughness":
+    compactTerrainTextureDigests["rock-albedo-roughness"],
+  "rock-normal-ao": compactTerrainTextureDigests["rock-normal-ao"],
 });
 export const COMPACT_TERRAIN_HEIGHT_SHA256 = Object.freeze({
   ...compactTerrainHeightDigests,
@@ -141,6 +154,49 @@ export type CompactRockProjection = "stochastic-v1";
 export type CompactRockSampling = "exact-zero-v1";
 export type CompactGroundSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
+export type CompactTerrainTextureEncoding = "uastc-v1";
+type CompactTerrainCompressedFormat = NonNullable<
+  ReturnType<typeof getKTX2TerrainFormat>
+>;
+export const COMPACT_TERRAIN_COMPRESSED_MIP_BYTES = Object.freeze([
+  1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16,
+]);
+
+/** Actual transcode output, not the source-container label, must fit this contract. */
+export function validateCompactTerrainCompressedTexture(
+  image: THREE.Texture,
+  channel: Channel,
+  format: CompactTerrainCompressedFormat,
+): asserts image is THREE.CompressedTexture {
+  if (
+    (format !== THREE.RGBA_ASTC_4x4_Format &&
+      format !== THREE.RGBA_BPTC_Format) ||
+    !(image instanceof THREE.CompressedTexture) ||
+    image.format !== format ||
+    image.type !== THREE.UnsignedByteType ||
+    image.image.width !== COMPACT_TERRAIN_MATERIAL.textureSize ||
+    image.image.height !== COMPACT_TERRAIN_MATERIAL.textureSize ||
+    image.mipmaps.length !== COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.length ||
+    image.generateMipmaps ||
+    image.flipY ||
+    image.premultiplyAlpha ||
+    image.colorSpace !==
+      (channel === "albedo-roughness"
+        ? THREE.SRGBColorSpace
+        : THREE.NoColorSpace)
+  )
+    throw new Error("Invalid compact terrain compressed texture contract");
+  for (const [level, mip] of image.mipmaps.entries()) {
+    const size = Math.max(1, COMPACT_TERRAIN_MATERIAL.textureSize >> level);
+    if (
+      mip.width !== size ||
+      mip.height !== size ||
+      !(mip.data instanceof Uint8Array) ||
+      mip.data.byteLength !== COMPACT_TERRAIN_COMPRESSED_MIP_BYTES[level]
+    )
+      throw new Error(`Invalid compact terrain compressed mip ${level}`);
+  }
+}
 /**
  * Candidate material microrelief, not world-space displacement. Means are from
  * the pinned RGBA8 height pack, before filtering/projection blending; retaining
@@ -200,6 +256,7 @@ type Entry = {
   width: number;
   height: number;
   sha256: string | null;
+  compressed?: true;
 };
 
 /** Per-material textures, never global or shared between world lifetimes. */
@@ -209,6 +266,8 @@ export class CompactTerrainTextureSet {
   private readonly pending = new Map<Key, { cancel(): void }>();
   private promise: Promise<void> | null = null;
   private disposed = false;
+  private readonly compressedFormat: CompactTerrainCompressedFormat | null;
+  private readonly transcoderPath: string;
 
   constructor(
     cdnUrl: string,
@@ -216,7 +275,17 @@ export class CompactTerrainTextureSet {
     readonly surfaceBlend?: CompactSurfaceBlend,
     readonly rockProjection?: CompactRockProjection,
     readonly grassSubstrate?: CompactGrassSubstrate,
+    readonly textureEncoding?: CompactTerrainTextureEncoding,
+    private readonly textureRenderer?: THREE.WebGPURenderer,
   ) {
+    this.transcoderPath = `${cdnUrl.replace(/\/$/, "")}${KTX2_TRANSCODER_PATH}`;
+    if (textureEncoding !== undefined && textureEncoding !== "uastc-v1")
+      throw new Error("Unknown compact terrain texture encoding");
+    if (textureEncoding && !textureRenderer)
+      throw new Error("Compressed terrain requires its initialized renderer");
+    this.compressedFormat = textureEncoding
+      ? getKTX2TerrainFormat(textureRenderer!)
+      : null;
     if (dirtProjection !== undefined && dirtProjection !== "stochastic-v1")
       throw new Error("Unknown compact dirt projection");
     if (surfaceBlend !== undefined && surfaceBlend !== "height-v1")
@@ -248,7 +317,12 @@ export class CompactTerrainTextureSet {
         this.configureTexture(image, channel);
         this.entries.set(key, {
           key,
-          url: `${cdnUrl.replace(/\/$/, "")}/terrain/textures/compact-pbr/${key}.png`,
+          url: `${cdnUrl.replace(/\/$/, "")}/${
+            this.compressedFormat
+              ? compactTerrainTextureDigests["uastc-v1"].maps[key].path
+              : `terrain/textures/compact-pbr/${key}.png`
+          }`,
+          ...(this.compressedFormat ? { compressed: true as const } : {}),
           node: texture(image),
           status: "idle",
           error: null,
@@ -293,6 +367,17 @@ export class CompactTerrainTextureSet {
       flipY: entry.node.value.flipY,
       premultiplyAlpha: entry.node.value.premultiplyAlpha,
       anisotropy: entry.node.value.anisotropy,
+      ...(entry.compressed
+        ? {
+            format: entry.node.value.format,
+            mipLevels: entry.node.value.mipmaps.length,
+            mipBytes:
+              entry.node.value instanceof THREE.CompressedTexture
+                ? entry.node.value.mipmaps.map((mip) => mip.data.byteLength)
+                : [],
+            generateMipmaps: entry.node.value.generateMipmaps,
+          }
+        : {}),
     }));
     return {
       id: this.id,
@@ -327,6 +412,20 @@ export class CompactTerrainTextureSet {
           ? COMPACT_GRASS_SUBSTRATE.additionalSurfaceSampleCount
           : 0),
       bitmapOptions: { ...COMPACT_TERRAIN_BITMAP_OPTIONS },
+      ...(this.textureEncoding
+        ? {
+            textureEncoding: {
+              requested: this.textureEncoding,
+              effective: this.compressedFormat ? "uastc-v1" : "png",
+              format: this.compressedFormat,
+              fallbackReason: this.compressedFormat
+                ? null
+                : "astc4x4-and-bc7-unavailable",
+              orientation: "physical-flipY; upload-flipY=false",
+              heightEncoding: "png",
+            },
+          }
+        : {}),
     };
   }
 
@@ -341,7 +440,9 @@ export class CompactTerrainTextureSet {
   private expectedDigest(key: Key): string {
     return key === "ground-height"
       ? COMPACT_TERRAIN_HEIGHT_SHA256[key]
-      : COMPACT_TERRAIN_TEXTURE_SHA256[key];
+      : this.compressedFormat
+        ? compactTerrainTextureDigests["uastc-v1"].maps[key].sha256
+        : COMPACT_TERRAIN_TEXTURE_SHA256[key];
   }
 
   private configureTexture(
@@ -359,7 +460,7 @@ export class CompactTerrainTextureSet {
     // before ClientGraphics sets Three's constructor default. Existing textures
     // do not inherit later changes to that global default.
     image.anisotropy = COMPACT_TERRAIN_MATERIAL.anisotropy;
-    image.generateMipmaps = true;
+    image.generateMipmaps = !(image instanceof THREE.CompressedTexture);
     // Bitmap decode performs the single Y flip. Explicitly disable a second
     // WebGPU copy flip, and never premultiply packed roughness/AO into RGB.
     image.flipY = false;
@@ -390,6 +491,18 @@ export class CompactTerrainTextureSet {
       throw new Error(
         `Invalid compact terrain texture dimensions: ${entry.key}`,
       );
+    }
+    if (entry.compressed) {
+      try {
+        validateCompactTerrainCompressedTexture(
+          image,
+          entry.key.endsWith("normal-ao") ? "normal-ao" : "albedo-roughness",
+          this.compressedFormat!,
+        );
+      } catch (error) {
+        this.disposeTexture(image);
+        throw error;
+      }
     }
     this.configureTexture(
       image,
@@ -460,6 +573,16 @@ export class CompactTerrainTextureSet {
                 `Compact terrain texture exceeds size budget: ${entry.key}`,
               );
             const bytes = await blob.arrayBuffer();
+            if (
+              entry.compressed &&
+              blob.size !==
+                compactTerrainTextureDigests["uastc-v1"].maps[
+                  entry.key as `${Layer}-${Channel}`
+                ].bytes
+            )
+              throw new Error(
+                `Compact terrain compressed file size mismatch: ${entry.key}`,
+              );
             const digest = await globalThis.crypto.subtle.digest(
               "SHA-256",
               bytes,
@@ -471,6 +594,26 @@ export class CompactTerrainTextureSet {
               throw new Error(
                 `Compact terrain texture digest mismatch: ${entry.key}`,
               );
+            }
+            if (abort.signal.aborted)
+              throw new Error(
+                `Compact terrain texture loading cancelled: ${entry.key}`,
+              );
+            if (entry.compressed) {
+              const loader = await initKTX2Loader(
+                this.textureRenderer!,
+                this.transcoderPath,
+              );
+              if (abort.signal.aborted)
+                throw new Error(
+                  `Compact terrain texture loading cancelled: ${entry.key}`,
+                );
+              const image = await new Promise<THREE.CompressedTexture>(
+                (resolve, reject) => {
+                  loader.parse(bytes, resolve, reject);
+                },
+              );
+              return { image, sha256 };
             }
             const bitmap = await globalThis.createImageBitmap(
               blob,

@@ -64,6 +64,7 @@ import {
   type CompactRockProjection,
   type CompactRockSampling,
   type CompactGroundSampling,
+  type CompactTerrainTextureEncoding,
   type CompactSurfaceBlend,
   type CompactPondBlend,
   type CompactCoastBlend,
@@ -1196,6 +1197,8 @@ export function createTerrainMaterial(
     compactRockProjection?: CompactRockProjection;
     compactRockSampling?: CompactRockSampling;
     compactGroundSampling?: CompactGroundSampling;
+    compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
+    compactTextureRenderer?: THREE.WebGPURenderer;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
     compactCoastBlend?: CompactCoastBlend;
@@ -1238,6 +1241,13 @@ export function createTerrainMaterial(
     throw new Error("Rock projection requires the compact PBR material");
   if (options.compactSurfaceBlend !== undefined && !options.compactPbr)
     throw new Error("Surface blending requires the compact PBR material");
+  if (
+    options.compactTerrainTextureEncoding !== undefined &&
+    !options.compactPbr
+  )
+    throw new Error(
+      "Terrain texture encoding requires the compact PBR material",
+    );
   if (options.compactGroundSampling !== undefined) {
     if (options.compactGroundSampling !== "exact-zero-v1")
       throw new Error("Invalid compact ground sampling");
@@ -1409,6 +1419,8 @@ export function createTerrainMaterial(
         grassColorGrade && options.compactSurfaceBlend === "height-v1"
           ? "frequency-v1"
           : undefined,
+        options.compactTerrainTextureEncoding,
+        options.compactTextureRenderer,
       )
     : null;
 

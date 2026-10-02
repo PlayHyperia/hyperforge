@@ -6,6 +6,7 @@ import {
 } from "../../../extras/three/geometryToPxMesh";
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
 import { System } from "../infrastructure/System";
+import type { ClientGraphics } from "../../client/ClientGraphics";
 import { EventType } from "../../../types/events";
 import { NoiseGenerator } from "../../../utils/NoiseGenerator";
 import { InstancedMeshManager } from "../../../utils/rendering/InstancedMeshManager";
@@ -202,6 +203,7 @@ import {
   resolveCompactRockProjectionCandidate,
   resolveCompactRockSampling,
   resolveCompactGroundSampling,
+  resolveCompactTerrainTextureEncoding,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -463,6 +465,9 @@ export class TerrainSystem extends System {
   private compactGroundSampling: ReturnType<
     typeof resolveCompactGroundSampling
   > | null;
+  private compactTerrainTextureEncoding: ReturnType<
+    typeof resolveCompactTerrainTextureEncoding
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -658,12 +663,28 @@ export class TerrainSystem extends System {
    */
   private initTerrainMaterial(): void {
     const profile = this.getWorldTerrainProfile();
+    const textureEncoding = this.getCompactTerrainTextureEncoding();
+    let textureRenderer: THREE.WebGPURenderer | undefined;
+    if (textureEncoding) {
+      const graphics = this.world.getSystem<ClientGraphics>("graphics");
+      if (!graphics || graphics !== this.world.graphics || !graphics.renderer)
+        throw new Error(
+          "Compressed terrain requires its registered graphics renderer",
+        );
+      textureRenderer = graphics.renderer;
+    }
     const material = createTerrainMaterial(undefined, {
       compactPbr: isCompactSculptProfile(profile),
       compactDirtProjection: this.getCompactDirtProjection(),
       compactRockProjection: this.getCompactRockProjection(),
       compactRockSampling: this.getCompactRockSampling(),
       compactGroundSampling: this.getCompactGroundSampling(),
+      ...(textureEncoding
+        ? {
+            compactTerrainTextureEncoding: textureEncoding,
+            compactTextureRenderer: textureRenderer,
+          }
+        : {}),
       compactSurfaceBlend: this.getCompactSurfaceBlend(),
       compactPondBlend: this.getCompactPondBlend(),
       compactCoastBlend: this.getCompactCoastBlend(),
@@ -877,6 +898,20 @@ export class TerrainSystem extends System {
       this.compactGroundSampling = selection ?? null;
     }
     return this.compactGroundSampling ?? undefined;
+  }
+
+  private getCompactTerrainTextureEncoding(): ReturnType<
+    typeof resolveCompactTerrainTextureEncoding
+  > {
+    if (this.compactTerrainTextureEncoding === undefined)
+      this.compactTerrainTextureEncoding =
+        resolveCompactTerrainTextureEncoding() ?? null;
+    const selection = this.compactTerrainTextureEncoding ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain texture encoding requires compact sculpt terrain",
+      );
+    return selection;
   }
 
   /** Capture both absence and selection once, independently of dirt projection. */
@@ -2246,6 +2281,22 @@ export class TerrainSystem extends System {
 
   constructor(world: World) {
     super(world);
+  }
+
+  override getDependencies() {
+    // PNG startup keeps its original dependency graph. Only the explicit client
+    // candidate waits for its registered renderer; servers never require GPU.
+    if (this.resolveRuntimeRole().isClient) {
+      if (this.compactTerrainTextureEncoding === undefined)
+        this.compactTerrainTextureEncoding =
+          resolveCompactTerrainTextureEncoding() ?? null;
+      if (
+        this.compactTerrainTextureEncoding &&
+        this.world.getSystem("graphics")
+      )
+        return { required: ["graphics"] };
+    }
+    return {};
   }
 
   init(): Promise<void> {
