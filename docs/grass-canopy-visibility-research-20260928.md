@@ -1,5 +1,27 @@
 # Grass canopy visibility: research checkpoint
 
+## Native207 — exact-zero ground comparison; small unreplicated signal
+
+The existing ground candidate was tested on current canonical build201 without changing production defaults. **Do not promote it or claim an accepted performance improvement:** one candidate sample is modestly faster than two baseline samples, but the candidate repeat never passes admission. Performance remains the only active priority; 60 FPS at 2× is not achieved.
+
+All three accepted short samples use the same ordinary scene, camera/player pose, phase0.56, exposure0.850240084, actual3024×1724/DPR2/MSAA4, High shadows, reflections, postprocessing and bloom. Each is25 seconds total, including five seconds of warmup. Every tick attempts85 grass and35 terrain draws, with zero omissions; owner counts, settings and pose match. Diagnostic completion/restoration/owner-absence checks pass, errors are empty, and focus metadata remains true. The sole intended configuration difference is `groundSampling`, independently inspected on the live terrain material; rock sampling stays `exact-zero-v1`. No GPU timers, fences or forced renders are introduced, and there is no emulated viewport or DPR/quality reduction within the matched pair. Wind, water and actors remain live rather than replay-locked.
+
+| Accepted run, chronological order | Measured ticks | Wall tick median / p95 | Synchronous CPU median / p95 |
+| --- | ---: | ---: | ---: |
+| Candidate02 | 302 | 65.90 / 73.40 ms | 16.10 / 19.60 ms |
+| Baseline04 | 293 | 67.30 / 76.10 ms | 16.70 / 22.50 ms |
+| Baseline05 | 294 | 67.40 / 74.50 ms | 16.65 / 20.50 ms |
+
+Root and an independent reviewer reproduce the guards and arithmetic. The candidate's median wall interval is1.4–1.5ms lower (2.1–2.2%); the first pair's input-timestamp median differs by only0.2ms. Short, candidate-first, single-view samples on a shared host do not establish a repeatable gain. These are instrumented ordinary tick intervals and synchronous CPU spans, **not GPU completion or displayed FPS**. Even the candidate remains far beyond the16.67ms frame budget. Stop iterating on this tiny signal as the primary performance task; retain the opt-in candidate, leave qualification open, and next isolate planar-reflection duplication without changing the public flag/vegetation LOD. Terrain and grass remain the strongest measured cost leads from Native206.
+
+Receipts: [candidate02](/Users/lucid/Downloads/hyperia-native207-candidate02-short.json), SHA256 `f71e43ba9812ae41e68f8eea6d4f32544276cb4a73c308eccb2828d20ccfc76d`; [baseline04](/Users/lucid/Downloads/hyperia-native207-baseline04-short.json), `30fbdeb257e6dc47ca869bc495cf985feba15e37e296ecfeabfec36f9065b1cf`; [baseline05](/Users/lucid/Downloads/hyperia-native207-baseline05-short.json), `21e7aaed5cb96dd069462763e745fc3ef82a1acd4379af0b611bbd3865f72e5c`.
+
+An earlier successful65-second baseline03 has807 ticks/745 measured and81.5ms median at3800×1886; it is **excluded from the pair** because the newly opened native window renders3024×1724. The earlier two baseline trials and candidate01 lose focus and are excluded. Candidate03/04 refuse admission at zero frames on the combined visibility/focus/device guard; do not assert which individual condition failed. Candidate03 is downloaded, candidate04 remains in the private client log. No more refused retries are planned in this batch.
+
+Source verification passes21 selected real-owner/material tests across three suites (771 unselected), with all nine source/test/config hashes unchanged. [Regression receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/service-layout-network01-UNQUALIFIED/ground-sampling207-current-regression01.log), SHA256 `327ad4cfc955dd418f37fa64e416174faecefe936101530ce162796dc81c43ac`. The private helper admission passes65 cases plus root's inverse-hash and no-output preflight checks. After runtime cleanup, both helper edits are restored with exact original SHA256 matches and independent Node22 syntax checks. These are not current native WGSL, image-parity or whole-project acceptance.
+
+Accepted samples restore their observer hooks. Baseline and first-candidate camera/clock/exposure restoration is explicitly confirmed; the final refused candidate's camera/exposure controls lack an explicit restoration receipt before its owned page is closed. All owned207 game/DevTools tabs and the stale206 tabs are closed, preserving New Tab. Runtime207 stops normally with empty errors, protected state unchanged, disposable database removed and four private ports free; Docker confirms the exact container is absent. [Process receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-ground207-pair01/process.json), SHA256 `4bb4ab3c04b8fe6fcefb8014a2ccba67d85c5a886dac263ab8ff625d82c055dd`. All42 unrelated file hashes remain unchanged. Public3333/build174 and production defaults are untouched.
+
 ## Native206 — current-build performance ranking at 2×
 
 Performance is the sole active priority. This completed diagnostic replaces the historical grass-first ordering below: **terrain beauty drawing has the largest measured marginal effect in this view, followed by grass**. It does not establish an exclusive GPU-cost breakdown or a shipping improvement.
