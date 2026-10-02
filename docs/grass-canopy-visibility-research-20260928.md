@@ -1,5 +1,53 @@
 # Grass canopy visibility: research checkpoint
 
+## Source227 / Native227 — full terrain surface cache executes; preliminary cadence lead
+
+**Status: representation prototype verified, not promoted.** Performance remains the sole active priority and sustained 60 FPS / 16.67 ms at actual 2× is not achieved. Unlike the rejected small dirt/grass-cache pilots, this experiment replaces the expensive composed terrain surface for one complete 100 m chunk, while retaining its geometry and live lighting.
+
+### Product boundary and verification
+
+`TerrainShader.getCompactTerrainPreLightingSurface()` exposes a lazy frozen record of the exact existing albedo, roughness, AO, view-space normal and live lighting-multiplier nodes. Noncompact/disposed materials return null. Consumers borrow these nodes and own only their derived targets/materials. Default rendering, material construction order and texture ownership are unchanged; **no cache, selector or automatic preparation is added to production**.
+
+Root verification: **204 tests pass / two existing skips / zero failures**, including seven new real-TSL identity/lifetime/light-separation cases. Scoped ESLint, formatting, independent source review and diff checks pass. Full shared typecheck still has the same five inherited procgen API errors, none in the two changed files. Canonical build211 completes with nine bundles, 980 inputs and zero overrides; report SHA256 `a06485f3a6c4d5c2916a2b7b0db63b523dc3f52b8345c43bdece03c4045078`, framework-client SHA256 `656bcf17182caad2b106a423406e355af4e797948f282317f927e756e69628df`.
+
+The design is informed by [Epic's runtime virtual-texturing workflow](https://dev.epicgames.com/documentation/unreal-engine/runtimevirtual-texturing-quick-start-in-unreal-engine) and [Three's MRT example](https://threejs.org/examples/webgpu_multiple_rendertargets.html). This prototype is **not production virtual texturing**: source normal fading and filtering depend on the held primary camera. It bakes the actual surface before dynamic lighting into two RGBA16F maps; lights, PBR, receiver shadows and fog remain live.
+
+### Actual WebGPU execution
+
+The external helper `native-terrain-surface227.mjs` (SHA256 `5f4c9b2823bcda667ad47474c36ac7b15ebb1d3a43aa991ee7b65f8d8d441b2e`) prepares a 128 m / 4096² patch at X286/Z386. Eligible source is `QuadTerrain_quad_49_d4_350_450`. It substitutes only that complete mesh in the primary view; nonprimary views and all other chunks use original material arguments. Preparation is serialized, source/camera/texture ownership guarded, and the lease is bounded to two minutes.
+
+The latest preparation costs **1,422.4 ms** outside timing. Logical persistent GPU target/depth allocation is **405.33 MiB**, with readback peak **533.33 MiB**; this is an intentionally expensive architectural probe, not an acceptable shipping allocation per chunk. Readback checks **20,480,000 channel-texels**, zero invalid values, maximum normal-length error0.0006973. Finite base coverage is not pixel fidelity.
+
+[Issued-program proof](/Users/lucid/Downloads/hyperia-native227-surface-program-proof.json), SHA256 `e8d707aa0fd5f0a0c6fb565286433f8cf5edd8d5461df28d14f9048d645d1590`, independently verifies:
+
+- Primary terrain remains18 issued draws /491,280 triangle slots, exactly one cached draw; nonprimary remains17 /482,838, all original.
+- Cached fragment reduces **55→18 static texture-sampling sites**, including removal of all35 compact-surface gradient samples. Two atlas bindings replace surface maps; PMREM and five shadow comparisons remain.
+- Original primary/nonprimary programs and bindings are byte-identical to stock. Cached vertex placement matches after generated-name normalization; no discard or depth override is added.
+- A prior visual lease renders2,305 substituted frames with no guard errors, then automatically restores on expiry. This is lifecycle evidence, not timing.
+
+Root inspects [stock](/Users/lucid/Downloads/hyperia-native227-surface-stock.png), [candidate](/Users/lucid/Downloads/hyperia-native227-surface-candidate.png) and [restored](/Users/lucid/Downloads/hyperia-native227-surface-restored.png) ordinary-frame images at3024×1724. No gross defect is apparent in this bounded wide view. The view is the **arena-lobby platform overlooking meadow/pond**, not a grass-only closeup despite older naming. Covered-pixel contribution is unmeasured. Mip/filter differences, normal-distance behavior, boundaries and vertical terrain skirts remain explicit visual risks; an XZ atlas cannot exactly represent vertical skirts.
+
+### Preliminary full-content timing — incomplete repeat
+
+Same loaded build211, fixed pose/phase0.56/exposure0.850240084, DPR2/MSAA4/High shadows/full reflections, with allocations resident in both arms. Each planned arm lasts25 seconds, first5 excluded. No readback, census or GPU fence runs during timing.
+
+| Arm | Complete? | Measured ticks | Wall median / p95 (ms) | Tick CPU median (ms) |
+| --- | --- | ---: | ---: | ---: |
+| [Stock](</Users/lucid/Downloads/hyperia-native214-full-content-timing (10).json>) | Yes |488|41.20 /43.90|12.20|
+| [Cached](</Users/lucid/Downloads/hyperia-native214-full-content-timing (11).json>) | Yes |534|37.80 /40.50|13.20|
+| [Restored stock](</Users/lucid/Downloads/hyperia-native214-full-content-timing (12).json>) | **No: lost focus** |380|Excluded|Excluded|
+
+The single complete pair shows a **3.40 ms / approximately8.25% lower median interval**, while CPU rises1.00ms. This is an unreplicated lead, not a causal/exclusive GPU saving or physical-display FPS. The incomplete final control is excluded; the earlier focus-refused installation (9) has zero rows and is also excluded. Do not substitute its partial statistics for a completed A/B/A test. The reused helper's inherited bank-candidate prose does not describe this experiment; Native227's program and cleanup receipts establish the variant. Its terrain-attempt counter reports35 stock /34 cached because the cached material is a different identity, not because a draw disappears. The independent issued-draw census above establishes equal geometry in its sampled frames.
+
+Root and independent review verify identical quality, pose, helper source and texture receipts, all50 periodic focus observations true,85 grass attempts and zero omissions on every accepted row. There are487 stock /533 candidate measured intervals. Quantiles use floor(q × (n − 1)); median uses the middle pair when needed. Stock/candidate timing SHA256 values are `308a631ea9cbd5e05689cfb76279ec8bcfcc425335b33e03a0786b6d519b90ed` and `2ddce01be7eb239edfd06d06ac772d5b1ff1eef7900a682fbf5a202a96beddba`.
+
+### Retirement and next decision
+
+[Cleanup](/Users/lucid/Downloads/hyperia-native227-surface-cleanup.json), SHA256 `c6e5889dffa31642a40093d51e120217e82cce9154fff80bf7bf7d760e225921`, brackets candidate timing with active/healthy snapshots and advancing substitutions1→1606; it confirms exact renderer, exposure, camera/clock restoration, owned target retirement and controller removal. Owned game/DevTools windows close, connectedUserCount reaches0 and no established private socket remains. Runtime stops at2026-10-02T21:52:31.857Z, protected state unchanged, disposable database removed, four private ports free, errors empty. Process SHA256 `17ab02f1cdeea521dafcc143c228bcfd8d69191455c201706709b0ab816b9358`. Both temporary served helpers are removed, external evidence retained, runtime helper baseline restored, and all50 source/unrelated pins match. Public3333/saved-player data remain untouched.
+
+Next: repeat this same full-content comparison in completed reverse-order blocks before expanding the representation. If the gain holds, design a bounded shared-page budget and resolve filtering/normal-distance/skirt/fallback behavior before moving-view or default acceptance. Continue missing current-build category timing; the terrain/grass/reflection ordering and overlap cautions in Native226 still apply. Do not turn shader-site reduction into an exhaustive GPU budget or claim60FPS.
+
+
 ## Native226 — fresh-tab clump-cache comparison completed; pilot rejected
 
 **Decision: keep `grassDynamics=clump-frame-v1` disabled and stop expanding this pilot.** Its healthy GPU output does not produce a useful complete-content performance gain in the tested view. Product source and public defaults remain unchanged. The 60 FPS / 16.67 ms target at actual 2× is still unmet.

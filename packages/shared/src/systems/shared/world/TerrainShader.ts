@@ -138,6 +138,20 @@ export type CompactHavenGroundMaterialReceipt = Readonly<{
   grassEligibilityChanged: false;
 }>;
 
+/** Borrowed nodes from the live material, before dynamic lighting and fog.
+ * Screen filtering and normal-strength distance still depend on the render
+ * camera. This is a graph boundary, not a claim that its outputs are static.
+ * Consumers own any derived materials/targets, never these source resources.
+ */
+export type CompactTerrainPreLightingSurface = Readonly<{
+  albedo: Node<"vec3">;
+  roughness: Node<"float">;
+  ao: Node<"float">;
+  normalView: Node<"vec3">;
+  /** Keep live in beauty rendering; do not bake lamps/night lighting. */
+  lightingMultiplier: Node<"vec3">;
+}>;
+
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
   SNOW_HEIGHT: 90.0,
@@ -1231,6 +1245,7 @@ export function createTerrainMaterial(
   compactCoastBlend?: CompactCoastBlend;
   compactPondBankField?: CompactPondBankField;
   getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
+  getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
   compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -2379,7 +2394,8 @@ export function createTerrainMaterial(
 
   // Apply vertex lighting additively (multiply base by (1 + lightAccum))
   // This brightens terrain near lights without washing out colors
-  const litTerrain = mul(surfaceAlbedo, add(vec3(1, 1, 1), lightAccum));
+  const lightingMultiplier = add(vec3(1, 1, 1), lightAccum);
+  const litTerrain = mul(surfaceAlbedo, lightingMultiplier);
 
   // === DISTANCE FOG (smoothstep with squared distances — avoids per-fragment sqrt) ===
   const baseFogFactor = smoothstep(
@@ -2434,6 +2450,7 @@ export function createTerrainMaterial(
     compactCoastBlend?: CompactCoastBlend;
     compactPondBankField?: CompactPondBankField;
     getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
+    getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
     compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -2495,6 +2512,18 @@ export function createTerrainMaterial(
     });
   let diagnosticOutputs: CompactTerrainDiagnosticOutputs | null = null;
   let diagnosticDisposed = false;
+  let preLightingSurface: CompactTerrainPreLightingSurface | null = null;
+  result.getCompactTerrainPreLightingSurface = () => {
+    if (diagnosticDisposed || !compactSurface) return null;
+    preLightingSurface ??= Object.freeze({
+      albedo: surfaceAlbedo,
+      roughness: compactSurface.roughness,
+      ao: compactSurface.ao,
+      normalView: compactSurface.normal,
+      lightingMultiplier,
+    });
+    return preLightingSurface;
+  };
   result.getCompactTerrainDiagnosticOutputs = () => {
     if (diagnosticDisposed || !compactBaseSurface?.weights || !compactWeights)
       return null;
@@ -2511,6 +2540,7 @@ export function createTerrainMaterial(
   material.addEventListener("dispose", () => {
     diagnosticDisposed = true;
     diagnosticOutputs = null;
+    preLightingSurface = null;
   });
   if (grassColorGrade)
     Object.defineProperty(result, "compactGrassColorGrade", {

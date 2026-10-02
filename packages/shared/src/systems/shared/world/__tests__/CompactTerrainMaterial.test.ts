@@ -146,6 +146,165 @@ function createTerrainMaterial(
   return material;
 }
 
+describe("compact terrain pre-lighting surface (real TSL graph boundary)", () => {
+  it.each([undefined, "height-v1"] as const)(
+    "exposes the exact borrowed material nodes with %s surface blending",
+    (compactSurfaceBlend) => {
+      const material = createTerrainMaterial(undefined, {
+        compactPbr: true,
+        compactSurfaceBlend,
+      });
+      try {
+        const before = {
+          color: material.colorNode,
+          normal: material.normalNode,
+          roughness: material.roughnessNode,
+          ao: material.aoNode,
+          output: material.outputNode,
+          position: material.positionNode,
+          version: material.version,
+          receipt: material.compactTerrainSurface!.getReceipt(),
+        };
+        const surface = material.getCompactTerrainPreLightingSurface();
+        expect(surface).not.toBeNull();
+        if (!surface) throw new Error("Compact PBR surface was not exposed");
+        expect(material.getCompactTerrainPreLightingSurface()).toBe(surface);
+        expect(Object.isFrozen(surface)).toBe(true);
+        expect(Object.keys(surface).sort()).toEqual([
+          "albedo",
+          "ao",
+          "lightingMultiplier",
+          "normalView",
+          "roughness",
+        ]);
+        for (const node of Object.values(surface))
+          expect(node).toBeInstanceOf(THREE.Node);
+        expect(material.normalNode).toBe(surface.normalView);
+        expect(material.roughnessNode).toBe(surface.roughness);
+        expect(material.aoNode).toBe(surface.ao);
+
+        // r186 wraps the original multiplication in one anonymous VarNode.
+        // Do not accept a reconstructed or merely equivalent color graph.
+        expect(material.colorNode?.type).toBe("VarNode");
+        const multiply = Reflect.get(material.colorNode!, "node");
+        expect(multiply).toBeInstanceOf(THREE.Node);
+        expect(multiply.type).toBe("OperatorNode");
+        expect(multiply.op).toBe("*");
+        expect(multiply.aNode).toBe(surface.albedo);
+        expect(multiply.bNode).toBe(surface.lightingMultiplier);
+        expect(Reflect.set(surface, "albedo", vec3(0))).toBe(false);
+        expect(material.colorNode).toBe(before.color);
+        expect(material.normalNode).toBe(before.normal);
+        expect(material.roughnessNode).toBe(before.roughness);
+        expect(material.aoNode).toBe(before.ao);
+        expect(material.outputNode).toBe(before.output);
+        expect(material.positionNode).toBe(before.position);
+        expect(material.version).toBe(before.version);
+        expect(material.compactTerrainSurface!.getReceipt()).toEqual(
+          before.receipt,
+        );
+      } finally {
+        material.dispose();
+      }
+    },
+  );
+
+  it("returns null for both omitted and explicitly disabled compact PBR", () => {
+    for (const options of [{}, { compactPbr: false }]) {
+      const material = createTerrainMaterial(undefined, options);
+      try {
+        expect(material.getCompactTerrainPreLightingSurface()).toBeNull();
+        expect(material.getCompactTerrainPreLightingSurface()).toBeNull();
+        expect(material.compactTerrainSurface).toBeUndefined();
+      } finally {
+        material.dispose();
+      }
+      expect(material.getCompactTerrainPreLightingSurface()).toBeNull();
+    }
+  });
+
+  it.each([false, true])(
+    "returns null after disposal even when requested before disposal is %s",
+    (requestBeforeDisposal) => {
+      const material = createTerrainMaterial(undefined, { compactPbr: true });
+      const surface = requestBeforeDisposal
+        ? material.getCompactTerrainPreLightingSurface()
+        : null;
+      material.dispose();
+      expect(material.getCompactTerrainPreLightingSurface()).toBeNull();
+      expect(material.compactTerrainSurface!.getReceipt().status).toBe(
+        "disposed",
+      );
+      material.dispose();
+      expect(material.getCompactTerrainPreLightingSurface()).toBeNull();
+      if (surface) {
+        expect(Object.isFrozen(surface)).toBe(true);
+        expect(material.normalNode).toBe(surface.normalView);
+      }
+    },
+  );
+
+  it("keeps each material's stable graph independent of another owner's disposal", () => {
+    const first = createTerrainMaterial(undefined, { compactPbr: true });
+    const second = createTerrainMaterial(undefined, { compactPbr: true });
+    try {
+      const a = first.getCompactTerrainPreLightingSurface();
+      const b = second.getCompactTerrainPreLightingSurface();
+      if (!a || !b) throw new Error("Expected two compact PBR surfaces");
+      expect(a).not.toBe(b);
+      for (const key of Object.keys(a) as (keyof typeof a)[])
+        expect(a[key]).not.toBe(b[key]);
+      first.dispose();
+      expect(first.getCompactTerrainPreLightingSurface()).toBeNull();
+      expect(second.getCompactTerrainPreLightingSurface()).toBe(b);
+      expect(second.compactTerrainSurface!.getReceipt().status).not.toBe(
+        "disposed",
+      );
+      expect(second.normalNode).toBe(b.normalView);
+    } finally {
+      first.dispose();
+      second.dispose();
+    }
+  });
+
+  it("keeps dynamic lamp and point-light inputs in the live multiplier, outside surface channels", () => {
+    const material = createTerrainMaterial(undefined, { compactPbr: true });
+    try {
+      const surface = material.getCompactTerrainPreLightingSurface();
+      if (!surface) throw new Error("Expected a compact PBR surface");
+      const lighting = graph(surface.lightingMultiplier);
+      const lamp = getLamppostLightTextureState();
+      const dynamicInputs = [
+        lamp.uNightMix,
+        ...material.terrainUniforms.vertexLightPositions,
+        ...material.terrainUniforms.vertexLightColors,
+        ...material.terrainUniforms.vertexLightParams,
+      ];
+      for (const node of dynamicInputs) expect(lighting.has(node)).toBe(true);
+      for (const root of [
+        surface.albedo,
+        surface.roughness,
+        surface.ao,
+        surface.normalView,
+      ]) {
+        const nodes = graph(root);
+        expect(nodes.has(surface.lightingMultiplier)).toBe(false);
+        for (const node of dynamicInputs) expect(nodes.has(node)).toBe(false);
+        expect(
+          [...nodes].some(
+            (node) => Reflect.get(node, "value") === lamp.textureNode.value,
+          ),
+        ).toBe(false);
+      }
+      expect(material.outputNode).not.toBeNull();
+      expect(material.lights).toBe(true);
+      expect(material.positionNode).toBeNull();
+    } finally {
+      material.dispose();
+    }
+  });
+});
+
 describe("identity terrain texture matrices (real TSL ownership, not native qualification)", () => {
   const createOwner = (selected = true) =>
     new CompactTerrainTextureSet(
