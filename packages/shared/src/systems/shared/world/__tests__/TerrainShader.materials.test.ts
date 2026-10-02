@@ -18,6 +18,50 @@ import {
 } from "../TerrainShader";
 
 describe("TerrainShader material graph", () => {
+  it("keeps raw dirt caching absent by default and admits only the bounded stochastic candidate", () => {
+    type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
+    for (const options of [
+      { compactDirtSurfaceCache: "dirt-page-v1" },
+      { compactPbr: true, compactDirtSurfaceCache: "dirt-page-v1" },
+    ] satisfies Options[])
+      expect(() => createTerrainMaterial(undefined, options)).toThrow(
+        "requires the explicit stochastic compact PBR candidate",
+      );
+    const invalid: Options = {
+      compactPbr: true,
+      compactDirtProjection: "stochastic-v1",
+    };
+    Reflect.set(invalid, "compactDirtSurfaceCache", "unbounded");
+    expect(() => createTerrainMaterial(undefined, invalid)).toThrow(
+      "requires the explicit stochastic compact PBR candidate",
+    );
+    const baseline = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactDirtProjection: "stochastic-v1",
+    });
+    const candidate = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactDirtProjection: "stochastic-v1",
+      compactDirtSurfaceCache: "dirt-page-v1",
+    });
+    try {
+      expect(baseline).not.toHaveProperty("compactDirtSurfacePage");
+      expect(candidate.compactDirtSurfacePage).toBeDefined();
+      expect(
+        Object.getOwnPropertyDescriptor(candidate, "compactDirtSurfacePage"),
+      ).toMatchObject({ writable: false, configurable: false });
+      expect(candidate.compactTerrainSurface?.getReceipt().status).toBe("idle");
+      expect(candidate.terrainUniforms.vertexLightColors).toHaveLength(
+        MAX_VERTEX_LIGHTS,
+      );
+      expect(candidate).not.toHaveProperty("compactGroundSampling");
+      expect(candidate).not.toHaveProperty("compactRockSampling");
+    } finally {
+      baseline.dispose();
+      candidate.dispose();
+    }
+  });
+
   it("admits regional bank evaluation only for a bound compact bank and pins its receipt", () => {
     type Options = NonNullable<Parameters<typeof createTerrainMaterial>[1]>;
     const invalid: Options = { compactPbr: true };

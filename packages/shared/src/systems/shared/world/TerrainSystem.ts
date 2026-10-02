@@ -206,6 +206,7 @@ import {
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
   resolveCompactTerrainBankEvaluation,
+  resolveCompactDirtSurfaceCache,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -476,6 +477,9 @@ export class TerrainSystem extends System {
   private compactTerrainBankEvaluation: ReturnType<
     typeof resolveCompactTerrainBankEvaluation
   > | null;
+  private compactDirtSurfaceCache: ReturnType<
+    typeof resolveCompactDirtSurfaceCache
+  > | null;
   private compactSurfaceBlend: ReturnType<
     typeof resolveCompactSurfaceBlendCandidate
   > | null;
@@ -689,6 +693,7 @@ export class TerrainSystem extends System {
       compactGroundSampling: this.getCompactGroundSampling(),
       compactTerrainTextureMatrix: this.getCompactTerrainTextureMatrix(),
       compactTerrainBankEvaluation: this.getCompactTerrainBankEvaluation(),
+      compactDirtSurfaceCache: this.getCompactDirtSurfaceCache(),
       ...(textureEncoding
         ? {
             compactTerrainTextureEncoding: textureEncoding,
@@ -949,6 +954,24 @@ export class TerrainSystem extends System {
         "Terrain bank evaluation requires compact sculpt terrain",
       );
     return selection;
+  }
+
+  private getCompactDirtSurfaceCache(): ReturnType<
+    typeof resolveCompactDirtSurfaceCache
+  > {
+    if (this.compactDirtSurfaceCache === undefined) {
+      const selection = resolveCompactDirtSurfaceCache();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error(
+            "Dirt surface caching requires compact sculpt terrain",
+          );
+        if (this.getCompactDirtProjection() !== "stochastic-v1")
+          throw new Error("Dirt surface caching requires stochastic dirt");
+      }
+      this.compactDirtSurfaceCache = selection ?? null;
+    }
+    return this.compactDirtSurfaceCache ?? undefined;
   }
 
   /** Capture both absence and selection once, independently of dirt projection. */

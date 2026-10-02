@@ -1928,6 +1928,48 @@ export function blendCompactDirtAlbedo(
   return blendCompactStochasticAlbedo(a, b, c, weights, palette);
 }
 
+/** Raw linear RGB and physical roughness, before every bank/coast/light grade.
+ * The page bake and its live fallback share these exact source samples. Keep
+ * this factory lazy: callers must invoke it inside the selected shader branch.
+ */
+export function createCompactDirtRawAppearance(
+  textures: CompactTerrainTextureSet,
+  projection: ReturnType<typeof createCompactDirtProjections>,
+): Node<"vec4"> {
+  const base = textures.getNode("dirt", "albedo-roughness");
+  const a = textures.sample(base, projection.a.uv, projection.a);
+  const b = textures.sample(base, projection.b.uv, projection.b);
+  const c = textures.sample(base, projection.c.uv, projection.c);
+  return vec4(
+    blendCompactDirtAlbedo(a.rgb, b.rgb, c.rgb, projection.weights).toVar(
+      "compactStochasticDirtAlbedo",
+    ),
+    a.a
+      .max(COMPACT_TERRAIN_MATERIAL.minimumRoughness)
+      .mul(projection.weights.x)
+      .add(
+        b.a
+          .max(COMPACT_TERRAIN_MATERIAL.minimumRoughness)
+          .mul(projection.weights.y),
+      )
+      .add(
+        c.a
+          .max(COMPACT_TERRAIN_MATERIAL.minimumRoughness)
+          .mul(projection.weights.z),
+      ),
+  );
+}
+
+/** Optional private page owner. Undefined keeps the original material graph. */
+export type CompactTerrainDirtSurfaceResolver = {
+  resolve(
+    worldXZ: Node<"vec2">,
+    worldDx: Node<"vec2">,
+    worldDy: Node<"vec2">,
+    originalRaw: () => Node<"vec4">,
+  ): Node<"vec4">;
+};
+
 /** Same approximate linear-space compensation for each independently sampled
  * scan. Never use the dirt mean for stone or compensate encoded normal channels.
  * This does not perform the histogram transform/inverse of Heitz/Neyret.
@@ -2091,11 +2133,13 @@ export function createCompactTerrainLayers(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
   patternNoise: Node<"float"> = float(0.5),
+  dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
 ): Record<Layer, CompactTerrainLayer> {
   const factory = createCompactTerrainLayerFactory(
     textures,
     distanceSquared,
     patternNoise,
+    dirtSurfacePage,
   );
   // Preserve the original unconditional graph-construction order.
   const rock = factory.createRock();
@@ -2154,6 +2198,7 @@ export function createCompactTerrainLayerFactory(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
   patternNoise: Node<"float"> = float(0.5),
+  dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
 ): {
   createGround(): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
   prepareGround(): {
@@ -2165,6 +2210,8 @@ export function createCompactTerrainLayerFactory(
   };
   createRock(required?: Node<"bool">): CompactTerrainLayer;
 } {
+  if (dirtSurfacePage && textures.dirtProjection !== "stochastic-v1")
+    throw new Error("Dirt surface pages require stochastic-v1 projection");
   const controls = COMPACT_TERRAIN_MATERIAL;
   const nearDetail = float(1).sub(
     smoothstep(
@@ -2332,6 +2379,26 @@ export function createCompactTerrainLayerFactory(
       undefined,
       worldDerivatives,
     );
+    const cachedRaw = dirtSurfacePage
+      ? Fn(() => {
+          // Both the page footprint and the original sample gradients must be
+          // evaluated before a nonuniform page/fallback branch. The other dirt
+          // channels retain their original projection and normal-frame graph.
+          const worldXZ = vec2(positionWorld.x, positionWorld.z).toVar(
+            "compactDirtSurfaceWorldXZ",
+          );
+          const dx = (worldDerivatives?.dx.xz ?? worldXZ.dFdx()).toVar(
+            "compactDirtSurfaceWorldDx",
+          );
+          const dy = (worldDerivatives?.dy.xz ?? worldXZ.dFdy()).toVar(
+            "compactDirtSurfaceWorldDy",
+          );
+          const projection = createCompactDirtProjections(worldXZ, dx, dy);
+          return dirtSurfacePage.resolve(worldXZ, dx, dy, () =>
+            createCompactDirtRawAppearance(textures, projection),
+          );
+        })().toVar("compactDirtSurfacePageResult")
+      : null;
     return {
       ...(a.height && b.height && c.height
         ? {
@@ -2341,16 +2408,20 @@ export function createCompactTerrainLayerFactory(
               .add(c.height.mul(p.weights.z)),
           }
         : {}),
-      albedo: blendCompactDirtAlbedo(
-        a.albedo,
-        b.albedo,
-        c.albedo,
-        p.weights,
-      ).toVar("compactStochasticDirtAlbedo"),
-      roughness: a.roughness
-        .mul(p.weights.x)
-        .add(b.roughness.mul(p.weights.y))
-        .add(c.roughness.mul(p.weights.z)),
+      // Do not materialize the original AR blend when a resolver owns it.
+      // project() creates no dirt AR temporaries, so its unused AR nodes stay
+      // outside the emitted graph while normal/AO and height remain live.
+      albedo:
+        cachedRaw?.rgb ??
+        blendCompactDirtAlbedo(a.albedo, b.albedo, c.albedo, p.weights).toVar(
+          "compactStochasticDirtAlbedo",
+        ),
+      roughness:
+        cachedRaw?.a ??
+        a.roughness
+          .mul(p.weights.x)
+          .add(b.roughness.mul(p.weights.y))
+          .add(c.roughness.mul(p.weights.z)),
       ao: a.ao
         .mul(p.weights.x)
         .add(b.ao.mul(p.weights.y))

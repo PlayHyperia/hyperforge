@@ -56,6 +56,8 @@ import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
   createCompactTerrainLayerFactory,
+  createCompactDirtRawAppearance,
+  createCompactDirtProjections,
   createCompactRockAppearanceRequired,
   createCompactGrassAppearanceRequired,
   createCompactDirtAppearanceRequired,
@@ -102,6 +104,10 @@ import {
   applyCompactCoastRock,
   createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
+import {
+  CompactTerrainDirtSurfacePage,
+  type CompactTerrainDirtSurfaceCache,
+} from "./CompactTerrainDirtSurfacePage";
 import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 import {
   createCompactTerrainColorOperations,
@@ -1202,6 +1208,7 @@ export function createTerrainMaterial(
     compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
     compactTerrainTextureMatrix?: CompactTerrainTextureMatrix;
     compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
+    compactDirtSurfaceCache?: CompactTerrainDirtSurfaceCache;
     compactTextureRenderer?: THREE.WebGPURenderer;
     compactSurfaceBlend?: CompactSurfaceBlend;
     compactPondBlend?: CompactPondBlend;
@@ -1216,6 +1223,7 @@ export function createTerrainMaterial(
 ): THREE.Material & {
   terrainUniforms: TerrainUniforms;
   compactTerrainSurface?: CompactTerrainTextureSet;
+  compactDirtSurfacePage?: CompactTerrainDirtSurfacePage;
   compactRockSampling?: CompactRockSampling;
   compactGroundSampling?: CompactGroundSampling;
   compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
@@ -1261,6 +1269,15 @@ export function createTerrainMaterial(
         "Terrain texture matrix requires the compact PBR material",
       );
   }
+  if (
+    options.compactDirtSurfaceCache !== undefined &&
+    (options.compactDirtSurfaceCache !== "dirt-page-v1" ||
+      !options.compactPbr ||
+      options.compactDirtProjection !== "stochastic-v1")
+  )
+    throw new Error(
+      "Dirt surface caching requires the explicit stochastic compact PBR candidate",
+    );
   if (options.compactTerrainBankEvaluation !== undefined) {
     if (options.compactTerrainBankEvaluation !== "regional-v1")
       throw new Error("Invalid compact terrain bank evaluation");
@@ -1453,6 +1470,17 @@ export function createTerrainMaterial(
   // Sample Perlin noise
   const noiseUV = mul(vec2(worldPos.x, worldPos.z), noiseScale);
   const noiseValue = texture(noiseTex, noiseUV).r;
+  // A single explicitly prepared page. No automatic bake, streaming pool or
+  // default selection: an unprepared/invalid page uses the original shader.
+  const compactDirtSurfacePage =
+    compactTextures && options.compactDirtSurfaceCache
+      ? new CompactTerrainDirtSurfacePage(compactTextures, (worldXZ, dx, dy) =>
+          createCompactDirtRawAppearance(
+            compactTextures,
+            createCompactDirtProjections(worldXZ, dx, dy),
+          ),
+        )
+      : undefined;
   const macroSurface = createCompactTerrainMacroWeights(
     vec2(worldPos.x, worldPos.z),
     noiseValue,
@@ -1460,7 +1488,12 @@ export function createTerrainMaterial(
   );
   const compactLayerFactory =
     compactTextures && options.compactRockSampling
-      ? createCompactTerrainLayerFactory(compactTextures, distSq, noiseValue)
+      ? createCompactTerrainLayerFactory(
+          compactTextures,
+          distSq,
+          noiseValue,
+          compactDirtSurfacePage,
+        )
       : null;
   const preparedGround = options.compactGroundSampling
     ? compactLayerFactory!.prepareGround()
@@ -1492,7 +1525,12 @@ export function createTerrainMaterial(
               worldNormal: normalWorldGeometry,
             },
           }
-        : createCompactTerrainLayers(compactTextures, distSq, noiseValue)
+        : createCompactTerrainLayers(
+            compactTextures,
+            distSq,
+            noiseValue,
+            compactDirtSurfacePage,
+          )
       : null;
   const bankVergeLocality = macroField?.bankVerge
     ? createCompactBankVergeLocality(worldPos, macroField)
@@ -2388,6 +2426,7 @@ export function createTerrainMaterial(
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
     compactTerrainSurface?: CompactTerrainTextureSet;
+    compactDirtSurfacePage?: CompactTerrainDirtSurfacePage;
     compactRockSampling?: CompactRockSampling;
     compactGroundSampling?: CompactGroundSampling;
     compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
@@ -2405,6 +2444,13 @@ export function createTerrainMaterial(
     };
   };
   result.terrainUniforms = terrainUniforms;
+  if (compactDirtSurfacePage)
+    Object.defineProperty(result, "compactDirtSurfacePage", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: compactDirtSurfacePage,
+    });
   if (options.compactTerrainBankEvaluation !== undefined)
     Object.defineProperty(result, "compactTerrainBankEvaluation", {
       enumerable: true,
@@ -2506,7 +2552,10 @@ export function createTerrainMaterial(
     };
   if (compactTextures) {
     result.compactTerrainSurface = compactTextures;
-    material.addEventListener("dispose", () => compactTextures.dispose());
+    material.addEventListener("dispose", () => {
+      compactDirtSurfacePage?.dispose();
+      compactTextures.dispose();
+    });
   }
   return result;
 }

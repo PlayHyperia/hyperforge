@@ -28,6 +28,7 @@ import {
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
   resolveCompactTerrainBankEvaluation,
+  resolveCompactDirtSurfaceCache,
   resolveCompactSurfaceBlendCandidate,
   resolveCompactPondBlendCandidate,
   resolveCompactCoastBlend,
@@ -65,6 +66,94 @@ import {
 function makeWindow(pathname: string, search = ""): Window {
   return { location: { pathname, search } } as unknown as Window;
 }
+
+describe("bounded dirt surface cache selection (no quality defaults)", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string) => {
+    dom.reconfigure({ url: `http://localhost:3344/?${query}` });
+    return dom.window as unknown as Window;
+  };
+  it("requires one exact opt-in without changing or parsing peer defaults", () => {
+    for (const query of [
+      "",
+      "terrainBankEvaluation=invalid",
+      "dirtProjection=invalid",
+    ])
+      expect(resolveCompactDirtSurfaceCache(visit(query))).toBeUndefined();
+    expect(
+      resolveCompactDirtSurfaceCache(
+        visit("terrainDirtSurfaceCache=dirt-page-v1"),
+      ),
+    ).toBe("dirt-page-v1");
+    for (const value of [
+      "",
+      "off",
+      "DIRT-PAGE-V1",
+      "dirt-page-v1%20",
+      "dirt-page-v1&terrainDirtSurfaceCache=dirt-page-v1",
+    ])
+      expect(() =>
+        resolveCompactDirtSurfaceCache(
+          visit(`terrainDirtSurfaceCache=${value}`),
+        ),
+      ).toThrow("dirt surface cache candidate");
+  });
+  it.each([false, true])(
+    "captures selected=%s once on the actual terrain owner",
+    (selected) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(selected ? "terrainDirtSurfaceCache=dirt-page-v1" : ""),
+      });
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      terrain["compactDirtProjection"] = "stochastic-v1";
+      try {
+        expect(terrain["getCompactDirtSurfaceCache"]()).toBe(
+          selected ? "dirt-page-v1" : undefined,
+        );
+        visit("terrainDirtSurfaceCache=invalid");
+        expect(terrain["getCompactDirtSurfaceCache"]()).toBe(
+          selected ? "dirt-page-v1" : undefined,
+        );
+        expect(terrain.getDependencies()).toEqual({});
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
+  it("rejects an incompatible world or dirt projection and has no server default", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("terrainDirtSurfaceCache=dirt-page-v1"),
+    });
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    try {
+      terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+      expect(() => terrain["getCompactDirtSurfaceCache"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      terrain["compactDirtProjection"] = null;
+      expect(() => terrain["getCompactDirtSurfaceCache"]()).toThrow(
+        "requires stochastic dirt",
+      );
+      Reflect.deleteProperty(globalThis, "window");
+      expect(resolveCompactDirtSurfaceCache()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
 
 describe("explicit regional terrain bank evaluation (no quality defaults)", () => {
   const dom = new JSDOM("", { url: "http://localhost:3344/" });

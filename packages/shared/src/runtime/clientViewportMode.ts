@@ -517,6 +517,22 @@ export function resolveCompactTerrainBankEvaluation(
   return "regional-v1";
 }
 
+/** Bounded raw dirt cache experiment. No page is baked by URL selection alone. */
+export function resolveCompactDirtSurfaceCache(
+  win?: Window,
+): "dirt-page-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values =
+    getSearchParams(windowRef)?.getAll("terrainDirtSurfaceCache") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "dirt-page-v1")
+    throw new Error(
+      "Unknown or duplicate terrain dirt surface cache candidate",
+    );
+  return "dirt-page-v1";
+}
+
 /** Explicit surface-blend preview; the terrain owner separately admits sculpt terrain. */
 export function resolveCompactSurfaceBlendCandidate(
   win?: Window,

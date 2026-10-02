@@ -6,6 +6,7 @@ import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
+import { JSDOM } from "jsdom";
 import compactTextureDigests from "../../../../data/compact-terrain-textures.json";
 import type { Browser } from "playwright";
 import THREE, {
@@ -53,6 +54,7 @@ import {
   createCompactGroundProjections,
   createCompactGrassSubstrateGradients,
   createCompactDirtProjections,
+  createCompactDirtRawAppearance,
   createCompactStochasticProjections,
   blendCompactStochasticAlbedo,
   createCompactDirtVertexHash,
@@ -111,6 +113,10 @@ import {
   type CompactPondBankComposition,
 } from "../CompactTerrainPalette";
 import type { FlatZone } from "../../../../types/world/terrain";
+import {
+  COMPACT_TERRAIN_DIRT_SURFACE_PAGE,
+  CompactTerrainDirtSurfacePage,
+} from "../CompactTerrainDirtSurfacePage";
 import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { DataManager } from "../../../../data/DataManager";
 import { World } from "../../../../core/World";
@@ -1479,6 +1485,10 @@ function vectorValue(
         return pair((a, b) => (a !== 0 || b !== 0 ? 1 : 0));
       case ">":
         return pair((a, b) => (a > b ? 1 : 0));
+      case ">=":
+        return pair((a, b) => (a >= b ? 1 : 0));
+      case "<=":
+        return pair((a, b) => (a <= b ? 1 : 0));
       case "/":
         return pair((a, b) => a / b);
       case "+":
@@ -1597,6 +1607,653 @@ async function decodedTexture(name: string) {
     THREE.RGBAFormat,
   );
 }
+
+describe("bounded dirt surface page (real TSL and ownership, not native qualification)", () => {
+  const createOwner = () =>
+    new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      "height-v1",
+      "stochastic-v1",
+      "frequency-v1",
+    );
+  const expanded = (roots: readonly Node[], stop = new Set<Node>()) => {
+    const seen = new Set<Node>();
+    const visit = (node: Node) => {
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (
+        node === positionWorld ||
+        node === normalWorldGeometry ||
+        stop.has(node)
+      )
+        return;
+      const stack = numericShaderStack(node);
+      if (stack) visit(stack);
+      else for (const child of node.getChildren()) visit(child);
+    };
+    roots.forEach(visit);
+    return seen;
+  };
+  const samples = (nodes: Iterable<Node>, source: THREE.Texture) =>
+    [...nodes].filter(
+      (node) =>
+        Reflect.get(node, "isTextureNode") === true &&
+        Reflect.get(node, "value") === source &&
+        Reflect.get(node, "uvNode") instanceof THREE.Node,
+    );
+  const fingerprint = (root: Node): string => {
+    const cache = new Map<Node, string>();
+    const visit = (node: Node): string => {
+      const previous = cache.get(node);
+      if (previous) return previous;
+      const value: unknown = Reflect.get(node, "value");
+      const result = createHash("sha256")
+        .update(
+          JSON.stringify({
+            type: node.type,
+            fields: [
+              "op",
+              "method",
+              "components",
+              "scope",
+              "nodeType",
+              "name",
+            ].map((key) => Reflect.get(node, key)),
+            value:
+              value instanceof THREE.Texture
+                ? value.uuid
+                : value instanceof THREE.Vector2 ||
+                    value instanceof THREE.Vector3 ||
+                    value instanceof THREE.Vector4 ||
+                    value instanceof THREE.Matrix4
+                  ? value.toArray()
+                  : typeof value === "number" || typeof value === "boolean"
+                    ? value
+                    : null,
+            children: [...node.getChildren()].map(visit),
+          }),
+        )
+        .digest("hex");
+      cache.set(node, result);
+      return result;
+    };
+    return visit(root);
+  };
+  const createPage = (owner: CompactTerrainTextureSet) =>
+    new CompactTerrainDirtSurfacePage(owner, (p, dx, dy) =>
+      createCompactDirtRawAppearance(
+        owner,
+        createCompactDirtProjections(p, dx, dy),
+      ),
+    );
+
+  it("packs the original three projected linear colors and per-sample clamped roughness", () => {
+    const owner = createOwner();
+    try {
+      const projection = createCompactDirtProjections(
+        vec2(2.17, -3.41),
+        vec2(0.01, 0.002),
+        vec2(-0.003, 0.02),
+      );
+      const raw = createCompactDirtRawAppearance(owner, projection);
+      const reads = samples(
+        graph(raw),
+        owner.getNode("dirt", "albedo-roughness").value,
+      );
+      expect(reads).toHaveLength(3);
+      const projections = [projection.a, projection.b, projection.c];
+      for (const projected of projections) {
+        const read = reads.find(
+          (node) => Reflect.get(node, "uvNode") === projected.uv,
+        );
+        expect(read).toBeDefined();
+        expect(Reflect.get(read!, "gradNode")).toEqual([
+          projected.dx,
+          projected.dy,
+        ]);
+      }
+      // Bind only the actual source samples, not a fake texture/renderer. This
+      // checks arithmetic, not GPU filtering, half precision, or cache fidelity.
+      const colors = [
+        [0.02, 0.2, 0.9, 0.1],
+        [0.9, 0.3, 0.05, 0.8],
+        [0.1, 0.7, 0.3, 1],
+      ] as const;
+      for (const weights of [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1 / 3, 1 / 3, 1 / 3],
+        [0.1, 0.3, 0.6],
+      ] as const) {
+        const values = new Map<Node, readonly number[]>([
+          [projection.weights, weights],
+        ]);
+        projections.forEach((projected, index) =>
+          values.set(
+            reads.find((node) => Reflect.get(node, "uvNode") === projected.uv)!,
+            colors[index],
+          ),
+        );
+        const expectedRgb = vectorValue(
+          blendCompactDirtAlbedo(
+            vec3(...(colors[0].slice(0, 3) as [number, number, number])),
+            vec3(...(colors[1].slice(0, 3) as [number, number, number])),
+            vec3(...(colors[2].slice(0, 3) as [number, number, number])),
+            vec3(...weights),
+          ),
+        );
+        const expectedRoughness = colors.reduce(
+          (sum, color, index) =>
+            sum + Math.max(0.65, color[3]) * weights[index],
+          0,
+        );
+        const actual = vectorValue(raw, values);
+        actual
+          .slice(0, 3)
+          .forEach((value, index) =>
+            expect(value).toBeCloseTo(expectedRgb[index], 14),
+          );
+        expect(actual[3]).toBeCloseTo(expectedRoughness, 14);
+      }
+      const nodes = graph(raw);
+      expect(
+        samples(nodes, owner.getNode("dirt", "normal-ao").value),
+      ).toHaveLength(0);
+      expect(samples(nodes, owner.getHeightNode()!.value)).toHaveLength(0);
+      expect(
+        [...nodes].some((node) =>
+          ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+        ),
+      ).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("keeps the omitted resolver graph and source receipt unchanged", () => {
+    const owner = createOwner();
+    try {
+      const before = owner.getReceipt();
+      const baseline = createCompactTerrainLayers(
+        owner,
+        float(81),
+        float(0.43),
+      );
+      const explicit = createCompactTerrainLayers(
+        owner,
+        float(81),
+        float(0.43),
+        undefined,
+      );
+      for (const key of ["grass", "dirt", "rock"] as const)
+        for (const channel of Object.keys(
+          baseline[key],
+        ) as (keyof CompactTerrainLayer)[]) {
+          expect(fingerprint(explicit[key][channel]!)).toBe(
+            fingerprint(baseline[key][channel]!),
+          );
+        }
+      expect(owner.getReceipt()).toEqual(before);
+      const nodes = expanded(
+        Object.values(baseline).flatMap((layer) => Object.values(layer)),
+      );
+      expect(
+        [...nodes].some((node) =>
+          String(Reflect.get(node, "name")).startsWith("compactDirtSurface"),
+        ),
+      ).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("keeps only the three original dirt AR reads inside fallback, with one shared packed result", () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    try {
+      const before = owner.getReceipt();
+      const baseline = createCompactTerrainLayerFactory(
+        owner,
+        float(81),
+        float(0.43),
+      ).createGround();
+      const candidate = createCompactTerrainLayerFactory(
+        owner,
+        float(81),
+        float(0.43),
+        page,
+      ).createGround();
+      for (const channel of ["height", "ao", "worldNormal"] as const)
+        expect(fingerprint(candidate.dirt[channel]!)).toBe(
+          fingerprint(baseline.dirt[channel]!),
+        );
+      for (const channel of Object.keys(
+        baseline.grass,
+      ) as (keyof CompactTerrainLayer)[])
+        expect(fingerprint(candidate.grass[channel]!)).toBe(
+          fingerprint(baseline.grass[channel]!),
+        );
+
+      const nodes = expanded(Object.values(candidate.dirt));
+      const branches = [...nodes].filter(
+        (node) => node.type === "ConditionalNode",
+      );
+      expect(branches).toHaveLength(1);
+      const branch = branches[0];
+      const ifNode = Reflect.get(branch, "ifNode"),
+        elseNode = Reflect.get(branch, "elseNode");
+      expect(ifNode).toBeInstanceOf(THREE.Node);
+      expect(elseNode).toBeInstanceOf(THREE.Node);
+      const dirtAR = owner.getNode("dirt", "albedo-roughness").value;
+      expect(samples(expanded([ifNode]), dirtAR)).toHaveLength(0);
+      expect(samples(expanded([elseNode]), dirtAR)).toHaveLength(3);
+      // Stop at the actual conditional: all live normal/AO and height roots are
+      // still traversed, so unused project().albedo cannot hide a hoisted read.
+      const outside = expanded(
+        Object.values(candidate.dirt),
+        new Set([branch]),
+      );
+      expect(samples(outside, dirtAR)).toHaveLength(0);
+      expect(
+        samples(outside, owner.getNode("dirt", "normal-ao").value),
+      ).toHaveLength(3);
+      expect(samples(outside, owner.getHeightNode()!.value)).toHaveLength(3);
+      const shared = [...nodes].filter(
+        (node) => Reflect.get(node, "name") === "compactDirtSurfacePageResult",
+      );
+      expect(shared).toHaveLength(1);
+      expect(graph(candidate.dirt.albedo).has(shared[0])).toBe(true);
+      expect(graph(candidate.dirt.roughness).has(shared[0])).toBe(true);
+
+      const localStacks = [...nodes].filter(
+        (node) => node.type === "StackNode",
+      );
+      const outer = localStacks.find((stack) =>
+        (Reflect.get(stack, "nodes") as Node[]).some(
+          (node) => Reflect.get(node, "name") === "compactDirtSurfaceWorldDx",
+        ),
+      )!;
+      expect(outer).toBeDefined();
+      const statements = Reflect.get(outer, "nodes") as Node[];
+      const derivativeNames = [
+        "compactDirtSurfaceWorldDx",
+        "compactDirtSurfaceWorldDy",
+      ];
+      for (const name of derivativeNames)
+        expect(
+          statements.some((node) => Reflect.get(node, "name") === name),
+        ).toBe(true);
+      const pageStack = localStacks.find((stack) =>
+        (Reflect.get(stack, "nodes") as Node[]).includes(branch),
+      )!;
+      expect(pageStack).toBeDefined();
+      const pageStatements = Reflect.get(pageStack, "nodes") as Node[];
+      const beforeBranch = pageStatements.slice(
+        0,
+        pageStatements.indexOf(branch),
+      );
+      for (const name of [
+        "compactDirtPageWorldXZ",
+        "compactDirtPageWorldDx",
+        "compactDirtPageWorldDy",
+      ])
+        expect(
+          beforeBranch.some((node) => Reflect.get(node, "name") === name),
+        ).toBe(true);
+      const hoisted = new Set(
+        [...statements, ...beforeBranch].filter(
+          (node) => node.type === "VarNode",
+        ),
+      );
+      for (const node of expanded([ifNode, elseNode], hoisted))
+        expect(
+          ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+        ).toBe(false);
+      expect(owner.getReceipt()).toEqual(before);
+      expect(page.getReceipt()).toMatchObject({
+        state: "idle",
+        ready: false,
+        allocatedBytes: 0,
+        issuedDraws: 0,
+      });
+    } finally {
+      page.dispose();
+      owner.dispose();
+    }
+  });
+
+  it("defers fallback construction until real Fn expansion and rejects a dual-projection factory", () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    const dual = new CompactTerrainTextureSet("/assets");
+    try {
+      let constructions = 0;
+      const p = vec2(1, 2),
+        dx = vec2(0.1, 0),
+        dy = vec2(0, 0.1);
+      const result = page.resolve(p, dx, dy, () => {
+        constructions++;
+        return createCompactDirtRawAppearance(
+          owner,
+          createCompactDirtProjections(p, dx, dy),
+        );
+      });
+      expect(constructions).toBe(0);
+      const first = expanded([result]);
+      expect(constructions).toBe(1);
+      expect(expanded([result])).toEqual(first);
+      expect(constructions).toBe(1);
+      expect(() =>
+        createCompactTerrainLayerFactory(dual, float(4), float(0.5), page),
+      ).toThrow(/stochastic-v1/);
+    } finally {
+      page.dispose();
+      owner.dispose();
+      dual.dispose();
+    }
+  });
+
+  it("requires actually decoded admitted PNG sources, never the one-pixel fallback", async () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    // Inspect the real admission method without constructing a renderer,
+    // changing readiness or replacing any production method.
+    const capture = () =>
+      Reflect.apply(Reflect.get(page, "captureSource"), page, []) as {
+        texture: THREE.Texture;
+        source: THREE.Texture["source"];
+        data: unknown;
+        stamp: string;
+      };
+    try {
+      expect(capture).toThrow(/admitted loaded dirt AR/);
+      for (const entry of lifecycle(owner).entries.values()) {
+        const bytes = await readFile(
+          new URL(`${entry.key}.png`, assetDirectory),
+        );
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        expect(digest).toBe(
+          entry.key === "ground-height"
+            ? COMPACT_TERRAIN_HEIGHT_SHA256["ground-height"]
+            : expectedDigest(entry.key),
+        );
+        const decoded = await decodedTexture(entry.key);
+        entry.status = "loading";
+        expect(lifecycle(owner).installTexture(entry, decoded, digest)).toBe(
+          true,
+        );
+      }
+      expect(owner.getReceipt().status).toBe("ready");
+      const source = owner.getNode("dirt", "albedo-roughness").value;
+      const pin = capture();
+      expect(pin.texture).toBe(source);
+      expect(pin.source).toBe(source.source);
+      expect(pin.data).toBe(source.source.data);
+      const originalSpace = source.colorSpace;
+      source.colorSpace = THREE.NoColorSpace;
+      expect(capture).toThrow(/admitted loaded dirt AR/);
+      source.colorSpace = originalSpace;
+      expect(capture().stamp).toBe(pin.stamp);
+      expect(page.getReceipt()).toMatchObject({
+        state: "idle",
+        ready: false,
+        allocatedBytes: 0,
+        completedBakes: 0,
+      });
+      owner.dispose();
+      expect(capture).toThrow(/admitted loaded dirt AR/);
+    } finally {
+      page.dispose();
+      owner.dispose();
+    }
+  });
+
+  it("admits minification on both singular axes and rejects fine, grazing and chart-edge footprints", () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    try {
+      const p = vec2(12.5),
+        dx = vec2(0.1, 0),
+        dy = vec2(0, 0.1);
+      const raw = page.resolve(p, dx, dy, () =>
+        createCompactDirtRawAppearance(
+          owner,
+          createCompactDirtProjections(p, dx, dy),
+        ),
+      );
+      const nodes = expanded([raw]);
+      const branch = [...nodes].find(
+        (node) => node.type === "ConditionalNode",
+      )!;
+      const condition = Reflect.get(branch, "condNode") as Node;
+      const ready = Reflect.get(page, "ready") as Node;
+      const origin = Reflect.get(page, "origin") as Node;
+      const texel = 25 / 1024;
+      const evaluate = (
+        position: readonly number[],
+        x: readonly number[],
+        y: readonly number[],
+        admitted = true,
+      ) =>
+        vectorValue(
+          condition,
+          new Map<Node, readonly number[]>([
+            [p, position],
+            [dx, x],
+            [dy, y],
+            [ready, [admitted ? 1 : 0]],
+            [origin, [0, 0]],
+          ]),
+        )[0];
+      // Only the arithmetic evaluator receives a ready input; no page state or
+      // texture is forged, and CPU tests cannot establish successful GPU baking.
+      expect(evaluate([12.5, 12.5], [texel, 0], [0, texel])).toBe(1);
+      expect(evaluate([12.5, 12.5], [texel * 0.999, 0], [0, texel])).toBe(0);
+      expect(evaluate([12.5, 12.5], [1, 0], [0, 0.001])).toBe(0);
+      expect(evaluate([12.5, 12.5], [1, 0], [1, 0])).toBe(0);
+      expect(evaluate([12.5, 12.5], [0, 0], [0, 0])).toBe(0);
+      expect(evaluate([12.5, 12.5], [0.1, 0.1], [-0.1, 0.1])).toBe(1);
+      expect(evaluate([12.5, 12.5], [0.1, 0], [0, 0.1], false)).toBe(0);
+      const margin = 2 * 0.1 + 2 * texel;
+      for (const position of [
+        [-1, 12.5],
+        [26, 12.5],
+        [12.5, -1],
+        [12.5, 26],
+        [margin - 1e-9, 12.5],
+        [25 - margin + 1e-9, 12.5],
+      ])
+        expect(evaluate(position, [0.1, 0], [0, 0.1])).toBe(0);
+      expect(evaluate([margin, 25 - margin], [0.1, 0], [0, 0.1])).toBe(1);
+      expect(page.getReceipt().ready).toBe(false);
+    } finally {
+      page.dispose();
+      owner.dispose();
+    }
+  });
+
+  it("has a fixed allocation ceiling and disposes its CPU placeholder exactly once without disposing source owners", async () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    const source = owner.getNode("dirt", "albedo-roughness").value;
+    let sourceDisposals = 0,
+      pageDisposals = 0;
+    source.addEventListener("dispose", () => sourceDisposals++);
+    const placeholder = Reflect.get(page, "placeholder") as THREE.DataTexture;
+    placeholder.addEventListener("dispose", () => pageDisposals++);
+    try {
+      expect(Object.isFrozen(COMPACT_TERRAIN_DIRT_SURFACE_PAGE)).toBe(true);
+      expect(COMPACT_TERRAIN_DIRT_SURFACE_PAGE.size).toBe(1024);
+      expect(COMPACT_TERRAIN_DIRT_SURFACE_PAGE.widthMeters).toBe(25);
+      const mipBytes = Array.from(
+        { length: 11 },
+        (_, level) => (1024 >> level) ** 2 * 4 * 2,
+      );
+      expect(COMPACT_TERRAIN_DIRT_SURFACE_PAGE.baseBytes).toBe(mipBytes[0]);
+      expect(COMPACT_TERRAIN_DIRT_SURFACE_PAGE.mipBytes).toBe(
+        mipBytes.reduce((sum, bytes) => sum + bytes, 0),
+      );
+      expect(placeholder).toBeInstanceOf(THREE.DataTexture);
+      expect(placeholder.image.width).toBe(1);
+      expect(placeholder.image.height).toBe(1);
+      expect(page.getReceipt()).toMatchObject({
+        state: "idle",
+        ready: false,
+        generation: 0,
+        allocatedBytes: 0,
+        textureUuid: null,
+        completedBakes: 0,
+        issuedDraws: 0,
+      });
+      const absentRenderer = undefined as unknown as Parameters<
+        typeof page.bake
+      >[0];
+      for (const position of [
+        [NaN, 0],
+        [Infinity, 0],
+        [0, -Infinity],
+        [1e6 + 1, 0],
+        [0, -1e6 - 1],
+      ])
+        await expect(
+          page.bake(absentRenderer, position[0], position[1]),
+        ).rejects.toThrow(/finite bounded origin/);
+      for (const position of [
+        [0, 0],
+        [1e6, -1e6],
+      ])
+        await expect(
+          page.bake(absentRenderer, position[0], position[1]),
+        ).rejects.toThrow(/initialized native WebGPU/);
+      expect(page.getReceipt()).toMatchObject({
+        state: "idle",
+        generation: 0,
+        allocatedBytes: 0,
+        completedBakes: 0,
+      });
+      page.invalidate("test cancellation");
+      expect(page.getReceipt()).toMatchObject({
+        state: "invalid",
+        reason: "test cancellation",
+        ready: false,
+        generation: 1,
+        working: false,
+      });
+      page.dispose();
+      const disposed = page.getReceipt();
+      expect(disposed).toMatchObject({
+        state: "disposed",
+        reason: "disposed",
+        ready: false,
+        generation: 2,
+        allocatedBytes: 0,
+      });
+      page.dispose();
+      page.invalidate("late invalidation");
+      expect(page.getReceipt()).toEqual(disposed);
+      expect(pageDisposals).toBe(1);
+      expect(sourceDisposals).toBe(0);
+      expect(() =>
+        page.resolve(vec2(0), vec2(1, 0), vec2(0, 1), () => vec4(0)),
+      ).toThrow(/live page/);
+      await expect(page.bake(absentRenderer, 0, 0)).rejects.toThrow(
+        /busy or disposed/,
+      );
+    } finally {
+      page.dispose();
+      owner.dispose();
+    }
+    expect(sourceDisposals).toBe(1);
+  });
+
+  it("restores real renderer public state after synchronous preparation success or failure without rendering", async () => {
+    const owner = createOwner(),
+      page = createPage(owner);
+    const dom = new JSDOM("<!doctype html><canvas></canvas>");
+    const renderer = new THREE.WebGPURenderer({
+      canvas: dom.window.document.querySelector("canvas")!,
+    });
+    const priorTarget = new THREE.RenderTarget(32, 32),
+      pageTarget = new THREE.RenderTarget(16, 16);
+    try {
+      renderer.setRenderTarget(priorTarget, 2, 1);
+      renderer.setMRT(THREE.TSL.mrt({ output: vec4(1) }));
+      renderer.setRenderObjectFunction(renderer.renderObject.bind(renderer));
+      renderer.setViewport(3, 4, 29, 28);
+      renderer.setScissor(5, 6, 20, 19);
+      renderer.setScissorTest(true);
+      renderer.setClearColor(new THREE.Color(0.2, 0.3, 0.4), 0.6);
+      renderer.autoClear = false;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.8;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      const snapshot = () => ({
+        target: renderer.getRenderTarget(),
+        face: renderer.getActiveCubeFace(),
+        mip: renderer.getActiveMipmapLevel(),
+        mrt: renderer.getMRT(),
+        callback: renderer.getRenderObjectFunction(),
+        viewport: renderer.getViewport(new THREE.Vector4()).toArray(),
+        scissor: renderer.getScissor(new THREE.Vector4()).toArray(),
+        scissorTest: renderer.getScissorTest(),
+        clear: renderer.getClearColor(new THREE.Color()).toArray(),
+        alpha: renderer.getClearAlpha(),
+        autoClear: renderer.autoClear,
+        toneMapping: renderer.toneMapping,
+        exposure: renderer.toneMappingExposure,
+        colorSpace: renderer.outputColorSpace,
+        pixelRatio: renderer.getPixelRatio(),
+        canvas: [renderer.domElement.width, renderer.domElement.height],
+      });
+      const before = snapshot();
+      const invoke = (operation: () => number) =>
+        Reflect.apply(Reflect.get(page, "withTarget"), page, [
+          renderer,
+          pageTarget,
+          operation,
+        ]) as number;
+      const inspect = () => {
+        expect(renderer.getRenderTarget()).toBe(pageTarget);
+        expect(renderer.getMRT()).toBeNull();
+        expect(renderer.getRenderObjectFunction()).toBeNull();
+        expect(renderer.getScissorTest()).toBe(false);
+        expect(renderer.autoClear).toBe(true);
+        expect(renderer.toneMapping).toBe(THREE.NoToneMapping);
+        expect(renderer.toneMappingExposure).toBe(1);
+        expect(renderer.outputColorSpace).toBe(THREE.LinearSRGBColorSpace);
+        return 17;
+      };
+      expect(invoke(inspect)).toBe(17);
+      expect(snapshot()).toEqual(before);
+      expect(() =>
+        invoke(() => {
+          inspect();
+          throw new Error("preparation rejected");
+        }),
+      ).toThrow(/operation\/state restoration failed/);
+      expect(snapshot()).toEqual(before);
+      expect(renderer.hasInitialized()).toBe(false);
+      await expect(page.bake(renderer, 0, 0)).rejects.toThrow(
+        /initialized native WebGPU/,
+      );
+      expect(snapshot()).toEqual(before);
+      expect(page.getReceipt()).toMatchObject({
+        state: "idle",
+        allocatedBytes: 0,
+        issuedDraws: 0,
+      });
+    } finally {
+      page.dispose();
+      owner.dispose();
+      priorTarget.dispose();
+      pageTarget.dispose();
+      await renderer.dispose();
+      dom.window.close();
+    }
+  });
+});
 
 describe("composition-v1 shared actual bank material graph", () => {
   const ops = createCompactTerrainColorOperations();
