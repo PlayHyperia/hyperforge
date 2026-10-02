@@ -1,5 +1,58 @@
 # Grass canopy visibility: research checkpoint
 
+## Native223 — scene ownership census and shared grass dynamics pilot
+
+**Performance only; 60 FPS at true2× is still unmet.** This checkpoint fills scene-submission ownership gaps and starts a default-off exact-expression reuse pilot. It does not replace Native206's matched terrain/grass cost ordering or turn triangle counts into GPU milliseconds. The last repeat-tested rough-leaf candidate remained41.2–41.6ms median ordinary tick cadence, not sustained16.67ms or displayed60FPS.
+
+### Native submission census
+
+The [actual exported receipt](/Users/lucid/Downloads/hyperia-native223-scene-census.json), SHA256 `ef12f7094a73f1138c7569dd1028f30d1e1f34cf347cf928c92e3e4b290a20e6`, records one ordinary World.tick34238→34239 on frozen build209/Source220. Renderer.render, backend.draw and World.tick observers forward every original call; all three restore exact ownership/descriptors. Complete/restored are true with empty census errors. This is a bounded read-only census, **not timing**, even though its observation interval is recorded.
+
+Settings are3024×1724, DPR2,4×MSAA, High PCF shadows, reflections enabled, held day phase0.56/exposure0.850240084 and the prior low-meadow pose. Primary shadow reuse and terrain bounds are off; rough-leaf lighting is on. Composer routing is active, but LUT and depth blur are inactive. The postprocessing preference does not establish active bloom/LUT/depth-blur workload.
+
+| Actual category / evidence | Primary calls / triangle slots | Mirror calls / triangle slots | Shadow calls / triangle slots | All issued triangle slots |
+| --- | ---: | ---: | ---: | ---: |
+| Grounded grass owner |45 /3,708,681|40 /3,263,232|0 /0|6,971,913|
+| Terrain owner |18 /491,280|17 /482,838|0 /0|974,118|
+| Vegetation mushroom owner |9 /205,533|9 /205,533|18 /411,066|822,132|
+| Tree-material evidence only, not exact pool ownership |46 /119,980|46 /119,980|92 /239,960|479,920|
+| Registered actors |19 /56,996|18 /53,996|0 /0|110,992|
+
+The whole frame has **867 issued-call counters/10,571,622 repeated-view triangle slots**: primary329/4,898,452; mirror320/4,424,057; shadow216/1,245,144; other2/3,969. One other draw is the exactly owned output-transform fullscreen triangle; the3,968-triangle other draw is unclassified. Its geometry matches the source fog-sky geometry, but that is inference, not captured owner identity. Issued calls differ from893 backend draw attempts because some attempts issue no draw. Counts repeat geometry across passes; they are not unique scene triangles, covered pixels or an exhaustive rendering-time budget.
+
+Actor admission uses the actual canonical exported player constructors and canonical Entity/live-registry membership with matching type/config/data NPC or mob fields. There are72 indexed actor roots and11 issued skinned objects, with no unclassified skinned object in this frame; the issued actor objects do not cast shadows. This does not prove a universal absence of duplicate avatars or complete actor CPU cost. An initial install requiring unexported NPC/Mob constructors was refused before any hook/UI/global ownership; the corrected final helper SHA256 is `880cb12fc74caa5097c1383eb168a1982c5591b04136a08e77edad678733df44`.
+
+Resource-tree batching pools are module-local and were not initialized/imported to make them accessible. Eight actual objects carry source-created tree-lighting metadata; their grouped draw counts above are explicitly evidence-only and do not admit a blanket tree omission. Vegetation asset-key parsing is verified: the indexed definitions are mushrooms, not misclassified trees. Other scenery, flowers, effects and sky remain incompletely owned.
+
+### Model-budget lead: use the existing mushroom LOD work
+
+The nine drawn mushroom chunks contain41 instances ×5,013 triangles/instance. They already share one material, so material sharing is not a missing optimization. The current served manifest already references `trees/mushroom-lod1.glb`: the verified derivative has1,500 triangles (70.08% fewer) versus the5,013-triangle hero. Source projected-error LOD conservatively retains the hero when reflections are enabled. The pre-existing checklist task is therefore reinforced: qualify existing main/mirror/sun-shadow projected error with original-detail fallback, not another asset-generation task, unconditional decimation, a reflection-guard bypass or a claimed FPS gain.
+
+Matched timing for actors, exact tree owners, mushrooms/flowers, output transformation and remaining scenery is still open. Terrain/grass/reflection remain the leading measured opportunities; this census does not supply a new time ranking.
+
+### New shared grass dynamics pilot — native qualification pending
+
+Implementation is frozen in six scoped source/test files: grass manager/helper, terrain wiring and the captured client selector/tests. The explicit `grassDynamics=clump-frame-v1` path computes raw wind sine values and distance fade once per clump/frame in a manager-owned RGBA32F storage texture. The original vertex graph retains amplitude order, blade bending, grounding, normals, geometry and population. The unselected path stays unchanged. A current-frame/owner/generation check selects original math for unavailable or stale output. This design is not evidence of net savings: vertex texture loads, one compute dispatch, owner checks and occasional input uploads must be included in complete-content timing.
+
+Final source verification: root independently repeats **843 passing tests / one native-only skip** across five suites (selector 636, cache 21, rough-leaf 39, appearance 111, environment 36). Final report SHA256 `db86da497d6ba627a96869ab3c2992233f219268a1de7e1fd5b4c8ca3786e7e8`. Scoped lint, formatting and diff checks pass. The final root typecheck still reports the same five procgen-distribution API errors, none in the six changed files.
+
+Review caught and repaired a real retirement hazard: Three r186 can keep compiled bindings when `needsUpdate` changes but the program key does not. Each active lease now adds a stable shader-key identity, removes it on retirement, and preserves exact original ownership/descriptors. If a foreign key masks that identity, shared textures remain alive until the exact material releases them; active plus retained owners remain capped at 128. No borrowed material is disposed. Chunk addresses are immutable uint uniforms rather than shader literals. Tests cover these ownership/lifetime cases; native shader and GPU-resource verification remain open.
+
+Canonical build210 completes with **9 bundles, 980 source inputs, zero virtual overrides**, and source bytes matching the canonical working tree. Report SHA256 `b0330b1032107a205f285a717984197a5e3e49a6756b2771ae2773f24160e359`; guarded pre/post snapshots match across 421 pinned files, 438 links, 42 unrelated dirty files, both root docs, public listeners, and the saved database identity/volume. This is build qualification, not GPU or performance acceptance.
+
+The wind suite has 17 pass / 32 fail both against read-only HEAD-only GrassVisualManager and the initial candidate; root verifies the exact same failing test-name set. Baseline receipt SHA256 `94caec440e7f41be67e31ea7a8e61dbe529d97bc78a22ddf040fc4e22d22b578`; initial cache+wind receipt `3ce3265eecb7d8cfaedfc83f871297a0fdd4be38c4d47b90f26b67f28072d64e` includes 15 initial cache cases. Separately, an incorrect repository-root selector invocation omitted the package's DataManager/ProcessingDataProvider setup and failed 37 content cases. The proper package-config run passes all 636 selector cases. Retain the failed-run evidence without labeling those 37 as product regressions. Inherited wind/type failures still prevent a fully green project claim.
+
+Logical bounded texture payload is8MiB+8KiB (output4MiB, input4MiB, matrix8KiB); CPU backing is4MiB+8KiB. These are not measured total VRAM/RSS. Unsupported/excess owners retain original math; the fixed budget supports262,144 clumps/128 owners at most4,096 clumps each. Texture ownership belongs to the manager, not a chunk's disposable geometry; current tokens do not wrap within its lifetime.
+
+Native gates remain: actual emitted compute and vertex WGSL, successful output generation/value checks (a prepared flag is insufficient), matched final images, main/mirror frame-time equivalence, stale/error/overflow/reuse/retirement fallback, moving-view behavior, bounded memory and repeated full-content2× timings. No production/public default is promoted.
+
+### Cleanup and custody
+
+[Native223 cleanup](/Users/lucid/Downloads/hyperia-native223-cleanup.json), SHA256 `9de7b20d2f62d2b0a03b32975549bea650e9f9ca2cd9cc08f35eee0847b89334`, verifies camera/clock and environment/renderer exposure restoration, census/controls absence and canonical renderer methods. The reused Chrome tab returns to New Tab.
+
+Private runtime223 stops by requested SIGTERM at2026-10-02T14:57:03.885Z, empty errors, protected runtime state unchanged, disposable database removed, and all four private ports free. Process receipt SHA256 `f6bbf44eadee6ab0d0a1ee0b08e47f6fa8311c6a6bde16b0b03300e6ea409356`. Two owned served diagnostic copies are removed; external evidence/helper copies remain. Runtime helper restores to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` and passes syntax. All438 protected links and42 unrelated dirty-file hashes verify unchanged. Of414 previous build209 file pins,411 remain exact; the only three intentional source changes are the grass manager, terrain wiring and client selector for the new pilot. Public3333/build174 and saved database remain untouched.
+
+
 ## Native222 — water-depth sharing rejected; MSAA handling shows a small lead
 
 **Result: one accepted full-content 2× comparison shows a 1.35 ms (~3.3%) marginal wall-cadence improvement in each treatment arm.** Treatment medians remain **39.9–40.0 ms**, not 16.67 ms or sustained 60 FPS. This is a private fixed-view descriptor experiment, not a production-safe renderer optimization. Product source, defaults, public build174, quality and scene content are unchanged.

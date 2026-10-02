@@ -142,6 +142,7 @@ export type GrassSubmissionCandidate = "adaptive-ranges-v1";
 export type GrassShadowCandidate = "distance-pcf-v1";
 export type GrassEnvironmentCandidate = "shared-max-roughness-v1";
 export type GrassLightingModelCandidate = "rough-leaf-v1";
+export type GrassDynamicsCandidate = "clump-frame-v1";
 export type GrassPaletteCandidate = "regional-v1";
 export type RootedFlowerCandidate = "rooted-v1";
 
@@ -239,6 +240,36 @@ export function resolveGrassLightingModelCandidate(
       "Rough leaf lighting requires the ordinary retained leaf-volume meadow field, uniform shadows and no stacked environment/shadow trial",
     );
   return "rough-leaf-v1";
+}
+
+/** Explicit shared clump motion trial; omission does not parse peer trials or
+ * change the existing vertex graph. The terrain owner captures this once. */
+export function resolveGrassDynamicsCandidate(
+  win?: Window,
+): GrassDynamicsCandidate | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const params = getSearchParams(windowRef);
+  const values = params?.getAll("grassDynamics") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "clump-frame-v1")
+    throw new Error("Unknown or duplicate grass dynamics candidate");
+  if (
+    !resolveLocalPlayerWorldPreview(windowRef) ||
+    resolveGrassGeometryCandidate(windowRef) !== "meadow-field-v1" ||
+    resolveSingleMapShadowFlow(windowRef) !== "uniform-v1" ||
+    params?.has("grassInstancing") ||
+    params?.has("grassSubmission") ||
+    params?.has("grassEnvironment") ||
+    params?.has("grassShadow")
+  )
+    throw new Error(
+      "Clump dynamics requires the ordinary retained leaf-volume meadow field, uniform shadows and no stacked instancing/submission/environment/shadow trial",
+    );
+  // The separately qualified lighting model is compatible; invalid or
+  // duplicate selections still fail through its original strict resolver.
+  resolveGrassLightingModelCandidate(windowRef);
+  return "clump-frame-v1";
 }
 
 /** Explicit rooted-flower population; omission never enables this owner. */

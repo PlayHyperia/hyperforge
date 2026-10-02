@@ -41,6 +41,7 @@ import {
   resolveGrassShadowCandidate,
   resolveGrassEnvironmentCandidate,
   resolveGrassLightingModelCandidate,
+  resolveGrassDynamicsCandidate,
   resolveGrassPaletteCandidate,
   resolveRootedFlowerCandidate,
   resolveTreeWindCandidate,
@@ -766,6 +767,127 @@ describe("explicit grass distance shadow filtering", () => {
       world.destroy();
     }
   });
+});
+
+describe("explicit per-frame clump dynamics", () => {
+  const dependencies =
+    "worldPreview=retained-v1&streamRenderProfile=island-fine-meadow-720p60-v1&grassAppearance=fine-meadow-v1&grassLighting=leaf-volume-v1&grassGeometry=meadow-field-v1&shadowFlow=uniform-v1";
+  const selected = "grassDynamics=clump-frame-v1";
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string, path = "/"): Window => {
+    dom.reconfigure({ url: `http://localhost:3344${path}?${query}` });
+    return dom.window as unknown as Window;
+  };
+
+  it("is inert by default, including invalid unselected peer trials", () => {
+    expect(resolveGrassDynamicsCandidate()).toBeUndefined();
+    for (const query of [
+      "",
+      dependencies,
+      "grassGeometry=invalid",
+      "grassLightingModel=invalid",
+      "grassInstancing=invalid",
+    ])
+      expect(resolveGrassDynamicsCandidate(visit(query))).toBeUndefined();
+  });
+
+  it("requires one exact candidate and all exact retained-world dependencies", () => {
+    expect(
+      resolveGrassDynamicsCandidate(visit(`${dependencies}&${selected}`)),
+    ).toBe("clump-frame-v1");
+    for (const value of [
+      "",
+      "true",
+      "clump-frame-v2",
+      "CLUMP-FRAME-V1",
+      "clump-frame-v1%20",
+      "clump-frame-v1&grassDynamics=clump-frame-v1",
+    ])
+      expect(() =>
+        resolveGrassDynamicsCandidate(
+          visit(`${dependencies}&grassDynamics=${value}`),
+        ),
+      ).toThrow("Unknown or duplicate grass dynamics candidate");
+    for (const key of new URLSearchParams(dependencies).keys()) {
+      const missing = new URLSearchParams(dependencies);
+      missing.delete(key);
+      const duplicate = new URLSearchParams(dependencies);
+      duplicate.append(key, duplicate.get(key)!);
+      const invalid = new URLSearchParams(dependencies);
+      invalid.set(key, "invalid");
+      for (const params of [missing, duplicate, invalid])
+        expect(() =>
+          resolveGrassDynamicsCandidate(visit(`${params}&${selected}`)),
+        ).toThrow();
+    }
+  });
+
+  it("allows qualified rough-leaf lighting but rejects other owners and spectator routes", () => {
+    expect(
+      resolveGrassDynamicsCandidate(
+        visit(`${dependencies}&${selected}&grassLightingModel=rough-leaf-v1`),
+      ),
+    ).toBe("clump-frame-v1");
+    for (const suffix of [
+      "grassInstancing=attributes-v1",
+      "grassInstancing=",
+      "grassSubmission=adaptive-ranges-v1",
+      "grassSubmission=",
+      "grassEnvironment=shared-max-roughness-v1",
+      "grassEnvironment=",
+      "grassShadow=distance-pcf-v1",
+      "grassShadow=",
+      "grassLightingModel=invalid",
+      "grassLightingModel=rough-leaf-v1&grassLightingModel=rough-leaf-v1",
+      "grassCoverage=invalid",
+      "grassCoverageCell=",
+      "embedded=true",
+      "embedded=false",
+      "page=stream",
+      "mode=spectator",
+    ])
+      expect(() =>
+        resolveGrassDynamicsCandidate(
+          visit(`${dependencies}&${selected}&${suffix}`),
+        ),
+      ).toThrow();
+    for (const path of ["/stream.html", "/play"])
+      expect(() =>
+        resolveGrassDynamicsCandidate(
+          visit(`${dependencies}&${selected}`, path),
+        ),
+      ).toThrow();
+  });
+
+  it.each([false, true])(
+    "captures the actual terrain selection once (enabled=%s)",
+    (enabled) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const world = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(`${dependencies}${enabled ? `&${selected}` : ""}`),
+      });
+      try {
+        terrain["getCompactGrassColorGrade"]();
+        const captured = terrain["grassVisualSelection"]!;
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(captured.dynamics).toBe(enabled ? "clump-frame-v1" : undefined);
+        expect(captured.instancing).toBeUndefined();
+        expect(captured.submission).toBeUndefined();
+        visit(`${dependencies}&grassDynamics=invalid`);
+        terrain["getCompactGrassColorGrade"]();
+        expect(terrain["grassVisualSelection"]).toBe(captured);
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+      }
+    },
+  );
 });
 
 describe("explicit rough-leaf lighting model", () => {
@@ -3749,7 +3871,7 @@ describe("explicit attribute-only grass instancing", () => {
       1,
     );
     expect(source).toMatch(
-      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*grassSelection\.submission,\s*grassSelection\.shadow,\s*grassSelection\.environment,\s*grassSelection\.lightingModel,\s*\);/u,
+      /grassSelection\.geometry,\s*grassSelection\.vergeEvaluation,\s*grassSelection\.instancing,\s*grassSelection\.submission,\s*grassSelection\.shadow,\s*grassSelection\.environment,\s*grassSelection\.lightingModel,\s*grassSelection\.dynamics,\s*\);/u,
     );
   });
 });
@@ -4449,7 +4571,7 @@ describe("explicit single-cell grass coverage URL policy (not native startup pro
       /if \(this\.compactGrassColorGrade === undefined\) \{[\s\S]*const coverageTrial = resolveGrassCoverageTrial\(\);/u,
     );
     expect(capture).toMatch(
-      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(submission \? \{ submission \} : \{\}\),\s*\.\.\.\(shadow \? \{ shadow \} : \{\}\),\s*\.\.\.\(environment \? \{ environment \} : \{\}\),\s*\.\.\.\(lightingModel \? \{ lightingModel \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
+      /this\.grassVisualSelection = Object\.freeze\(\{\s*appearance,\s*profile,\s*coverageTrial,\s*\.\.\.\(roadClearance \? \{ roadClearance \} : \{\}\),\s*\.\.\.\(lighting \? \{ lighting \} : \{\}\),\s*\.\.\.\(geometry \? \{ geometry \} : \{\}\),\s*\.\.\.\(vergeEvaluation \? \{ vergeEvaluation \} : \{\}\),\s*\.\.\.\(instancing \? \{ instancing \} : \{\}\),\s*\.\.\.\(submission \? \{ submission \} : \{\}\),\s*\.\.\.\(shadow \? \{ shadow \} : \{\}\),\s*\.\.\.\(environment \? \{ environment \} : \{\}\),\s*\.\.\.\(lightingModel \? \{ lightingModel \} : \{\}\),\s*\.\.\.\(dynamics \? \{ dynamics \} : \{\}\),\s*\.\.\.\(palette \? \{ palette \} : \{\}\),\s*\.\.\.\(groundingExecution \? \{ groundingExecution \} : \{\}\),\s*\.\.\.\(flowers \? \{ flowers \} : \{\}\),?\s*\}\)/u,
     );
     expect(source).toMatch(
       /grassSelection\.profile\?\.grassProfile === "fine-meadow-v1"\s*\? grassSelection\.coverageTrial \|\| grassSelection\.roadClearance\s*\? \{\s*\.\.\.FINE_MEADOW_GRASS_VISUAL_PROFILE,\s*\.\.\.\(grassSelection\.coverageTrial\s*\? \{ coverageTrial: grassSelection\.coverageTrial \}\s*: \{\}\),\s*\.\.\.\(grassSelection\.roadClearance\s*\? \{ roadClearance: grassSelection\.roadClearance \}\s*: \{\}\),?\s*\}\s*: FINE_MEADOW_GRASS_VISUAL_PROFILE/u,

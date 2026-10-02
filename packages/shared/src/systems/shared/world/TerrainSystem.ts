@@ -219,6 +219,7 @@ import {
   resolveGrassShadowCandidate,
   resolveGrassEnvironmentCandidate,
   resolveGrassLightingModelCandidate,
+  resolveGrassDynamicsCandidate,
   resolveGrassPaletteCandidate,
   resolveGrassCoverageTrial,
   resolveGrassRoadClearance,
@@ -502,6 +503,7 @@ export class TerrainSystem extends System {
         shadow?: ReturnType<typeof resolveGrassShadowCandidate>;
         environment?: ReturnType<typeof resolveGrassEnvironmentCandidate>;
         lightingModel?: ReturnType<typeof resolveGrassLightingModelCandidate>;
+        dynamics?: ReturnType<typeof resolveGrassDynamicsCandidate>;
         palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
         groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
         flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
@@ -1051,6 +1053,7 @@ export class TerrainSystem extends System {
       const shadow = resolveGrassShadowCandidate();
       const environment = resolveGrassEnvironmentCandidate();
       const lightingModel = resolveGrassLightingModelCandidate();
+      const dynamics = resolveGrassDynamicsCandidate();
       const palette = resolveGrassPaletteCandidate();
       const groundingExecution = resolveGrassGroundingExecution();
       const flowers = resolveRootedFlowerCandidate();
@@ -1073,6 +1076,7 @@ export class TerrainSystem extends System {
         ...(shadow ? { shadow } : {}),
         ...(environment ? { environment } : {}),
         ...(lightingModel ? { lightingModel } : {}),
+        ...(dynamics ? { dynamics } : {}),
         ...(palette ? { palette } : {}),
         ...(groundingExecution ? { groundingExecution } : {}),
         ...(flowers ? { flowers } : {}),
@@ -3244,7 +3248,32 @@ export class TerrainSystem extends System {
         grassSelection.shadow,
         grassSelection.environment,
         grassSelection.lightingModel,
+        grassSelection.dynamics,
       );
+      if (grassSelection.dynamics) {
+        const manager = this.grassVisualManager;
+        const graphics = this.world.graphics;
+        if (!graphics) throw new Error("Grass dynamics requires graphics");
+        void graphics
+          .prepareRenderer(() => {
+            if (
+              this.destroyed ||
+              this.grassVisualManager !== manager ||
+              this.world.graphics !== graphics
+            )
+              return;
+            return manager.prepareClumpFrameCache(graphics.renderer);
+          })
+          .catch((error: unknown) => {
+            manager.failClumpFramePreparation(
+              error instanceof Error ? error.message : String(error),
+            );
+            console.warn(
+              "[TerrainSystem] Grass frame preparation retained original dynamics",
+              error,
+            );
+          });
+      }
       if (grassSelection.submission && this.world.graphics)
         this.grassVisualManager.setAdaptiveGrassRenderer(
           this.world.graphics.renderer,
@@ -10222,6 +10251,13 @@ export class TerrainSystem extends System {
   /** Primary render pose only; grass generation remains in the update budget. */
   public prepareGrassForRender(camera: THREE.Camera): void {
     this.grassVisualManager?.capturePrimaryView(camera);
+    if (this.grassVisualSelection?.dynamics && this.world.graphics)
+      this.grassVisualManager?.prepareClumpFrameForRender(
+        this.world.graphics.renderer,
+        this.world.graphics.isPrecompileIdle() &&
+          this.world.graphics.getOpaqueLoadingCoverStatus().state ===
+            "uncovered",
+      );
     this.rootedFlowerVisualManager?.prepareForRender(camera);
   }
 

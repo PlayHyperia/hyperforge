@@ -38,6 +38,11 @@ import {
   updateGrassRoughLeafEnvironmentMaterial,
 } from "./OutdoorEnvironment";
 import { GrassRoughLeafMaterial } from "./GrassRoughLeafMaterial";
+import {
+  GrassClumpFrameCache,
+  createGrassClumpFrameValues,
+  readGrassClumpFrame,
+} from "./GrassClumpFrameCache";
 import { isCompactSculptProfile } from "./WorldTerrainProfile";
 import { createCompactTerrainColorOperations } from "./CompactTerrainPalette";
 import type { CompactHabitatField } from "./CompactHabitatComposition";
@@ -58,6 +63,7 @@ import type {
   GrassShadowCandidate,
   GrassEnvironmentCandidate,
   GrassLightingModelCandidate,
+  GrassDynamicsCandidate,
   GrassSurfaceEligibility,
   StreamingGrassProfileReceipt,
 } from "../../../runtime/clientViewportMode";
@@ -1878,6 +1884,7 @@ export class GrassVisualManager implements QuadTreeListener {
     { node: TerrainQuadNode; work: GrassWorkUnit; desiredLod: number }
   >();
   private destroyed = false;
+  private clumpFrameCache: GrassClumpFrameCache | null = null;
 
   constructor(
     private readonly terrainProfileIdentity: string,
@@ -1922,6 +1929,7 @@ export class GrassVisualManager implements QuadTreeListener {
     private readonly shadowCandidate?: GrassShadowCandidate,
     private readonly environmentCandidate?: GrassEnvironmentCandidate,
     private readonly lightingModelCandidate?: GrassLightingModelCandidate,
+    private readonly dynamicsCandidate?: GrassDynamicsCandidate,
   ) {
     if (typeof terrainProfileIdentity !== "string" || !terrainProfileIdentity) {
       throw new Error("Grass visual terrain profile identity is required");
@@ -2034,6 +2042,20 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error(
         "Rough leaf lighting requires the admitted meadow field without other lighting trials",
+      );
+    if (
+      dynamicsCandidate !== undefined &&
+      (dynamicsCandidate !== "clump-frame-v1" ||
+        !this.fineMeadow ||
+        geometryCandidate !== FINE_GRASS_MEADOW_FIELD_COMPOSITION.id ||
+        lightingCandidate !== FINE_GRASS_LEAF_VOLUME_LIGHTING.id ||
+        instancingCandidate !== undefined ||
+        submissionCandidate !== undefined ||
+        environmentCandidate !== undefined ||
+        shadowCandidate !== undefined)
+    )
+      throw new Error(
+        "Grass dynamics requires the ordinary admitted meadow field",
       );
     if (
       instancingCandidate !== undefined &&
@@ -2345,6 +2367,7 @@ export class GrassVisualManager implements QuadTreeListener {
       this.lodGeometries.forEach((geometry) => geometry.dispose());
       this.material.dispose();
       this.foldedMaterial?.dispose();
+      this.clumpFrameCache?.dispose();
       throw error;
     }
     if (this.compactMeadow) {
@@ -2422,6 +2445,7 @@ export class GrassVisualManager implements QuadTreeListener {
 
   /** No whole-population traversal; callbacks register only touched owners. */
   finishGrassForRender(): void {
+    this.clumpFrameCache?.finishFrame();
     if (!this.touchedAdaptiveGrassOwners.size) return;
     let failure: unknown;
     let failed = false;
@@ -2663,6 +2687,27 @@ export class GrassVisualManager implements QuadTreeListener {
     )
       throw new Error("Grass invariant preparation owner cannot be replaced");
     this.clumpInvariantPreparation = prepare;
+  }
+
+  async prepareClumpFrameCache(renderer: Renderer): Promise<void> {
+    if (!this.destroyed) await this.clumpFrameCache?.prepare(renderer);
+  }
+
+  failClumpFramePreparation(reason: string): void {
+    this.clumpFrameCache?.fail(reason);
+  }
+
+  prepareClumpFrameForRender(
+    renderer: Renderer,
+    preparationIdle: boolean,
+  ): void {
+    if (this.destroyed) return;
+    if (preparationIdle) this.clumpFrameCache?.dispatch(renderer);
+    else this.clumpFrameCache?.finishFrame();
+  }
+
+  getClumpFrameReceipt() {
+    return this.clumpFrameCache?.getReceipt() ?? null;
   }
 
   /** Compile the production instanced-grass vertex layout before it is visible. */
@@ -3089,6 +3134,7 @@ export class GrassVisualManager implements QuadTreeListener {
   private retireGrassChunk(key: string): void {
     const chunk = this.chunks.get(key);
     if (chunk) {
+      this.clumpFrameCache?.retire(chunk.mesh);
       if (chunk.mesh.parent) chunk.mesh.parent.remove(chunk.mesh);
       const release = () => {
         try {
@@ -3991,6 +4037,7 @@ export class GrassVisualManager implements QuadTreeListener {
       }
 
       this.container.add(mesh);
+      this.clumpFrameCache?.register(mesh);
       this.chunks.set(key, {
         nodeId: node.id,
         mesh,
@@ -4000,6 +4047,7 @@ export class GrassVisualManager implements QuadTreeListener {
         work,
       });
     } catch (error) {
+      if (mesh) this.clumpFrameCache?.retire(mesh);
       mesh?.removeFromParent();
       const release = () => {
         try {
@@ -4200,6 +4248,7 @@ export class GrassVisualManager implements QuadTreeListener {
     this.pendingLodSwap.clear();
     terminateGrassWorkerPool();
     for (const key of this.chunks.keys()) this.retireGrassChunk(key);
+    this.clumpFrameCache?.dispose();
     this.lodGeometries.forEach((g) => g.dispose());
     if (this.material) this.material.dispose();
     this.foldedMaterial?.dispose();
@@ -4774,6 +4823,13 @@ export class GrassVisualManager implements QuadTreeListener {
       Math.min(GRASS_CONFIG.FADE_START, this.maxRenderDistance * 0.8),
     );
     const uFadeEnd = float(this.maxRenderDistance);
+    if (this.dynamicsCandidate)
+      this.clumpFrameCache = new GrassClumpFrameCache(
+        uPlayerPos,
+        uWindSpeed,
+        Math.min(GRASS_CONFIG.FADE_START, this.maxRenderDistance * 0.8),
+        this.maxRenderDistance,
+      );
 
     mat.positionNode = Fn(() => {
       const localPos = positionLocal.toVar("gp");
@@ -5017,13 +5073,33 @@ export class GrassVisualManager implements QuadTreeListener {
         vec3(worldBase.x, float(0), worldBase.z),
         vec3(uPlayerPos.x, float(0), uPlayerPos.z),
       );
-      const fade = clamp(
-        sub(
-          float(1),
-          smoothstep(uFadeStart, uFadeEnd, pow(dot(toPlayer, toPlayer), 0.5)),
-        ),
-        float(0),
-        float(1),
+      const frameValues = this.dynamicsCandidate
+        ? readGrassClumpFrame(() =>
+            createGrassClumpFrameValues(
+              worldBase.xyz,
+              time,
+              uWindSpeed,
+              uPlayerPos,
+              uFadeStart,
+              uFadeEnd,
+            ),
+          ).toVar("naturalGrassClumpFrame")
+        : null;
+      const fade = (
+        frameValues
+          ? frameValues.z
+          : clamp(
+              sub(
+                float(1),
+                smoothstep(
+                  uFadeStart,
+                  uFadeEnd,
+                  pow(dot(toPlayer, toPlayer), 0.5),
+                ),
+              ),
+              float(0),
+              float(1),
+            )
       ).toVar("naturalGrassFade");
       const wt = time.mul(uWindSpeed);
       const heightFlex = usesGrassBladeHeightFlex(this.geometryLayout);
@@ -5109,17 +5185,23 @@ export class GrassVisualManager implements QuadTreeListener {
         // Chunk-local offsets repeat at each chunk boundary. Key both waves to
         // the actual world-space clump base, not to an animated blade vertex.
         const displacement = vec3(
-          sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
+          (frameValues
+            ? frameValues.x
+            : sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
+          )
             .mul(uWindStrength)
             .mul(bend)
             .mul(uBladeHeight),
           float(0),
-          sin(
-            wt
-              .mul(0.67)
-              .add(worldBase.x.mul(0.18))
-              .add(worldBase.z.mul(0.28))
-              .add(2),
+          (frameValues
+            ? frameValues.y
+            : sin(
+                wt
+                  .mul(0.67)
+                  .add(worldBase.x.mul(0.18))
+                  .add(worldBase.z.mul(0.28))
+                  .add(2),
+              )
           )
             .mul(uWindStrength)
             .mul(0.55)
