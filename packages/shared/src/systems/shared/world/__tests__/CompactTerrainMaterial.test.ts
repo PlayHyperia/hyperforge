@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { build } from "esbuild";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
 import { JSDOM } from "jsdom";
 import compactTextureDigests from "../../../../data/compact-terrain-textures.json";
@@ -1766,6 +1766,387 @@ async function decodedTexture(name: string) {
     THREE.RGBAFormat,
   );
 }
+
+describe("loaded source leases (real installed Three textures)", () => {
+  const decoded = new Map<string, THREE.DataTexture>();
+  beforeAll(async () => {
+    for (const key of [
+      ...Object.keys(COMPACT_TERRAIN_TEXTURE_SHA256),
+      "ground-height",
+    ])
+      decoded.set(key, await decodedTexture(key));
+  });
+  afterAll(() => {
+    for (const image of decoded.values()) image.dispose();
+    decoded.clear();
+  });
+  const install = (
+    owner: CompactTerrainTextureSet,
+    entry: TextureEntry,
+    image?: THREE.Texture,
+  ) => {
+    const data = decoded.get(entry.key)!.image;
+    const loaded =
+      image ??
+      new THREE.DataTexture(
+        data.data,
+        data.width,
+        data.height,
+        THREE.RGBAFormat,
+      );
+    entry.status = "loading";
+    expect(
+      lifecycle(owner).installTexture(
+        entry,
+        loaded,
+        entry.key === "ground-height"
+          ? COMPACT_TERRAIN_HEIGHT_SHA256["ground-height"]
+          : expectedDigest(entry.key),
+      ),
+    ).toBe(true);
+    return loaded;
+  };
+  const loadedOwner = (height = false, identity = false) => {
+    const owner = new CompactTerrainTextureSet(
+      "/assets",
+      undefined,
+      height ? "height-v1" : undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      identity ? "identity-v1" : undefined,
+    );
+    for (const entry of lifecycle(owner).entries.values())
+      install(owner, entry);
+    return owner;
+  };
+
+  it("refuses partial, failed, redirected and disposed owners; accepts only all admitted maps", () => {
+    const owner = new CompactTerrainTextureSet(
+      "/assets",
+      undefined,
+      "height-v1",
+    );
+    try {
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      const entries = [...lifecycle(owner).entries.values()];
+      for (const entry of entries.slice(0, -1)) install(owner, entry);
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      entries.at(-1)!.status = "error";
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      install(owner, entries.at(-1)!);
+      const lease = owner.captureLoadedSourceLease()!;
+      expect(Object.isFrozen(lease)).toBe(true);
+      expect(lease.isCurrent()).toBe(true);
+      const node = entries[0].node,
+        original = node.value;
+      const foreign = original.clone();
+      node.value = foreign;
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      expect(lease.isCurrent()).toBe(false);
+      node.value = original;
+      foreign.dispose();
+      expect(lease.isCurrent()).toBe(false);
+      const current = owner.captureLoadedSourceLease()!;
+      owner.dispose();
+      expect(current.isCurrent()).toBe(false);
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("bounds leases, releases slots idempotently, and does not dispose or modify sources", () => {
+    const owner = loadedOwner(),
+      other = loadedOwner(true, true);
+    try {
+      const before = owner.getReceipt();
+      const leases = Array.from({ length: 16 }, () =>
+        owner.captureLoadedSourceLease()!,
+      );
+      expect(leases.every(Boolean)).toBe(true);
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      const unrelated = other.captureLoadedSourceLease()!;
+      for (let i = 0; i < 100; i++) expect(leases[0].isCurrent()).toBe(true);
+      expect(owner.getReceipt()).toEqual(before);
+      leases[0].release();
+      leases[0].release();
+      expect(leases[0].isCurrent()).toBe(false);
+      expect(owner.captureLoadedSourceLease()!.isCurrent()).toBe(true);
+      const image = owner.getNode("grass", "albedo-roughness").value;
+      let disposals = 0;
+      const external = () => {
+        disposals++;
+      };
+      image.addEventListener("dispose", external);
+      const ownSubscription = Reflect.get(image, "_listeners").dispose.length;
+      expect(ownSubscription).toBe(2); // One owner callback, not sixteen lease callbacks.
+      image.dispose();
+      expect(disposals).toBe(1);
+      expect(leases.every((lease) => !lease.isCurrent())).toBe(true);
+      expect(unrelated.isCurrent()).toBe(true);
+      // Three permits re-uploading textures, but this admission is deliberately
+      // stricter: only a validated installer publication can restore it.
+      image.needsUpdate = true;
+      expect(owner.captureLoadedSourceLease()).toBeNull();
+      install(owner, lifecycle(owner).entries.get("grass-albedo-roughness")!);
+      expect(owner.captureLoadedSourceLease()!.isCurrent()).toBe(true);
+      owner.dispose();
+      owner.dispose();
+      expect(disposals).toBe(2);
+      expect(image.hasEventListener("dispose", external)).toBe(true);
+      expect(Reflect.get(image, "_listeners").dispose).toEqual([external]);
+      image.removeEventListener("dispose", external);
+    } finally {
+      owner.dispose();
+      other.dispose();
+    }
+  });
+
+  it("invalidates sticky on direct node, source, sampler and UV changes without receipt serialization", () => {
+    const owner = loadedOwner(true);
+    try {
+      const node = owner.getNode("dirt", "albedo-roughness"),
+        image = node.value;
+      const change =
+        <T extends object, K extends keyof T>(object: T, key: K, next: T[K]) =>
+        () => {
+          const previous = object[key];
+          object[key] = next;
+          return () => {
+            object[key] = previous;
+          };
+        };
+      const mutations: Array<readonly [string, () => () => void]> = [
+        ["root reference", change(node, "referenceNode", texture(image))],
+        ["cyclic root reference", change(node, "referenceNode", node)],
+        [
+          "root texel offset",
+          () => {
+            const old = Reflect.get(node, "offsetNode");
+            Reflect.set(node, "offsetNode", THREE.TSL.ivec2(1, 2));
+            return () => {
+              Reflect.set(node, "offsetNode", old);
+            };
+          },
+        ],
+        ["root UV", change(node, "uvNode", vec2(0.2))],
+        ["root sampling", change(node, "sampler", false)],
+        [
+          "root matrix policy",
+          change(node, "updateMatrix", !node.updateMatrix),
+        ],
+        [
+          "source identity",
+          change(image, "source", new THREE.Source(image.image)),
+        ],
+        [
+          "source version",
+          change(image.source, "version", image.source.version + 1),
+        ],
+        ["source readiness", change(image.source, "dataReady", false)],
+        ["image owner", change(image.source, "data", { ...image.image })],
+        ["image width", change(image.image, "width", 512)],
+        ["pixels owner", change(image.image, "data", new Uint8Array(4))],
+        ["texture version", change(image, "version", image.version + 1)],
+        ["wrap", change(image, "wrapS", THREE.ClampToEdgeWrapping)],
+        ["min filter", change(image, "minFilter", THREE.NearestFilter)],
+        ["anisotropy", change(image, "anisotropy", 1)],
+        ["color", change(image, "colorSpace", THREE.NoColorSpace)],
+        ["format", change(image, "format", THREE.RGBAIntegerFormat)],
+        ["upload flip", change(image, "flipY", true)],
+        ["offset reference", change(image, "offset", image.offset.clone())],
+        ["offset value", change(image.offset, "x", 0.25)],
+        ["repeat reference", change(image, "repeat", image.repeat.clone())],
+        ["repeat value", change(image.repeat, "y", 2)],
+        ["center reference", change(image, "center", image.center.clone())],
+        ["center value", change(image.center, "x", 0.5)],
+        ["rotation", change(image, "rotation", 1)],
+        ["matrix policy", change(image, "matrixAutoUpdate", false)],
+        ["matrix reference", change(image, "matrix", image.matrix.clone())],
+        [
+          "matrix storage",
+          change(image.matrix, "elements", [...image.matrix.elements]),
+        ],
+        ["matrix element", change(image.matrix.elements, 0, 2)],
+        ["mip array", change(image, "mipmaps", [])],
+      ];
+      for (const [label, mutate] of mutations) {
+        const lease = owner.captureLoadedSourceLease()!;
+        expect(lease?.isCurrent(), label).toBe(true);
+        const restore = mutate();
+        expect(lease.isCurrent(), label).toBe(false);
+        restore();
+        expect(lease.isCurrent(), `${label}: sticky`).toBe(false);
+      }
+      for (const key of [
+        "id",
+        "dirtProjection",
+        "surfaceBlend",
+        "rockProjection",
+        "grassSubstrate",
+        "textureEncoding",
+        "textureMatrix",
+      ] as const) {
+        const previous = owner[key],
+          lease = owner.captureLoadedSourceLease()!;
+        Reflect.set(owner, key, "foreign-recipe");
+        expect(lease.isCurrent(), key).toBe(false);
+        expect(owner.captureLoadedSourceLease(), key).toBeNull();
+        Reflect.set(owner, key, previous);
+        expect(lease.isCurrent(), key).toBe(false);
+      }
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("invalidates replacement, removes retired listeners, and rejects late installation", () => {
+    const owner = loadedOwner();
+    const entry = lifecycle(owner).entries.get("grass-albedo-roughness")!;
+    const old = entry.node.value;
+    const subscription = Reflect.get(old, "_listeners").dispose[0];
+    const lease = owner.captureLoadedSourceLease()!;
+    const replacement = install(owner, entry);
+    expect(lease.isCurrent()).toBe(false);
+    expect(old.hasEventListener("dispose", subscription)).toBe(false);
+    const current = owner.captureLoadedSourceLease()!;
+    old.dispose();
+    expect(current.isCurrent()).toBe(true);
+    owner.dispose();
+    expect(current.isCurrent()).toBe(false);
+    expect(Reflect.get(replacement, "_listeners").dispose).toHaveLength(0);
+    const late = new THREE.DataTexture(new Uint8Array(4), 1, 1);
+    let disposed = 0;
+    late.addEventListener("dispose", () => {
+      disposed++;
+    });
+    entry.status = "loading";
+    expect(
+      lifecycle(owner).installTexture(entry, late, expectedDigest(entry.key)),
+    ).toBe(false);
+    expect(disposed).toBe(1);
+    expect(Reflect.get(late, "_listeners").dispose).toHaveLength(1);
+  });
+
+  it("does not publish listeners or replace admitted ownership on rejected installs", () => {
+    const owner = loadedOwner();
+    try {
+      const entry = lifecycle(owner).entries.get("grass-albedo-roughness")!;
+      const original = entry.node.value;
+      const subscription = Reflect.get(original, "_listeners").dispose[0];
+      for (const wrongDigest of [true, false]) {
+        const image = wrongDigest
+          ? original.clone()
+          : new THREE.DataTexture(new Uint8Array(4), 1, 1);
+        let disposals = 0;
+        const external = () => {
+          disposals++;
+        };
+        image.addEventListener("dispose", external);
+        entry.status = "loading";
+        expect(() =>
+          lifecycle(owner).installTexture(
+            entry,
+            image,
+            wrongDigest ? "invalid-digest" : expectedDigest(entry.key),
+          ),
+        ).toThrow(wrongDigest ? "digest mismatch" : "dimensions");
+        expect(disposals).toBe(1);
+        expect(Reflect.get(image, "_listeners").dispose).toEqual([external]);
+        expect(entry.node.value).toBe(original);
+        expect(original.hasEventListener("dispose", subscription)).toBe(true);
+        expect(owner.captureLoadedSourceLease()).toBeNull();
+        image.removeEventListener("dispose", external);
+      }
+      install(owner, entry);
+      expect(owner.captureLoadedSourceLease()!.isCurrent()).toBe(true);
+      expect(original.hasEventListener("dispose", subscription)).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("pins real compressed mip owners and byte spans; in-place bytes follow needsUpdate", () => {
+    const owner = loadedOwner();
+    const entry = lifecycle(owner).entries.get("dirt-albedo-roughness")!;
+    const compressed = new THREE.CompressedTexture(
+      COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.map((bytes, level) => ({
+        data: new Uint8Array(bytes),
+        width: Math.max(1, 1024 >> level),
+        height: Math.max(1, 1024 >> level),
+      })),
+      1024,
+      1024,
+      THREE.RGBA_ASTC_4x4_Format,
+    );
+    try {
+      // The production common installer and real compressed object are used;
+      // this fixture is not evidence of native KTX2 transcoding or GPU upload.
+      install(owner, entry, compressed);
+      const assertMutation = (mutate: () => () => void) => {
+        const lease = owner.captureLoadedSourceLease()!;
+        expect(lease.isCurrent()).toBe(true);
+        const restore = mutate();
+        expect(lease.isCurrent()).toBe(false);
+        restore();
+        expect(lease.isCurrent()).toBe(false);
+      };
+      assertMutation(() => {
+        const old = compressed.mipmaps;
+        compressed.mipmaps = [...old];
+        return () => {
+          compressed.mipmaps = old;
+        };
+      });
+      assertMutation(() => {
+        const old = compressed.mipmaps[0];
+        compressed.mipmaps[0] = { ...old };
+        return () => {
+          compressed.mipmaps[0] = old;
+        };
+      });
+      assertMutation(() => {
+        const mip = compressed.mipmaps[0],
+          old = mip.data;
+        mip.data = old.slice();
+        return () => {
+          mip.data = old;
+        };
+      });
+      assertMutation(() => {
+        const mip = compressed.mipmaps[0],
+          old = mip.data;
+        mip.data = old.subarray(16);
+        return () => {
+          mip.data = old;
+        };
+      });
+      assertMutation(() => {
+        const mip = compressed.mipmaps[0];
+        mip.width = 512;
+        return () => {
+          mip.width = 1024;
+        };
+      });
+      assertMutation(() => {
+        const mip = compressed.mipmaps[0];
+        mip.height = 512;
+        return () => {
+          mip.height = 1024;
+        };
+      });
+      const lease = owner.captureLoadedSourceLease()!;
+      compressed.mipmaps[0].data[0] = 42;
+      expect(lease.isCurrent()).toBe(true); // No byte hashing, by contract.
+      compressed.needsUpdate = true;
+      expect(lease.isCurrent()).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
+});
 
 describe("bounded dirt surface page (real TSL and ownership, not native qualification)", () => {
   const createOwner = () =>

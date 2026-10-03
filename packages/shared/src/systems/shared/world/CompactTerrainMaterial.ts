@@ -260,7 +260,230 @@ type Entry = {
   height: number;
   sha256: string | null;
   compressed?: true;
+  admitted?: {
+    node: TextureNode<"vec4">;
+    texture: THREE.Texture;
+    onDispose(): void;
+  };
 };
+
+export type CompactTerrainLoadedSourceLease = Readonly<{
+  isCurrent(): boolean;
+  release(): void;
+}>;
+
+const LOADED_SOURCE_LEASE_LIMIT = 16;
+const SOURCE_TEXTURE_KEYS = [
+  "version",
+  "mapping",
+  "channel",
+  "format",
+  "internalFormat",
+  "type",
+  "colorSpace",
+  "wrapS",
+  "wrapT",
+  "magFilter",
+  "minFilter",
+  "anisotropy",
+  "generateMipmaps",
+  "flipY",
+  "premultiplyAlpha",
+  "unpackAlignment",
+  "rotation",
+  "matrixAutoUpdate",
+] as const;
+const SOURCE_NODE_KEYS = [
+  "referenceNode",
+  "uvNode",
+  "levelNode",
+  "biasNode",
+  "compareNode",
+  "depthNode",
+  "gradNode",
+  "gatherNode",
+  "sampler",
+  "updateMatrix",
+] as const;
+const SOURCE_RECIPE_KEYS = [
+  "id",
+  "dirtProjection",
+  "surfaceBlend",
+  "rockProjection",
+  "grassSubstrate",
+  "textureEncoding",
+  "textureMatrix",
+] as const;
+
+type LoadedSourceImage = {
+  width: number;
+  height: number;
+  depth?: unknown;
+  data?: unknown;
+};
+
+function captureLoadedSourceTexture(entry: Entry) {
+  const admitted = entry.admitted;
+  if (
+    entry.status !== "loaded" ||
+    entry.error !== null ||
+    !admitted ||
+    entry.node !== admitted.node ||
+    entry.node.referenceNode !== null ||
+    entry.node.value !== admitted.texture
+  )
+    return null;
+  const image: unknown = admitted.texture.source.data;
+  if (
+    !image ||
+    typeof image !== "object" ||
+    !("width" in image) ||
+    !("height" in image) ||
+    image.width !== entry.width ||
+    image.height !== entry.height ||
+    image.width !== COMPACT_TERRAIN_MATERIAL.textureSize ||
+    image.height !== COMPACT_TERRAIN_MATERIAL.textureSize ||
+    !admitted.texture.source.dataReady
+  )
+    return null;
+  const data = image as LoadedSourceImage;
+  const pixels = ArrayBuffer.isView(data.data) ? data.data : null;
+  const texture = admitted.texture;
+  // Ordinary PNG/bitmap sources have no explicit mip payload. Only the actual
+  // Three compressed-texture shape is admitted when mip payloads are present.
+  if (!(texture instanceof THREE.CompressedTexture) && texture.mipmaps.length)
+    return null;
+  if (texture instanceof THREE.CompressedTexture) {
+    if (texture.mipmaps.length !== COMPACT_TERRAIN_COMPRESSED_MIP_BYTES.length)
+      return null;
+    for (let i = 0; i < texture.mipmaps.length; i++) {
+      const mip = texture.mipmaps[i];
+      if (
+        !mip ||
+        !(mip.data instanceof Uint8Array) ||
+        mip.data.byteLength !== COMPACT_TERRAIN_COMPRESSED_MIP_BYTES[i] ||
+        mip.width !== Math.max(1, COMPACT_TERRAIN_MATERIAL.textureSize >> i) ||
+        mip.height !== Math.max(1, COMPACT_TERRAIN_MATERIAL.textureSize >> i)
+      )
+        return null;
+    }
+  }
+  const mips =
+    texture instanceof THREE.CompressedTexture
+      ? texture.mipmaps.map((mip) => ({
+          mip,
+          data: mip.data,
+          buffer: mip.data.buffer,
+          byteOffset: mip.data.byteOffset,
+          byteLength: mip.data.byteLength,
+          width: mip.width,
+          height: mip.height,
+        }))
+      : [];
+  return {
+    entry,
+    admitted,
+    texture,
+    node: entry.node,
+    sha256: entry.sha256,
+    source: texture.source,
+    sourceVersion: texture.source.version,
+    image: data,
+    width: data.width,
+    height: data.height,
+    depth: data.depth,
+    data: data.data,
+    pixels,
+    pixelBuffer: pixels?.buffer,
+    pixelOffset: pixels?.byteOffset,
+    pixelLength: pixels?.byteLength,
+    textureValues: SOURCE_TEXTURE_KEYS.map((key) => texture[key]),
+    nodeValues: SOURCE_NODE_KEYS.map((key) => entry.node[key]),
+    // Public in r186 TextureNode; absent from the installed declarations.
+    offsetNode: Reflect.get(entry.node, "offsetNode"),
+    offset: texture.offset,
+    offsetX: texture.offset.x,
+    offsetY: texture.offset.y,
+    repeat: texture.repeat,
+    repeatX: texture.repeat.x,
+    repeatY: texture.repeat.y,
+    center: texture.center,
+    centerX: texture.center.x,
+    centerY: texture.center.y,
+    matrix: texture.matrix,
+    elements: texture.matrix.elements,
+    matrixValues: texture.matrix.elements.slice(),
+    mipmaps: texture.mipmaps,
+    mips,
+  };
+}
+
+type LoadedSourceTexturePin = NonNullable<
+  ReturnType<typeof captureLoadedSourceTexture>
+>;
+
+function loadedSourceTextureIsCurrent(pin: LoadedSourceTexturePin): boolean {
+  const { entry, texture, node, image } = pin;
+  if (
+    entry.admitted !== pin.admitted ||
+    entry.status !== "loaded" ||
+    entry.error !== null ||
+    entry.node !== node ||
+    entry.sha256 !== pin.sha256 ||
+    entry.width !== pin.width ||
+    entry.height !== pin.height ||
+    node.referenceNode !== null ||
+    Reflect.get(node, "offsetNode") !== pin.offsetNode ||
+    node.value !== texture ||
+    texture.source !== pin.source ||
+    pin.source.version !== pin.sourceVersion ||
+    !pin.source.dataReady ||
+    pin.source.data !== image ||
+    image.width !== pin.width ||
+    image.height !== pin.height ||
+    image.depth !== pin.depth ||
+    image.data !== pin.data ||
+    (pin.pixels !== null &&
+      (pin.pixels.buffer !== pin.pixelBuffer ||
+        pin.pixels.byteOffset !== pin.pixelOffset ||
+        pin.pixels.byteLength !== pin.pixelLength)) ||
+    texture.offset !== pin.offset ||
+    pin.offset.x !== pin.offsetX ||
+    pin.offset.y !== pin.offsetY ||
+    texture.repeat !== pin.repeat ||
+    pin.repeat.x !== pin.repeatX ||
+    pin.repeat.y !== pin.repeatY ||
+    texture.center !== pin.center ||
+    pin.center.x !== pin.centerX ||
+    pin.center.y !== pin.centerY ||
+    texture.matrix !== pin.matrix ||
+    pin.matrix.elements !== pin.elements ||
+    pin.elements.length !== pin.matrixValues.length ||
+    texture.mipmaps !== pin.mipmaps ||
+    pin.mipmaps.length !== pin.mips.length
+  )
+    return false;
+  for (let i = 0; i < SOURCE_TEXTURE_KEYS.length; i++)
+    if (texture[SOURCE_TEXTURE_KEYS[i]] !== pin.textureValues[i]) return false;
+  for (let i = 0; i < SOURCE_NODE_KEYS.length; i++)
+    if (node[SOURCE_NODE_KEYS[i]] !== pin.nodeValues[i]) return false;
+  for (let i = 0; i < pin.matrixValues.length; i++)
+    if (pin.elements[i] !== pin.matrixValues[i]) return false;
+  for (let i = 0; i < pin.mips.length; i++) {
+    const mip = pin.mips[i];
+    if (
+      pin.mipmaps[i] !== mip.mip ||
+      mip.mip.data !== mip.data ||
+      mip.data.buffer !== mip.buffer ||
+      mip.data.byteOffset !== mip.byteOffset ||
+      mip.data.byteLength !== mip.byteLength ||
+      mip.mip.width !== mip.width ||
+      mip.mip.height !== mip.height
+    )
+      return false;
+  }
+  return true;
+}
 
 /** Per-material textures, never global or shared between world lifetimes. */
 export class CompactTerrainTextureSet {
@@ -272,6 +495,8 @@ export class CompactTerrainTextureSet {
   private readonly compressedFormat: CompactTerrainCompressedFormat | null;
   private readonly transcoderPath: string;
   #identityTextures?: WeakMap<TextureNode<"vec4">, THREE.Texture>;
+  private readonly sourceRecipe: readonly unknown[];
+  private sourceLeases?: Set<() => void>;
 
   constructor(
     cdnUrl: string,
@@ -283,6 +508,7 @@ export class CompactTerrainTextureSet {
     private readonly textureRenderer?: THREE.WebGPURenderer,
     readonly textureMatrix?: CompactTerrainTextureMatrix,
   ) {
+    this.sourceRecipe = SOURCE_RECIPE_KEYS.map((key) => this[key]);
     if (textureMatrix !== undefined && textureMatrix !== "identity-v1")
       throw new Error("Unknown compact terrain texture matrix mode");
     if (textureMatrix) {
@@ -453,6 +679,59 @@ export class CompactTerrainTextureSet {
     return this.entries.get("ground-height")?.node;
   }
 
+  /**
+   * Opt-in, bounded validity lease for the fully installed source maps only.
+   * No renderer work or content hashing. In-place pixel/mip byte edits must use
+   * Three's needsUpdate contract; graph uniforms, geometry and camera are NOT
+   * covered. Capture allocates once; isCurrent performs direct comparisons.
+   * At most 16 leases may be live. Invalid/released leases are permanently false
+   * and drop their source references. Loaded textures have one owner disposal
+   * listener each (at most seven), independent of the number of leases.
+   */
+  captureLoadedSourceLease(): CompactTerrainLoadedSourceLease | null {
+    if (
+      this.disposed ||
+      (this.sourceLeases?.size ?? 0) >= LOADED_SOURCE_LEASE_LIMIT
+    )
+      return null;
+    for (let i = 0; i < SOURCE_RECIPE_KEYS.length; i++)
+      if (this[SOURCE_RECIPE_KEYS[i]] !== this.sourceRecipe[i]) return null;
+    const captured: LoadedSourceTexturePin[] = [];
+    for (const entry of this.entries.values()) {
+      if (entry.sha256 !== this.expectedDigest(entry.key)) return null;
+      const pin = captureLoadedSourceTexture(entry);
+      if (!pin) return null;
+      captured.push(pin);
+    }
+    if (captured.length !== (this.surfaceBlend ? 7 : 6)) return null;
+    let owner: CompactTerrainTextureSet | null = this;
+    let pins: typeof captured | null = captured;
+    const release = () => {
+      owner?.sourceLeases?.delete(release);
+      owner = null;
+      if (pins) pins.length = 0;
+      pins = null;
+    };
+    const isCurrent = () => {
+      if (!owner || !pins) return false;
+      let current = !owner.disposed && owner.entries.size === pins.length;
+      for (let i = 0; current && i < SOURCE_RECIPE_KEYS.length; i++)
+        current = owner[SOURCE_RECIPE_KEYS[i]] === owner.sourceRecipe[i];
+      for (let i = 0; current && i < pins.length; i++)
+        current =
+          owner.entries.get(pins[i].entry.key) === pins[i].entry &&
+          loadedSourceTextureIsCurrent(pins[i]);
+      if (!current) release();
+      return current;
+    };
+    (this.sourceLeases ??= new Set()).add(release);
+    return Object.freeze({ isCurrent, release });
+  }
+
+  private releaseSourceLeases(): void {
+    if (this.sourceLeases) for (const release of this.sourceLeases) release();
+  }
+
   private createTextureNode(image: THREE.Texture): TextureNode<"vec4"> {
     const base = texture(image);
     const identityTextures = this.#identityTextures;
@@ -611,6 +890,12 @@ export class CompactTerrainTextureSet {
       throw error;
     }
     const previous = entry.node.value;
+    this.releaseSourceLeases();
+    if (entry.admitted)
+      entry.admitted.texture.removeEventListener(
+        "dispose",
+        entry.admitted.onDispose,
+      );
     // TextureNode.sample() retains a reference to this base node, so every
     // projection follows the new real texture; never stuff an HTML image into
     // a DataTexture or leave a sampled clone pointing at the placeholder.
@@ -620,6 +905,17 @@ export class CompactTerrainTextureSet {
     entry.height = source.height;
     entry.sha256 = sha256;
     entry.status = "loaded";
+    // Bounded lifetime bookkeeping only: no default lease or GPU work. Remove
+    // this subscription before retiring/replacing its texture.
+    const onDispose = () => {
+      this.releaseSourceLeases();
+      if (entry.admitted?.onDispose === onDispose) {
+        image.removeEventListener("dispose", onDispose);
+        entry.admitted = undefined;
+      }
+    };
+    entry.admitted = { node: entry.node, texture: image, onDispose };
+    image.addEventListener("dispose", onDispose);
     this.disposeTexture(previous);
     return true;
   }
@@ -769,9 +1065,17 @@ export class CompactTerrainTextureSet {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.releaseSourceLeases();
     for (const pending of this.pending.values()) pending.cancel();
     this.pending.clear();
     for (const entry of this.entries.values()) {
+      if (entry.admitted) {
+        entry.admitted.texture.removeEventListener(
+          "dispose",
+          entry.admitted.onDispose,
+        );
+        entry.admitted = undefined;
+      }
       this.disposeTexture(entry.node.value);
       entry.status = "disposed";
     }

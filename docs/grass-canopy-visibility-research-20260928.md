@@ -1,5 +1,29 @@
 # Grass canopy visibility: research checkpoint
 
+## Source237 — bounded loaded-source validity for terrain reuse
+
+**Outcome: a verified cache-safety prerequisite, not a new FPS gain.** `CompactTerrainTextureSet.captureLoadedSourceLease()` records fully installed texture ownership and provides direct currentness checks without rebuilding diagnostic receipts each frame. No production caller, renderer/shader change, GPU allocation or default selector is added. Default texture loading gains only bounded disposal-lifetime bookkeeping.
+
+The owner admits at most 16 leases, with one removable disposal listener per loaded map (six, or seven with height). Checks cover the actual admitted root node/texture, source/data identities and versions, relevant 2D sampler/upload/UV state, recipe selectors, and all compressed mip owners, dimensions and byte spans. Disposing a loaded texture invalidates leases and revokes admission until a validated installation; replacement removes its retired listener. Invalid/released leases stay false, return their slot and clear captured references. Late/rejected installs publish no listener.
+
+This is **source validity only**. Graph uniforms, camera, geometry, composed-material inputs and rendered filtering/appearance require separate guards. In-place pixel edits must use Three's ordinary `needsUpdate` contract; this does not hash content or detect unannounced byte writes. No per-frame cost reduction is measured yet.
+
+### Verification
+
+- Final root rerun: **390 tests pass / two existing native-only skips across four suites**, in 33.08 seconds: `CompactTerrainMaterial`, `TerrainVisualManagerPacing`, `TerrainGridSurface`, `TerrainVisualProfileAdmission`. Six new cases use decoded project PNGs, actual Three textures and the production installer; compressed objects are source-lifetime fixtures, not new native KTX/upload proof.
+- Scoped ESLint, Prettier and independent source review pass. Review caught disposal re-admission, cyclic root references and the installed r186 `offsetNode` field before final verification.
+- Shared typecheck retains exactly five inherited procgen API errors outside the changed files; **the package typecheck is not clean**. Three initially introduced inference errors were fixed before the final rerun.
+- All 56 protected previous-file hashes match; the existing material test is intentionally extended and both changed files have new pins. No private game was launched and no public session or saved-player state was operated on for this source-only checkpoint.
+- [Verification receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source237-loaded-terrain-source-verification.json).
+
+### Next implementation boundary
+
+Keep camera-dependent normal detail, AO, height competition, lighting and shadows live; investigate caching **composed albedo and roughness only**. The existing 45–120 m normal fade precedes multiple normalizations, so a final cached normal cannot reconstruct it exactly. Current packed layer functions also retain albedo reads when only their normal output is used: first separate a default-inert normal/AO-only graph and prove those reads are absent while preserving the actual normal arithmetic.
+
+Native236's issued shader has 16 albedo/roughness sample sites, 14 normal/AO sites and five height sites. Replacing the first group with one composed-page read is a **theoretical sample reduction, not a predicted millisecond gain**. One 1024² RGBA16F page with full mips is 11,184,808 logical bytes (10.67 MiB), excluding depth, staging, metadata and allocator overhead. This is design arithmetic, not an adopted page count, total VRAM measurement or approved budget; smaller formats need separate range/filter-error qualification.
+
+Terrain remains the largest directly ranked content cost, grass second; reflection repeats both and is not an additive third slice. The earlier rough-leaf gain is already included in Native236 and cannot be added again. Independently repeat the native terrain comparison before production GPU integration, then require bounded memory, original-shader fallback and moving/near/shore/filtering/live-light checks. **Sustained 60 FPS / 16.67 ms at actual 2× is still unmet.**
+
 ## Native236 — first complete terrain-cache A/B/B/A shows a bounded cadence lead
 
 **Outcome: approximately 2.7 ms / 6.7% lower median tick intervals in one completed experiment, not production acceptance or 60 FPS.** The full composed-surface prototype now has a valid closing stock control. B1/B2 share one continuous cache lease; they are not independent fresh-run replications. Terrain remains the directly measured first content priority, grass second; reflection overlaps both. Sustained 16.67 ms at actual 2× remains unmet.
