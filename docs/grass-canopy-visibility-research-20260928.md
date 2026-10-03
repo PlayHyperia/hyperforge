@@ -1,5 +1,17 @@
 # Grass canopy visibility: research checkpoint
 
+## Native240 — rejected repeat; no new timing result
+
+The fresh private runtime deliberately reused immutable build236 and the same helpers, pose and actual 3024×1724 / DPR 2 / MSAA 4 settings as Native236. It did **not** test the newer Source239 code as a performance change. No quality setting was reduced.
+
+Both attempts are excluded: [attempt 9](</Users/lucid/Downloads/hyperia-native228-surface-abba (9).json>) fails the combined visibility/focus/device start guard; [attempt 10](</Users/lucid/Downloads/hyperia-native228-surface-abba (10).json>) receives a blur event before Start. Both have `startedAt: null`, zero rows/blocks/programs and `complete: false`. The first receipt does not distinguish which admission boolean failed. Independent review confirms neither supplies timing or replication evidence. Native236 remains **one accepted within-run comparison**, not an independently replicated saving.
+
+The attempts restore their timing hooks but retain the prepared probe. Separate later native-console observation verifies probe disposal, resource retirement, renderer/exposure and camera/clock restoration, with empty errors. The owned game and DevTools are then closed; the preexisting New Tab remains. The private runtime stops at **2026-10-03 04:59:11.933 UTC** with no errors. Its disposable database is removed, all four private ports are clear, and all 1,156 protected file pins plus public port/database ownership are unchanged. The seven temporary runtime admissions are reverted and the three served helper copies removed; evidence originals remain. All 58 prior source/test pins still match.
+
+[Rejected-attempt and cleanup receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native240-rejected-repeat-cleanup.json) records exact hashes and distinguishes exported pre-disposal state from later native cleanup.
+
+**Next:** establish actual native game foreground before another timed repeat; do not loop on the unchanged failure or weaken focus acceptance. Default-inert source work can proceed independently, but production cache integration and any new speedup claim remain gated on valid timing and loaded-art/memory checks. **60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Source239 — complete live normal/AO composition and native shader proof
 
 **Outcome: the complete normal/AO path is now separated and verified; no default rendering or FPS change.** Shared channel-selective bank, coast and final blending helpers preserve existing arithmetic. `getCompactTerrainNormalSurface()` lazily exposes a frozen owner-local graph with live distance, camera and composition uniforms. It builds fresh normal-only layers rather than borrowing the packed appearance graph, refuses foreign/mutated recipe ownership and returns null after material disposal. It does not load textures, allocate GPU pages or install a production caller.
