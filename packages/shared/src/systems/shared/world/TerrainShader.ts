@@ -56,12 +56,14 @@ import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
   createCompactTerrainLayerFactory,
+  createCompactTerrainNormalLayerFactory,
   createCompactDirtRawAppearance,
   createCompactDirtProjections,
   createCompactRockAppearanceRequired,
   createCompactGrassAppearanceRequired,
   createCompactDirtAppearanceRequired,
   type CompactTerrainLayer,
+  type CompactTerrainNormalLayer,
   type CompactDirtProjection,
   type CompactRockProjection,
   type CompactRockSampling,
@@ -74,6 +76,7 @@ import {
   type CompactCoastBlend,
   type CompactTerrainDiagnosticOutputs,
   blendCompactTerrainLayers,
+  blendCompactTerrainNormalLayers,
   createCompactTerrainDiagnosticOutputs,
   createCompactHabitatSoilNode,
   createCompactTerrainLayerWeights,
@@ -91,6 +94,7 @@ import {
   applyCompactPondWetness,
   applyCompactPondRockSoil,
   applyCompactPondBankMaterials,
+  applyCompactPondBankNormalMaterials,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -102,6 +106,7 @@ import {
   createCompactCoastDistribution,
   createCompactCoastalGroundCover,
   applyCompactCoastRock,
+  applyCompactCoastNormalRock,
   createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
 import {
@@ -150,6 +155,12 @@ export type CompactTerrainPreLightingSurface = Readonly<{
   normalView: Node<"vec3">;
   /** Keep live in beauty rendering; do not bake lamps/night lighting. */
   lightingMultiplier: Node<"vec3">;
+}>;
+
+export type CompactTerrainNormalSurface = Readonly<{
+  ao: Node<"float">;
+  normalView: Node<"vec3">;
+  weights?: Node<"vec4">;
 }>;
 
 export const TERRAIN_SHADER_CONSTANTS = {
@@ -1246,6 +1257,7 @@ export function createTerrainMaterial(
   compactPondBankField?: CompactPondBankField;
   getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
   getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
+  getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
   compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -2149,14 +2161,16 @@ export function createTerrainMaterial(
           pondContactSoil,
         })
       : undefined;
-  const compactBaseSurface =
+  // Capture these shared scalar graph inputs in the original argument order.
+  // The optional normal-only graph reuses them, never re-reads mutable options
+  // or borrows the full material's packed layer/coverage graph.
+  const compactBlendInputs =
     compactLayers && compactWeights
-      ? blendCompactTerrainLayers(
-          compactLayers,
-          compactWeights.dirt,
-          compactWeights.cliff,
-          wornTurf?.road ?? compactWeights.road,
-          macroField?.havenGround
+      ? {
+          dirt: compactWeights.dirt,
+          cliff: compactWeights.cliff,
+          road: wornTurf?.road ?? compactWeights.road,
+          havenGround: macroField?.havenGround
             ? createCompactHavenGroundWeights(
                 vec2(worldPos.x, worldPos.z),
                 macroField.havenGround,
@@ -2164,7 +2178,7 @@ export function createTerrainMaterial(
                 slope,
               )
             : undefined,
-          options.compactHabitat
+          habitatSoil: options.compactHabitat
             ? createCompactHabitatSoilNode(
                 worldPos.x,
                 worldPos.z,
@@ -2172,76 +2186,103 @@ export function createTerrainMaterial(
               ).toVar("compactHabitatSoil")
             : undefined,
           coastalGround,
-          grassColorGrade &&
+          wornTurfSoil:
+            grassColorGrade &&
             macroField?.coastalMeadow &&
             (macroField.bankVerge || macroField.pondServiceGround)
-            ? mix(
-                wornTurf?.soil ?? float(0),
-                float(1),
-                createCompactBankVergeWear(
-                  worldPos,
-                  macroField,
-                  bankVergeLocality,
-                ),
-              ).toVar("compactTurfAndBankSoil")
-            : wornTurf?.soil,
-          options.compactSurfaceBlend === "height-v1" && pondSurface.domain
-            ? createCompactPondBankSediment(pondSurface.domain, slope)
-            : undefined,
-          options.compactPondBlend === "relief-v1" ||
+              ? mix(
+                  wornTurf?.soil ?? float(0),
+                  float(1),
+                  createCompactBankVergeWear(
+                    worldPos,
+                    macroField,
+                    bankVergeLocality,
+                  ),
+                ).toVar("compactTurfAndBankSoil")
+              : wornTurf?.soil,
+          pondSediment:
+            options.compactSurfaceBlend === "height-v1" && pondSurface.domain
+              ? createCompactPondBankSediment(pondSurface.domain, slope)
+              : undefined,
+          pondReliefSoil:
+            options.compactPondBlend === "relief-v1" ||
             options.compactPondBlend === "relief-contact-v1" ||
             options.compactPondBlend === "shore-contact-v1" ||
             options.compactPondBlend === "composition-v1"
-            ? legacyPondSoil
-            : undefined,
-          options.compactPondBlend === "relief-contact-v1" ||
+              ? legacyPondSoil
+              : undefined,
+          pondRockContact:
+            options.compactPondBlend === "relief-contact-v1" ||
             options.compactPondBlend === "shore-contact-v1" ||
             options.compactPondBlend === "composition-v1"
-            ? createCompactPondRockContact({
-                world: worldPos,
-                distortNoise,
-                field: macroField,
-                pondSoil: legacyPondSoil,
-                geometricCliff: compactWeights.geometricCliff,
-                road: wornTurf?.road ?? compactWeights.road,
-                pondContactSoil,
-              })
-            : undefined,
-          options.compactCoastBlend === "detail-v1" && coastSurface
-            ? {
-                coverage: coastSurface.coverage,
-                pondRegion: pondSurface.domain?.region ?? float(0),
-              }
-            : undefined,
-          options.compactCoastBlend === "distribution-v1"
-            ? createCompactCoastDistribution({
-                x: worldPos.x,
-                z: worldPos.z,
-                height: worldPos.y,
-                slope,
-                noiseValue,
-                meadowNoise: meadowNoise ?? noiseValue,
-                road: wornTurf?.road ?? compactWeights.road,
-                pond: pondParameters
-                  ? {
-                      centerX: pondParameters.x,
-                      centerZ: pondParameters.y,
-                      radius: pondParameters.z,
-                    }
-                  : null,
-                field: macroField,
-              })
-            : undefined,
-          options.compactCoastBlend === "cavity-v1" && coastSurface
-            ? {
-                coverage: coastSurface.coverage,
-                pondClearance: createCompactCoastCavityPondClearance(
-                  worldPos,
-                  pondParameters,
-                ),
-              }
-            : undefined,
+              ? createCompactPondRockContact({
+                  world: worldPos,
+                  distortNoise,
+                  field: macroField,
+                  pondSoil: legacyPondSoil,
+                  geometricCliff: compactWeights.geometricCliff,
+                  road: wornTurf?.road ?? compactWeights.road,
+                  pondContactSoil,
+                })
+              : undefined,
+          coastDetail:
+            options.compactCoastBlend === "detail-v1" && coastSurface
+              ? {
+                  coverage: coastSurface.coverage,
+                  pondRegion: pondSurface.domain?.region ?? float(0),
+                }
+              : undefined,
+          coastDistribution:
+            options.compactCoastBlend === "distribution-v1"
+              ? createCompactCoastDistribution({
+                  x: worldPos.x,
+                  z: worldPos.z,
+                  height: worldPos.y,
+                  slope,
+                  noiseValue,
+                  meadowNoise: meadowNoise ?? noiseValue,
+                  road: wornTurf?.road ?? compactWeights.road,
+                  pond: pondParameters
+                    ? {
+                        centerX: pondParameters.x,
+                        centerZ: pondParameters.y,
+                        radius: pondParameters.z,
+                      }
+                    : null,
+                  field: macroField,
+                })
+              : undefined,
+          coastCavity:
+            options.compactCoastBlend === "cavity-v1" && coastSurface
+              ? {
+                  coverage: coastSurface.coverage,
+                  pondClearance: createCompactCoastCavityPondClearance(
+                    worldPos,
+                    pondParameters,
+                  ),
+                }
+              : undefined,
           pondBankComposition,
+        }
+      : null;
+  const compactBaseSurface =
+    compactLayers && compactBlendInputs
+      ? blendCompactTerrainLayers(
+          compactLayers,
+          compactBlendInputs.dirt,
+          compactBlendInputs.cliff,
+          compactBlendInputs.road,
+          compactBlendInputs.havenGround,
+          compactBlendInputs.habitatSoil,
+          compactBlendInputs.coastalGround,
+          compactBlendInputs.wornTurfSoil,
+          compactBlendInputs.pondSediment,
+          compactBlendInputs.pondReliefSoil,
+          compactBlendInputs.pondRockContact,
+          compactBlendInputs.coastDetail,
+          compactBlendInputs.coastDistribution,
+          compactBlendInputs.coastCavity,
+          compactBlendInputs.pondBankComposition,
           resolveCompactAppearance,
         )
       : null;
@@ -2451,6 +2492,7 @@ export function createTerrainMaterial(
     compactPondBankField?: CompactPondBankField;
     getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
     getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
+    getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
     compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -2513,6 +2555,162 @@ export function createTerrainMaterial(
   let diagnosticOutputs: CompactTerrainDiagnosticOutputs | null = null;
   let diagnosticDisposed = false;
   let preLightingSurface: CompactTerrainPreLightingSurface | null = null;
+  let normalSurface: CompactTerrainNormalSurface | null = null;
+  const normalRecipe = compactTextures
+    ? Object.freeze({
+        deferredRock: compactLayerFactory !== null,
+        deferredGround: preparedGround !== null,
+        dirtProjection: compactTextures.dirtProjection,
+        rockProjection: compactTextures.rockProjection,
+        surfaceBlend: compactTextures.surfaceBlend,
+        grassSubstrate: compactTextures.grassSubstrate,
+        textureEncoding: compactTextures.textureEncoding,
+        textureMatrix: compactTextures.textureMatrix,
+      })
+    : null;
+  // Explicit graph request only. No material-node replacement, renderer work,
+  // texture loading or proof of texture readiness/static cacheability. Distance,
+  // derivatives, world uniforms and view-normal conversion remain live owners.
+  result.getCompactTerrainNormalSurface = () => {
+    if (
+      diagnosticDisposed ||
+      !compactTextures ||
+      !compactBlendInputs ||
+      !normalRecipe ||
+      result.compactTerrainSurface !== compactTextures ||
+      compactTextures.dirtProjection !== normalRecipe.dirtProjection ||
+      compactTextures.rockProjection !== normalRecipe.rockProjection ||
+      compactTextures.surfaceBlend !== normalRecipe.surfaceBlend ||
+      compactTextures.grassSubstrate !== normalRecipe.grassSubstrate ||
+      compactTextures.textureEncoding !== normalRecipe.textureEncoding ||
+      compactTextures.textureMatrix !== normalRecipe.textureMatrix
+    )
+      return null;
+    if (normalSurface) return normalSurface;
+    const factory = createCompactTerrainNormalLayerFactory(
+      compactTextures,
+      distSq,
+      noiseValue,
+    );
+    // Match the original unconditional ordering and raw cavity-AO ownership.
+    const rawRock = normalRecipe.deferredRock ? null : factory.createRock();
+    const prepared = normalRecipe.deferredGround
+      ? factory.prepareGround()
+      : null;
+    const placeholder = (height: Node<"float">): CompactTerrainNormalLayer => ({
+      height,
+      ao: float(1),
+      worldNormal: normalWorldGeometry,
+    });
+    type NormalLayers = Record<
+      "grass" | "dirt" | "rock",
+      CompactTerrainNormalLayer
+    >;
+    const layers: NormalLayers = {
+      ...(prepared
+        ? {
+            grass: placeholder(prepared.heights.grass),
+            dirt: placeholder(prepared.heights.dirt),
+          }
+        : factory.createGround()),
+      rock: rawRock
+        ? {
+            ...rawRock,
+            rawRockAo: rawRock.rawRockAo!.toVar("compactRawRockAo"),
+          }
+        : { ao: float(1), worldNormal: normalWorldGeometry },
+    };
+    // The coastal ground contribution owns RAW dirt, before bank grading.
+    const coastal =
+      compactBlendInputs.coastalGround && coastSurface
+        ? {
+            coverage: compactBlendInputs.coastalGround.coverage,
+            layer: applyCompactCoastNormalRock(
+              layers.dirt,
+              layers.dirt,
+              coastSurface,
+            ),
+          }
+        : undefined;
+    const gradeBankAndCoast = (resolved: NormalLayers) => {
+      if (pondBankComposition) {
+        const bank = applyCompactPondBankNormalMaterials(
+          resolved.dirt,
+          resolved.rock,
+          pondBankComposition,
+        );
+        resolved.dirt = bank.soil;
+        resolved.rock = bank.rock;
+      }
+      if (coastRockSurface)
+        resolved.rock = applyCompactCoastNormalRock(
+          resolved.rock,
+          resolved.dirt,
+          coastRockSurface,
+        );
+    };
+    if (!normalRecipe.deferredRock) gradeBankAndCoast(layers);
+    const resolveNormals = normalRecipe.deferredRock
+      ? (
+          weights: Node<"vec4">,
+          initial: NormalLayers,
+        ): NormalLayers & { coastalGround?: CompactTerrainNormalLayer } => {
+          const required = createCompactRockAppearanceRequired(
+            weights,
+            pondBankComposition?.mineralAppearance ?? float(0),
+          );
+          const ground = prepared?.resolve({
+            grassRequired: createCompactGrassAppearanceRequired(weights),
+            dirtRequired: createCompactDirtAppearanceRequired(
+              weights,
+              pondBankComposition?.siltAppearance ?? float(0),
+              coastRockSurface?.soil ?? float(0),
+            ),
+          });
+          const resolved: NormalLayers & {
+            coastalGround?: CompactTerrainNormalLayer;
+          } = {
+            ...initial,
+            ...ground,
+            rock: factory.createRock(required),
+          };
+          if (ground && coastal && coastSurface)
+            resolved.coastalGround = applyCompactCoastNormalRock(
+              ground.dirt,
+              ground.dirt,
+              coastSurface,
+            );
+          // Coverage is already complete when this resolver executes. These mixes
+          // preserve the original normal-context fences and never feed weights.
+          gradeBankAndCoast(resolved);
+          return resolved;
+        }
+      : undefined;
+    const surface = blendCompactTerrainNormalLayers(
+      layers,
+      compactBlendInputs.dirt,
+      compactBlendInputs.cliff,
+      compactBlendInputs.road,
+      compactBlendInputs.havenGround,
+      compactBlendInputs.habitatSoil,
+      coastal,
+      compactBlendInputs.wornTurfSoil,
+      compactBlendInputs.pondSediment,
+      compactBlendInputs.pondReliefSoil,
+      compactBlendInputs.pondRockContact,
+      compactBlendInputs.coastDetail,
+      compactBlendInputs.coastDistribution,
+      compactBlendInputs.coastCavity,
+      compactBlendInputs.pondBankComposition,
+      resolveNormals,
+    );
+    normalSurface = Object.freeze({
+      ao: surface.ao,
+      normalView: surface.normal,
+      ...(surface.weights ? { weights: surface.weights } : {}),
+    });
+    return normalSurface;
+  };
   result.getCompactTerrainPreLightingSurface = () => {
     if (diagnosticDisposed || !compactSurface) return null;
     preLightingSurface ??= Object.freeze({
@@ -2541,6 +2739,7 @@ export function createTerrainMaterial(
     diagnosticDisposed = true;
     diagnosticOutputs = null;
     preLightingSurface = null;
+    normalSurface = null;
   });
   if (grassColorGrade)
     Object.defineProperty(result, "compactGrassColorGrade", {

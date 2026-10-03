@@ -1856,6 +1856,35 @@ export function applyCompactPondBankMaterials(
   rock: CompactTerrainLayer,
   field: CompactPondBankComposition<Node<"float">> | undefined,
 ): { soil: CompactTerrainLayer; rock: CompactTerrainLayer } {
+  return applyCompactPondBankMaterialsInternal(true, soil, rock, field);
+}
+
+export function applyCompactPondBankNormalMaterials(
+  soil: CompactTerrainNormalLayer,
+  rock: CompactTerrainNormalLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainNormalLayer; rock: CompactTerrainNormalLayer } {
+  return applyCompactPondBankMaterialsInternal(false, soil, rock, field);
+}
+
+function applyCompactPondBankMaterialsInternal(
+  includeAppearance: true,
+  soil: CompactTerrainLayer,
+  rock: CompactTerrainLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainLayer; rock: CompactTerrainLayer };
+function applyCompactPondBankMaterialsInternal(
+  includeAppearance: false,
+  soil: CompactTerrainNormalLayer,
+  rock: CompactTerrainNormalLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainNormalLayer; rock: CompactTerrainNormalLayer };
+function applyCompactPondBankMaterialsInternal(
+  includeAppearance: boolean,
+  soil: CompactTerrainFactoryLayer,
+  rock: CompactTerrainFactoryLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainFactoryLayer; rock: CompactTerrainFactoryLayer } {
   if (
     field?.mineralAppearance === undefined ||
     field.siltAppearance === undefined
@@ -1863,12 +1892,14 @@ export function applyCompactPondBankMaterials(
     return { soil, rock };
   const mineral = field.mineralAppearance.clamp(0, 1);
   const silt = field.siltAppearance.clamp(0, 1);
-  const albedo = createCompactTerrainColorOperations().bankAppearanceAlbedo(
-    [soil.albedo.x, soil.albedo.y, soil.albedo.z],
-    [rock.albedo.x, rock.albedo.y, rock.albedo.z],
-    field,
-    compactCoastDistributionMath,
-  );
+  const albedo = includeAppearance
+    ? createCompactTerrainColorOperations().bankAppearanceAlbedo(
+        [soil.albedo!.x, soil.albedo!.y, soil.albedo!.z],
+        [rock.albedo!.x, rock.albedo!.y, rock.albedo!.z],
+        field,
+        compactCoastDistributionMath,
+      )
+    : null;
   // Bank masks vary per fragment. Evaluate both normal inputs before selecting
   // the result so their cotangent derivatives remain in uniform control flow.
   // Fence that context at the inputs: their own sampling/LOD branches retain
@@ -1898,19 +1929,27 @@ export function applyCompactPondBankMaterials(
   return {
     soil: {
       ...soil,
-      albedo: vec3(...albedo.soil).toVar("compactPondBankSoilAlbedo"),
-      roughness: mix(
-        mix(soil.roughness, rock.roughness, mineral),
-        soil.roughness,
-        silt,
-      ),
+      ...(includeAppearance
+        ? {
+            albedo: vec3(...albedo!.soil).toVar("compactPondBankSoilAlbedo"),
+            roughness: mix(
+              mix(soil.roughness!, rock.roughness!, mineral),
+              soil.roughness!,
+              silt,
+            ),
+          }
+        : {}),
       ao: mix(mix(soil.ao, rock.ao, mineral), soil.ao, silt),
       worldNormal: soilNormal,
     },
     rock: {
       ...rock,
-      albedo: vec3(...albedo.rock).toVar("compactPondBankRockAlbedo"),
-      roughness: mix(rock.roughness, soil.roughness, silt),
+      ...(includeAppearance
+        ? {
+            albedo: vec3(...albedo!.rock).toVar("compactPondBankRockAlbedo"),
+            roughness: mix(rock.roughness!, soil.roughness!, silt),
+          }
+        : {}),
       ao: mix(rock.ao, soil.ao, silt),
       worldNormal: silt
         .greaterThan(0)
@@ -1929,19 +1968,54 @@ export function applyCompactCoastRock(
   soil: CompactTerrainLayer,
   coast: { soil: Node<"float">; wetness: Node<"float"> },
 ): CompactTerrainLayer {
+  return applyCompactCoastRockInternal(true, rock, soil, coast);
+}
+
+export function applyCompactCoastNormalRock(
+  rock: CompactTerrainNormalLayer,
+  soil: CompactTerrainNormalLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainNormalLayer {
+  return applyCompactCoastRockInternal(false, rock, soil, coast);
+}
+
+function applyCompactCoastRockInternal(
+  includeAppearance: true,
+  rock: CompactTerrainLayer,
+  soil: CompactTerrainLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainLayer;
+function applyCompactCoastRockInternal(
+  includeAppearance: false,
+  rock: CompactTerrainNormalLayer,
+  soil: CompactTerrainNormalLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainNormalLayer;
+function applyCompactCoastRockInternal(
+  includeAppearance: boolean,
+  rock: CompactTerrainFactoryLayer,
+  soil: CompactTerrainFactoryLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainFactoryLayer {
   const c = COMPACT_TERRAIN_COMPOSITION;
-  const roughness = mix(rock.roughness, soil.roughness, coast.soil);
+  const roughness = includeAppearance
+    ? mix(rock.roughness!, soil.roughness!, coast.soil)
+    : null;
   return {
     // Keep original source cavities independent of the nested soil/wetness mix.
     ...(rock.rawRockAo ? { rawRockAo: rock.rawRockAo } : {}),
-    albedo: mix(rock.albedo, soil.albedo, coast.soil).mul(
-      mix(float(1), float(c.coastWetAlbedo), coast.wetness),
-    ),
-    roughness: mix(
-      roughness,
-      roughness.min(c.coastWetRoughness),
-      coast.wetness,
-    ),
+    ...(includeAppearance
+      ? {
+          albedo: mix(rock.albedo!, soil.albedo!, coast.soil).mul(
+            mix(float(1), float(c.coastWetAlbedo), coast.wetness),
+          ),
+          roughness: mix(
+            roughness!,
+            roughness!.min(c.coastWetRoughness),
+            coast.wetness,
+          ),
+        }
+      : {}),
     ao: mix(rock.ao, soil.ao, coast.soil),
     worldNormal: normalize(mix(rock.worldNormal, soil.worldNormal, coast.soil)),
   };
@@ -3746,14 +3820,14 @@ function createCompactHeightSurfaceWeights(
   ).toVar("compactHeightSurfaceWeights");
 }
 
-export function blendCompactTerrainLayers(
-  layers: Record<Layer, CompactTerrainLayer>,
+type CompactTerrainBlendArguments<T extends CompactTerrainNormalLayer> = [
+  layers: Record<Layer, T>,
   dirt: Node<"float">,
   cliff: Node<"float">,
   road: Node<"float">,
   havenGround?: { talus: Node<"float">; wear: Node<"float"> },
   habitatSoil?: Node<"float">,
-  coastalGround?: { coverage: Node<"float">; layer: CompactTerrainLayer },
+  coastalGround?: { coverage: Node<"float">; layer: T },
   wornTurfSoil?: Node<"float">,
   pondSediment?: Node<"float">,
   pondReliefSoil?: Node<"float">,
@@ -3764,17 +3838,65 @@ export function blendCompactTerrainLayers(
   pondBankComposition?: CompactPondBankComposition<Node<"float">>,
   resolveAppearance?: (
     weights: Node<"vec4">,
-    layers: Record<Layer, CompactTerrainLayer>,
-  ) => Record<Layer, CompactTerrainLayer> & {
-    coastalGround?: CompactTerrainLayer;
+    layers: Record<Layer, T>,
+  ) => Record<Layer, T> & {
+    coastalGround?: T;
   },
-): {
-  albedo: Node<"vec3">;
-  roughness: Node<"float">;
+];
+type CompactTerrainNormalBlend = {
   ao: Node<"float">;
   normal: Node<"vec3">;
   weights?: Node<"vec4">;
-} {
+};
+type CompactTerrainFullBlend = CompactTerrainNormalBlend & {
+  albedo: Node<"vec3">;
+  roughness: Node<"float">;
+};
+
+export function blendCompactTerrainLayers(
+  ...args: CompactTerrainBlendArguments<CompactTerrainLayer>
+): CompactTerrainFullBlend {
+  return blendCompactTerrainLayersInternal(true, ...args);
+}
+
+export function blendCompactTerrainNormalLayers(
+  ...args: CompactTerrainBlendArguments<CompactTerrainNormalLayer>
+): CompactTerrainNormalBlend {
+  return blendCompactTerrainLayersInternal(false, ...args);
+}
+
+function blendCompactTerrainLayersInternal(
+  includeAppearance: true,
+  ...args: CompactTerrainBlendArguments<CompactTerrainLayer>
+): CompactTerrainFullBlend;
+function blendCompactTerrainLayersInternal(
+  includeAppearance: false,
+  ...args: CompactTerrainBlendArguments<CompactTerrainNormalLayer>
+): CompactTerrainNormalBlend;
+function blendCompactTerrainLayersInternal<
+  T extends CompactTerrainFactoryLayer,
+>(
+  includeAppearance: boolean,
+  ...[
+    layers,
+    dirt,
+    cliff,
+    road,
+    havenGround,
+    habitatSoil,
+    coastalGround,
+    wornTurfSoil,
+    pondSediment,
+    pondReliefSoil,
+    pondRockContact,
+    coastDetail,
+    coastDistribution,
+    coastCavity,
+    pondBankComposition,
+    resolveAppearance,
+  ]: CompactTerrainBlendArguments<T>
+): CompactTerrainNormalBlend &
+  Partial<Pick<CompactTerrainFullBlend, "albedo" | "roughness">> {
   if (resolveAppearance && coastCavity)
     throw new Error(
       "Deferred rock appearance cannot supply coast cavity weights",
@@ -3851,8 +3973,8 @@ export function blendCompactTerrainLayers(
         pondBankComposition,
       );
     // Appearance resolution cannot feed back into the completed weight graph.
-    const appearance: Record<Layer, CompactTerrainLayer> & {
-      coastalGround?: CompactTerrainLayer;
+    const appearance: Record<Layer, T> & {
+      coastalGround?: T;
     } = resolveAppearance?.(weights, layers) ?? layers;
     const coastalAppearance = appearance.coastalGround ?? coastalGround?.layer;
     const blendVector = (
@@ -3879,18 +4001,22 @@ export function blendCompactTerrainLayers(
         .add(coastal.mul(weights.w));
     return {
       weights,
-      albedo: blendVector(
-        appearance.grass.albedo,
-        appearance.dirt.albedo,
-        appearance.rock.albedo,
-        coastalAppearance?.albedo,
-      ),
-      roughness: blendScalar(
-        appearance.grass.roughness,
-        appearance.dirt.roughness,
-        appearance.rock.roughness,
-        coastalAppearance?.roughness,
-      ),
+      ...(includeAppearance
+        ? {
+            albedo: blendVector(
+              appearance.grass.albedo!,
+              appearance.dirt.albedo!,
+              appearance.rock.albedo!,
+              coastalAppearance?.albedo,
+            ),
+            roughness: blendScalar(
+              appearance.grass.roughness!,
+              appearance.dirt.roughness!,
+              appearance.rock.roughness!,
+              coastalAppearance?.roughness,
+            ),
+          }
+        : {}),
       ao: blendScalar(
         appearance.grass.ao,
         appearance.dirt.ao,
@@ -3958,18 +4084,22 @@ export function blendCompactTerrainLayers(
     return mix(mix(meadow, rock, cliff), ground, road);
   };
   return {
-    albedo: blendVector(
-      layers.grass.albedo,
-      layers.dirt.albedo,
-      layers.rock.albedo,
-      coastalGround?.layer.albedo,
-    ),
-    roughness: blendScalar(
-      layers.grass.roughness,
-      layers.dirt.roughness,
-      layers.rock.roughness,
-      coastalGround?.layer.roughness,
-    ),
+    ...(includeAppearance
+      ? {
+          albedo: blendVector(
+            layers.grass.albedo!,
+            layers.dirt.albedo!,
+            layers.rock.albedo!,
+            coastalGround?.layer.albedo,
+          ),
+          roughness: blendScalar(
+            layers.grass.roughness!,
+            layers.dirt.roughness!,
+            layers.rock.roughness!,
+            coastalGround?.layer.roughness,
+          ),
+        }
+      : {}),
     ao: blendScalar(
       layers.grass.ao,
       layers.dirt.ao,

@@ -1,5 +1,39 @@
 # Grass canopy visibility: research checkpoint
 
+## Source239 — complete live normal/AO composition and native shader proof
+
+**Outcome: the complete normal/AO path is now separated and verified; no default rendering or FPS change.** Shared channel-selective bank, coast and final blending helpers preserve existing arithmetic. `getCompactTerrainNormalSurface()` lazily exposes a frozen owner-local graph with live distance, camera and composition uniforms. It builds fresh normal-only layers rather than borrowing the packed appearance graph, refuses foreign/mutated recipe ownership and returns null after material disposal. It does not load textures, allocate GPU pages or install a production caller.
+
+Raw coastal dirt is resolved before bank mineral/silt grading, followed by coast-rock composition. The complete height/relief/sediment/contact/coast/cavity/bank weight order is retained before deferred resolution. Cavity uses fresh raw rock AO. Appearance-only grass grades and pond wetness are excluded; the original full-material path still uses them. The exact zero-mask normal behavior, derivative-flow fences and view-space conversion remain shared.
+
+### Native hardware result — shader correctness, not game timing
+
+The [accepted native receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source239-native-shader-qualification.json), SHA256 `7fd4a6ea1880221f0eacc5d1a24f6825432764a0a5cccd97afe97662b6ce815d`, records five real production-material configurations on Apple hardware WebGPU / Metal-3. Independent review recomputes the following **compact texture-owner sample sites in the actual issued normal/AO probe fragments**:
+
+| Configuration | Existing normal/AO probe | Separated normal/AO probe | Appearance sites removed |
+| --- | ---: | ---: | ---: |
+| Linear | 10 | 10 | 0 |
+| Height + bank | 31 | 31 | 0 |
+| Deferred rock | 31 | 22 | 9 |
+| Deferred ground + rock | 35 | 19 | 16 |
+| Coast cavity | 22 | 22 | 0 |
+
+Every retained normal/AO/height role has the same count. All candidate appearance bindings are absent. The fully deferred case retains 14 normal/AO plus five height sites; including the other textures, its probe has 39→23 total sites. **This is not a claim that the ordinary full PBR shader drops from 55 to 19, nor a measured GPU-time saving.** The current native game baseline selects deferred rock, not deferred ground.
+
+All ten target draws require the expected material builder, matching actual issued fragment state, a successful non-error hardware pipeline and a positive draw-counter increment. Merely resolving `compileAsync()` is not sufficient: Three can catch build/pipeline failures and substitute/skip work. The three unconditional pair fragments are byte-identical. Device/pipeline errors are empty and owned resources are disposed.
+
+This qualification uses production fallback texels. It does **not** establish loaded-art filtering, pixel parity, near/grazing/moving views, game performance or cache integration. Four earlier private-harness attempts are rejected and retained separately: a duplicate Three import, the wrong render-vs-draw counter, an overly broad hook catching the renderer's output quad, and an overescaped shader-count regex. None is counted as a successful comparison.
+
+### Regression and safety checkpoint
+
+- Final root: **401 tests pass / two existing native-only skips across four core suites** (38.53 seconds), plus **155 passes / two existing gated skips** across five related suites (16.52 seconds): **556 passes / four gated skips total**.
+- Seven new tests cover exact bank/coast/final weights and channels, zero/tiny masks, captured options, live fade/road/pond inputs, expanded function/branch dependencies, and lazy getter lifetime/default-node invariance. Independent review caught and corrected a test-only diagnostic path before the final run.
+- Scoped lint, formatting and diff checks pass. Shared typecheck still has five inherited procgen API errors outside changed files; **it is not clean**.
+- All 55 protected previous-file pins and three new source/test pins match. Source237 leases and Source238 raw-layer implementation/tests are preserved. Native helper servers and their temporary build aliases are stopped/removed, all five test ports are free, and the owned Chrome window is closed. No game server, public 3333 session or saved-player state was operated on.
+- [Combined verification and cleanup receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source239-complete-normal-composition-verification.json).
+
+**Next:** independently repeat the live full-2× comparison, then qualify a bounded composed albedo/roughness representation while using this live normal/AO graph. Retain Source233 coverage, Source237 loaded-source validity, separate composition/uniform/filter guards and original fallback. Do not expand the 405.33 MiB fixed-view prototype. Loaded-map pixels, moving/near/shore views, live lighting/shadows/fog and total memory still require evidence. Terrain→grass remains the directly ranked order; reflection overlaps both and the rough-leaf improvement is already included. **Sustained 60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Source238 — normal/AO-only terrain layers without hidden appearance reads
 
 **Outcome: the raw-layer graph split is verified and default-inert, not a measured FPS gain.** `createCompactTerrainNormalLayerFactory()` builds grass, dirt and rock normal/AO/height outputs through the same implementation as the existing full factory. A construction-time channel choice excludes albedo/roughness samples, temporaries and packed assignments; no appearance outputs or page-input parameter are exposed. Existing callers and default rendering remain unchanged.
