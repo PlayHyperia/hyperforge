@@ -1,5 +1,36 @@
 # Grass canopy visibility: research checkpoint
 
+## Native236 — first complete terrain-cache A/B/B/A shows a bounded cadence lead
+
+**Outcome: approximately 2.7 ms / 6.7% lower median tick intervals in one completed experiment, not production acceptance or 60 FPS.** The full composed-surface prototype now has a valid closing stock control. B1/B2 share one continuous cache lease; they are not independent fresh-run replications. Terrain remains the directly measured first content priority, grass second; reflection overlaps both. Sustained 16.67 ms at actual 2× remains unmet.
+
+### Build recovery and unchanged rendering scope
+
+Canonical build 236 succeeds in 2.126 seconds: nine bundles, 980 inputs and zero substitutions. Build 234 previously timed out after 300 seconds; LLDB located esbuild blocked opening `/Users/lucid/Documents`, with the pathname confirmed from register `x20` and libc disassembly. The narrowly scoped compiler alias plus process/API working-directory change to `/private/tmp` allows the full build to complete. This identifies a blocked operation and a working build route, **not an established iCloud, TCC or other OS root cause**. Temporary build/runtime helper changes are restored afterwards. Source233's committed/pushed coverage prerequisite remains uncalled by default; no production GPU cache or rendering promotion is introduced.
+
+The [completed receipt](</Users/lucid/Downloads/hyperia-native228-surface-abba (6).json>), SHA256 `540300d60bae87460c70f9e88c5eca191af242a8b10e3c5745fe3de35d5ccdde`, records 100.020 seconds: 2,592 valid rows, 2,076 measured ticks and 98 successful focus checks. Each 25-second arm excludes its first 5 seconds; no readback, bake or GPU fence occurs during timing. Canvas 3024×1724 / DPR 2 / MSAA 4, High shadows, full reflections, postprocessing/bloom, held pose/phase/exposure and complete content remain unchanged. Every row retains 868 issued calls and 10,567,544 repeated-view triangle slots.
+
+| Arm | Measured ticks / intervals | Wall median / p95 (ms) | Tick CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| Stock A1 | 500 / 499 | 40.20 / 42.40 | 11.60 |
+| Cached B1 | 538 / 537 | 37.50 / 39.90 | 13.10 |
+| Cached B2 | 538 / 537 | 37.60 / 39.70 | 13.10 |
+| Restored stock A2 | 500 / 499 | 40.30 / 42.20 | 11.70 |
+
+Root and independent recomputation use midpoint medians and p95 index `floor(0.95 × (n − 1))`. Compared with the 40.25 ms stock-bookend mean, cached medians improve by 2.75 / 2.65 ms, while synchronous CPU rises approximately 1.45 ms. These are instrumented ordinary tick intervals, **not presented FPS, exclusive GPU savings or an additive performance budget**.
+
+### Useful signal, substantial qualification limits
+
+Only one complete 100 m terrain tile in the primary view uses the cache; mirrors and other tiles remain original. The issued-program proof retains the existing 55→18 static texture-site reduction with all five shadow comparisons, not geometry/light omission. The run records 1,344 cached primary substitutions including warmup. Preparation costs 962.7 ms outside timing. Finite-coverage readback checks 20,480,000 channel texels with zero invalid values and maximum normal-length error 0.00069726; this is not filtering or pixel-parity proof.
+
+Allocation remains 425,022,800 bytes / 405.33 MiB persistent, with 533.33 MiB GPU readback peak. The held-camera normal fade, composed-material filtering, gutters/skirts, near/grazing/shore appearance, moving-view behavior and memory budget remain unqualified. **This expensive fixed-view representation is not suitable for shipping as-is.** The result justifies bounded-page planning, not production GPU integration or default promotion; an independent fresh repeat remains required first.
+
+Later [attempt 7](</Users/lucid/Downloads/hyperia-native228-surface-abba (7).json>) loses focus with zero rows; [attempt 8](</Users/lucid/Downloads/hyperia-native228-surface-abba (8).json>) fails initial visibility/focus/device admission with zero rows. Both are excluded, not repetitions of the accepted comparison. Their SHA256 values are `471c9b786a23d0a3e4c45b7e7e82e61490873f099e51e2de27ed698559ff9c3c` and `9075d555a3977ef2ba98362b501646a102d6a00502812a3da56e54190117188e`.
+
+### Cleanup
+
+Native-console checks verify the probe disposed, renderer restored, owned resources retired, empty errors, exposure/camera/clock restored and diagnostic owners absent. Runtime stops at 02:43:23.179 UTC with empty errors, protected state unchanged and all private ports free; public state is untouched. Three temporary served helper copies are removed while evidence originals remain. Build/runtime helpers return to their original state. [Cleanup and custody record](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native236-cleanup.json).
+
 ## Source233 — complete terrain coverage prerequisite, no rendering change
 
 **Outcome: a tested ownership/coverage guard for a future bounded terrain cache, not an FPS gain.** No production caller, GPU cache allocation, material/default change, native benchmark or visual acceptance is introduced.
