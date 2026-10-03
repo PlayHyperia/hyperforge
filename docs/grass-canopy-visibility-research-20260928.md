@@ -1,5 +1,50 @@
 # Grass canopy visibility: research checkpoint
 
+## Native230–231 — completed physical GPU pass attribution at actual 2×
+
+**Outcome: 24 validated GPU samples, not a speedup or 60 FPS acceptance.** Performance remains the sole active priority. The current scene is still substantially above the 16.67 ms budget; no production rendering/defaults change in this checkpoint.
+
+### Scope, receipts and independent verification
+
+Canonical build212 is reused without source changes on the Apple M5 /24 GiB Mac, AC-powered at runtime preflight. The ordinary private game naturally reaches readiness at **3024×1724, DPR2, MSAA4, High shadows, full planar reflections**, held camera/phase0.56/exposure0.850240084, with the already-tested rough-leaf opt-in. Actors, resource relocation and wind remain live. No objects are omitted, no manual scene renders or queue fences are introduced, and no resolution/content/quality setting is reduced. Host power/thermal observations are preflight snapshots, not continuous host-isolation proof.
+
+The first [Native230 receipt](/Users/lucid/Downloads/hyperia-native230-gpu-passes.json), SHA256 `6d5a4af50c536cd0a0b19836a050581e51581545d964d6741a059a0606930c8d`, stops on blur after6.055 seconds with six raw samples. It is explicitly incomplete; all hooks and18 owned resources restore. Its data remain exploratory rather than being silently combined with a successful run.
+
+The independently reviewed Native231 variant collects independent foreground samples at most1Hz within120 wall seconds. Focus loss pauses collection, resumption requires2 seconds plus full owner/quality checks, and acceptance requires unchanged focus before/after the original CPU tick **and through asynchronous GPU readback**. Interrupted samples are recorded and excluded; ordinary gameplay always continues. The successful [Native231 receipt](/Users/lucid/Downloads/hyperia-native231-gpu-passes.json), SHA256 `88b3b87ecaa546fd1b9baf630534ee959e5642adfe0499ae50063b3470c69cb9`, contains24 valid samples in25.648 seconds, with only the initial2.016-second settling period and **no subsequent focus interruption or rejected sample**.
+
+Every sample has eight physical passes: fog, three initial/resumed primary segments, primary shadow capture, mirror, mirror shadow capture and final output. All192 passes use unique query pairs within their query sets and map to exact live owners. Forty-eight depth-copy boundaries join the resumed primary segments. All24 samples retain890 backend attempts,864 issued-call counters and10,555,544 repeated-view triangle slots. This is not a unique-scene triangle count or complete category-time ranking.
+
+Root and independent reviewer recompute unions directly from raw BigInt timestamps; all summaries match. All six global hooks and144 native-encoder hooks restore;72/72 owned query/readback/resolve resources are destroyed; pending/resources/errors/GPU errors/device loss are zero. External helper SHA256 `92baec874b4eeb9178d404fa1028f69ecb9590ac8a249211586ca13a3b4587ad`; Node22 syntax passes. [Reproducible root analysis](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native231-root-analysis.json).
+
+### Observed pass intervals — deliberately non-additive
+
+| Pass scope, sorted by median interval union | Median | Observed range |
+| --- | ---: | ---: |
+| Primary world, union of three physical segments |32.178 ms|26.018–38.994 ms|
+| Planar mirror world |18.809 ms|12.386–37.093 ms|
+| Final output |16.417 ms|4.129–21.037 ms|
+| Primary-view shadow-map capture |0.786 ms|0.655–1.180 ms|
+| Mirror-view shadow-map capture |0.721 ms|0.655–1.245 ms|
+| Fog preparation |0 ms at reported precision|0–0.131 ms|
+
+**These are overlapping reported intervals, not isolated GPU costs, exclusive budget percentages or expected savings.** Across all passes, median union is38.928 ms, median envelope40.206 ms, but median raw duration sum is96.076 ms with56.721 ms of interval overlap. Treating the sum as frame cost would be wrong. All timestamps lie on an observed65,536 ns grid;13 fog intervals report zero, which does not mean rendering is free.
+
+The output interval starts exactly with the final primary segment in15/24 samples. Its end is only0.328–0.459 ms later than that segment (median0.360 ms). This does not isolate output shader cost; it specifically prevents misdiagnosing a standalone16 ms output bottleneck. Copy/resolve/compute work outside render passes is not separately timed. Sparse samples and instrumented CPU durations do not establish presented FPS, smooth frame pacing, moving-camera acceptance or an isolated host GPU budget.
+
+### Optimization order and next implementation gate
+
+1. **Terrain surface evaluation first, grass rendering second:** these remain the only directly ordered content categories from controlled within-run omission comparisons. Their earlier29.1–29.8 ms versus25.45–26.3 ms measurements were at3800×1886 and must not be transplanted into this3024×1724 budget.
+2. **Repeated reflection rendering is a major overlapping scope:** the earlier3024×1724 omission test measured12.6–13.6 ms marginal cost. It repeats terrain/grass/other work, so do not add it as an exclusive third category.
+3. **Shadow-map generation is comparatively short in this view.** That does not measure shadow receiving/PCF inside terrain and grass shaders, and is not permission to remove shadows.
+4. **Trees, actors, flowers, mushrooms, water shading, UI and remaining CPU systems still lack a complete, current isolated-time ranking.** Triangle counts and draw-count shares are not substitutes. The Native229 strict category screen remains refused, not retrospectively accepted.
+
+Stop expanding pass-profiling wrappers now that this dataset is complete. The next substantive gate is a repeat of the existing Native227 full composed-terrain surface experiment under explicitly matched/repeated live-scene conditions, followed only if beneficial by bounded production paging. Its one-pair3.4 ms lead is still unreplicated; do not promote its405.33 MiB fixed-view allocation. A paging design must preserve live lighting/shadows/fog, use original shading for stale/missing/under-resolved/steep/grazing/overlapping/skirt regions, qualify near-ground filtering and moving coverage, and measure total GPU memory. Final cached normals cannot simply have distance fade applied afterward and claim equivalence to the current per-projection normal composition. Full2× output stays fixed. Sustained moving-view60 FPS remains unmet.
+
+### Cleanup and checkpoint safety
+
+[Native230–231 cleanup record](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native230-231-cleanup.json) records direct native-console verification of restored exposure, camera/clock, absent probe/UI owners and released exposure subscription. Owned game/DevTools close; no established private socket remains before shutdown. Runtime ends2026-10-03T00:20:37.610Z with empty errors, protected state unchanged, disposable database removed and all four private ports free. Process SHA256 `4076ce2d08a22aab1e020dcc851d103c0653677354adb8a630a3d24ea760218d`. Three temporary served helpers are removed; evidence originals remain. Runtime helper returns to its baseline hash and all57 source/unrelated pins match. Public3333 and the saved-player database are untouched.
+
+
 ## Source229 — exact tree ownership and native scene volatility
 
 **Outcome: measurement support and a diagnosed attribution obstacle, not an FPS improvement.** The performance-only goal remains sustained 60 FPS / 16.67 ms at actual 2×. Default rendering, public3333 and saved-player data are unchanged.
