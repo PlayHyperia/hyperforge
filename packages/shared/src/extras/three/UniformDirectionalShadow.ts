@@ -19,10 +19,13 @@ import {
   context,
   float,
   mix,
+  overrideNode,
   positionWorld,
+  screenCoordinate,
   smoothstep,
   uniform,
 } from "three/tsl";
+import { croppedReflectionScreen } from "./CroppedReflectionScreen";
 
 type FilterInputs = {
   depthTexture: DepthTexture;
@@ -52,6 +55,24 @@ const basicShadowFilter =
   BasicShadowFilter as unknown as ShadowFilterInputs["filterFn"];
 const pcfShadowFilter =
   PCFShadowFilter as unknown as ShadowFilterInputs["filterFn"];
+// Node.getShared caches the first override per builder/node/stage. Every PCF
+// call must therefore use this same replacement; only its render-owned origin
+// uniform changes between ordinary and cropped captures. Never select a graph
+// from the render target present during its first compilation.
+const originalScreenCoordinate = () => croppedReflectionScreen.screenCoordinate;
+function originalScreenPcfShadowFilter(inputs: FilterInputs): Node<"float"> {
+  const filtered = pcfShadowFilter(inputs);
+  if (!croppedReflectionScreen.enabled) return filtered;
+  // r186's OverrideContextNode declaration erases the flow node's type and
+  // typed extensions. ContextNode.generateNodeType/generate delegate to this
+  // exact float flow. Preserve it without inserting a float()/intent VarNode;
+  // no taps, weights or map inputs change.
+  return overrideNode(
+    screenCoordinate,
+    originalScreenCoordinate,
+    filtered,
+  ) as unknown as Node<"float">;
+}
 const grassFilterContexts = new WeakMap<
   ContextNode<unknown>,
   GrassShadowFilterContext
@@ -104,11 +125,15 @@ function grassShadowFilter(
           positionWorld.distance(owner.primaryCameraPosition),
         );
         visibility.assign(
-          mix(pcfShadowFilter(inputs), basicShadowFilter(inputs), weight),
+          mix(
+            originalScreenPcfShadowFilter(inputs),
+            basicShadowFilter(inputs),
+            weight,
+          ),
         );
       })
       .Else(() => {
-        visibility.assign(pcfShadowFilter(inputs));
+        visibility.assign(originalScreenPcfShadowFilter(inputs));
       });
     return visibility;
   })().context({ uniformFlow: false });
@@ -147,13 +172,14 @@ export class UniformDirectionalShadowNode extends ShadowNode {
         const owner = material.contextNode
           ? grassFilterContexts.get(material.contextNode)
           : undefined;
-        if (
-          !owner ||
-          activeBuilder.renderer.shadowMap.type !== PCFShadowMap ||
-          shadow.filterNode != null ||
-          inputs.filterFn !== pcfShadowFilter
-        ) {
-          return inputs.filterFn(filterInputs);
+        const stockPcf =
+          activeBuilder.renderer.shadowMap.type === PCFShadowMap &&
+          shadow.filterNode == null &&
+          inputs.filterFn === pcfShadowFilter;
+        if (!owner || !stockPcf) {
+          return stockPcf
+            ? originalScreenPcfShadowFilter(filterInputs)
+            : inputs.filterFn(filterInputs);
         }
         // The outer uniformFlow must not turn the uniform mode branches into
         // eager selects. grassShadowFilter explicitly resets that context.

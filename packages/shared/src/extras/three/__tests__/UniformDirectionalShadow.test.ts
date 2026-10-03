@@ -2,11 +2,21 @@ import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { JSDOM } from "jsdom";
 import type { Browser } from "playwright";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import THREE, { uniform } from "../three";
-import { ShadowNode } from "three/webgpu";
-import { context } from "three/tsl";
+import { ShadowNode, WGSLNodeBuilder, type Node } from "three/webgpu";
+import {
+  BasicShadowFilter,
+  PCFShadowFilter,
+  context,
+  interleavedGradientNoise,
+  overrideNode,
+  screenCoordinate,
+  vec3,
+  vec4,
+} from "three/tsl";
 import {
   GrassShadowFilterContext,
   UniformDirectionalShadowNode,
@@ -99,6 +109,232 @@ describe("explicit uniform-frustum single-map shadow owner", () => {
     node.dispose();
     plain.dispose();
     subclass.dispose();
+  });
+});
+
+describe("cropped reflection stock PCF coordinates", () => {
+  type ShadowModule = typeof import("../UniformDirectionalShadow");
+  type ScreenModule = typeof import("../CroppedReflectionScreen");
+  type Callback = (builder: WGSLNodeBuilder) => Node;
+
+  // These are real Three objects and its actual CPU shader builder. No device
+  // is initialized: texture-pipeline execution remains a separate native gate.
+  async function fixture(
+    selected: boolean,
+    run: (
+      shadows: ShadowModule,
+      screen: ScreenModule,
+      renderer: THREE.WebGPURenderer,
+      mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardNodeMaterial>,
+    ) => void,
+  ) {
+    const previousWindow = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "window",
+    );
+    const dom = new JSDOM("<canvas></canvas>", {
+      url: `https://example.test/${selected ? "?reflectionCapture=cropped-v1" : ""}`,
+    });
+    const canvas = dom.window.document.querySelector("canvas")!;
+    const renderer = new THREE.WebGPURenderer({ canvas });
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(),
+      new THREE.MeshStandardNodeMaterial(),
+    );
+    try {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: dom.window,
+      });
+      // Reevaluate only the real modules' captured URL selection. This does not
+      // replace a dependency or mutate the selected singleton after creation.
+      vi.resetModules();
+      const shadows = await import("../UniformDirectionalShadow");
+      const screen = await import("../CroppedReflectionScreen");
+      expect(screen.croppedReflectionScreen.enabled).toBe(selected);
+      run(shadows, screen, renderer, mesh);
+    } finally {
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      await renderer.dispose();
+      if (previousWindow)
+        Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+      dom.window.close();
+      vi.resetModules();
+    }
+  }
+
+  function inspect(root: Node, builder: WGSLNodeBuilder) {
+    const nodes = new Set<Node>();
+    const overrides: Array<Map<Node, Callback>> = [];
+    const visit = (node: Node) => {
+      if (nodes.has(node)) return;
+      nodes.add(node);
+      if (Reflect.get(node, "isOverrideContextNode") === true) {
+        const value = Reflect.get(node, "value");
+        const entries: unknown = Reflect.get(value, "overrideNodes");
+        if (!(entries instanceof Map))
+          throw new Error("Missing real override map");
+        overrides.push(entries);
+      }
+      if (Reflect.get(node, "isShaderCallNodeInternal") === true) {
+        const stack: unknown = Reflect.apply(
+          Reflect.get(node, "getOutputNode"),
+          node,
+          [builder],
+        );
+        if (!(stack instanceof THREE.Node))
+          throw new Error("Missing real Fn stack");
+        visit(stack);
+        return;
+      }
+      // If/Else stores closed ShaderNode callbacks, not calls. Expand those
+      // actual callbacks too so side-effect assignments cannot hide taps.
+      if (typeof Reflect.get(node, "jsFunc") === "function") {
+        const call: unknown = Reflect.apply(
+          Reflect.get(node, "call"),
+          node,
+          [],
+        );
+        if (!(call instanceof THREE.Node))
+          throw new Error("Missing real branch call");
+        visit(call);
+        return;
+      }
+      for (const child of node.getChildren()) visit(child);
+    };
+    visit(root);
+    return {
+      overrides,
+      comparisons: [...nodes].filter(
+        (node) =>
+          Reflect.get(node, "isTextureNode") === true &&
+          Reflect.get(node, "compareNode") instanceof THREE.Node,
+      ).length,
+    };
+  }
+
+  function filterGraph(
+    shadows: ShadowModule,
+    renderer: THREE.WebGPURenderer,
+    mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardNodeMaterial>,
+    filter: "pcf" | "basic" | "custom",
+  ) {
+    const light = new THREE.DirectionalLight();
+    const owner = new shadows.UniformDirectionalShadowNode(light);
+    const depthTexture = new THREE.DepthTexture(64, 64);
+    depthTexture.compareFunction = THREE.LessEqualCompare;
+    const builder = new WGSLNodeBuilder(mesh, renderer);
+    builder.shaderStage = "fragment";
+    const stock = (
+      filter === "basic" ? BasicShadowFilter : PCFShadowFilter
+    ) as Parameters<
+      ShadowModule["UniformDirectionalShadowNode"]["prototype"]["setupShadowFilter"]
+    >[1]["filterFn"];
+    if (filter === "custom") Reflect.set(light.shadow, "filterNode", stock);
+    try {
+      return inspect(
+        owner.setupShadowFilter(builder, {
+          depthTexture,
+          shadowCoord: vec3(0.25, 0.5, 0.75),
+          shadow: light.shadow,
+          filterFn: stock,
+        }),
+        builder,
+      );
+    } finally {
+      depthTexture.dispose();
+      owner.dispose();
+    }
+  }
+
+  it("leaves the disabled stock five-tap graph and basic/custom filters unwrapped", async () => {
+    await fixture(false, (shadows, _screen, renderer, mesh) => {
+      expect(filterGraph(shadows, renderer, mesh, "pcf")).toMatchObject({
+        comparisons: 5,
+        overrides: [],
+      });
+    });
+    await fixture(true, (shadows, _screen, renderer, mesh) => {
+      expect(filterGraph(shadows, renderer, mesh, "basic")).toMatchObject({
+        comparisons: 1,
+        overrides: [],
+      });
+      expect(filterGraph(shadows, renderer, mesh, "custom")).toMatchObject({
+        comparisons: 5,
+        overrides: [],
+      });
+    });
+  });
+
+  it("wraps only stock PCF and shares one canonical callback across grass branches and materials", async () => {
+    await fixture(true, (shadows, screen, renderer, mesh) => {
+      const plain = filterGraph(shadows, renderer, mesh, "pcf");
+      expect(plain.comparisons).toBe(5);
+      expect(plain.overrides).toHaveLength(1);
+      const callback = plain.overrides[0].get(screenCoordinate)!;
+      expect(typeof callback).toBe("function");
+      expect(Reflect.apply(callback, undefined, [])).toBe(
+        screen.croppedReflectionScreen.screenCoordinate,
+      );
+      const key = mesh.material.customProgramCacheKey();
+      const version = mesh.material.version;
+      const context = new shadows.GrassShadowFilterContext();
+      mesh.material.contextNode = context.contextNode;
+      const markedKey = mesh.material.customProgramCacheKey();
+      expect(markedKey).not.toBe(key);
+      for (const mode of [0, 1, 2, 0]) {
+        context.drawMode.value = mode;
+        const graph = filterGraph(shadows, renderer, mesh, "pcf");
+        // Existing near/far/transition graph: 5 + 1 + (5 + 1), not a
+        // claim that all twelve comparisons execute in a selected mode.
+        expect(graph.comparisons).toBe(12);
+        expect(graph.overrides).toHaveLength(2);
+        for (const map of graph.overrides) {
+          expect(map.size).toBe(1);
+          expect(map.get(screenCoordinate)).toBe(callback);
+        }
+        expect(mesh.material.customProgramCacheKey()).toBe(markedKey);
+        expect(mesh.material.version).toBe(version);
+      }
+    });
+  });
+
+  it("emits corrected stock IGN arguments without contaminating raw coordinates or builder caches", async () => {
+    await fixture(true, (_shadows, screen, renderer, mesh) => {
+      const corrected = () => screen.croppedReflectionScreen.screenCoordinate;
+      const emit = (reverse: boolean) => {
+        const builder = new WGSLNodeBuilder(mesh, renderer);
+        builder.shaderStage = "fragment";
+        const plain = interleavedGradientNoise(screenCoordinate.xy);
+        const cropped = overrideNode(
+          screenCoordinate,
+          corrected,
+          interleavedGradientNoise(screenCoordinate.xy),
+        );
+        return builder.flowStagesNode(
+          reverse
+            ? vec4(cropped, plain, screenCoordinate.x, 1)
+            : vec4(plain, cropped, screenCoordinate.x, 1),
+          "vec4",
+        ).result;
+      };
+      for (const reverse of [false, true, false]) {
+        const actual = emit(reverse);
+        expect(
+          actual.match(/interleavedGradientNoise\( fragCoord\.xy \)/g),
+        ).toHaveLength(1);
+        expect(
+          actual.match(
+            /interleavedGradientNoise\( \( fragCoord\.xy \+ render\.croppedReflectionPixelOffset \) \)/g,
+          ),
+        ).toHaveLength(1);
+        expect(actual).toContain(", fragCoord.xy.x, 1.0 )");
+        expect(actual).not.toMatch(/Recursion|NaN|undefined/);
+      }
+    });
   });
 });
 

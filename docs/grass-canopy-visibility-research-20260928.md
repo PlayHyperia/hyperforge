@@ -1,5 +1,51 @@
 # Grass canopy visibility: research checkpoint
 
+## Native249 — pixel-density-preserving reflection crop (private candidate)
+
+**The actual reflection attachment shrinks; 60 FPS remains unmet and performance acceptance is open.** Native248 first measures 16 ordinary completed frames in the retained 3024×1724 / DPR2 / MSAA4 view: the sampled-water rectangle is consistently [773,348,739,117] inside the native 1512×862, zero-MSAA reflection target. Outward eight-pixel alignment yields [768,344,744,128], retaining 95,232 of 1,303,344 attachment pixels (7.31%). This is a footprint/attachment ratio, not a predicted frame-time saving.
+
+The explicit, default-off `reflectionCapture=cropped-v1` candidate now allocates that smaller attachment **at the original pixel density**. It applies C×P after the native oblique clip-plane calculation, remaps the already-distorted water UV, and virtualizes original screen coordinates only inside the exact mirror renderer/target/camera lease. Original stock five-tap PCF remains intact through a scoped coordinate override. Ordinary/default aliases preserve stock node identities. Unsupported scissor, multisample, array-camera, transmission, custom-shadow, point/line/sprite or borrowed scene-callback cases retain full capture. The pilot does not claim universal compatibility with arbitrary custom material graphs.
+
+Root and independent reviews verify the installed r186 lifecycle rather than assuming current online declarations exactly describe it. Root passes **90 tests / one native-only skip** across the screen, shadow and water suites; scoped lint/format pass. Full shared TypeScript still reports the same five inherited procgen-export errors and zero new errors. These CPU tests are not GPU performance evidence.
+
+Fresh canonical build249 has nine outputs, 981 compiled inputs, zero source substitutions and 182 unchanged protected artifacts. In the actual private game, the candidate uses **744×128**, toggling to full **1512×862** restores identity water UVs, and the main canvas stays **3024×1724 / DPR2 / MSAA4**. Matched camera, phase 0.56 and exposure 0.850240084 are retained. [Cropped frame](/Users/lucid/Downloads/hyperia-native249-cropped.png) and [full frame](/Users/lucid/Downloads/hyperia-native249-full.png) show no obvious lost scenery or shifted reflection in this static view. Wind, water, clouds and actors remain live: no pixel identity, motion, all-day or all-route acceptance is claimed.
+
+- [x] Actual cropped-target eligibility and live full-target restoration.
+- [x] Default-off selector, screen/projection math, five-tap shadow-coordinate override and real-object lifecycle tests.
+- [x] Issued mirror/primary shader and packed CPU uniform qualification in the held view. All 209 common primary and 143 common mirror object/material/geometry pairs retain byte-identical WGSL. All sampled shadow-PCF paths retain five comparison sites and the corrected pixel origin [768,344]; primary/full-mirror transforms remain identity. No viewport-size transform is emitted in this view, so its native execution is not claimed.
+- [x] Two complete 60-second same-view, full-content A/B/B/A timing screens with exact observer restoration.
+- [ ] Moving-view crop/allocation behavior, broad image parity, flag-absent baseline comparison and sustained 16.67 ms acceptance.
+
+The actual submitted-work comparison removes **70 mirror draw calls / 1,950,281 repeated-view triangles**: 22 grass calls / 1,855,125 triangles, 34 standard-material calls / 53,160 triangles and 14 physical-material calls / 41,996 triangles. Primary work (330 calls / 4,895,601 triangles), shadow work (216 / 1,244,326) and other work (2 / 3,969) are unchanged in the two captured frames. No scene object or quality setting is removed. This is ordinary cropped-frustum rejection, not a GPU-time saving by itself. Both shader observers restore exactly with empty errors. [Raw shader qualification](/Users/lucid/Downloads/hyperia-native249-crop-qualification.json), SHA256 `cfd8159422aa7c5321689c04e55f013184a10842349fe5e65ad8ad765d80ecc7`, contains actually issued programs and packed CPU binding data, not GPU readback, pixel equality or exhaustive material compatibility. The two shader captures are unfocused and are not timing evidence.
+
+Provenance: Native248 raw footprint SHA256 `3e90a64e8c1ff5061dfe81234b9dd360b4abe506613421ccb825b30ab2bc57e3`; its stopped process receipt `5bee0bcaf3440fee091db41dfed9ba598cc69eec694a93c2d809837b4b5eb8f2` records empty errors/protected-state restoration, and native camera/clock/exposure restoration passes. Build249 report SHA256 `3c73d51d6a25d485e4435c90d35db49b4271ab654fb5b2318d8002baad6ff000`; framework-client `002af555f5819f33b7e7eb5081944546c1eb509f5d31063165ed24430f595eb3`. Build/source evidence is not runtime acceptance. Public3333 and saved game remain untouched.
+
+
+### Native249 repeated timing — a material same-view improvement, not 60 FPS
+
+Each four-arm comparison runs full/cropped/cropped/full for 15 seconds per arm, excluding four seconds of warm-up. All original ticks and rendering execute; no geometry omissions, material replacements, GPU waits or timestamp queries are introduced. Both runs finish with empty errors, all rows valid and exact hook/toggle restoration. The same opted-in graph supplies full-mode identity coordinates; this is **not** a separate flag-absent/default-graph comparison.
+
+| Wall tick median / p95 (ms) | Full A1 | Cropped B1 | Cropped B2 | Full A2 |
+| --- | ---: | ---: | ---: | ---: |
+| Run 1: 1,563 valid ticks | 42.30 / 48.50 | 35.50 / 37.80 | 35.40 / 37.50 | 41.20 / 44.60 |
+| Run 2: 1,512 valid ticks | 42.50 / 48.50 | 37.30 / 43.80 | 36.40 / 39.70 | 41.80 / 45.30 |
+
+The cropped arm improves against its adjacent full arm by **5.2–6.8 ms** across both runs. Full bookends drift −1.1 ms and −0.7 ms, smaller than those differences. Synchronous CPU medians are 13.10/13.30/13.20/12.50 ms in run 1 and 12.80/13.80/13.40/12.50 ms in run 2: cropping does not demonstrate a CPU win. These are ordinary frame-update intervals, not exclusive GPU time or displayed-frame presentation measurements. No 60 FPS claim is made; the best cropped median remains more than twice the 16.67 ms target.
+
+Both runs retain actual 3024×1724/DPR2/MSAA4, high shadows, unchanged scene owners, held pose/phase/exposure and live world simulation. All frames issue two outer render calls and one mirror capture. Actual summed work is consistently **868 calls / 10,567,544 repeated-view triangles full** versus **798 / 8,617,263 cropped**. These include nested reflection/shadow work once, not distinct scene-model triangle counts. Each run has 59 successful foreground/quality metadata checks. Live-scene work is slightly larger than the earlier shader snapshots, but the exact 70-call / 1,950,281-triangle reduction is unchanged.
+
+[Run 1](</Users/lucid/Downloads/hyperia-native249-crop-abba (1).json>) SHA256 `7e625decc43d92152a907bd3b9342d945247b878125da5a06c58e4689f13c38f`; [run 2](</Users/lucid/Downloads/hyperia-native249-crop-abba (2).json>) `b42ef5eed74ce0e1f86624519b7b52369cb012aaf3ecfe8804ef15dbb915a628`. The earlier failed attempt is retained with one invalid warm-up row and zero measured samples: the diagnostic read counters after `DevStats.postTick()` reset them. Only observer accounting changes to non-overlapping outermost render-call intervals; the production game and validation tolerances do not change. Corrected helper SHA256 `b703c24c38ed4e69ea0d09ddba96c8d48574aec6325b3ac5041749cd1fd72b5e`.
+
+The [independent timing verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native249-timing-verification.json) reproduces all quantiles, 48 time bins, target/work invariants and cross-run input equality. Run 2's first cropped arm is less stable (two-second medians 36.4–41.1 ms); the result is not treated as a universal fixed saving.
+
+### Native249 cleanup and checkpoint boundary
+
+The timer restores its original crop toggle and both exact hook descriptors after each run. A subsequent native console command disposes the panel and requests full capture. Native-window focus changes prevent verification of the final full attachment and exact held camera/clock/exposure release; these are **not** marked restored. Only the owned private game tab is closed, retiring that diagnostic document/context without closing other browser work. Public3333 and saved-game data remain untouched.
+
+The exact private runtime stops at **2026-10-03 20:40:19.945 UTC**, errors empty, all **1,142 protected files** unchanged, disposable database removed and four private ports free. Process receipt SHA256 `cfcceae3eaa3d87641694e87823f78caaba511c34fb71d31cb7d15c789ba536d`. Six temporary runtime admissions are reversed byte-for-byte and three served helper copies removed; source helpers/raw results remain. Public3333/5555/5556 retain their prior process owners. Of 42 inherited working files, 41 remain byte-identical; the remaining WaterSystem retains all six original addition groups (25 lines), excluded from this checkpoint's independently verified owned blob. A final regression rerun passes 90 tests / one native-only skip and scoped lint.
+
+**Next:** qualify moving-camera target resizing/allocation and edge/distortion coverage before any default promotion; then continue the larger terrain/grass shading work. The crop is a demonstrated static-view performance candidate, not whole-game visual acceptance. The ranked queue below remains non-additive because reflections repeat terrain and grass.
+
 ## Native247 — current-view trees, actors and mushrooms measured
 
 **The first complete live-scene category screen is saved; 60 FPS is not achieved.** Revalidated immutable build244 matches current source at HEAD `787ac0504` (the only HEAD delta is documentation): 1,121 effective source pins, nine bundles/maps and six build configs match. The private ordinary game retains 3024×1724 / DPR2 / MSAA4, high shadows, full reflections, held phase 0.56/exposure 0.850240084 and rough-leaf grass. Wind, actors, transparent effects and simulation remain live.

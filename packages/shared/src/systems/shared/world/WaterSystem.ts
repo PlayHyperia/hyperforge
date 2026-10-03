@@ -47,6 +47,12 @@ import THREE, {
 } from "../../../extras/three/three";
 import type { Node, NodeBuilder, NodeFrame, UniformNode } from "three/webgpu";
 import { NodeUpdateType, select, positionView, exp2, fwidth } from "three/tsl";
+import {
+  alignCroppedReflectionRect,
+  cropReflectionProjection,
+  croppedReflectionScreen,
+} from "../../../extras/three/CroppedReflectionScreen";
+import { isOwnedUniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
@@ -312,6 +318,8 @@ export class WaterSystem {
   private readonly reflectionAxis = new THREE.Vector3(0, 0, 1);
   private readonly reflectionScale = new THREE.Vector3(1, 1, 1);
   private reflectionFootprintEnabled = false;
+  private reflectionCropEnabled = croppedReflectionScreen.enabled;
+  private readonly reflectionCropUv = uniform(new THREE.Vector4(1, 1, 0, 0));
   private reflectionGrassFootprintEnabled = false;
   private reflectionGrassFootprint: LakeGrassFootprint | null = null;
   private lakeWavePositionNode: Node | null = null;
@@ -347,6 +355,13 @@ export class WaterSystem {
   /** Opt-in until native moving-view pixel and cost qualification is complete. */
   setReflectionFootprintEnabled(enabled: boolean): void {
     this.reflectionFootprintEnabled = enabled;
+  }
+
+  /** Runtime comparison is allowed only with the opt-in shader graph loaded. */
+  setReflectionCropEnabled(enabled: boolean): void {
+    if (enabled && !croppedReflectionScreen.enabled)
+      throw new Error("Cropped reflection requires the opt-in shader graph");
+    this.reflectionCropEnabled = enabled;
   }
 
   /** Submission-only experiment. Never enables the separate raster scissor. */
@@ -387,6 +402,189 @@ export class WaterSystem {
       return true;
     return scope.crop.intersectsBox(bounds);
   };
+
+  /** Own only the mirror capture; never virtualize native framebuffer samplers.
+   * This opt-in pilot admits ordinary meshes, not transmission/custom shadow
+   * filters. Issued-shader and moving-view pixel qualification remains required. */
+  private beginLakeCroppedCapture(
+    renderer: NonNullable<NodeFrame["renderer"]>,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    target: THREE.RenderTarget,
+    fullWidth: number,
+    fullHeight: number,
+    pixels: THREE.Vector4,
+  ): (() => void) | null {
+    if (
+      !this.reflectionCropEnabled ||
+      this.reflectionGrassFootprintEnabled ||
+      scene.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+      scene.onAfterRender !== THREE.Object3D.prototype.onAfterRender ||
+      renderer.getScissorTest() ||
+      target.scissorTest ||
+      target.samples !== 0 ||
+      camera instanceof THREE.ArrayCamera ||
+      renderer.shadowMap.type !== THREE.PCFShadowMap ||
+      ![fullWidth, fullHeight, ...pixels.toArray()].every(
+        Number.isSafeInteger,
+      ) ||
+      fullWidth <= 0 ||
+      fullHeight <= 0 ||
+      pixels.x < 0 ||
+      pixels.y < 0 ||
+      pixels.z <= 0 ||
+      pixels.w <= 0 ||
+      pixels.x % 8 !== 0 ||
+      pixels.y % 8 !== 0 ||
+      pixels.x + pixels.z > fullWidth ||
+      pixels.y + pixels.w > fullHeight
+    )
+      return null;
+    let supported = true;
+    scene.traverseVisible((object) => {
+      if (!supported) return;
+      if (object instanceof THREE.Light && object.castShadow) {
+        supported =
+          object instanceof THREE.DirectionalLight &&
+          isOwnedUniformDirectionalShadowNode(
+            object.shadow.shadowNode,
+            object,
+          ) &&
+          Reflect.get(object.shadow, "filterNode") == null;
+      }
+      if (
+        object instanceof THREE.Points ||
+        object instanceof THREE.Sprite ||
+        object instanceof THREE.Line
+      )
+        supported = false;
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material)
+        ? object.material
+        : [object.material];
+      for (const material of materials) {
+        // Built-in transmission samples a local framebuffer/mip domain. It is
+        // deliberately not claimed equivalent by the original-screen aliases.
+        const transmission: unknown = Reflect.get(material, "transmission");
+        if (
+          material instanceof THREE.ShaderMaterial ||
+          (transmission !== undefined && transmission !== 0) ||
+          Reflect.get(material, "transmissionNode") != null
+        )
+          supported = false;
+      }
+    });
+    if (!supported) return null;
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onBeforeRender",
+    );
+    const afterDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onAfterRender",
+    );
+    if (
+      !Object.isExtensible(scene) ||
+      [beforeDescriptor, afterDescriptor].some(
+        (descriptor) =>
+          descriptor && (!descriptor.configurable || !("value" in descriptor)),
+      )
+    )
+      return null;
+    const x = pixels.x,
+      y = pixels.y,
+      width = pixels.z,
+      height = pixels.w;
+    const crop = cropReflectionProjection(
+      new THREE.Matrix4(),
+      pixels,
+      fullWidth,
+      fullHeight,
+    );
+    const projection = new THREE.Matrix4();
+    const inverse = new THREE.Matrix4();
+    let active = false;
+    let released = false;
+    let endCoordinates: (() => void) | null = null;
+    // Admission/lease validation must finish BEFORE ReflectorNode starts its
+    // nested render: r186 has no exception cleanup around that native call.
+    if (target.width !== width || target.height !== height)
+      target.setSize(width, height);
+    target.viewport.set(0, 0, width, height);
+    target.scissor.set(0, 0, width, height);
+    try {
+      endCoordinates = croppedReflectionScreen.begin({
+        renderer,
+        target,
+        camera,
+        fullWidth,
+        fullHeight,
+        x,
+        y,
+        width,
+        height,
+      });
+    } catch {
+      return null;
+    }
+    const restore = () => {
+      try {
+        endCoordinates?.();
+      } finally {
+        endCoordinates = null;
+        if (active) {
+          camera.projectionMatrix.copy(projection);
+          camera.projectionMatrixInverse.copy(inverse);
+          active = false;
+        }
+      }
+    };
+    const owns = (args: unknown[]) =>
+      args[0] === renderer &&
+      args[1] === scene &&
+      args[2] === camera &&
+      args[3] === target;
+    const before: THREE.Scene["onBeforeRender"] = (...args: unknown[]) => {
+      if (!owns(args)) return;
+      // Native ReflectorNode has finished its oblique Z-row at this point.
+      projection.copy(camera.projectionMatrix);
+      inverse.copy(camera.projectionMatrixInverse);
+      active = true;
+      camera.projectionMatrix.premultiply(crop);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+    };
+    const after: THREE.Scene["onAfterRender"] = (...args: unknown[]) => {
+      if (owns(args)) restore();
+    };
+    Object.defineProperty(scene, "onBeforeRender", {
+      configurable: true,
+      writable: true,
+      value: before,
+    });
+    Object.defineProperty(scene, "onAfterRender", {
+      configurable: true,
+      writable: true,
+      value: after,
+    });
+    return () => {
+      if (released) return;
+      released = true;
+      try {
+        restore();
+      } finally {
+        if (scene.onBeforeRender === before) {
+          if (beforeDescriptor)
+            Object.defineProperty(scene, "onBeforeRender", beforeDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onBeforeRender;
+        }
+        if (scene.onAfterRender === after) {
+          if (afterDescriptor)
+            Object.defineProperty(scene, "onAfterRender", afterDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onAfterRender;
+        }
+      }
+    };
+  }
 
   /** Lease only the synchronous reflection traversal. The mirror camera is
    * still stale at _updateResolution; the scene callback observes its final
@@ -1193,6 +1391,7 @@ export class WaterSystem {
       target: THREE.RenderTarget | null;
       scissored: boolean;
       endGrassFootprint: (() => void) | null;
+      endCroppedCapture: (() => void) | null;
       previousTargetScissorTest: boolean;
       previousRendererScissorTest: boolean;
     };
@@ -1208,15 +1407,27 @@ export class WaterSystem {
         ): void;
       };
       sizedReflection._updateResolution = (target, renderer) => {
-        Reflect.apply(nativeResize, reflection, [target, renderer]);
+        const cropEnabled = this.reflectionCropEnabled;
+        const resizeFull = () => {
+          Reflect.apply(nativeResize, reflection, [target, renderer]);
+          this.reflectionCropUv.value.set(1, 1, 0, 0);
+        };
+        // Choose the attachment size BEFORE resizing. Full -> cropped resizing
+        // here would dispose/reallocate twice on every reflection capture.
+        if (!cropEnabled) resizeFull();
         const scope = captureScope;
-        if (!scope || scope.renderer !== renderer || scope.target) return;
+        if (!scope || scope.renderer !== renderer || scope.target) {
+          if (cropEnabled) resizeFull();
+          return;
+        }
         const virtualCamera = reflection.virtualCameras.get(scope.owner.camera);
         if (
           !virtualCamera ||
           reflection.renderTargets.get(virtualCamera) !== target
-        )
+        ) {
+          if (cropEnabled) resizeFull();
           return;
+        }
         const source = renderer.getRenderTarget();
         if (source) {
           size.set(source.width, source.height);
@@ -1227,6 +1438,15 @@ export class WaterSystem {
             .getViewport(viewport)
             .multiplyScalar(renderer.getPixelRatio());
         }
+        // Native r186 derives reflection dimensions from the drawing buffer,
+        // even when the primary pass is rendering into an offscreen target.
+        const drawingSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+        const fullWidth = Math.round(
+          drawingSize.x * reflection.resolutionScale,
+        );
+        const fullHeight = Math.round(
+          drawingSize.y * reflection.resolutionScale,
+        );
         const texture = target.texture;
         if (
           renderer.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
@@ -1247,12 +1467,61 @@ export class WaterSystem {
           !this.computeLakeReflectionScissor(
             scope.owner.camera,
             scope.owner.plane,
-            target.width,
-            target.height,
+            fullWidth,
+            fullHeight,
             scissor,
           )
-        )
+        ) {
+          if (cropEnabled) resizeFull();
           return;
+        }
+        if (cropEnabled) {
+          // Eight-pixel origin alignment also preserves legacy ordered fades.
+          // Expand outward only: never discard any admitted bilinear footprint.
+          const aligned = alignCroppedReflectionRect(
+            scissor,
+            fullWidth,
+            fullHeight,
+          );
+          if (!aligned) {
+            resizeFull();
+            return;
+          }
+          scissor.copy(aligned);
+          const scene = scope.owner.scene;
+          const direction = scope.owner.camera.getWorldDirection(
+            new THREE.Vector3(),
+          );
+          const eye = new THREE.Vector3().setFromMatrixPosition(
+            scope.owner.camera.matrixWorld,
+          );
+          scope.endCroppedCapture =
+            scene &&
+            Math.abs(direction.dot(scope.owner.plane.normal)) > 1e-4 &&
+            scope.owner.plane.distanceToPoint(eye) > 1e-5
+              ? this.beginLakeCroppedCapture(
+                  renderer,
+                  scene,
+                  virtualCamera,
+                  target,
+                  fullWidth,
+                  fullHeight,
+                  scissor,
+                )
+              : null;
+          if (!scope.endCroppedCapture) {
+            resizeFull();
+            return;
+          }
+          scope.target = target;
+          this.reflectionCropUv.value.set(
+            fullWidth / scissor.z,
+            fullHeight / scissor.w,
+            -scissor.x / scissor.z,
+            -scissor.y / scissor.w,
+          );
+          return;
+        }
         scope.target = target;
         if (this.reflectionGrassFootprintEnabled && scope.owner.scene) {
           const direction = scope.owner.camera.getWorldDirection(
@@ -1298,7 +1567,8 @@ export class WaterSystem {
       const previousScope = captureScope;
       const scope: CaptureScope | null =
         (this.reflectionFootprintEnabled ||
-          this.reflectionGrassFootprintEnabled) &&
+          this.reflectionGrassFootprintEnabled ||
+          this.reflectionCropEnabled) &&
         frame.renderer &&
         !previousScope
           ? {
@@ -1307,6 +1577,7 @@ export class WaterSystem {
               target: null,
               scissored: false,
               endGrassFootprint: null,
+              endCroppedCapture: null,
               previousTargetScissorTest: false,
               previousRendererScissorTest: frame.renderer.getScissorTest(),
             }
@@ -1319,7 +1590,11 @@ export class WaterSystem {
         return result;
       } finally {
         try {
-          scope?.endGrassFootprint?.();
+          try {
+            scope?.endCroppedCapture?.();
+          } finally {
+            scope?.endGrassFootprint?.();
+          }
         } finally {
           try {
             if (scope?.scissored && scope.target) {
@@ -1659,6 +1934,13 @@ export class WaterSystem {
     reflNode.uvNode = reflNode.uvNode!.add(
       mul(normalDistortion, reflectionDistortion),
     );
+    if (croppedReflectionScreen.enabled) {
+      // The native reflected UV has already flipped X and applied distortion.
+      // Convert that full-frame coordinate to the owned cropped attachment.
+      reflNode.uvNode = reflNode.uvNode
+        .mul(this.reflectionCropUv.xy)
+        .add(this.reflectionCropUv.zw);
+    }
     this.lakeReflectionUvNode = reflNode.uvNode;
     const reflectionNode = reflNode;
 

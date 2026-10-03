@@ -27,6 +27,7 @@ import "./webgpu-polyfills";
 
 // Import WebGPU build of Three.js
 import * as THREE_NAMESPACE from "three/webgpu";
+import { croppedReflectionScreen } from "./CroppedReflectionScreen";
 
 // TSL functions are exported under the TSL namespace in three/webgpu.
 // Explicit property types keep declaration output tied to Three's public API
@@ -154,11 +155,11 @@ export const mrt: typeof THREE_NAMESPACE.TSL.mrt = THREE_NAMESPACE.TSL.mrt;
 export const reflector: typeof THREE_NAMESPACE.TSL.reflector =
   THREE_NAMESPACE.TSL.reflector;
 export const viewportCoordinate: typeof THREE_NAMESPACE.TSL.viewportCoordinate =
-  THREE_NAMESPACE.TSL.viewportCoordinate;
-export const screenUV: typeof THREE_NAMESPACE.TSL.screenUV =
-  THREE_NAMESPACE.TSL.screenUV;
+  croppedReflectionScreen.viewportCoordinate;
+export const screenUV: THREE_NAMESPACE.Node<"vec2"> =
+  croppedReflectionScreen.screenUV;
 export const viewportSize: typeof THREE_NAMESPACE.TSL.viewportSize =
-  THREE_NAMESPACE.TSL.viewportSize;
+  croppedReflectionScreen.viewportSize;
 export const viewportDepthTexture: typeof THREE_NAMESPACE.TSL.viewportDepthTexture =
   THREE_NAMESPACE.TSL.viewportDepthTexture;
 export const linearDepth: typeof THREE_NAMESPACE.TSL.linearDepth =
