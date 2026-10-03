@@ -1,5 +1,27 @@
 # Grass canopy visibility: research checkpoint
 
+## Source238 — normal/AO-only terrain layers without hidden appearance reads
+
+**Outcome: the raw-layer graph split is verified and default-inert, not a measured FPS gain.** `createCompactTerrainNormalLayerFactory()` builds grass, dirt and rock normal/AO/height outputs through the same implementation as the existing full factory. A construction-time channel choice excludes albedo/roughness samples, temporaries and packed assignments; no appearance outputs or page-input parameter are exposed. Existing callers and default rendering remain unchanged.
+
+The all-feature direct graph falls from **35 compact-source texture nodes to 19**: the 16 albedo/roughness nodes are absent while 14 normal/AO and five height nodes remain. These are source-graph counts, **not issued shader counts, GPU timings or an FPS prediction**. The original 45–120 m normal fade, projection rotations, derivative hoisting, broadened grass-substrate sampling gradients, original cotangent gradients, AO strength and raw rock AO are retained. Inactive conditional branches keep the same neutral defaults.
+
+### Verification
+
+- Final root core rerun: **394 tests pass / two existing native-only skips across four suites**, in 34.65 seconds. Related grass, pond and shadow suites add **155 passes / two existing gated skips**, in 16.64 seconds: **549 passes / four gated skips across nine selected suites**.
+- Four new cases cover 12 graph recipe combinations and 160 numeric cases, including fade endpoints, flat/sloped bases and active/inactive layers. Tests expand actual Three TSL function/conditional side effects and reject both explicit and implicit-UV appearance dependencies. Retained sample gradients and numeric normal/AO/height outputs match the full path.
+- Scoped ESLint, Prettier, diff checks and independent source/test review pass. Shared typecheck retains exactly five inherited procgen API errors outside changed files; **the package typecheck is not clean**.
+- Source237's lease implementation and six tests are byte-preserved. All 56 protected previous-file hashes match; two intentionally extended files receive new pins. No game runtime, browser, GPU page allocation, public session or saved-player state is operated on.
+- [Final verification receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source238-terrain-normal-layer-verification.json).
+
+### Next implementation boundary
+
+This factory returns **raw layers, not the final composed terrain normal/AO**. The bank mineral/silt blend, nested coast composition, material weights and final normal transformations still need a shared channel-selective composition path and an owned lazy accessor. Preserve the exact current arithmetic and live uniform ownership; do not substitute dummy appearance outputs or an approximate duplicate compositor.
+
+Independently repeat Native236's comparison before production GPU integration. Any bounded composed color/roughness pages must use Source233 coverage and Source237 source validity plus separate composition, uniform and filtering guards, original-shader fallback and bounded total memory. Do not expand the 405.33 MiB fixed-view prototype. Moving, near-ground, shore, filtering and live-light/shadow/fog qualification remains open.
+
+Terrain then grass remain the directly measured content order. Reflections overlap both; the rough-leaf improvement is already present in the current native baseline. Other category costs are not inferred from triangle counts. **Sustained 60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Source237 — bounded loaded-source validity for terrain reuse
 
 **Outcome: a verified cache-safety prerequisite, not a new FPS gain.** `CompactTerrainTextureSet.captureLoadedSourceLease()` records fully installed texture ownership and provides direct currentness checks without rebuilding diagnostic receipts each frame. No production caller, renderer/shader change, GPU allocation or default selector is added. Default texture loading gains only bounded disposal-lifetime bookkeeping.

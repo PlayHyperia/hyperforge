@@ -43,6 +43,7 @@ import {
   CompactTerrainTextureSet,
   createCompactTerrainLayers,
   createCompactTerrainLayerFactory,
+  createCompactTerrainNormalLayerFactory,
   createCompactRockAppearanceRequired,
   createCompactGrassAppearanceRequired,
   createCompactDirtAppearanceRequired,
@@ -1546,21 +1547,22 @@ function vectorValue(
     }
     if (node.type === "VarNode") return child("node");
     if (node.type === "ArrayElementNode") {
-      // The regional bank packs scalar results into a real mat4. Only that
-      // concrete column access is admitted; this is not GPU indexing emulation.
+      // The real bank/terrain closures pack results into mat4/mat3 columns.
+      // Admit only those concrete shapes, not general GPU indexing emulation.
       const values = child("node"),
         index = child("indexNode");
+      const size = values.length === 9 ? 3 : values.length === 16 ? 4 : 0;
       if (
-        values.length !== 16 ||
+        size === 0 ||
         index.length !== 1 ||
         !Number.isInteger(index[0]) ||
         index[0] < 0 ||
-        index[0] > 3
+        index[0] >= size
       )
         throw new Error(
-          "Numeric matrix access requires a concrete mat4 column",
+          "Numeric matrix access requires a concrete mat3/mat4 column",
         );
-      return values.slice(index[0] * 4, index[0] * 4 + 4);
+      return values.slice(index[0] * size, index[0] * size + size);
     }
     if (node.type === "ContextNode") {
       // Arithmetic is unchanged by this narrowly scoped codegen setting. The
@@ -2144,6 +2146,531 @@ describe("loaded source leases (real installed Three textures)", () => {
       expect(lease.isCurrent()).toBe(false);
     } finally {
       owner.dispose();
+    }
+  });
+});
+
+describe("normal/AO-only terrain layer factory (real TSL, not GPU qualification)", () => {
+  const profiles = [false, true].flatMap((height) =>
+    [false, true].flatMap((dirt) =>
+      [false, true].flatMap((rock) =>
+        (height ? [false, true] : [false]).map((substrate) => ({
+          height,
+          dirt,
+          rock,
+          substrate,
+        })),
+      ),
+    ),
+  );
+  const ownerFor = (p: (typeof profiles)[number]) =>
+    new CompactTerrainTextureSet(
+      "/assets",
+      p.dirt ? "stochastic-v1" : undefined,
+      p.height ? "height-v1" : undefined,
+      p.rock ? "stochastic-v1" : undefined,
+      p.substrate ? "frequency-v1" : undefined,
+    );
+  const expand = (roots: readonly Node[], stop = new Set<Node>()) => {
+    const seen = new Set<Node>();
+    const visit = (node: Node) => {
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (
+        node === positionWorld ||
+        node === normalWorldGeometry ||
+        stop.has(node)
+      )
+        return;
+      const stack = numericShaderStack(node);
+      if (stack) visit(stack);
+      else for (const child of node.getChildren()) visit(child);
+    };
+    roots.forEach(visit);
+    return seen;
+  };
+  const roleCounts = (
+    owner: CompactTerrainTextureSet,
+    nodes: Iterable<Node>,
+  ) => {
+    const keys = new Map(
+      owner.getReceipt().textures.map((t) => [t.textureUuid, t.key]),
+    );
+    const counts = new Map<string, number>();
+    for (const node of nodes) {
+      const source: unknown = Reflect.get(node, "value");
+      if (
+        Reflect.get(node, "isTextureNode") !== true ||
+        !(source instanceof THREE.Texture) ||
+        !(Reflect.get(node, "uvNode") instanceof THREE.Node)
+      )
+        continue;
+      const key = keys.get(source.uuid);
+      if (!key)
+        throw new Error("Unexpected texture owner in terrain-layer graph");
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Object.fromEntries(
+      [...counts].sort(([a], [b]) => a.localeCompare(b)),
+    );
+  };
+  const allRoots = (layers: readonly object[]) =>
+    layers.flatMap((layer) => Object.values(layer) as Node[]);
+  const fingerprint = (root: Node): string => {
+    const cache = new Map<Node, string>();
+    const visit = (node: Node): string => {
+      const previous = cache.get(node);
+      if (previous) return previous;
+      const value: unknown = Reflect.get(node, "value");
+      const result = createHash("sha256")
+        .update(
+          JSON.stringify({
+            type: node.type,
+            fields: [
+              "op",
+              "method",
+              "components",
+              "scope",
+              "nodeType",
+              "name",
+              "sampler",
+              "updateMatrix",
+            ].map((key) => Reflect.get(node, key)),
+            value:
+              value instanceof THREE.Texture
+                ? value.uuid
+                : value instanceof THREE.Vector2 ||
+                    value instanceof THREE.Vector3 ||
+                    value instanceof THREE.Vector4
+                  ? value.toArray()
+                  : typeof value === "number" || typeof value === "boolean"
+                    ? value
+                    : null,
+            children:
+              node === positionWorld || node === normalWorldGeometry
+                ? []
+                : [...node.getChildren()].map(visit),
+          }),
+        )
+        .digest("hex");
+      cache.set(node, result);
+      return result;
+    };
+    return visit(root);
+  };
+
+  it("removes every AR source dependency for all recipes while retaining original direct sample roles", () => {
+    for (const p of profiles) {
+      const owner = ownerFor(p);
+      try {
+        const before = owner.getReceipt();
+        const original = createCompactTerrainLayerFactory(
+          owner,
+          float(64),
+          float(0.137),
+        );
+        const candidate = createCompactTerrainNormalLayerFactory(
+          owner,
+          float(64),
+          float(0.137),
+        );
+        const a = { ...original.createGround(), rock: original.createRock() };
+        const b = { ...candidate.createGround(), rock: candidate.createRock() };
+        const expected = {
+          "grass-albedo-roughness": p.substrate ? 4 : 2,
+          "grass-normal-ao": 2,
+          "dirt-albedo-roughness": p.dirt ? 3 : 2,
+          "dirt-normal-ao": p.dirt ? 3 : 2,
+          "rock-albedo-roughness": p.rock ? 9 : 6,
+          "rock-normal-ao": p.rock ? 9 : 6,
+          ...(p.height ? { "ground-height": p.dirt ? 5 : 4 } : {}),
+        };
+        expect(
+          roleCounts(owner, expand(allRoots(Object.values(a)))),
+          JSON.stringify(p),
+        ).toEqual(expected);
+        expect(
+          roleCounts(owner, expand(allRoots(Object.values(b)))),
+          JSON.stringify(p),
+        ).toEqual(
+          Object.fromEntries(
+            Object.entries(expected).filter(
+              ([key]) => !key.endsWith("albedo-roughness"),
+            ),
+          ),
+        );
+        for (const key of ["grass", "dirt", "rock"] as const) {
+          expect(Object.keys(b[key]).sort()).toEqual(
+            Object.keys(a[key])
+              .filter(
+                (channel) => channel !== "albedo" && channel !== "roughness",
+              )
+              .sort(),
+          );
+          expect(b[key]).not.toHaveProperty("albedo");
+          expect(b[key]).not.toHaveProperty("roughness");
+        }
+        expect(owner.getReceipt()).toEqual(before);
+        if (!p.height)
+          expect(() => candidate.prepareGround()).toThrow(
+            /admitted height layers/,
+          );
+      } finally {
+        owner.dispose();
+      }
+    }
+  });
+
+  it("has no hidden AR reads in actual outer Fn stacks or conditional ground/rock branches", () => {
+    for (const p of profiles) {
+      const owner = ownerFor(p);
+      try {
+        const make = (normalOnly: boolean) =>
+          THREE.TSL.Fn(() => {
+            const factory = normalOnly
+              ? createCompactTerrainNormalLayerFactory(
+                  owner,
+                  float(6400),
+                  float(0.437),
+                )
+              : createCompactTerrainLayerFactory(
+                  owner,
+                  float(6400),
+                  float(0.437),
+                );
+            const direct = factory.createGround();
+            const rock = factory.createRock(float(1).greaterThan(0));
+            const inactiveRock = factory.createRock(float(0).greaterThan(0));
+            const layers = [direct.grass, direct.dirt, rock, inactiveRock];
+            if (p.height) {
+              const prepared = factory.prepareGround();
+              for (const [grass, dirt] of [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
+              ]) {
+                const resolved = prepared.resolve({
+                  grassRequired: float(grass).greaterThan(0),
+                  dirtRequired: float(dirt).greaterThan(0),
+                });
+                layers.push(resolved.grass, resolved.dirt);
+              }
+            }
+            return layers.reduce(
+              (sum, layer) => sum.add(vec4(layer.worldNormal, layer.ao)),
+              vec4(0),
+            );
+          })();
+        const original = expand([make(false)]),
+          candidate = expand([make(true)]);
+        expect(
+          Object.keys(roleCounts(owner, original)).some((key) =>
+            key.endsWith("albedo-roughness"),
+          ),
+        ).toBe(true);
+        expect(
+          Object.keys(roleCounts(owner, candidate)).some((key) =>
+            key.endsWith("albedo-roughness"),
+          ),
+        ).toBe(false);
+        // Also reject implicit-UV roots, which the explicit sample counter
+        // intentionally omits to avoid counting sampled base owners twice.
+        const appearanceSources = new Set(
+          (["grass", "dirt", "rock"] as const).map(
+            (layer) => owner.getNode(layer, "albedo-roughness").value,
+          ),
+        );
+        expect(
+          [...candidate].some(
+            (node) =>
+              Reflect.get(node, "isTextureNode") === true &&
+              appearanceSources.has(Reflect.get(node, "value")),
+          ),
+        ).toBe(false);
+        const expected = Object.fromEntries(
+          Object.entries(roleCounts(owner, original)).filter(
+            ([key]) => !key.endsWith("albedo-roughness"),
+          ),
+        );
+        expect(roleCounts(owner, candidate)).toEqual(expected);
+        expect(
+          [...candidate].filter((node) => node.type === "ConditionalNode"),
+        ).toHaveLength(p.height ? 10 : 2);
+        // A real Stack holds the derivative temporaries before each varying
+        // conditional. Stop at those exact temporaries when inspecting the
+        // branch; following their inputs again would mislabel hoisted work.
+        for (const stack of candidate) {
+          if (stack.type !== "StackNode") continue;
+          const statements: unknown = Reflect.get(stack, "nodes");
+          if (!Array.isArray(statements))
+            throw new Error("Missing actual stack statements");
+          const branchIndex = statements.findIndex(
+            (node: Node) => node.type === "ConditionalNode",
+          );
+          if (branchIndex < 0) continue;
+          const before = statements.slice(0, branchIndex) as Node[];
+          expect(
+            before.some((node) =>
+              /WorldDx$/.test(String(Reflect.get(node, "name"))),
+            ),
+          ).toBe(true);
+          expect(
+            before.some((node) =>
+              /WorldDy$/.test(String(Reflect.get(node, "name"))),
+            ),
+          ).toBe(true);
+          const hoisted = new Set(
+            before.filter((node) => node.type === "VarNode"),
+          );
+          const branchNodes = expand([statements[branchIndex]], hoisted);
+          for (const node of branchNodes)
+            expect(
+              ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+            ).toBe(false);
+        }
+        for (const node of candidate) {
+          expect(String(Reflect.get(node, "name"))).not.toMatch(
+            /SubstrateLow|SubstrateAlbedo|Stochastic.*Albedo|RockAlbedo/,
+          );
+        }
+      } finally {
+        owner.dispose();
+      }
+    }
+  });
+
+  it("retains exact normal/AO/height graph and sample-gradient recipes independently of appearance", () => {
+    for (const p of profiles) {
+      const owner = ownerFor(p),
+        distance = float(6400),
+        noise = float(0.137);
+      try {
+        const original = createCompactTerrainLayerFactory(
+          owner,
+          distance,
+          noise,
+        );
+        const candidate = createCompactTerrainNormalLayerFactory(
+          owner,
+          distance,
+          noise,
+        );
+        const a = { ...original.createGround(), rock: original.createRock() };
+        const b = { ...candidate.createGround(), rock: candidate.createRock() };
+        for (const layer of ["grass", "dirt", "rock"] as const)
+          for (const channel of [
+            "worldNormal",
+            "ao",
+            "height",
+            "rawRockAo",
+          ] as const) {
+            if (!a[layer][channel]) continue;
+            expect(
+              fingerprint(b[layer][channel]!),
+              `${JSON.stringify(p)}:${layer}:${channel}`,
+            ).toBe(fingerprint(a[layer][channel]!));
+          }
+        const samples = (roots: readonly Node[]) =>
+          [...expand(roots)]
+            .filter((node) => {
+              const source: unknown = Reflect.get(node, "value");
+              return (
+                source instanceof THREE.Texture &&
+                Reflect.get(node, "uvNode") instanceof THREE.Node &&
+                !["grass", "dirt", "rock"].some(
+                  (layer) =>
+                    owner.getNode(
+                      layer as "grass" | "dirt" | "rock",
+                      "albedo-roughness",
+                    ).value === source,
+                )
+              );
+            })
+            .map(fingerprint)
+            .sort();
+        expect(samples(allRoots(Object.values(b)))).toEqual(
+          samples(allRoots(Object.values(a))),
+        );
+        const conditionalRoots = (
+          factory: typeof original | typeof candidate,
+        ) => {
+          const layers = [factory.createRock(float(1).greaterThan(0))];
+          if (p.height) {
+            const prepared = factory.prepareGround();
+            const ground = prepared.resolve({
+              grassRequired: float(1).greaterThan(0),
+              dirtRequired: float(0).greaterThan(0),
+            });
+            layers.push(ground.grass, ground.dirt);
+          }
+          return allRoots(layers);
+        };
+        expect(samples(conditionalRoots(candidate))).toEqual(
+          samples(conditionalRoots(original)),
+        );
+      } finally {
+        owner.dispose();
+      }
+    }
+  });
+
+  it("preserves exact live normal, AO, raw AO and height arithmetic across fade and branch endpoints", () => {
+    // These supplied texels/derivatives are concrete inputs to real arithmetic
+    // nodes. They do not emulate GPU filtering or establish native pixel parity.
+    for (const p of profiles.filter((p, i) => [0, 3, 6, 11].includes(i))) {
+      const owner = ownerFor(p),
+        distance = float(0),
+        noise = float(0.137);
+      const grassRequired = float(1).greaterThan(0),
+        dirtRequired = float(1).greaterThan(0),
+        rockRequired = float(1).greaterThan(0);
+      try {
+        const original = createCompactTerrainLayerFactory(
+          owner,
+          distance,
+          noise,
+        );
+        const candidate = createCompactTerrainNormalLayerFactory(
+          owner,
+          distance,
+          noise,
+        );
+        const build = (factory: typeof original | typeof candidate) => {
+          const direct = factory.createGround();
+          const result = [
+            direct.grass,
+            direct.dirt,
+            factory.createRock(),
+            factory.createRock(rockRequired),
+          ];
+          if (p.height) {
+            const prepared = factory.prepareGround();
+            const resolved = prepared.resolve({ grassRequired, dirtRequired });
+            expect(resolved.grass.height).toBe(prepared.heights.grass);
+            expect(resolved.dirt.height).toBe(prepared.heights.dirt);
+            result.push(resolved.grass, resolved.dirt);
+          }
+          return result;
+        };
+        const a = build(original),
+          b = build(candidate);
+        const roots = allRoots([...a, ...b]),
+          nodes = expand(roots);
+        const keys = new Map(
+          owner.getReceipt().textures.map((t) => [t.textureUuid, t.key]),
+        );
+        for (const meters of [0, 45, 80, 120, 145])
+          for (const direction of [
+            [0, 1, 0],
+            [-0.6, 0.3, 0.7],
+          ]) {
+            const normal = new THREE.Vector3(...direction).normalize();
+            const u = new THREE.Vector3(1, 0.2, 0.1).cross(normal).normalize();
+            const v = normal.clone().cross(u);
+            const dx = u
+              .clone()
+              .multiplyScalar(0.23)
+              .addScaledVector(v, 0.03)
+              .toArray();
+            const dy = v
+              .clone()
+              .multiplyScalar(-0.17)
+              .addScaledVector(u, 0.04)
+              .toArray();
+            for (const flags of [
+              [1, 1, 1],
+              [0, 1, 0],
+              [1, 0, 1],
+              [0, 0, 0],
+            ]) {
+              const position = [-23.7, 27.4, 478.3];
+              const inputs = new Map<Node, readonly number[]>([
+                [positionWorld, position],
+                [normalWorldGeometry, normal.toArray()],
+                [distance, [meters ** 2]],
+                [noise, [direction[0] === 0 ? 0.137 : 0.71875]],
+                [grassRequired, [flags[0]]],
+                [dirtRequired, [flags[1]]],
+                [rockRequired, [flags[2]]],
+              ]);
+              for (const node of nodes) {
+                const method: unknown = Reflect.get(node, "method");
+                if (method !== "dFdx" && method !== "dFdy") continue;
+                const operand: unknown = Reflect.get(node, "aNode");
+                if (!(operand instanceof THREE.Node))
+                  throw new Error("Missing actual derivative operand");
+                const delta = method === "dFdx" ? dx : dy;
+                const shifted = new Map(inputs);
+                shifted.set(
+                  positionWorld,
+                  position.map((n, i) => n + delta[i]),
+                );
+                const start = vectorValue(operand, inputs),
+                  end = vectorValue(operand, shifted);
+                inputs.set(
+                  node,
+                  end.map((n, i) => n - start[i]),
+                );
+              }
+              for (const node of nodes) {
+                const source: unknown = Reflect.get(node, "value"),
+                  uv: unknown = Reflect.get(node, "uvNode");
+                if (
+                  !(source instanceof THREE.Texture) ||
+                  !(uv instanceof THREE.Node)
+                )
+                  continue;
+                const key = keys.get(source.uuid);
+                if (!key) throw new Error("Unexpected supplied texture source");
+                const [x, y] = vectorValue(uv, inputs);
+                inputs.set(
+                  node,
+                  key.endsWith("normal-ao")
+                    ? [
+                        0.5 + 0.22 * Math.sin(x + y * 0.3),
+                        0.5 + 0.19 * Math.cos(y - x * 0.4),
+                        0.87,
+                        0.39 + 0.16 * Math.cos(x * 0.2),
+                      ]
+                    : [
+                        0.41 + 0.16 * Math.sin(x),
+                        0.38 + 0.14 * Math.cos(y),
+                        0.52,
+                        0.83,
+                      ],
+                );
+              }
+              const ac = new Map<Node, number[]>(),
+                bc = new Map<Node, number[]>();
+              for (let i = 0; i < a.length; i++) {
+                for (const channel of [
+                  "worldNormal",
+                  "ao",
+                  "height",
+                  "rawRockAo",
+                ] as const) {
+                  expect(Boolean(b[i][channel])).toBe(Boolean(a[i][channel]));
+                  if (a[i][channel])
+                    expect(vectorValue(b[i][channel]!, inputs, bc)).toEqual(
+                      vectorValue(a[i][channel]!, inputs, ac),
+                    );
+                }
+                const n = vectorValue(b[i].worldNormal, inputs, bc);
+                expect(n.every(Number.isFinite)).toBe(true);
+                expect(Math.hypot(...n)).toBeCloseTo(1, 12);
+              }
+              expect(vectorValue(b[2].ao, inputs, bc)[0]).toBeCloseTo(
+                1 +
+                  (vectorValue(b[2].rawRockAo!, inputs, bc)[0] - 1) *
+                    COMPACT_TERRAIN_MATERIAL.aoStrength,
+                12,
+              );
+            }
+          }
+      } finally {
+        owner.dispose();
+      }
     }
   });
 });

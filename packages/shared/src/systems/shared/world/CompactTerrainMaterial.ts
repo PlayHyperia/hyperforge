@@ -1093,6 +1093,27 @@ export type CompactTerrainLayer = {
   rawRockAo?: Node<"float">;
 };
 
+/** Live material channels only; intentionally cannot stand in for a full layer. */
+export type CompactTerrainNormalLayer = Pick<
+  CompactTerrainLayer,
+  "ao" | "worldNormal" | "height" | "rawRockAo"
+>;
+
+type CompactTerrainLayerFactory<T extends CompactTerrainNormalLayer> = {
+  createGround(): { grass: T; dirt: T };
+  prepareGround(): {
+    heights: { grass: Node<"float">; dirt: Node<"float"> };
+    resolve(required: {
+      grassRequired: Node<"bool">;
+      dirtRequired: Node<"bool">;
+    }): { grass: T; dirt: T };
+  };
+  createRock(required?: Node<"bool">): T;
+};
+
+type CompactTerrainFactoryLayer = CompactTerrainNormalLayer &
+  Partial<Pick<CompactTerrainLayer, "albedo" | "roughness">>;
+
 /**
  * Fine-meadow substrate art trial: compress sampled LINEAR grass reflectance
  * around its unchanged source mean, before meadow tint and colour grading.
@@ -2503,17 +2524,55 @@ export function createCompactTerrainLayerFactory(
   distanceSquared: Node<"float">,
   patternNoise: Node<"float"> = float(0.5),
   dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
-): {
-  createGround(): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
-  prepareGround(): {
-    heights: { grass: Node<"float">; dirt: Node<"float"> };
-    resolve(required: {
-      grassRequired: Node<"bool">;
-      dirtRequired: Node<"bool">;
-    }): { grass: CompactTerrainLayer; dirt: CompactTerrainLayer };
-  };
-  createRock(required?: Node<"bool">): CompactTerrainLayer;
-} {
+): CompactTerrainLayerFactory<CompactTerrainLayer> {
+  return createCompactTerrainLayerFactoryInternal(
+    textures,
+    distanceSquared,
+    patternNoise,
+    true,
+    dirtSurfacePage,
+  );
+}
+
+/**
+ * Opt-in construction of live normal/AO/height channels without building any
+ * albedo/roughness samples or their temporary assignments. This is not a full
+ * material layer and has no surface-page resolver. Default callers keep the
+ * original full factory, including its graph construction order.
+ */
+export function createCompactTerrainNormalLayerFactory(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float"> = float(0.5),
+): CompactTerrainLayerFactory<CompactTerrainNormalLayer> {
+  return createCompactTerrainLayerFactoryInternal(
+    textures,
+    distanceSquared,
+    patternNoise,
+    false,
+  );
+}
+
+function createCompactTerrainLayerFactoryInternal(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float">,
+  includeAppearance: true,
+  dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
+): CompactTerrainLayerFactory<CompactTerrainLayer>;
+function createCompactTerrainLayerFactoryInternal(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float">,
+  includeAppearance: false,
+): CompactTerrainLayerFactory<CompactTerrainNormalLayer>;
+function createCompactTerrainLayerFactoryInternal(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float">,
+  includeAppearance: boolean,
+  dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
+): CompactTerrainLayerFactory<CompactTerrainFactoryLayer> {
   if (dirtSurfacePage && textures.dirtProjection !== "stochastic-v1")
     throw new Error("Dirt surface pages require stochastic-v1 projection");
   const controls = COMPACT_TERRAIN_MATERIAL;
@@ -2535,15 +2594,15 @@ export function createCompactTerrainLayerFactory(
       strength: Node<"float">;
     } | null,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainLayer => {
+  ): CompactTerrainFactoryLayer => {
     const sample = (channel: Channel) => {
       const base = textures.getNode(layer, channel);
       return textures.sample(base, uv, gradients);
     };
-    const ar = sample("albedo-roughness");
+    const ar = includeAppearance ? sample("albedo-roughness") : null;
     let na = sample("normal-ao");
-    let grassRoughnessAlpha = ar.a;
-    let albedo: Node<"vec3"> = ar.rgb;
+    let grassRoughnessAlpha = ar?.a;
+    let albedo: Node<"vec3"> | undefined = ar?.rgb;
     if (layer === "grass" && textures.grassSubstrate) {
       if (!gradients?.scale)
         throw new Error(
@@ -2557,15 +2616,17 @@ export function createCompactTerrainLayerFactory(
       );
       // Reuse the same sRGB texture/UV owner: sampling decodes RGB to linear.
       // Reuse filtered packed alpha so roughness follows the same turf footprint.
-      const low = textures
-        .sample(textures.getNode(layer, "albedo-roughness"), uv, broad)
-        .toVar(`compactGrassSubstrateLow${projection}`);
-      albedo = mix(
-        low.rgb,
-        ar.rgb,
-        COMPACT_GRASS_SUBSTRATE.detailRetention,
-      ).toVar(`compactGrassSubstrateAlbedo${projection}`);
-      grassRoughnessAlpha = low.a;
+      if (includeAppearance) {
+        const low = textures
+          .sample(textures.getNode(layer, "albedo-roughness"), uv, broad)
+          .toVar(`compactGrassSubstrateLow${projection}`);
+        albedo = mix(
+          low.rgb,
+          ar!.rgb,
+          COMPACT_GRASS_SUBSTRATE.detailRetention,
+        ).toVar(`compactGrassSubstrateAlbedo${projection}`);
+        grassRoughnessAlpha = low.a;
+      }
       // Filter the packed material signal, not its original cotangent frame.
       na = textures.sample(textures.getNode(layer, "normal-ao"), uv, broad);
     }
@@ -2581,11 +2642,18 @@ export function createCompactTerrainLayerFactory(
       ...(heightSample
         ? { height: layer === "grass" ? heightSample.r : heightSample.g }
         : {}),
-      albedo,
-      roughness:
-        layer === "grass"
-          ? createCompactDryGrassRoughness(grassRoughnessAlpha, projection)
-          : ar.a.max(controls.minimumRoughness),
+      ...(includeAppearance
+        ? {
+            albedo: albedo!,
+            roughness:
+              layer === "grass"
+                ? createCompactDryGrassRoughness(
+                    grassRoughnessAlpha!,
+                    projection,
+                  )
+                : ar!.a.max(controls.minimumRoughness),
+          }
+        : {}),
       ao: mix(float(1), na.a, float(controls.aoStrength)),
       worldNormal:
         layer === "rock" && sharedRockNormal
@@ -2613,7 +2681,7 @@ export function createCompactTerrainLayerFactory(
     normalStrength: number,
     prepared?: ReturnType<typeof createCompactGroundProjections>,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainLayer => {
+  ): CompactTerrainFactoryLayer => {
     const p =
       prepared ??
       createCompactGroundProjections(
@@ -2643,8 +2711,12 @@ export function createCompactTerrainLayerFactory(
       ...(a.height && b.height
         ? { height: mix(a.height, b.height, p.weight) }
         : {}),
-      albedo: mix(a.albedo, b.albedo, p.weight),
-      roughness: mix(a.roughness, b.roughness, p.weight),
+      ...(includeAppearance
+        ? {
+            albedo: mix(a.albedo!, b.albedo!, p.weight),
+            roughness: mix(a.roughness!, b.roughness!, p.weight),
+          }
+        : {}),
       ao: mix(a.ao, b.ao, p.weight),
       worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
     };
@@ -2652,7 +2724,7 @@ export function createCompactTerrainLayerFactory(
   const stochasticDirt = (
     prepared?: ReturnType<typeof createCompactDirtProjections>,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainLayer => {
+  ): CompactTerrainFactoryLayer => {
     const p =
       prepared ??
       createCompactDirtProjections(vec2(positionWorld.x, positionWorld.z));
@@ -2683,26 +2755,27 @@ export function createCompactTerrainLayerFactory(
       undefined,
       worldDerivatives,
     );
-    const cachedRaw = dirtSurfacePage
-      ? Fn(() => {
-          // Both the page footprint and the original sample gradients must be
-          // evaluated before a nonuniform page/fallback branch. The other dirt
-          // channels retain their original projection and normal-frame graph.
-          const worldXZ = vec2(positionWorld.x, positionWorld.z).toVar(
-            "compactDirtSurfaceWorldXZ",
-          );
-          const dx = (worldDerivatives?.dx.xz ?? worldXZ.dFdx()).toVar(
-            "compactDirtSurfaceWorldDx",
-          );
-          const dy = (worldDerivatives?.dy.xz ?? worldXZ.dFdy()).toVar(
-            "compactDirtSurfaceWorldDy",
-          );
-          const projection = createCompactDirtProjections(worldXZ, dx, dy);
-          return dirtSurfacePage.resolve(worldXZ, dx, dy, () =>
-            createCompactDirtRawAppearance(textures, projection),
-          );
-        })().toVar("compactDirtSurfacePageResult")
-      : null;
+    const cachedRaw =
+      includeAppearance && dirtSurfacePage
+        ? Fn(() => {
+            // Both the page footprint and the original sample gradients must be
+            // evaluated before a nonuniform page/fallback branch. The other dirt
+            // channels retain their original projection and normal-frame graph.
+            const worldXZ = vec2(positionWorld.x, positionWorld.z).toVar(
+              "compactDirtSurfaceWorldXZ",
+            );
+            const dx = (worldDerivatives?.dx.xz ?? worldXZ.dFdx()).toVar(
+              "compactDirtSurfaceWorldDx",
+            );
+            const dy = (worldDerivatives?.dy.xz ?? worldXZ.dFdy()).toVar(
+              "compactDirtSurfaceWorldDy",
+            );
+            const projection = createCompactDirtProjections(worldXZ, dx, dy);
+            return dirtSurfacePage.resolve(worldXZ, dx, dy, () =>
+              createCompactDirtRawAppearance(textures, projection),
+            );
+          })().toVar("compactDirtSurfacePageResult")
+        : null;
     return {
       ...(a.height && b.height && c.height
         ? {
@@ -2715,17 +2788,24 @@ export function createCompactTerrainLayerFactory(
       // Do not materialize the original AR blend when a resolver owns it.
       // project() creates no dirt AR temporaries, so its unused AR nodes stay
       // outside the emitted graph while normal/AO and height remain live.
-      albedo:
-        cachedRaw?.rgb ??
-        blendCompactDirtAlbedo(a.albedo, b.albedo, c.albedo, p.weights).toVar(
-          "compactStochasticDirtAlbedo",
-        ),
-      roughness:
-        cachedRaw?.a ??
-        a.roughness
-          .mul(p.weights.x)
-          .add(b.roughness.mul(p.weights.y))
-          .add(c.roughness.mul(p.weights.z)),
+      ...(includeAppearance
+        ? {
+            albedo:
+              cachedRaw?.rgb ??
+              blendCompactDirtAlbedo(
+                a.albedo!,
+                b.albedo!,
+                c.albedo!,
+                p.weights,
+              ).toVar("compactStochasticDirtAlbedo"),
+            roughness:
+              cachedRaw?.a ??
+              a
+                .roughness!.mul(p.weights.x)
+                .add(b.roughness!.mul(p.weights.y))
+                .add(c.roughness!.mul(p.weights.z)),
+          }
+        : {}),
       ao: a.ao
         .mul(p.weights.x)
         .add(b.ao.mul(p.weights.y))
@@ -2741,7 +2821,7 @@ export function createCompactTerrainLayerFactory(
   const buildRock = (worldDerivatives?: {
     dx: Node<"vec3">;
     dy: Node<"vec3">;
-  }): CompactTerrainLayer => {
+  }): CompactTerrainFactoryLayer => {
     // Only identical geometric inputs are shared. Every rotated projection
     // retains its own tangent lengths and explicit texture-coordinate gradients.
     const sharedRockNormal = textures.rockProjection
@@ -2796,17 +2876,21 @@ export function createCompactTerrainLayerFactory(
             .rawRockAo!.mul(p.weights.x)
             .add(b.rawRockAo!.mul(p.weights.y))
             .add(c.rawRockAo!.mul(p.weights.z)),
-          albedo: blendCompactStochasticAlbedo(
-            a.albedo,
-            b.albedo,
-            c.albedo,
-            p.weights,
-            createCompactTerrainColorOperations().getPalette().rock,
-          ).toVar(`compactStochasticRockAlbedo${axis}`),
-          roughness: a.roughness
-            .mul(p.weights.x)
-            .add(b.roughness.mul(p.weights.y))
-            .add(c.roughness.mul(p.weights.z)),
+          ...(includeAppearance
+            ? {
+                albedo: blendCompactStochasticAlbedo(
+                  a.albedo!,
+                  b.albedo!,
+                  c.albedo!,
+                  p.weights,
+                  createCompactTerrainColorOperations().getPalette().rock,
+                ).toVar(`compactStochasticRockAlbedo${axis}`),
+                roughness: a
+                  .roughness!.mul(p.weights.x)
+                  .add(b.roughness!.mul(p.weights.y))
+                  .add(c.roughness!.mul(p.weights.z)),
+              }
+            : {}),
           ao: a.ao
             .mul(p.weights.x)
             .add(b.ao.mul(p.weights.y))
@@ -2834,10 +2918,16 @@ export function createCompactTerrainLayerFactory(
       const b = projectRock(p.b);
       return {
         rawRockAo: mix(a.rawRockAo!, b.rawRockAo!, p.weight),
-        albedo: blendCompactRockAlbedo(a.albedo, b.albedo, p.weight).toVar(
-          `compactRockAlbedo${axis}`,
-        ),
-        roughness: mix(a.roughness, b.roughness, p.weight),
+        ...(includeAppearance
+          ? {
+              albedo: blendCompactRockAlbedo(
+                a.albedo!,
+                b.albedo!,
+                p.weight,
+              ).toVar(`compactRockAlbedo${axis}`),
+              roughness: mix(a.roughness!, b.roughness!, p.weight),
+            }
+          : {}),
         ao: mix(a.ao, b.ao, p.weight),
         worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
       };
@@ -2886,12 +2976,20 @@ export function createCompactTerrainLayerFactory(
         sides[1].rawRockAo,
         sides[2].rawRockAo,
       ),
-      albedo: blendVector(sides[0].albedo, sides[1].albedo, sides[2].albedo),
-      roughness: blendScalar(
-        sides[0].roughness,
-        sides[1].roughness,
-        sides[2].roughness,
-      ),
+      ...(includeAppearance
+        ? {
+            albedo: blendVector(
+              sides[0].albedo!,
+              sides[1].albedo!,
+              sides[2].albedo!,
+            ),
+            roughness: blendScalar(
+              sides[0].roughness!,
+              sides[1].roughness!,
+              sides[2].roughness!,
+            ),
+          }
+        : {}),
       ao: blendScalar(sides[0].ao, sides[1].ao, sides[2].ao),
       worldNormal: normalize(
         blendVector(
@@ -2953,8 +3051,9 @@ export function createCompactTerrainLayerFactory(
       const appearance = (
         layer: "grass" | "dirt",
         required: Node<"bool">,
-      ): CompactTerrainLayer => {
+      ): CompactTerrainFactoryLayer => {
         const label = layer === "grass" ? "Grass" : "Dirt";
+        const channelsLabel = includeAppearance ? "Appearance" : "NormalAO";
         const packed = Fn(() => {
           // Explicit world and projection gradients enter this stack BEFORE
           // its nonuniform branch. Height sampling above is independent and
@@ -2996,7 +3095,7 @@ export function createCompactTerrainLayerFactory(
               }
             : undefined;
           const result = mat3(vec3(0), normalWorldGeometry, vec3(1)).toVar(
-            `compact${label}Appearance`,
+            `compact${label}${channelsLabel}`,
           );
           If(required, () => {
             const material = projectedTriple
@@ -3012,24 +3111,28 @@ export function createCompactTerrainLayerFactory(
                 );
             result.assign(
               mat3(
-                material.albedo,
+                includeAppearance ? material.albedo! : vec3(0),
                 material.worldNormal,
-                vec3(material.roughness, material.ao, 1),
+                vec3(
+                  includeAppearance ? material.roughness! : float(1),
+                  material.ao,
+                  1,
+                ),
               ),
             );
           });
           return result;
         })().toVar(
-          `compact${label}AppearanceResult`,
+          `compact${label}${channelsLabel}Result`,
         ) as unknown as Node<"mat3"> & {
           element(index: 0 | 1 | 2): Node<"vec3">;
         };
         const channels = packed.element(2);
         return {
           height: layer === "grass" ? grassHeight : dirtHeight,
-          albedo: packed.element(0),
+          ...(includeAppearance ? { albedo: packed.element(0) } : {}),
           worldNormal: packed.element(1),
-          roughness: channels.x,
+          ...(includeAppearance ? { roughness: channels.x } : {}),
           ao: channels.y,
         };
       };
@@ -3043,13 +3146,14 @@ export function createCompactTerrainLayerFactory(
     },
     createRock: (required) => {
       if (required === undefined) return buildRock();
+      const channelsLabel = includeAppearance ? "Appearance" : "NormalAO";
       const packed = Fn(() => {
         // These variables enter the enclosing stack before the nonuniform If.
         // No implicit derivative may be constructed inside buildRock below.
         const dx = positionWorld.dFdx().toVar("compactRockWorldDx");
         const dy = positionWorld.dFdy().toVar("compactRockWorldDy");
         const result = mat3(vec3(0), normalWorldGeometry, vec3(1)).toVar(
-          "compactRockAppearance",
+          `compactRock${channelsLabel}`,
         );
         If(required, () => {
           // Construct all rock samples and their .toVar() assignments here:
@@ -3058,14 +3162,20 @@ export function createCompactTerrainLayerFactory(
           const rawRockAo = rock.rawRockAo!.toVar("compactRawRockAo");
           result.assign(
             mat3(
-              rock.albedo,
+              includeAppearance ? rock.albedo! : vec3(0),
               rock.worldNormal,
-              vec3(rock.roughness, rock.ao, rawRockAo),
+              vec3(
+                includeAppearance ? rock.roughness! : float(1),
+                rock.ao,
+                rawRockAo,
+              ),
             ),
           );
         });
         return result;
-      })().toVar("compactRockAppearanceResult") as unknown as Node<"mat3"> & {
+      })().toVar(
+        `compactRock${channelsLabel}Result`,
+      ) as unknown as Node<"mat3"> & {
         // r186 indexes matrices through ArrayElementNode, but the installed
         // declarations expose .element only for array nodes. A mat3 column is
         // exactly vec3; keep this missing declaration local to the packed value.
@@ -3073,9 +3183,9 @@ export function createCompactTerrainLayerFactory(
       };
       const channels = packed.element(2);
       return {
-        albedo: packed.element(0),
+        ...(includeAppearance ? { albedo: packed.element(0) } : {}),
         worldNormal: packed.element(1),
-        roughness: channels.x,
+        ...(includeAppearance ? { roughness: channels.x } : {}),
         ao: channels.y,
         rawRockAo: channels.z,
       };
