@@ -1983,6 +1983,11 @@ function applyCompactPondBankMaterialsInternal(
           mineralNormal!,
         )
         .uniformFlow()
+        // r186 ConditionalNode caches an unassigned property after emitting a
+        // uniform-flow select inline. Bank soil is consumed again by coast
+        // rock: materialize its completed result once, preserving both input
+        // derivative fences and the original selection/normalization order.
+        .toVar("compactPondBankSoilNormal")
     : null;
   return {
     soil: {

@@ -23,7 +23,7 @@ import THREE, {
   vec3,
   vec4,
 } from "../../../../extras/three/three";
-import { NodeBuilder, type Node } from "three/webgpu";
+import { NodeBuilder, WGSLNodeBuilder, type Node } from "three/webgpu";
 import {
   createTerrainMaterial as createRuntimeTerrainMaterial,
   TerrainShadeUniforms,
@@ -3586,6 +3586,122 @@ describe("complete channel-selective terrain composition (real TSL, not native q
         contexts.some((n) => Reflect.get(n, "value").uniformFlow === true),
       ).toBe(true);
     }
+  });
+
+  describe("bank normal reuse in the real r186 WGSL emitter", () => {
+    const generate = (makeRoot: () => Node<"vec4">) => {
+      const dom = new JSDOM("<canvas></canvas>");
+      const renderer = new THREE.WebGPURenderer({
+        canvas: dom.window.document.querySelector("canvas")!,
+      });
+      const geometry = new THREE.PlaneGeometry(1, 1);
+      const material = new THREE.MeshStandardNodeMaterial();
+      try {
+        // Actual compiler and renderer objects, without initializing a device.
+        // This proves generated flow, not native pipeline or pixel correctness.
+        const builder = new WGSLNodeBuilder(
+          new THREE.Mesh(geometry, material),
+          renderer,
+        );
+        builder.shaderStage = "fragment";
+        return builder.flowStagesNode(makeRoot(), "vec4");
+      } finally {
+        geometry.dispose();
+        material.dispose();
+        renderer.dispose();
+        dom.window.close();
+      }
+    };
+    const unassignedReads = (flow: { code: string; result: string }) => {
+      const source = `${flow.code}\n${flow.result}`;
+      const assigned = new Set<string>();
+      const missing = new Set<string>();
+      // These closed graphs have no branch statements, parameters, textures or
+      // attributes. Every generated temporary must be assigned before its read.
+      for (const match of source.matchAll(
+        /\b(?:nodeVar\d+|compactPondBank[A-Za-z]+|tested[A-Za-z]+)\b/g,
+      )) {
+        if (/^\s*=(?!=)/.test(source.slice(match.index! + match[0].length)))
+          assigned.add(match[0]);
+        else if (!assigned.has(match[0])) missing.add(match[0]);
+      }
+      return [...missing];
+    };
+
+    it("reproduces the historical shared uniform-flow selector and verifies the explicit variable boundary", () => {
+      const emit = (retain: boolean) =>
+        generate(() => {
+          const selected = float(0.5)
+            .greaterThan(0)
+            .select(vec3(0.2, 0.9, 0.1), vec3(0, 1, 0))
+            .uniformFlow();
+          const shared = retain
+            ? selected.toVar("testedSharedNormal")
+            : selected;
+          return THREE.TSL.Fn(() => vec4(shared.add(shared.mul(0.5)), 1))();
+        });
+      const historical = emit(false);
+      expect(unassignedReads(historical)).toHaveLength(1);
+      expect(historical.code).not.toContain(" = ");
+      const retained = emit(true);
+      expect(unassignedReads(retained)).toEqual([]);
+      expect(
+        retained.code.match(/testedSharedNormal\s*=\s*select\(/g),
+      ).toHaveLength(1);
+      expect(retained.result.match(/testedSharedNormal/g)).toHaveLength(2);
+    });
+
+    it.each([
+      ["full", false],
+      ["full", true],
+      ["normal-only", false],
+      ["normal-only", true],
+    ] as const)(
+      "assigns the completed %s bank soil normal before direct and coastal reuse (coast first: %s)",
+      (mode, coastFirst) => {
+        for (const [mineral, silt] of [
+          [0, 0],
+          [1e-30, 1e-30],
+          [0.31, 0.17],
+          [1, 1],
+        ]) {
+          const flow = generate(() => {
+            const layers = fixture();
+            const field = bank(float(mineral), float(silt));
+            const selected =
+              mode === "full"
+                ? applyCompactPondBankMaterials(layers.dirt, layers.rock, field)
+                : applyCompactPondBankNormalMaterials(
+                    strip(layers.dirt),
+                    strip(layers.rock),
+                    field,
+                  );
+            const coastal = applyCompactCoastNormalRock(
+              selected.rock,
+              selected.soil,
+              { soil: float(0.43), wetness: float(0.2) },
+            );
+            return THREE.TSL.Fn(() => {
+              const first = (
+                coastFirst ? coastal.worldNormal : selected.soil.worldNormal
+              ).toVar("testedFirstNormal");
+              const second = (
+                coastFirst ? selected.soil.worldNormal : coastal.worldNormal
+              ).toVar("testedSecondNormal");
+              return vec4(first.add(second), 1);
+            })();
+          });
+          expect(unassignedReads(flow), flow.code).toEqual([]);
+          expect(
+            flow.code.match(/compactPondBankSoilNormal\s*=\s*select\(/g),
+          ).toHaveLength(1);
+          expect(
+            flow.code.match(/compactPondBankSoilNormal/g)!.length,
+          ).toBeGreaterThanOrEqual(3);
+          expect(flow.code).not.toMatch(/\b(?:dpdx|dpdy|textureSample)\b/);
+        }
+      },
+    );
   });
 
   it("retains original coastal AO/normal arithmetic and unattenuated raw cavity ownership", () => {
