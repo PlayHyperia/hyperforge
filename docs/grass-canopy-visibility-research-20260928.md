@@ -1,5 +1,34 @@
 # Grass canopy visibility: research checkpoint
 
+## Native246 — bounded appearance cache executes but has no sampled 2× coverage
+
+**Reject this configuration for further timing: the cache is unused in all three sampled native-pixel terrain crops.** Fresh build244 uses the current canonical source (HEAD `1d4b3c9e8e85ba13cca4a3f339ff0fe7d34cbc21`), nine bundles / 980 inputs and zero overrides. The private ordinary game retains 3024×1724 / DPR2, with the matched camera and held phase/exposure. This is hardware correctness and eligibility evidence, not an FPS measurement.
+
+[Raw qualification receipt](/Users/lucid/Downloads/hyperia-native246-appearance-qualification.json), SHA256 `a7fa2633f3a8730c41e6b37fa9aa265193d735bcb455c9bce2f7e54987d5cb6b`, preserves the failed attempts alongside successful results.
+
+- All 19 deterministic eligibility cases / 76 hardware readback pixels pass, including both gradient orientations, edge transitions, fine/coarse/anisotropic/steep/degenerate inputs and unavailable-page fallback. One actual issued pipeline is verified. The first readback attempt incorrectly assumed tightly packed rows; installed r186 returns a 512-byte stride and 1,840-byte array for this 19×4 RGBA32F target. Only decoding was corrected; shader inputs and tolerances did not change.
+- The 64 m / 2048² albedo/roughness page prepares successfully with loaded-source, actual MAIN geometry and resource checks. A first refusal identifies the canonical UniformGroupNode dirty-version updater; the corrected private helper admits only the exact used r186 singleton groups while retaining every individual texture/uniform pin. The failed page is disposed before retry.
+- Ordinary primary rendering issues 267 candidate draws while retaining 4,539 original other-camera attempts; a subsequent page-disabled phase records 1,296 fallback draws. Both phases restore original dispatch with empty probe errors. These counts establish execution, not useful cache coverage or saved time.
+- The pixel helper initially refuses the raw-color split before installing hooks. Installed r186 multiplication returns one canonical writable intent VarNode; exact one-level unwrapping corrects the diagnostic. No material, texture or eligibility threshold is changed.
+
+Root and independent audits reproduce the guard maximum absolute error of 3.58e−7 (limit 1e−5). Failed/successful guard shaders are byte-identical; failed/successful bake shaders are also byte-identical. The issued candidate confines all 16 static albedo/roughness source sample sites to fallback Else, with explicit outer gradients and no implicit derivatives/sampling inside Else. Five height sites, 14 live normal/AO sites, normal fade and five shadow-comparison sites remain outside. Static sites are not per-fragment sample counts. [Combined verification and source pins](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native246-appearance-verification.json).
+
+| Native 256² crop anchor (x,z) | Covered sample pixels | Eligible / transition pixels | Minor footprint median / maximum |
+| --- | ---: | ---: | ---: |
+| 350,450 | 44,215 | 0 / 0 | 0.02607 / 0.09875 m |
+| 340,436 | 57,828 | 0 / 0 | 0.02288 / 0.08770 m |
+| 360,464 | 39,417 | 0 / 0 | 0.03233 / 0.10320 m |
+
+The 141,460 covered **crop samples** all use the original path. The maximum sampled minor footprint is below the policy's 0.125 m activation threshold. The crops preserve full native pixel density through camera view offsets, not a downsampled full viewport. They render selected actual terrain alone: they do not measure all-screen unique pixels or occlusion behind trees/water/structures, and some samples may overlap. With no eligible pixels, loaded cached-art comparison is intentionally skipped; orientation/mip/filter parity remains unqualified. Do not call this a quality-preserving speedup or silently relax its safeguards to make a benchmark run.
+
+Nominal retained target storage remains 58.67 MiB, with up to 32 MiB staging (90.67 MiB logical peak); this is not total measured GPU residency. The configuration adds no demonstrated useful coverage at the tested view. Stop unchanged timing, cache enlargement and threshold sweeps as the primary work.
+
+### Restoration and next measured priority
+
+Native cleanup confirms the probe disposed/retired, original renderer restored, camera/clock/exposure restored, diagnostic owners absent and no device loss. Owned game/DevTools windows close; original New Tab remains. The isolated runtime stops at **2026-10-03 19:03:48.622 UTC**, errors empty, all 1,142 protected file pins unchanged, disposable database removed and four private ports clear. Temporary runtime admissions are reversed byte-for-byte and four served helper copies removed; source helpers/receipts remain. All 42 unrelated working-file hashes and public3333/5555/5556 process ownership are unchanged.
+
+**Next:** complete the remaining current-view category attribution using existing Native229 exact owners and restored native controls—trees, actors and mushrooms first. Record ordinary animation/submission variability instead of requiring an unchanged global draw-order hash; refuse owner, quality, resolution, pose or device changes. Confirm which postprocessing passes actually execute rather than ranking an inactive preference or overlapping timestamp interval. Preserve the directly matched terrain→grass ordering; reflection repeats both and is not an additive third slice. No new production cache/default is promoted. **Sustained 60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Native245 — complete matched repeat with material timing drift
 
 **A complete full-2× capture, but not a stable replicated speedup or 60 FPS.** A fresh isolated runtime reused immutable build236 and the exact Native236 pose, helpers, loaded texture recipe and 3024×1724 / DPR2 / MSAA4 settings. High shadows, full reflections, bloom/postprocessing, phase 0.56 and exposure 0.850240084 remained fixed. This repeats the older fixed-view diagnostic; it does not test Native242 as a performance change.
