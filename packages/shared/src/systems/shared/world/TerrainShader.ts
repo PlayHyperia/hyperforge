@@ -57,6 +57,7 @@ import {
   createCompactTerrainLayers,
   createCompactTerrainLayerFactory,
   createCompactTerrainNormalLayerFactory,
+  createCompactTerrainAppearanceLayerFactory,
   createCompactDirtRawAppearance,
   createCompactDirtProjections,
   createCompactRockAppearanceRequired,
@@ -64,6 +65,7 @@ import {
   createCompactDirtAppearanceRequired,
   type CompactTerrainLayer,
   type CompactTerrainNormalLayer,
+  type CompactTerrainAppearanceLayer,
   type CompactDirtProjection,
   type CompactRockProjection,
   type CompactRockSampling,
@@ -77,6 +79,7 @@ import {
   type CompactTerrainDiagnosticOutputs,
   blendCompactTerrainLayers,
   blendCompactTerrainNormalLayers,
+  blendCompactTerrainAppearanceLayers,
   createCompactTerrainDiagnosticOutputs,
   createCompactHabitatSoilNode,
   createCompactTerrainLayerWeights,
@@ -95,6 +98,7 @@ import {
   applyCompactPondRockSoil,
   applyCompactPondBankMaterials,
   applyCompactPondBankNormalMaterials,
+  applyCompactPondBankAppearanceMaterials,
   applyCompactMeadowTint,
   applyCompactFineGrassSubstrateContrast,
   applyCompactGrassColorGrade,
@@ -107,6 +111,7 @@ import {
   createCompactCoastalGroundCover,
   applyCompactCoastRock,
   applyCompactCoastNormalRock,
+  applyCompactCoastAppearanceRock,
   createCompactTerrainMacroWeights,
 } from "./CompactTerrainMaterial";
 import {
@@ -162,6 +167,20 @@ export type CompactTerrainNormalSurface = Readonly<{
   normalView: Node<"vec3">;
   weights?: Node<"vec4">;
 }>;
+
+/** Uniform-flow inputs prepared before an appearance resolver's spatial branch.
+ * The original callback must be invoked inside that branch, not precomputed.
+ * This graph interface grants no cache validity, filtering or GPU ownership.
+ */
+export type CompactTerrainAppearanceResolver = (
+  context: Readonly<{
+    worldPosition: Node<"vec3">;
+    worldDx: Node<"vec3">;
+    worldDy: Node<"vec3">;
+    weights: Node<"vec4">;
+  }>,
+  createOriginal: () => Node<"vec4">,
+) => Node<"vec4">;
 
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
@@ -1258,6 +1277,9 @@ export function createTerrainMaterial(
   getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
   getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
   getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
+  createCompactTerrainResolvedAppearance(
+    resolver: CompactTerrainAppearanceResolver,
+  ): Readonly<CompactTerrainAppearanceLayer> | null;
   compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
   compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
   compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -1273,6 +1295,7 @@ export function createTerrainMaterial(
   const grassColorGrade = grassColorOperations.grassColorGrade(
     options.compactGrassColorGrade,
   );
+  const compactSurfaceBlend = options.compactSurfaceBlend;
   if (grassColorGrade && !options.compactPbr)
     throw new Error("Grass color grade requires the compact PBR material");
   if (options.compactDirtProjection !== undefined && !options.compactPbr)
@@ -1580,17 +1603,24 @@ export function createTerrainMaterial(
   }
   // Reuse the identical grade order after either unconditional sampling or
   // deferred appearance resolution. None of these grades owns coverage.
-  const gradeCompactGrass = (layer: CompactTerrainLayer) => {
+  const gradeCompactGrass = <T extends CompactTerrainAppearanceLayer>(
+    layer: T,
+    inputs = {
+      meadowNoise,
+      macroDry: macroSurface.dry,
+      locality: bankVergeLocality,
+    },
+  ): T => {
     let grass = applyCompactFineGrassSubstrateContrast(
       layer,
       grassColorGrade,
-      options.compactSurfaceBlend,
+      compactSurfaceBlend,
     );
-    if (meadowNoise)
+    if (inputs.meadowNoise)
       grass = applyCompactMeadowTint(
         grass,
-        meadowNoise,
-        macroSurface.dry,
+        inputs.meadowNoise,
+        inputs.macroDry,
         macroField?.coastalMeadow
           ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
           : 1,
@@ -1602,7 +1632,7 @@ export function createTerrainMaterial(
       grassColorGrade,
       worldPos,
       macroField,
-      bankVergeLocality,
+      inputs.locality,
     );
   };
   if (compactLayers && !preparedGround)
@@ -2493,6 +2523,9 @@ export function createTerrainMaterial(
     getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
     getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
     getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
+    createCompactTerrainResolvedAppearance(
+      resolver: CompactTerrainAppearanceResolver,
+    ): Readonly<CompactTerrainAppearanceLayer> | null;
     compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
     compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
     compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
@@ -2571,19 +2604,24 @@ export function createTerrainMaterial(
   // Explicit graph request only. No material-node replacement, renderer work,
   // texture loading or proof of texture readiness/static cacheability. Distance,
   // derivatives, world uniforms and view-normal conversion remain live owners.
+  const ownsCompactRecipe = () =>
+    !diagnosticDisposed &&
+    compactTextures !== null &&
+    compactBlendInputs !== null &&
+    normalRecipe !== null &&
+    result.compactTerrainSurface === compactTextures &&
+    compactTextures.dirtProjection === normalRecipe.dirtProjection &&
+    compactTextures.rockProjection === normalRecipe.rockProjection &&
+    compactTextures.surfaceBlend === normalRecipe.surfaceBlend &&
+    compactTextures.grassSubstrate === normalRecipe.grassSubstrate &&
+    compactTextures.textureEncoding === normalRecipe.textureEncoding &&
+    compactTextures.textureMatrix === normalRecipe.textureMatrix;
   result.getCompactTerrainNormalSurface = () => {
     if (
-      diagnosticDisposed ||
+      !ownsCompactRecipe() ||
       !compactTextures ||
       !compactBlendInputs ||
-      !normalRecipe ||
-      result.compactTerrainSurface !== compactTextures ||
-      compactTextures.dirtProjection !== normalRecipe.dirtProjection ||
-      compactTextures.rockProjection !== normalRecipe.rockProjection ||
-      compactTextures.surfaceBlend !== normalRecipe.surfaceBlend ||
-      compactTextures.grassSubstrate !== normalRecipe.grassSubstrate ||
-      compactTextures.textureEncoding !== normalRecipe.textureEncoding ||
-      compactTextures.textureMatrix !== normalRecipe.textureMatrix
+      !normalRecipe
     )
       return null;
     if (normalSurface) return normalSurface;
@@ -2710,6 +2748,155 @@ export function createTerrainMaterial(
       ...(surface.weights ? { weights: surface.weights } : {}),
     });
     return normalSurface;
+  };
+  result.createCompactTerrainResolvedAppearance = (resolver) => {
+    if (
+      !ownsCompactRecipe() ||
+      !compactTextures ||
+      !normalRecipe ||
+      !compactWeights ||
+      compactDirtSurfacePage ||
+      typeof resolver !== "function"
+    )
+      return null;
+    const live = result.getCompactTerrainNormalSurface();
+    // The ordered non-height compositor has no equivalent final weight vector.
+    // Keep its original graph instead of replacing it with a different blend.
+    if (!live?.weights) return null;
+    const packed = Fn(() => {
+      if (!ownsCompactRecipe())
+        throw new Error(
+          "Terrain appearance resolver source is no longer owned",
+        );
+      // These scalar expressions can contain implicit noise/road sampling.
+      // Materialize every dependency BEFORE any resolver-owned spatial branch.
+      const world = positionWorld.toVar("compactAppearanceWorld");
+      const dx = positionWorld.dFdx().toVar("compactAppearanceWorldDx");
+      const dy = positionWorld.dFdy().toVar("compactAppearanceWorldDy");
+      const weights = live.weights!.toVar("compactAppearanceWeights");
+      const pattern = noiseValue.toVar("compactAppearancePatternNoise");
+      const variation = compactWeights.variation.toVar(
+        "compactAppearanceVariation",
+      );
+      const wetness = pondSurface.wetness.toVar("compactAppearancePondWetness");
+      const grading = {
+        meadowNoise: meadowNoise?.toVar("compactAppearanceMeadowNoise"),
+        macroDry: macroSurface.dry.toVar("compactAppearanceMacroDry"),
+        locality: bankVergeLocality?.toVar("compactAppearanceBankLocality"),
+      };
+      const margin = pondMargin
+        ? {
+            ...pondMargin,
+            shade: pondMargin.shade.toVar("compactAppearanceMarginShade"),
+          }
+        : undefined;
+      const bank = pondBankComposition
+        ? {
+            ...pondBankComposition,
+            grassShade: pondBankComposition.grassShade.toVar(
+              "compactAppearanceBankShade",
+            ),
+            mineralAppearance: pondBankComposition.mineralAppearance?.toVar(
+              "compactAppearanceMineral",
+            ),
+            siltAppearance: pondBankComposition.siltAppearance?.toVar(
+              "compactAppearanceSilt",
+            ),
+          }
+        : undefined;
+      const coast = coastSurface
+        ? {
+            soil: coastSurface.soil.toVar("compactAppearanceCoastSoil"),
+            wetness: coastSurface.wetness.toVar(
+              "compactAppearanceCoastWetness",
+            ),
+          }
+        : null;
+      const coastRock =
+        coastRockSurface && coast
+          ? {
+              soil: coastRockSurface.soil.toVar(
+                "compactAppearanceCoastRockSoil",
+              ),
+              wetness: coast.wetness,
+            }
+          : null;
+      const createOriginal = (): Node<"vec4"> => {
+        if (!ownsCompactRecipe())
+          throw new Error(
+            "Terrain appearance fallback source is no longer owned",
+          );
+        // Build here, not when this callback is created. A prebuilt packed graph
+        // can hoist all source reads out of the caller's Else in Three's TSL.
+        const factory = createCompactTerrainAppearanceLayerFactory(
+          compactTextures,
+          pattern,
+          { dx, dy },
+        );
+        const ground = factory.createGround(
+          normalRecipe.deferredGround
+            ? {
+                grassRequired: createCompactGrassAppearanceRequired(weights),
+                dirtRequired: createCompactDirtAppearanceRequired(
+                  weights,
+                  bank?.siltAppearance ?? float(0),
+                  coastRock?.soil ?? float(0),
+                ),
+              }
+            : undefined,
+        );
+        let grass = gradeCompactGrass(ground.grass, grading);
+        if (margin) grass = applyCompactPondMarginGrass(grass, margin);
+        if (bank) grass = applyCompactPondBankGrass(grass, bank);
+        let dirt = ground.dirt;
+        let rock = factory.createRock(
+          normalRecipe.deferredRock
+            ? createCompactRockAppearanceRequired(
+                weights,
+                bank?.mineralAppearance ?? float(0),
+              )
+            : undefined,
+        );
+        // Coastal ground borrows RAW dirt before mineral/silt grading. Rock
+        // then borrows the bank-graded soil, exactly as the original material.
+        const coastal =
+          coastalGround && coast
+            ? applyCompactCoastAppearanceRock(dirt, dirt, coast)
+            : undefined;
+        if (bank) {
+          const graded = applyCompactPondBankAppearanceMaterials(
+            dirt,
+            rock,
+            bank,
+          );
+          dirt = graded.soil;
+          rock = graded.rock;
+        }
+        if (coastRock)
+          rock = applyCompactCoastAppearanceRock(rock, dirt, coastRock);
+        const surface = applyCompactPondWetness(
+          blendCompactTerrainAppearanceLayers(
+            { grass, dirt, rock },
+            weights,
+            coastal,
+          ),
+          wetness,
+        );
+        return vec4(surface.albedo.mul(variation), surface.roughness);
+      };
+      return resolver(
+        Object.freeze({
+          worldPosition: world,
+          worldDx: dx,
+          worldDy: dy,
+          weights,
+        }),
+        createOriginal,
+      );
+    })()
+      .context({ uniformFlow: false })
+      .toVar("compactResolvedAppearance");
+    return Object.freeze({ albedo: packed.rgb, roughness: packed.a });
   };
   result.getCompactTerrainPreLightingSurface = () => {
     if (diagnosticDisposed || !compactSurface) return null;

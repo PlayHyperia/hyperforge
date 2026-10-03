@@ -1,5 +1,20 @@
 # Grass canopy visibility: research checkpoint
 
+## Source241 — appearance-only fallback graph; native qualification pending
+
+The terrain owner now exposes a lazy `createCompactTerrainResolvedAppearance()` graph for composed albedo/roughness. Its original fallback uses the same layer sampling, grass grading, raw coastal dirt, bank mineral/silt, coast-rock, final weights, pond wetness and variation order as the existing material. The live normal/AO path remains separate. The resolver receives explicit world derivatives and final weights; scalar noise/road/composition dependencies are materialized before its spatial branch. Fresh AR sampling is constructed when the callback is invoked inside the fallback, not prebuilt outside it. No page allocation, game caller, default rendering change or measured speedup is added.
+
+This placement matters in the installed Three r186: [VarNode](https://github.com/mrdoob/three.js/blob/r186/src/nodes/core/VarNode.js) may hoist preconstructed graph variables, and the [WGSL derivative rules](https://www.w3.org/TR/WGSL/#derivative-builtin-functions) require uniform-flow care. Source traversal alone does not establish the final issued shader. The prepared hardware check therefore requires an actual successful issued pipeline, all AR sample sites inside the fallback Else, no implicit derivative/sample operations in that branch, preserved live normal/AO/height reads, and positive RGBA32F marker/fallback comparisons. It uses production fallback texels, not loaded-world art, and cannot establish FPS.
+
+### Verified source scope
+
+- **561 tests pass / four existing gated skips** across nine selected suites: core 406 pass/two skips (39.52 s), related consumers 155 pass/two skips (16.32 s).
+- Five new tests cover raw AR recipes and explicit gradients, conditional masks, shared bank/coast/final arithmetic, lazy branch construction, unchanged default nodes, ownership/disposal admission and captured options before lazy expansion.
+- Scoped ESLint, Prettier and diff checks pass; independent source, test and native-helper review found no concrete blocker. Shared typecheck retains exactly five inherited procgen API errors outside the changed files; **it is not clean**.
+- All 55 protected previous-file hashes match. Only the three intended source/test files are extended; no public game, database, visual-quality setting or saved-player state is changed.
+
+**Native check remains open.** The source-pinned loopback bundle built successfully, but CUA reported the Mac locked before a test window could be opened. No draw, readback or timing receipt exists for Source241; do not count the prepared harness as a passed test. The next action is hardware shader qualification after unlock, followed by an independent unchanged-full-2× timing repeat before production GPU integration. Loaded maps, filtering, coverage, memory and moving-view validation remain required. **60 FPS / 16.67 ms at actual 2× is not achieved.**
+
 ## Native240 — rejected repeat; no new timing result
 
 The fresh private runtime deliberately reused immutable build236 and the same helpers, pose and actual 3024×1724 / DPR 2 / MSAA 4 settings as Native236. It did **not** test the newer Source239 code as a performance change. No quality setting was reduced.

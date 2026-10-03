@@ -1099,7 +1099,23 @@ export type CompactTerrainNormalLayer = Pick<
   "ao" | "worldNormal" | "height" | "rawRockAo"
 >;
 
-type CompactTerrainLayerFactory<T extends CompactTerrainNormalLayer> = {
+/** Reflectance channels only; contains no normal, AO or height placeholders. */
+export type CompactTerrainAppearanceLayer = Pick<
+  CompactTerrainLayer,
+  "albedo" | "roughness"
+>;
+
+export type CompactTerrainWorldDerivatives = Readonly<{
+  dx: Node<"vec3">;
+  dy: Node<"vec3">;
+}>;
+
+type CompactTerrainGroundRequired = {
+  grassRequired: Node<"bool">;
+  dirtRequired: Node<"bool">;
+};
+
+type CompactTerrainLayerFactory<T> = {
   createGround(): { grass: T; dirt: T };
   prepareGround(): {
     heights: { grass: Node<"float">; dirt: Node<"float"> };
@@ -1111,8 +1127,20 @@ type CompactTerrainLayerFactory<T extends CompactTerrainNormalLayer> = {
   createRock(required?: Node<"bool">): T;
 };
 
+type CompactTerrainAppearanceLayerFactory = {
+  createGround(required?: CompactTerrainGroundRequired): {
+    grass: CompactTerrainAppearanceLayer;
+    dirt: CompactTerrainAppearanceLayer;
+  };
+  createRock(required?: Node<"bool">): CompactTerrainAppearanceLayer;
+};
+
 type CompactTerrainFactoryLayer = CompactTerrainNormalLayer &
   Partial<Pick<CompactTerrainLayer, "albedo" | "roughness">>;
+
+// Internal compile-time channel selection. Public overloads expose only the
+// channels actually constructed; callers never receive synthetic placeholders.
+type CompactTerrainSampledLayer = Partial<CompactTerrainLayer>;
 
 /**
  * Fine-meadow substrate art trial: compress sampled LINEAR grass reflectance
@@ -1120,11 +1148,13 @@ type CompactTerrainFactoryLayer = CompactTerrainNormalLayer &
  * The CPU palette mean is a fixed point; this does not change grass placement,
  * texture resolution/filtering or any non-albedo material channel.
  */
-export function applyCompactFineGrassSubstrateContrast(
-  grass: CompactTerrainLayer,
+export function applyCompactFineGrassSubstrateContrast<
+  T extends CompactTerrainAppearanceLayer,
+>(
+  grass: T,
   grade: CompactGrassColorGrade | undefined,
   surfaceBlend?: CompactSurfaceBlend,
-): CompactTerrainLayer {
+): T {
   const operations = createCompactTerrainColorOperations();
   if (operations.grassColorGrade(grade) === undefined) return grass;
   const rawMean = operations.getPalette().grass;
@@ -1141,10 +1171,9 @@ export function applyCompactFineGrassSubstrateContrast(
 }
 
 /** Grade grass reflectance before soil/rock/path blending; no extra samples. */
-export function applyCompactGrassColorGrade(
-  grass: CompactTerrainLayer,
-  grade: CompactGrassColorGrade | undefined,
-): CompactTerrainLayer {
+export function applyCompactGrassColorGrade<
+  T extends CompactTerrainAppearanceLayer,
+>(grass: T, grade: CompactGrassColorGrade | undefined): T {
   const operations = createCompactTerrainColorOperations();
   if (operations.grassColorGrade(grade) === undefined) return grass;
   return {
@@ -1336,13 +1365,15 @@ export function createCompactBankVergeHeightScale(
 }
 
 /** Local grass reflectance, mirrored by the CPU root palette before layering. */
-export function applyCompactBankVergeGrassTint(
-  grass: CompactTerrainLayer,
+export function applyCompactBankVergeGrassTint<
+  T extends CompactTerrainAppearanceLayer,
+>(
+  grass: T,
   grade: CompactGrassColorGrade | undefined,
   world: Node<"vec3">,
   field: CompactTerrainMacroField | null,
   locality?: Node<"float">,
-): CompactTerrainLayer {
+): T {
   if (!grade || !field?.coastalMeadow || !field.bankVerge) return grass;
   return {
     ...grass,
@@ -1361,13 +1392,13 @@ export function applyCompactBankVergeGrassTint(
  * This is an art-directed linear-albedo tint, not a lighting bake or a new PBR
  * scan. Normals, roughness and AO retain the original grass layer references.
  */
-export function applyCompactMeadowTint(
-  grass: CompactTerrainLayer,
+export function applyCompactMeadowTint<T extends CompactTerrainAppearanceLayer>(
+  grass: T,
   noise: Node<"float">,
   macroDry: Node<"float"> = float(0),
   strength = 1,
   grade?: CompactGrassColorGrade,
-): CompactTerrainLayer {
+): T {
   const c = COMPACT_TERRAIN_COMPOSITION;
   const regional =
     createCompactTerrainColorOperations().grassColorGrade(grade) ===
@@ -1867,6 +1898,17 @@ export function applyCompactPondBankNormalMaterials(
   return applyCompactPondBankMaterialsInternal(false, soil, rock, field);
 }
 
+export function applyCompactPondBankAppearanceMaterials(
+  soil: CompactTerrainAppearanceLayer,
+  rock: CompactTerrainAppearanceLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): {
+  soil: CompactTerrainAppearanceLayer;
+  rock: CompactTerrainAppearanceLayer;
+} {
+  return applyCompactPondBankMaterialsInternal("appearance", soil, rock, field);
+}
+
 function applyCompactPondBankMaterialsInternal(
   includeAppearance: true,
   soil: CompactTerrainLayer,
@@ -1880,11 +1922,19 @@ function applyCompactPondBankMaterialsInternal(
   field: CompactPondBankComposition<Node<"float">> | undefined,
 ): { soil: CompactTerrainNormalLayer; rock: CompactTerrainNormalLayer };
 function applyCompactPondBankMaterialsInternal(
-  includeAppearance: boolean,
-  soil: CompactTerrainFactoryLayer,
-  rock: CompactTerrainFactoryLayer,
+  mode: "appearance",
+  soil: CompactTerrainAppearanceLayer,
+  rock: CompactTerrainAppearanceLayer,
   field: CompactPondBankComposition<Node<"float">> | undefined,
-): { soil: CompactTerrainFactoryLayer; rock: CompactTerrainFactoryLayer } {
+): { soil: CompactTerrainAppearanceLayer; rock: CompactTerrainAppearanceLayer };
+function applyCompactPondBankMaterialsInternal(
+  mode: boolean | "appearance",
+  soil: CompactTerrainSampledLayer,
+  rock: CompactTerrainSampledLayer,
+  field: CompactPondBankComposition<Node<"float">> | undefined,
+): { soil: CompactTerrainSampledLayer; rock: CompactTerrainSampledLayer } {
+  const includeAppearance = mode !== false;
+  const includeNormals = mode !== "appearance";
   if (
     field?.mineralAppearance === undefined ||
     field.siltAppearance === undefined
@@ -1904,28 +1954,36 @@ function applyCompactPondBankMaterialsInternal(
   // the result so their cotangent derivatives remain in uniform control flow.
   // Fence that context at the inputs: their own sampling/LOD branches retain
   // ownership, particularly the deferred exact-zero rock appearance branch.
-  const soilSourceNormal = soil.worldNormal
-    .context({ uniformFlow: false })
-    .toVar("compactPondBankSoilSourceNormal");
-  const rockSourceNormal = rock.worldNormal
-    .context({ uniformFlow: false })
-    .toVar("compactPondBankRockSourceNormal");
+  const soilSourceNormal = includeNormals
+    ? soil
+        .worldNormal!.context({ uniformFlow: false })
+        .toVar("compactPondBankSoilSourceNormal")
+    : null;
+  const rockSourceNormal = includeNormals
+    ? rock
+        .worldNormal!.context({ uniformFlow: false })
+        .toVar("compactPondBankRockSourceNormal")
+    : null;
   // Native selection returns the original normal exactly outside the field,
   // including source normals with finite rounding error (no extra normalize).
-  const mineralNormal = mineral
-    .greaterThan(0)
-    .select(
-      normalize(mix(soilSourceNormal, rockSourceNormal, mineral)),
-      soilSourceNormal,
-    )
-    .uniformFlow();
-  const soilNormal = silt
-    .greaterThan(0)
-    .select(
-      normalize(mix(mineralNormal, soilSourceNormal, silt)),
-      mineralNormal,
-    )
-    .uniformFlow();
+  const mineralNormal = includeNormals
+    ? mineral
+        .greaterThan(0)
+        .select(
+          normalize(mix(soilSourceNormal!, rockSourceNormal!, mineral)),
+          soilSourceNormal!,
+        )
+        .uniformFlow()
+    : null;
+  const soilNormal = includeNormals
+    ? silt
+        .greaterThan(0)
+        .select(
+          normalize(mix(mineralNormal!, soilSourceNormal!, silt)),
+          mineralNormal!,
+        )
+        .uniformFlow()
+    : null;
   return {
     soil: {
       ...soil,
@@ -1939,8 +1997,12 @@ function applyCompactPondBankMaterialsInternal(
             ),
           }
         : {}),
-      ao: mix(mix(soil.ao, rock.ao, mineral), soil.ao, silt),
-      worldNormal: soilNormal,
+      ...(includeNormals
+        ? {
+            ao: mix(mix(soil.ao!, rock.ao!, mineral), soil.ao!, silt),
+            worldNormal: soilNormal!,
+          }
+        : {}),
     },
     rock: {
       ...rock,
@@ -1950,14 +2012,18 @@ function applyCompactPondBankMaterialsInternal(
             roughness: mix(rock.roughness!, soil.roughness!, silt),
           }
         : {}),
-      ao: mix(rock.ao, soil.ao, silt),
-      worldNormal: silt
-        .greaterThan(0)
-        .select(
-          normalize(mix(rockSourceNormal, soilSourceNormal, silt)),
-          rockSourceNormal,
-        )
-        .uniformFlow(),
+      ...(includeNormals
+        ? {
+            ao: mix(rock.ao!, soil.ao!, silt),
+            worldNormal: silt
+              .greaterThan(0)
+              .select(
+                normalize(mix(rockSourceNormal!, soilSourceNormal!, silt)),
+                rockSourceNormal!,
+              )
+              .uniformFlow(),
+          }
+        : {}),
     },
   };
 }
@@ -1979,6 +2045,14 @@ export function applyCompactCoastNormalRock(
   return applyCompactCoastRockInternal(false, rock, soil, coast);
 }
 
+export function applyCompactCoastAppearanceRock(
+  rock: CompactTerrainAppearanceLayer,
+  soil: CompactTerrainAppearanceLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainAppearanceLayer {
+  return applyCompactCoastRockInternal("appearance", rock, soil, coast);
+}
+
 function applyCompactCoastRockInternal(
   includeAppearance: true,
   rock: CompactTerrainLayer,
@@ -1992,11 +2066,19 @@ function applyCompactCoastRockInternal(
   coast: { soil: Node<"float">; wetness: Node<"float"> },
 ): CompactTerrainNormalLayer;
 function applyCompactCoastRockInternal(
-  includeAppearance: boolean,
-  rock: CompactTerrainFactoryLayer,
-  soil: CompactTerrainFactoryLayer,
+  mode: "appearance",
+  rock: CompactTerrainAppearanceLayer,
+  soil: CompactTerrainAppearanceLayer,
   coast: { soil: Node<"float">; wetness: Node<"float"> },
-): CompactTerrainFactoryLayer {
+): CompactTerrainAppearanceLayer;
+function applyCompactCoastRockInternal(
+  mode: boolean | "appearance",
+  rock: CompactTerrainSampledLayer,
+  soil: CompactTerrainSampledLayer,
+  coast: { soil: Node<"float">; wetness: Node<"float"> },
+): CompactTerrainSampledLayer {
+  const includeAppearance = mode !== false;
+  const includeNormals = mode !== "appearance";
   const c = COMPACT_TERRAIN_COMPOSITION;
   const roughness = includeAppearance
     ? mix(rock.roughness!, soil.roughness!, coast.soil)
@@ -2016,8 +2098,14 @@ function applyCompactCoastRockInternal(
           ),
         }
       : {}),
-    ao: mix(rock.ao, soil.ao, coast.soil),
-    worldNormal: normalize(mix(rock.worldNormal, soil.worldNormal, coast.soil)),
+    ...(includeNormals
+      ? {
+          ao: mix(rock.ao!, soil.ao!, coast.soil),
+          worldNormal: normalize(
+            mix(rock.worldNormal!, soil.worldNormal!, coast.soil),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -2130,10 +2218,9 @@ export function createCompactPondBankSediment(
     .toVar("compactPondDrySediment");
 }
 
-export function applyCompactPondWetness(
-  surface: ReturnType<typeof blendCompactTerrainLayers>,
-  wetness: Node<"float">,
-) {
+export function applyCompactPondWetness<
+  T extends CompactTerrainAppearanceLayer,
+>(surface: T, wetness: Node<"float">): T {
   return {
     ...surface,
     albedo: surface.albedo.mul(
@@ -2627,6 +2714,28 @@ export function createCompactTerrainNormalLayerFactory(
   );
 }
 
+/** Fresh reflectance-only layers for a caller-owned dynamic branch. Both the
+ * original world derivatives and patternNoise MUST already have been evaluated
+ * before that branch. This factory never samples NAO/height or constructs a
+ * normal frame; it is not a complete composed terrain surface. */
+export function createCompactTerrainAppearanceLayerFactory(
+  textures: CompactTerrainTextureSet,
+  patternNoise: Node<"float">,
+  worldDerivatives: CompactTerrainWorldDerivatives,
+): CompactTerrainAppearanceLayerFactory {
+  if (!worldDerivatives?.dx?.isNode || !worldDerivatives.dy?.isNode)
+    throw new Error("Appearance layers require explicit world derivatives");
+  const factory = createCompactTerrainLayerFactoryInternal(
+    textures,
+    float(0),
+    patternNoise,
+    "appearance",
+    undefined,
+    worldDerivatives,
+  );
+  return { createGround: factory.createGround, createRock: factory.createRock };
+}
+
 function createCompactTerrainLayerFactoryInternal(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
@@ -2644,19 +2753,33 @@ function createCompactTerrainLayerFactoryInternal(
   textures: CompactTerrainTextureSet,
   distanceSquared: Node<"float">,
   patternNoise: Node<"float">,
-  includeAppearance: boolean,
+  mode: "appearance",
+  dirtSurfacePage: undefined,
+  worldDerivatives: CompactTerrainWorldDerivatives,
+): CompactTerrainLayerFactory<CompactTerrainAppearanceLayer> &
+  CompactTerrainAppearanceLayerFactory;
+function createCompactTerrainLayerFactoryInternal(
+  textures: CompactTerrainTextureSet,
+  distanceSquared: Node<"float">,
+  patternNoise: Node<"float">,
+  mode: boolean | "appearance",
   dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
-): CompactTerrainLayerFactory<CompactTerrainFactoryLayer> {
+  explicitWorldDerivatives?: CompactTerrainWorldDerivatives,
+): CompactTerrainLayerFactory<CompactTerrainSampledLayer> {
+  const includeAppearance = mode !== false;
+  const includeNormals = mode !== "appearance";
   if (dirtSurfacePage && textures.dirtProjection !== "stochastic-v1")
     throw new Error("Dirt surface pages require stochastic-v1 projection");
   const controls = COMPACT_TERRAIN_MATERIAL;
-  const nearDetail = float(1).sub(
-    smoothstep(
-      float(controls.normalFadeNear ** 2),
-      float(controls.normalFadeFar ** 2),
-      distanceSquared,
-    ),
-  );
+  const nearDetail = includeNormals
+    ? float(1).sub(
+        smoothstep(
+          float(controls.normalFadeNear ** 2),
+          float(controls.normalFadeFar ** 2),
+          distanceSquared,
+        ),
+      )
+    : null;
   const project = (
     layer: Layer,
     uv: Node<"vec2">,
@@ -2668,13 +2791,13 @@ function createCompactTerrainLayerFactoryInternal(
       strength: Node<"float">;
     } | null,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainFactoryLayer => {
+  ): CompactTerrainSampledLayer => {
     const sample = (channel: Channel) => {
       const base = textures.getNode(layer, channel);
       return textures.sample(base, uv, gradients);
     };
     const ar = includeAppearance ? sample("albedo-roughness") : null;
-    let na = sample("normal-ao");
+    let na = includeNormals ? sample("normal-ao") : null;
     let grassRoughnessAlpha = ar?.a;
     let albedo: Node<"vec3"> | undefined = ar?.rgb;
     if (layer === "grass" && textures.grassSubstrate) {
@@ -2702,9 +2825,10 @@ function createCompactTerrainLayerFactoryInternal(
         grassRoughnessAlpha = low.a;
       }
       // Filter the packed material signal, not its original cotangent frame.
-      na = textures.sample(textures.getNode(layer, "normal-ao"), uv, broad);
+      if (includeNormals)
+        na = textures.sample(textures.getNode(layer, "normal-ao"), uv, broad);
     }
-    const heightMap = textures.getHeightNode();
+    const heightMap = includeNormals ? textures.getHeightNode() : null;
     // Each layer's height follows its own exact projection and gradients.
     // Sampling RGB once at a common UV would misalign the material relief.
     const heightSample =
@@ -2712,7 +2836,7 @@ function createCompactTerrainLayerFactoryInternal(
         ? textures.sample(heightMap, uv, gradients)
         : undefined;
     return {
-      ...(layer === "rock" ? { rawRockAo: na.a } : {}),
+      ...(includeNormals && layer === "rock" ? { rawRockAo: na!.a } : {}),
       ...(heightSample
         ? { height: layer === "grass" ? heightSample.r : heightSample.g }
         : {}),
@@ -2728,25 +2852,29 @@ function createCompactTerrainLayerFactoryInternal(
                 : ar!.a.max(controls.minimumRoughness),
           }
         : {}),
-      ao: mix(float(1), na.a, float(controls.aoStrength)),
-      worldNormal:
-        layer === "rock" && sharedRockNormal
-          ? createCompactCotangentNormalFromInputs(
-              na.rgb,
-              sharedRockNormal.inputs,
-              gradients?.dx ?? uv.dFdx(),
-              gradients?.dy ?? uv.dFdy(),
-              sharedRockNormal.strength,
-            )
-          : createCompactCotangentNormal(
-              na.rgb,
-              normalWorldGeometry,
-              worldDerivatives?.dx ?? positionWorld.dFdx(),
-              worldDerivatives?.dy ?? positionWorld.dFdy(),
-              gradients?.dx ?? uv.dFdx(),
-              gradients?.dy ?? uv.dFdy(),
-              nearDetail.mul(normalStrength),
-            ),
+      ...(includeNormals
+        ? {
+            ao: mix(float(1), na!.a, float(controls.aoStrength)),
+            worldNormal:
+              layer === "rock" && sharedRockNormal
+                ? createCompactCotangentNormalFromInputs(
+                    na!.rgb,
+                    sharedRockNormal.inputs,
+                    gradients?.dx ?? uv.dFdx(),
+                    gradients?.dy ?? uv.dFdy(),
+                    sharedRockNormal.strength,
+                  )
+                : createCompactCotangentNormal(
+                    na!.rgb,
+                    normalWorldGeometry,
+                    worldDerivatives?.dx ?? positionWorld.dFdx(),
+                    worldDerivatives?.dy ?? positionWorld.dFdy(),
+                    gradients?.dx ?? uv.dFdx(),
+                    gradients?.dy ?? uv.dFdy(),
+                    nearDetail!.mul(normalStrength),
+                  ),
+          }
+        : {}),
     };
   };
   const ground = (
@@ -2755,13 +2883,15 @@ function createCompactTerrainLayerFactoryInternal(
     normalStrength: number,
     prepared?: ReturnType<typeof createCompactGroundProjections>,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainFactoryLayer => {
+  ): CompactTerrainSampledLayer => {
     const p =
       prepared ??
       createCompactGroundProjections(
         vec2(positionWorld.x, positionWorld.z),
         patternNoise,
         repeats,
+        worldDerivatives?.dx.xz,
+        worldDerivatives?.dy.xz,
       );
     const a = project(
       layer,
@@ -2791,17 +2921,27 @@ function createCompactTerrainLayerFactoryInternal(
             roughness: mix(a.roughness!, b.roughness!, p.weight),
           }
         : {}),
-      ao: mix(a.ao, b.ao, p.weight),
-      worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
+      ...(includeNormals
+        ? {
+            ao: mix(a.ao!, b.ao!, p.weight),
+            worldNormal: normalize(
+              mix(a.worldNormal!, b.worldNormal!, p.weight),
+            ),
+          }
+        : {}),
     };
   };
   const stochasticDirt = (
     prepared?: ReturnType<typeof createCompactDirtProjections>,
     worldDerivatives?: { dx: Node<"vec3">; dy: Node<"vec3"> },
-  ): CompactTerrainFactoryLayer => {
+  ): CompactTerrainSampledLayer => {
     const p =
       prepared ??
-      createCompactDirtProjections(vec2(positionWorld.x, positionWorld.z));
+      createCompactDirtProjections(
+        vec2(positionWorld.x, positionWorld.z),
+        worldDerivatives?.dx.xz,
+        worldDerivatives?.dy.xz,
+      );
     const a = project(
       "dirt",
       p.a.uv,
@@ -2880,34 +3020,39 @@ function createCompactTerrainLayerFactoryInternal(
                 .add(c.roughness!.mul(p.weights.z)),
           }
         : {}),
-      ao: a.ao
-        .mul(p.weights.x)
-        .add(b.ao.mul(p.weights.y))
-        .add(c.ao.mul(p.weights.z)),
-      worldNormal: normalize(
-        a.worldNormal
-          .mul(p.weights.x)
-          .add(b.worldNormal.mul(p.weights.y))
-          .add(c.worldNormal.mul(p.weights.z)),
-      ),
+      ...(includeNormals
+        ? {
+            ao: a
+              .ao!.mul(p.weights.x)
+              .add(b.ao!.mul(p.weights.y))
+              .add(c.ao!.mul(p.weights.z)),
+            worldNormal: normalize(
+              a
+                .worldNormal!.mul(p.weights.x)
+                .add(b.worldNormal!.mul(p.weights.y))
+                .add(c.worldNormal!.mul(p.weights.z)),
+            ),
+          }
+        : {}),
     };
   };
   const buildRock = (worldDerivatives?: {
     dx: Node<"vec3">;
     dy: Node<"vec3">;
-  }): CompactTerrainFactoryLayer => {
+  }): CompactTerrainSampledLayer => {
     // Only identical geometric inputs are shared. Every rotated projection
     // retains its own tangent lengths and explicit texture-coordinate gradients.
-    const sharedRockNormal = textures.rockProjection
-      ? {
-          inputs: createCompactCotangentInputs(
-            normalWorldGeometry,
-            worldDerivatives?.dx ?? positionWorld.dFdx(),
-            worldDerivatives?.dy ?? positionWorld.dFdy(),
-          ),
-          strength: nearDetail.mul(controls.rockNormalStrength),
-        }
-      : null;
+    const sharedRockNormal =
+      includeNormals && textures.rockProjection
+        ? {
+            inputs: createCompactCotangentInputs(
+              normalWorldGeometry,
+              worldDerivatives?.dx ?? positionWorld.dFdx(),
+              worldDerivatives?.dy ?? positionWorld.dFdy(),
+            ),
+            strength: nearDetail!.mul(controls.rockNormalStrength),
+          }
+        : null;
     const weights = normalWorldGeometry.abs().pow(vec3(4));
     const normalizedWeights = weights.div(
       weights.x.add(weights.y).add(weights.z).max(1e-12),
@@ -2946,10 +3091,14 @@ function createCompactTerrainLayerFactoryInternal(
         const b = projectRock(p.b);
         const c = projectRock(p.c);
         return {
-          rawRockAo: a
-            .rawRockAo!.mul(p.weights.x)
-            .add(b.rawRockAo!.mul(p.weights.y))
-            .add(c.rawRockAo!.mul(p.weights.z)),
+          ...(includeNormals
+            ? {
+                rawRockAo: a
+                  .rawRockAo!.mul(p.weights.x)
+                  .add(b.rawRockAo!.mul(p.weights.y))
+                  .add(c.rawRockAo!.mul(p.weights.z)),
+              }
+            : {}),
           ...(includeAppearance
             ? {
                 albedo: blendCompactStochasticAlbedo(
@@ -2965,16 +3114,20 @@ function createCompactTerrainLayerFactoryInternal(
                   .add(c.roughness!.mul(p.weights.z)),
               }
             : {}),
-          ao: a.ao
-            .mul(p.weights.x)
-            .add(b.ao.mul(p.weights.y))
-            .add(c.ao.mul(p.weights.z)),
-          worldNormal: normalize(
-            a.worldNormal
-              .mul(p.weights.x)
-              .add(b.worldNormal.mul(p.weights.y))
-              .add(c.worldNormal.mul(p.weights.z)),
-          ),
+          ...(includeNormals
+            ? {
+                ao: a
+                  .ao!.mul(p.weights.x)
+                  .add(b.ao!.mul(p.weights.y))
+                  .add(c.ao!.mul(p.weights.z)),
+                worldNormal: normalize(
+                  a
+                    .worldNormal!.mul(p.weights.x)
+                    .add(b.worldNormal!.mul(p.weights.y))
+                    .add(c.worldNormal!.mul(p.weights.z)),
+                ),
+              }
+            : {}),
         };
       }
       // Reuse the exact ground transition: outgoing B == incoming A at every
@@ -2991,7 +3144,9 @@ function createCompactTerrainLayerFactoryInternal(
       const a = projectRock(p.a);
       const b = projectRock(p.b);
       return {
-        rawRockAo: mix(a.rawRockAo!, b.rawRockAo!, p.weight),
+        ...(includeNormals
+          ? { rawRockAo: mix(a.rawRockAo!, b.rawRockAo!, p.weight) }
+          : {}),
         ...(includeAppearance
           ? {
               albedo: blendCompactRockAlbedo(
@@ -3002,8 +3157,14 @@ function createCompactTerrainLayerFactoryInternal(
               roughness: mix(a.roughness!, b.roughness!, p.weight),
             }
           : {}),
-        ao: mix(a.ao, b.ao, p.weight),
-        worldNormal: normalize(mix(a.worldNormal, b.worldNormal, p.weight)),
+        ...(includeNormals
+          ? {
+              ao: mix(a.ao!, b.ao!, p.weight),
+              worldNormal: normalize(
+                mix(a.worldNormal!, b.worldNormal!, p.weight),
+              ),
+            }
+          : {}),
       };
     };
     const sides = [
@@ -3045,11 +3206,15 @@ function createCompactTerrainLayerFactoryInternal(
         .add(b.mul(normalizedWeights.y))
         .add(c.mul(normalizedWeights.z));
     return {
-      rawRockAo: blendScalar(
-        sides[0].rawRockAo,
-        sides[1].rawRockAo,
-        sides[2].rawRockAo,
-      ),
+      ...(includeNormals
+        ? {
+            rawRockAo: blendScalar(
+              sides[0].rawRockAo!,
+              sides[1].rawRockAo!,
+              sides[2].rawRockAo!,
+            ),
+          }
+        : {}),
       ...(includeAppearance
         ? {
             albedo: blendVector(
@@ -3064,28 +3229,86 @@ function createCompactTerrainLayerFactoryInternal(
             ),
           }
         : {}),
-      ao: blendScalar(sides[0].ao, sides[1].ao, sides[2].ao),
-      worldNormal: normalize(
-        blendVector(
-          sides[0].worldNormal,
-          sides[1].worldNormal,
-          sides[2].worldNormal,
-        ),
-      ),
+      ...(includeNormals
+        ? {
+            ao: blendScalar(sides[0].ao!, sides[1].ao!, sides[2].ao!),
+            worldNormal: normalize(
+              blendVector(
+                sides[0].worldNormal!,
+                sides[1].worldNormal!,
+                sides[2].worldNormal!,
+              ),
+            ),
+          }
+        : {}),
     };
   };
+  const createAppearance = (
+    build: () => CompactTerrainSampledLayer,
+    required: Node<"bool"> | undefined,
+    label: "Grass" | "Dirt" | "Rock",
+  ): CompactTerrainAppearanceLayer => {
+    if (required === undefined) {
+      const layer = build();
+      return { albedo: layer.albedo!, roughness: layer.roughness! };
+    }
+    const packed = Fn(() => {
+      const result = vec4(0, 0, 0, 1).toVar(`compact${label}RawAppearance`);
+      If(required, () => {
+        // No samples or assignment-bearing nodes exist until this stack owns
+        // them. Explicit caller derivatives dominate any enclosing cache If.
+        const layer = build();
+        result.assign(vec4(layer.albedo!, layer.roughness!));
+      });
+      return result;
+    })().toVar(`compact${label}RawAppearanceResult`);
+    return { albedo: packed.rgb, roughness: packed.a };
+  };
   return {
-    createGround: () => ({
-      grass: ground("grass", controls.grassRepeatsPerMeter, 1),
-      dirt: textures.dirtProjection
-        ? stochasticDirt()
-        : ground(
-            "dirt",
-            controls.dirtRepeatsPerMeter,
-            controls.dirtNormalStrength,
+    createGround: (required?: CompactTerrainGroundRequired) => {
+      if (!includeNormals)
+        return {
+          grass: createAppearance(
+            () =>
+              ground(
+                "grass",
+                controls.grassRepeatsPerMeter,
+                1,
+                undefined,
+                explicitWorldDerivatives,
+              ),
+            required?.grassRequired,
+            "Grass",
           ),
-    }),
+          dirt: createAppearance(
+            () =>
+              textures.dirtProjection
+                ? stochasticDirt(undefined, explicitWorldDerivatives)
+                : ground(
+                    "dirt",
+                    controls.dirtRepeatsPerMeter,
+                    controls.dirtNormalStrength,
+                    undefined,
+                    explicitWorldDerivatives,
+                  ),
+            required?.dirtRequired,
+            "Dirt",
+          ),
+        };
+      return {
+        grass: ground("grass", controls.grassRepeatsPerMeter, 1),
+        dirt: textures.dirtProjection
+          ? stochasticDirt()
+          : ground(
+              "dirt",
+              controls.dirtRepeatsPerMeter,
+              controls.dirtNormalStrength,
+            ),
+      };
+    },
     prepareGround: () => {
+      if (!includeNormals)
+        throw new Error("Appearance-only layers do not prepare height samples");
       const heightMap = textures.getHeightNode();
       if (!heightMap)
         throw new Error(
@@ -3125,7 +3348,7 @@ function createCompactTerrainLayerFactoryInternal(
       const appearance = (
         layer: "grass" | "dirt",
         required: Node<"bool">,
-      ): CompactTerrainFactoryLayer => {
+      ): CompactTerrainSampledLayer => {
         const label = layer === "grass" ? "Grass" : "Dirt";
         const channelsLabel = includeAppearance ? "Appearance" : "NormalAO";
         const packed = Fn(() => {
@@ -3186,10 +3409,10 @@ function createCompactTerrainLayerFactoryInternal(
             result.assign(
               mat3(
                 includeAppearance ? material.albedo! : vec3(0),
-                material.worldNormal,
+                material.worldNormal!,
                 vec3(
                   includeAppearance ? material.roughness! : float(1),
-                  material.ao,
+                  material.ao!,
                   1,
                 ),
               ),
@@ -3219,6 +3442,12 @@ function createCompactTerrainLayerFactoryInternal(
       };
     },
     createRock: (required) => {
+      if (!includeNormals)
+        return createAppearance(
+          () => buildRock(explicitWorldDerivatives),
+          required,
+          "Rock",
+        );
       if (required === undefined) return buildRock();
       const channelsLabel = includeAppearance ? "Appearance" : "NormalAO";
       const packed = Fn(() => {
@@ -3237,10 +3466,10 @@ function createCompactTerrainLayerFactoryInternal(
           result.assign(
             mat3(
               includeAppearance ? rock.albedo! : vec3(0),
-              rock.worldNormal,
+              rock.worldNormal!,
               vec3(
                 includeAppearance ? rock.roughness! : float(1),
-                rock.ao,
+                rock.ao!,
                 rawRockAo,
               ),
             ),
@@ -3711,10 +3940,9 @@ export function applyCompactPondBankCompositionWeights(
   ).toVar("compactPondBankSurfaceWeights");
 }
 
-export function applyCompactPondBankGrass(
-  grass: CompactTerrainLayer,
-  composition: CompactPondBankComposition<Node<"float">>,
-): CompactTerrainLayer {
+export function applyCompactPondBankGrass<
+  T extends CompactTerrainAppearanceLayer,
+>(grass: T, composition: CompactPondBankComposition<Node<"float">>): T {
   return { ...grass, albedo: grass.albedo.mul(composition.grassShade) };
 }
 
@@ -3736,10 +3964,9 @@ export function createCompactPondMargin(
 }
 
 /** Local turf reflectance, not baked light or an alteration to soil/wetness. */
-export function applyCompactPondMarginGrass(
-  grass: CompactTerrainLayer,
-  margin: CompactPondMargin<Node<"float">>,
-): CompactTerrainLayer {
+export function applyCompactPondMarginGrass<
+  T extends CompactTerrainAppearanceLayer,
+>(grass: T, margin: CompactPondMargin<Node<"float">>): T {
   return { ...grass, albedo: grass.albedo.mul(margin.shade) };
 }
 
@@ -3852,6 +4079,51 @@ type CompactTerrainFullBlend = CompactTerrainNormalBlend & {
   albedo: Node<"vec3">;
   roughness: Node<"float">;
 };
+
+/** Reflectance composition from already completed LIVE material weights. No
+ * coverage/height/cavity work is recomputed, and no normal channels are built. */
+export function blendCompactTerrainAppearanceLayers(
+  layers: Record<Layer, CompactTerrainAppearanceLayer>,
+  weights: Node<"vec4">,
+  coastalGround: CompactTerrainAppearanceLayer = layers.dirt,
+): CompactTerrainAppearanceLayer {
+  return blendCompactTerrainAppearanceChannels(
+    weights,
+    layers.grass.albedo,
+    layers.dirt.albedo,
+    layers.rock.albedo,
+    coastalGround.albedo,
+    layers.grass.roughness,
+    layers.dirt.roughness,
+    layers.rock.roughness,
+    coastalGround.roughness,
+  );
+}
+
+function blendCompactTerrainAppearanceChannels(
+  weights: Node<"vec4">,
+  grass: Node<"vec3">,
+  soil: Node<"vec3">,
+  rock: Node<"vec3">,
+  coastal: Node<"vec3">,
+  grassRoughness: Node<"float">,
+  soilRoughness: Node<"float">,
+  rockRoughness: Node<"float">,
+  coastalRoughness: Node<"float">,
+): CompactTerrainAppearanceLayer {
+  return {
+    albedo: grass
+      .mul(weights.x)
+      .add(soil.mul(weights.y))
+      .add(rock.mul(weights.z))
+      .add(coastal.mul(weights.w)),
+    roughness: grassRoughness
+      .mul(weights.x)
+      .add(soilRoughness.mul(weights.y))
+      .add(rockRoughness.mul(weights.z))
+      .add(coastalRoughness.mul(weights.w)),
+  };
+}
 
 export function blendCompactTerrainLayers(
   ...args: CompactTerrainBlendArguments<CompactTerrainLayer>
@@ -4002,20 +4274,17 @@ function blendCompactTerrainLayersInternal<
     return {
       weights,
       ...(includeAppearance
-        ? {
-            albedo: blendVector(
-              appearance.grass.albedo!,
-              appearance.dirt.albedo!,
-              appearance.rock.albedo!,
-              coastalAppearance?.albedo,
-            ),
-            roughness: blendScalar(
-              appearance.grass.roughness!,
-              appearance.dirt.roughness!,
-              appearance.rock.roughness!,
-              coastalAppearance?.roughness,
-            ),
-          }
+        ? blendCompactTerrainAppearanceChannels(
+            weights,
+            appearance.grass.albedo!,
+            appearance.dirt.albedo!,
+            appearance.rock.albedo!,
+            coastalAppearance?.albedo ?? appearance.dirt.albedo!,
+            appearance.grass.roughness!,
+            appearance.dirt.roughness!,
+            appearance.rock.roughness!,
+            coastalAppearance?.roughness ?? appearance.dirt.roughness!,
+          )
         : {}),
       ao: blendScalar(
         appearance.grass.ao,
