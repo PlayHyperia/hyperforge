@@ -1,5 +1,35 @@
 # Grass canopy visibility: research checkpoint
 
+## Native245 — complete matched repeat with material timing drift
+
+**A complete full-2× capture, but not a stable replicated speedup or 60 FPS.** A fresh isolated runtime reused immutable build236 and the exact Native236 pose, helpers, loaded texture recipe and 3024×1724 / DPR2 / MSAA4 settings. High shadows, full reflections, bloom/postprocessing, phase 0.56 and exposure 0.850240084 remained fixed. This repeats the older fixed-view diagnostic; it does not test Native242 as a performance change.
+
+The [completed raw capture](</Users/lucid/Downloads/hyperia-native228-surface-abba (12).json>), SHA256 `dfc60a06bd7fdf10d6a61e96fe5040dc740169b6cebbc47db078e83763711bc4`, runs 100,020.1 ms with 2,453 valid rows, 99 successful focus checks, empty errors and restored timing hooks. Each 25-second block excludes 5 seconds of warm-up.
+
+| Median / p95 (ms) | Stock A1 | Cached B1 | Cached B2 | Stock A2 |
+| --- | ---: | ---: | ---: | ---: |
+| Wall tick interval | 44.2 / 48.4 | 41.4 / 44.5 | 38.0 / 43.9 | 39.8 / 42.5 |
+| Animation input interval | 41.7 / 50.1 | 41.7 / 50.0 | 40.8 / 42.6 | 41.6 / 42.6 |
+| Instrumented synchronous CPU | 12.5 / 17.9 | 13.6 / 16.7 | 13.2 / 18.1 | 12.0 / 14.8 |
+
+There are 454/484/526/506 measured rows, with 453/483/525/505 cadence samples. Median uses the middle pair for even counts; p95 uses floor(0.95×(n−1)). These are instrumented tick/input intervals, **not displayed-frame presentation measurements or exclusive GPU time**.
+
+### Interpretation: do not average away the drift
+
+The adjacent wall-median advantages are 2.8 ms and 1.8 ms. However, B2's successive 5-second medians are 40.45, 38.00, 37.40 and 35.40 ms **without changing its material**, and closing stock is 4.4 ms faster than opening stock. The endpoint-versus-middle mean difference of 2.3 ms is descriptive, not a causal shipping gain. Cached synchronous CPU is about 1.15 ms higher; the corresponding input-interval contrast is only 0.4 ms. Native236 remains the earlier cleaner within-run signal. Native245 adds directional support but does not justify a precise replicated saving.
+
+Every row retains 868 issued calls and 10,567,544 repeated-view triangle slots; these are not unique scene triangles. Primary/other terrain remain 17/17 draws at 482,838 slots each; grass 45/40 draws at 3,708,681/3,263,232 slots. All 52 terrain / 94 grass owners remain. The stock/cached shaders still have 55→18 texture operations with all five PCF sites. Their four program strings differ from Native236 only in six lines ordering members of `renderStruct`; sorting **only** those struct members makes all four exact. Do not describe them as raw byte-identical. Actual binding names/groups/stages and seven source-map/two atlas roles match; other session-specific lighting/shadow UUIDs were not independently role-attributed.
+
+The [same-session confirmation](</Users/lucid/Downloads/hyperia-native228-surface-abba (13).json>), SHA256 `a0d7c35a987165b5edaa6c3e825a952a74d837be85892c0a2682db3c4deda124`, loses focus at 9,001.1 ms: 205 rows, 91 measured A1 rows and no cached samples. It is excluded entirely from gain/replication statistics. The receipt does not identify the cause of blur. A preceding Start-button foreground refusal produced no timing run; it is not another benchmark. No further unchanged retry was made.
+
+### Restoration and next experiment
+
+[Native cleanup](</Users/lucid/Downloads/hyperia-native245-cleanup.json>), SHA256 `0826e4597a2de4dd2004d46a8b9b4eb1d3b1cd5a074f2c0a50ee02c442000b2f`, records inactive/disposed probe, original restoration, retired resources, empty errors, restored exposure/camera/clock, absent diagnostic owners and no device loss. Owned game/DevTools windows are closed; original New Tab remains. Runtime stops at 2026-10-03 18:27:45.220 UTC with its disposable database removed, four private ports clear, unchanged public ownership and 1,142 protected runtime file pins. Seven temporary admissions and three served helper copies are removed; original helpers and 42 unrelated working-file hashes are preserved. The public game/saved-player database was not operated on. [Combined verification receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native245-matched-terrain-repeat-verification.json).
+
+The next private Native244 draft reduces scope to **one 64 m / 2048² composed albedo/roughness page**, retaining live normals/AO and original fallback. Nominal storage is 42.67 MiB color mips plus 16 MiB depth, with up to 32 MiB readback staging. This is smaller coverage and fewer cached channels, not equal-coverage savings or measured total VRAM. The draft is **unexecuted and unqualified**; root and independent source review corrected unsafe discriminant math, added actual post-MAIN triangle exclusion and owned-resource disposal guards, and narrowed dynamic-uniform admission to exact canonical owners. Node syntax passes; no native draw or performance result exists for this draft. Actual issued shader branches, loaded-art orientation/mip/filter errors, deterministic fallback, moving views and lifetime/memory checks must precede performance acceptance. No public/default cache promotion.
+
+Terrain then grass remain the directly measured content priorities. Reflections repeat both and are not an additive third budget slice; rough-leaf savings are already in the baseline. **60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Native243 — matched-workload repeat interrupted by focus loss
 
 **No new timing or speedup claim.** The fresh isolated runtime reused immutable build236, not the newer Native242 fallback change. Native controls reconstructed the target from Native236's recorded quaternion and produced an exactly matching held pose, including its matrices. The actual 3024×1724 / DPR 2 / MSAA 4 scene retained high shadows, full reflections, bloom/postprocessing, held phase 0.56 and exposure 0.850240084.
