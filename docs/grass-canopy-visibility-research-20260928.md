@@ -1,5 +1,23 @@
 # Grass canopy visibility: research checkpoint
 
+## Source233 — complete terrain coverage prerequisite, no rendering change
+
+**Outcome: a tested ownership/coverage guard for a future bounded terrain cache, not an FPS gain.** No production caller, GPU cache allocation, material/default change, native benchmark or visual acceptance is introduced.
+
+`TerrainVisualManager.captureCompleteRetainedSurfaceRegion()` certifies a complete, nonoverlapping MAIN-surface XZ partition at canonical placement, bounded to at most 16 borrowed owners. The caller must include its full sampling gutter. Capture reuses existing retained topology admission, exact admitted Float32 endpoints and an exact rectangle sweep; empty/partial regions, gaps, overlaps, transitions, unsupported transforms, nonfinite extents and partial draw ranges fail closed. Currentness checks include new overlapping owners, geometry versions, owner replacement/removal and hierarchy changes, with sticky invalidation. The existing ordinary ownership lease is unchanged.
+
+This is **geometric coverage only**, not camera/layer visibility, materials/clipping/deformation, skirt coverage, seam-height continuity, filtering, roads/water-input ownership or rendered pixel parity. A future page caller still needs those separate guards and original-shader fallback. Capture costs O(installed chunks + S² log S), S ≤ 16; revalidation scans installed owners without a triangle walk. It is not enabled in the frame loop.
+
+### Verification and scope
+
+- Root rerun: **180/180 tests across 3 existing suites pass** (`TerrainGridSurface`, `TerrainVisualManagerPacing`, `TerrainVisualProfileAdmission`; 15.18 seconds). Tests exercise real Three geometry, production generators/managers and analytic terrain inputs, not native-game performance acceptance.
+- Scoped ESLint, Prettier and `git diff --check` pass. Independent final source/test review passes, including the nonbinary Float32 endpoint counterexample, tiny gap, compensating overlap, refinement, churn and invalidation cases.
+- Shared-package typecheck is **not clean**: the same five inherited procgen API errors remain in `CompactServiceCourtVisualsSystem`, `CompactServiceCourt`, `CompactServiceCourtSystem` and `RootedFlowerVisualManager`; none is in the changed files.
+- Only two source/test files changed; all 57 protected unrelated/prior-checkpoint hashes match. No private runtime was started for this source checkpoint; public 3333 and saved-player data were not operated on.
+- [Verification receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source233-complete-terrain-coverage-verification.json).
+
+**Next performance gate remains unchanged:** obtain a complete matched/repeated full 2× comparison of the existing composed-terrain prototype. The 405.33 MiB fixed-view prototype and one-pair 3.4 ms lead remain unqualified; this guard does not authorize production paging. Then, only if benefit repeats, implement bounded versioned pages and qualify memory, filtering, moving/near/shore views and lifecycle. Terrain→grass remains the directly measured content priority; reflection overlaps both. Sustained 60 FPS/16.67 ms at actual2× is still unmet.
+
 ## Native232 — terrain reuse preparation passes; timing replication rejected
 
 **No new speedup or FPS result.** Unchanged build212 and the existing Native227/228 helpers were reused at3024×1724/DPR2/MSAA4, with the same held view, lighting and full reflections. No production source/defaults changed.

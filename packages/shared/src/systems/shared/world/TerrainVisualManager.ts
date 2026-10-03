@@ -420,6 +420,192 @@ export class TerrainVisualManager implements QuadTreeListener {
     });
   }
 
+  /** Complete, nonoverlapping MAIN-surface XZ coverage at canonical placement.
+   * The caller includes its entire sampling gutter in bounds. This composes
+   * the retained grids' existing topology proofs; it does not certify slopes,
+   * skirt rendering, materials/deformation, cameras, unmanaged scene meshes,
+   * filtering, roads or water inputs. Unsupported
+   * or incomplete coverage returns null, never a partial certificate.
+   *
+   * Capture costs O(installed chunks + S² log S), S <= 16; revalidation scans
+   * installed owners without a triangle walk or fresh rectangle allocations.
+   * No matrices are updated: ordinary scene propagation must already be done.
+   */
+  captureCompleteRetainedSurfaceRegion(
+    bounds: TerrainGridBounds,
+    maxSurfaces = 16,
+  ): RetainedTerrainRegion | null {
+    if (this.disposed) throw new Error("Terrain visual manager is disposed");
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX >= bounds.maxX ||
+      bounds.minZ >= bounds.maxZ ||
+      !Number.isSafeInteger(maxSurfaces) ||
+      maxSurfaces < 1 ||
+      maxSurfaces > 16
+    )
+      throw new Error("Invalid complete retained terrain region");
+    const region = Object.freeze({ ...bounds });
+    const isTranslation = (matrix: THREE.Matrix4, x: number, z: number) =>
+      matrix.elements.every(
+        (value, i) =>
+          value === (i === 12 ? x : i === 14 ? z : i % 5 === 0 ? 1 : 0),
+      );
+    const canonical = (object: THREE.Object3D, x = 0, z = 0) =>
+      object.position.x === x &&
+      object.position.y === 0 &&
+      object.position.z === z &&
+      object.quaternion.x === 0 &&
+      object.quaternion.y === 0 &&
+      object.quaternion.z === 0 &&
+      object.quaternion.w === 1 &&
+      object.scale.x === 1 &&
+      object.scale.y === 1 &&
+      object.scale.z === 1 &&
+      isTranslation(object.matrix, x, z) &&
+      isTranslation(object.matrixWorld, x, z);
+    const ancestors: THREE.Object3D[] = [];
+    for (let object: THREE.Object3D | null = this.container; object;) {
+      // A foreign cyclic/deep hierarchy is unsupported, not unbounded work.
+      if (
+        ancestors.length === 64 ||
+        ancestors.includes(object) ||
+        !object.visible ||
+        !canonical(object)
+      )
+        return null;
+      ancestors.push(object);
+      object = object.parent;
+    }
+    const hierarchyCurrent = () =>
+      ancestors.every(
+        (object, i) =>
+          object.parent === (ancestors[i + 1] ?? null) &&
+          object.visible &&
+          canonical(object),
+      );
+    const chunkCanonical = (chunk: TerrainVisualChunk) =>
+      chunk.mesh.parent === this.container &&
+      chunk.mesh.matrixAutoUpdate === false &&
+      chunk.surface.nodeId === chunk.node.id &&
+      chunk.surface.centerX === chunk.node.centerX &&
+      chunk.surface.centerZ === chunk.node.centerZ &&
+      chunk.surface.size === chunk.node.size &&
+      chunk.surface.resolution === chunk.node.resolution &&
+      chunk.surface.matchesGeometry(chunk.mesh.geometry) &&
+      finiteBounds(chunk.surface) &&
+      canonical(chunk.mesh, chunk.node.centerX, chunk.node.centerZ);
+    const minimum = (surface: RetainedTerrainSurface) =>
+      Math.fround(-surface.size / 2);
+    const maximum = (surface: RetainedTerrainSurface) =>
+      Math.fround(
+        -surface.size / 2 +
+          (surface.resolution - 1) * (surface.size / (surface.resolution - 1)),
+      );
+    const finiteBounds = (surface: RetainedTerrainSurface) => {
+      const low = minimum(surface),
+        high = maximum(surface);
+      return (
+        [
+          low,
+          high,
+          surface.centerX + low,
+          surface.centerX + high,
+          surface.centerZ + low,
+          surface.centerZ + high,
+        ].every(Number.isFinite) &&
+        surface.centerX + low < surface.centerX + high &&
+        surface.centerZ + low < surface.centerZ + high
+      );
+    };
+    const fullDraw = (chunk: TerrainVisualChunk) =>
+      chunk.mesh.visible &&
+      chunk.mesh.geometry.groups.length === 0 &&
+      chunk.mesh.geometry.drawRange.start === 0 &&
+      chunk.mesh.geometry.drawRange.count === Infinity;
+    const intersects = (surface: RetainedTerrainSurface) => {
+      // Replay the exact admitted Float32 prefix expressions. For nonbinary
+      // sizes the final coordinate need not equal fround(size / 2).
+      const low = minimum(surface),
+        high = maximum(surface);
+      return (
+        surface.centerX + high >= region.minX &&
+        surface.centerX + low <= region.maxX &&
+        surface.centerZ + high >= region.minZ &&
+        surface.centerZ + low <= region.maxZ
+      );
+    };
+    const captured = new Map<TerrainVisualChunk, RetainedTerrainSurface>();
+    const rectangles: TerrainGridBounds[] = [];
+    for (const chunk of this.chunks.values()) {
+      // Otherwise an owner outside its nominal bounds could move into the
+      // footprint and escape both coverage and later invalidation checks.
+      if (!chunkCanonical(chunk)) return null;
+      if (!intersects(chunk.surface)) continue;
+      const surface = this.getRetainedSurface(chunk.node);
+      if (!surface || !fullDraw(chunk)) return null;
+      if (captured.size === maxSurfaces) return null;
+      captured.set(chunk, surface);
+      const low = minimum(surface),
+        high = maximum(surface);
+      const rectangle = {
+        minX: Math.max(region.minX, surface.centerX + low),
+        maxX: Math.min(region.maxX, surface.centerX + high),
+        minZ: Math.max(region.minZ, surface.centerZ + low),
+        maxZ: Math.min(region.maxZ, surface.centerZ + high),
+      };
+      if (rectangle.minX < rectangle.maxX && rectangle.minZ < rectangle.maxZ)
+        rectangles.push(rectangle);
+    }
+    if (rectangles.length === 0) return null;
+    const edges = [region.minX, region.maxX];
+    for (const rectangle of rectangles)
+      edges.push(rectangle.minX, rectangle.maxX);
+    edges.sort((a, b) => a - b);
+    for (let i = 1; i < edges.length; i++) {
+      const left = edges[i - 1],
+        right = edges[i];
+      if (left === right) continue;
+      const intervals = rectangles
+        .filter(
+          (rectangle) => rectangle.minX <= left && rectangle.maxX >= right,
+        )
+        .sort((a, b) => a.minZ - b.minZ || a.maxZ - b.maxZ);
+      let cursor = region.minZ;
+      for (const interval of intervals) {
+        // Exact shared boundaries are allowed; any positive gap OR overlap
+        // rejects. Area totals/epsilons could hide matching holes and overlaps.
+        if (interval.minZ !== cursor) return null;
+        cursor = interval.maxZ;
+      }
+      if (cursor !== region.maxZ) return null;
+    }
+    const surfaces = Object.freeze([...captured.values()]);
+    let current = true;
+    return Object.freeze({
+      bounds: region,
+      surfaces,
+      isCurrent: () => {
+        if (!current || this.disposed || !hierarchyCurrent())
+          return (current = false);
+        let matches = 0;
+        for (const chunk of this.chunks.values()) {
+          if (!chunkCanonical(chunk)) return (current = false);
+          if (!intersects(chunk.surface)) continue;
+          // Unlike the ordinary ownership lease, a newly installed but
+          // nonadmitted overlapping owner also invalidates complete coverage.
+          const surface = this.getRetainedSurface(chunk.node);
+          if (!surface || !fullDraw(chunk) || captured.get(chunk) !== surface)
+            return (current = false);
+          matches++;
+        }
+        return (current = matches === captured.size);
+      },
+    });
+  }
+
   /**
    * Compile the exact quad-tree terrain pipeline before the first generated
    * chunk reaches the scene. A flat-grid terrain tile is not representative:

@@ -34,6 +34,365 @@ const changed = validateWorldTerrainProfile({
   ...compact,
   seed: compact.seed + 1,
 });
+
+describe("complete retained main-surface region admission", () => {
+  const cleanups = new Set<() => void>();
+  afterEach(() => {
+    for (const close of cleanups) close();
+    cleanups.clear();
+  });
+
+  function fixture(resolution = 4) {
+    const scene = new THREE.Scene(),
+      container = new THREE.Group(),
+      material = new THREE.MeshBasicMaterial(),
+      provider = new ProfileTerrain(compact);
+    scene.add(container);
+    const manager = new TerrainVisualManager(
+      { minSize: 16, maxDepth: 1, resolution, rootChunkRadius: 0 },
+      provider,
+      container,
+      material,
+      createTerrainWorkerConfig(compact, resolution),
+      compact.seed,
+      [],
+      {},
+    );
+    cleanups.add(() => {
+      manager.dispose();
+      material.dispose();
+    });
+    const add = (x = 0, z = 0, size = 16, depth = 1) => {
+      const node = manager
+        .getQuadTree()
+        .createNode(null, null, size, x, z, depth);
+      manager["generateChunkSync"](node);
+      scene.updateMatrixWorld(true);
+      return manager.getChunks().get(node.visualChunkKey!)!;
+    };
+    return { scene, container, material, provider, manager, add };
+  }
+  const inner = { minX: -4, maxX: 4, minZ: -4, maxZ: 4 };
+
+  it("keeps ordinary empty/partial lease semantics and admits four exact tiled surfaces", () => {
+    const f = fixture(),
+      bounds = { minX: -16, maxX: 16, minZ: -16, maxZ: 16 };
+    expect(f.manager.captureRetainedSurfaceRegion(bounds).isCurrent()).toBe(
+      true,
+    );
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(bounds)).toBeNull();
+    const first = f.add(-8, -8);
+    expect(f.manager.captureRetainedSurfaceRegion(bounds).isCurrent()).toBe(
+      true,
+    );
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(bounds)).toBeNull();
+    for (const [x, z] of [
+      [8, -8],
+      [-8, 8],
+      [8, 8],
+    ])
+      f.add(x, z);
+    const lease = f.manager.captureCompleteRetainedSurfaceRegion(bounds)!;
+    expect(lease.surfaces).toHaveLength(4);
+    expect(lease.surfaces[0]).toBe(first.surface);
+    expect(lease.isCurrent()).toBe(true);
+    expect(Object.isFrozen(lease)).toBe(true);
+    expect(Object.isFrozen(lease.bounds)).toBe(true);
+    expect(Object.isFrozen(lease.surfaces)).toBe(true);
+    bounds.maxX = 100;
+    expect(lease.bounds.maxX).toBe(16);
+    expect(first.mesh.material).toBe(f.material);
+  });
+
+  it("rejects positive overlap even when an equal-area gap compensates", () => {
+    const f = fixture();
+    f.add(-8, 0);
+    f.add(7, 0); // One metre overlap at X=-1..0 and missing X=15..16.
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion({
+        minX: -16,
+        maxX: 16,
+        minZ: -8,
+        maxZ: 8,
+      }),
+    ).toBeNull();
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(inner)).toBeNull();
+  });
+
+  it("does not forgive a one-ULP gap between otherwise complete tiles", () => {
+    const f = fixture();
+    f.add(0, 0);
+    f.add(16 + 2 ** -48, 0);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion({
+        minX: 0,
+        maxX: 20,
+        minZ: -4,
+        maxZ: 4,
+      }),
+    ).toBeNull();
+  });
+
+  it("uses exact admitted Float32 endpoints outside nominal half-size bounds", () => {
+    const f = fixture(134),
+      size = 16.625000953674316,
+      chunk = f.add(0, 0, size),
+      positions = chunk.mesh.geometry.getAttribute("position"),
+      last = positions.getX(133),
+      roundedHalf = Math.fround(size / 2);
+    expect(last).toBe(8.312500953674316);
+    expect(last).toBeGreaterThan(roundedHalf);
+    const bounds = {
+      minX: roundedHalf + 2 ** -22,
+      maxX: last,
+      minZ: -1,
+      maxZ: 1,
+    };
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds)?.isCurrent(),
+    ).toBe(true);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion({
+        ...bounds,
+        maxX: last + 2 ** -22,
+      }),
+    ).toBeNull();
+  });
+
+  it("requires the caller's whole gutter footprint, including a newly arriving neighbor", () => {
+    const f = fixture();
+    f.add();
+    const bounds = { minX: -4, maxX: 8.25, minZ: -4, maxZ: 4 };
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(inner),
+    ).not.toBeNull();
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(bounds)).toBeNull();
+    f.add(16, 0);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds)?.isCurrent(),
+    ).toBe(true);
+  });
+
+  it("admits actual indexed refinement without rescanning or substituting a regular grid", () => {
+    const f = fixture(),
+      node = f.manager.getQuadTree().createNode(null, null, 16, 0, 0, 1),
+      data = generateQuadChunkDataSync(0, 0, 16, 4, f.provider),
+      result = assembleQuadChunkGeometry(data, f.provider, 3),
+      geometry = result.geometry,
+      original = geometry.getAttribute("position"),
+      values = Array.from(original.array.slice(0, 16 * 3)),
+      index = Array.from(geometry.index!.array.slice(0, 54));
+    // Refine one actual generated face into three positive faces. Main-surface
+    // topology is immutable; appended skirts are intentionally not the proof.
+    for (let axis = 0; axis < 3; axis++)
+      values.push((values[axis] + values[12 + axis] + values[3 + axis]) / 3);
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(values), 3),
+    );
+    geometry.setIndex([0, 4, 16, 4, 1, 16, 1, 0, 16, ...index.slice(3)]);
+    geometry.userData.terrainCellTopology = Object.freeze({
+      schemaVersion: 1,
+      resolution: 4,
+      surfaceVertexCount: 17,
+      cellIndexOffsets: Object.freeze([0, 12, 18, 24, 30, 36, 42, 48, 54, 60]),
+    });
+    f.manager["addMeshToScene"](node, f.manager["makeChunkKey"](node), result);
+    f.scene.updateMatrixWorld(true);
+    const lease = f.manager.captureCompleteRetainedSurfaceRegion(inner)!;
+    expect(lease.surfaces[0].isRegularGrid).toBe(false);
+    expect(lease.isCurrent()).toBe(true);
+  });
+
+  it("rejects retained parent/child transitions and accepts the final partition", () => {
+    const f = fixture();
+    f.manager.getQuadTree().setListener(f.manager);
+    // Away from the tree's initial origin focus, this starts as a final coarse
+    // owner rather than constructing an already-splitting parent.
+    const parent = f.add(350, 400, 32, 0).node,
+      bounds = { minX: 346, maxX: 354, minZ: 396, maxZ: 404 },
+      lease = f.manager.captureCompleteRetainedSurfaceRegion(bounds)!;
+    parent.split();
+    expect(lease.isCurrent()).toBe(false);
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(bounds)).toBeNull();
+    for (const child of parent.children.values())
+      f.manager["generateChunkSync"](child);
+    f.scene.updateMatrixWorld(true);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds)?.surfaces,
+    ).toHaveLength(4);
+    expect(lease.isCurrent()).toBe(false);
+  });
+
+  it("invalidates on new overlapping nonadmitted owners without changing ordinary leases", () => {
+    const f = fixture();
+    f.add();
+    const ordinary = f.manager.captureRetainedSurfaceRegion(inner),
+      complete = f.manager.captureCompleteRetainedSurfaceRegion(inner)!;
+    const overlap = f.add(1, 1);
+    overlap.node.splitting = true;
+    expect(ordinary.isCurrent()).toBe(true);
+    expect(complete.isCurrent()).toBe(false);
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(inner)).toBeNull();
+    f.manager["removeMeshFromScene"](overlap);
+    expect(complete.isCurrent()).toBe(false);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(inner)?.isCurrent(),
+    ).toBe(true);
+  });
+
+  it.each(["remove", "replace", "position", "index", "dispose"] as const)(
+    "permanently invalidates on %s without disposing borrowed resources itself",
+    (change) => {
+      const f = fixture(),
+        chunk = f.add(),
+        lease = f.manager.captureCompleteRetainedSurfaceRegion(inner)!;
+      let disposed = 0;
+      chunk.mesh.geometry.addEventListener("dispose", () => disposed++);
+      if (change === "remove" || change === "replace") {
+        f.manager["removeMeshFromScene"](chunk);
+        if (change === "replace") {
+          f.manager["generateChunkSync"](chunk.node);
+          f.scene.updateMatrixWorld(true);
+        }
+      } else if (change === "dispose") f.manager.dispose();
+      else {
+        const attribute =
+          change === "position"
+            ? chunk.mesh.geometry.getAttribute("position")
+            : chunk.mesh.geometry.index!;
+        attribute.needsUpdate = true;
+      }
+      const before = disposed;
+      expect(lease.isCurrent()).toBe(false);
+      expect(lease.isCurrent()).toBe(false);
+      expect(disposed).toBe(before);
+    },
+  );
+
+  it.each([
+    "hidden",
+    "draw-range",
+    "groups",
+    "mesh",
+    "outside-mesh",
+    "outside-geometry",
+    "parent",
+    "stale-parent",
+    "reparent",
+  ] as const)(
+    "refuses %s changes without repairing or updating scene state",
+    (change) => {
+      const f = fixture(),
+        chunk = f.add(),
+        distant = f.add(100, 100),
+        lease = f.manager.captureCompleteRetainedSurfaceRegion(inner)!;
+      if (change === "hidden") chunk.mesh.visible = false;
+      else if (change === "draw-range") chunk.mesh.geometry.setDrawRange(0, 3);
+      else if (change === "groups") chunk.mesh.geometry.addGroup(0, 3, 0);
+      else if (change === "mesh" || change === "outside-mesh") {
+        const mesh = change === "mesh" ? chunk.mesh : distant.mesh;
+        mesh.position.x = 0;
+        mesh.position.z = change === "mesh" ? 1 : 0;
+        mesh.updateMatrix();
+        f.scene.updateMatrixWorld(true);
+      } else if (change === "outside-geometry") {
+        const positions = distant.mesh.geometry.getAttribute("position");
+        positions.setX(0, -100);
+        positions.setZ(0, -100);
+        positions.needsUpdate = true;
+      } else if (change === "reparent") new THREE.Group().add(f.container);
+      else {
+        f.container.position.x = 1;
+        if (change === "parent") f.scene.updateMatrixWorld(true);
+      }
+      const worldBefore = chunk.mesh.matrixWorld.toArray();
+      expect(lease.isCurrent()).toBe(false);
+      const fresh = f.manager.captureCompleteRetainedSurfaceRegion(inner);
+      if (change === "reparent") expect(fresh?.isCurrent()).toBe(true);
+      else expect(fresh).toBeNull();
+      expect(chunk.mesh.matrixWorld.toArray()).toEqual(worldBefore);
+    },
+  );
+
+  it("keeps exact identity leases current through unrelated canonical churn", () => {
+    const f = fixture();
+    f.add();
+    const lease = f.manager.captureCompleteRetainedSurfaceRegion(inner)!;
+    const distant = f.add(100, 100);
+    expect(lease.isCurrent()).toBe(true);
+    f.manager["removeMeshFromScene"](distant);
+    expect(lease.isCurrent()).toBe(true);
+  });
+
+  it("rejects nonfinite Float32 endpoints rather than clipping infinity to finite coverage", () => {
+    const f = fixture(2),
+      node = f.manager.getQuadTree().createNode(null, null, 1e40, 0, 0, 1),
+      geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        new Float32Array([
+          -Infinity,
+          22,
+          -Infinity,
+          Infinity,
+          22,
+          -Infinity,
+          -Infinity,
+          22,
+          Infinity,
+          Infinity,
+          22,
+          Infinity,
+        ]),
+        3,
+      ),
+    );
+    geometry.setIndex([0, 2, 1, 1, 2, 3]);
+    f.manager["addMeshToScene"](node, f.manager["makeChunkKey"](node), {
+      geometry,
+      heightData: new Float32Array([22, 22, 22, 22]),
+    });
+    f.scene.updateMatrixWorld(true);
+    expect(f.manager.getRetainedSurface(node)).not.toBeNull();
+    expect(f.manager.captureCompleteRetainedSurfaceRegion(inner)).toBeNull();
+  });
+
+  it("bounds capture to 16 surfaces and rejects invalid requests", () => {
+    const f = fixture();
+    for (let x = 0; x < 4; x++)
+      for (let z = 0; z < 4; z++) f.add(x * 16, z * 16);
+    const bounds = { minX: -8, maxX: 56, minZ: -8, maxZ: 56 };
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds)?.surfaces,
+    ).toHaveLength(16);
+    expect(
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds, 15),
+    ).toBeNull();
+    for (const cap of [0, -1, 1.5, 17, NaN, Infinity])
+      expect(() =>
+        f.manager.captureCompleteRetainedSurfaceRegion(bounds, cap),
+      ).toThrow(/Invalid/);
+    for (const key of ["minX", "maxX", "minZ", "maxZ"])
+      expect(() =>
+        f.manager.captureCompleteRetainedSurfaceRegion({
+          ...bounds,
+          [key]: NaN,
+        }),
+      ).toThrow(/Invalid/);
+    expect(() =>
+      f.manager.captureCompleteRetainedSurfaceRegion({ ...bounds, maxX: -8 }),
+    ).toThrow(/Invalid/);
+    expect(() =>
+      f.manager.captureCompleteRetainedSurfaceRegion({ ...bounds, minZ: 57 }),
+    ).toThrow(/Invalid/);
+    f.manager.dispose();
+    expect(() =>
+      f.manager.captureCompleteRetainedSurfaceRegion(bounds),
+    ).toThrow(/disposed/);
+  });
+});
 const identity = worldTerrainProfileIdentity(compact);
 
 /** Analytic input field, with unchanged production generators/geometry/managers. */
