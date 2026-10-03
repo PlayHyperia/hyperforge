@@ -1,5 +1,21 @@
 # Grass canopy visibility: research checkpoint
 
+## Native242 — hardware-verified terrain fallback and derivative fix
+
+**The native test found and corrected a real defect; this is shader correctness, not an FPS gain.** [Attempt 1](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source241-native-shader-attempt1.json) issued three valid Apple/Metal pipelines but failed because `compactAppearanceWorldDx/Dy` evaluated `dpdx/dpdy` inside the spatial Else. Pre-branch `.toVar()` membership did not force execution there: r186 can skip a variable whose recorded analyze parent is only its stack and initialize it at first branch-local use. Explicit outer-stack assignments now force both derivatives before the resolver. No quality setting or original game caller changes.
+
+The **unchanged** acceptance helper passes [attempt 2](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source241-native-shader-attempt2.json), SHA256 `99f07d012af0f460276c6faae97bc3d966df32224c3575ec31770305fed014ce`:
+
+- Six actual production recipes, **24 positively issued hardware draws**, expected materials/pipelines and zero device/validation errors.
+- Independent raw-WGSL review of all **12 spatial shaders** confirms every 14/16 AR sample site is inside the fallback Else, with no implicit sampling or derivatives there. The explicit world gradients, five height sites and retained live normal/AO sites remain outside. Normal/AO site counts vary by recipe; this does not establish duplicate-free or cheaper full rendering.
+- **98,304 identity and 49,152 fallback pixel comparisons** pass the original 0.00002 absolute tolerance. Worst RGB difference is 2.98e-8; worst roughness difference is 1.19e-7. Another 49,152 marker pixels match exactly. Original graph/texture-owner receipts remain unchanged; all owned GPU resources are disposed.
+
+Final regression run: **562 passed / four existing gated skips across nine selected suites (65.28 s)**. Marker and real sampled-cache cases now require concrete derivative assignments before the actual resolver If; the numerical evaluator is unchanged. Scoped lint, formatting and diff checks pass. Shared typecheck still has exactly five inherited procgen API errors outside the changed files; it is not clean. The accepted native receipt pins the pre-regression-edit test file; both production-source pins are unchanged after that run.
+
+Both helper servers are stopped, both ports are free, and the owned Chrome test window is closed with the original New Tab retained. All 42 unrelated working-file hashes are preserved. No public game or saved-player database was operated on.
+
+**Limits and next:** production fallback texels, not loaded-world textures or page-filter equivalence. No GPU page, shipping caller or speedup is introduced. Independently repeat the unchanged full-game 2× comparison, then qualify bounded composed AR reuse with source/coverage/geometry/uniform guards and original fallback. Loaded-art, moving-view and memory gates remain open; **60 FPS / 16.67 ms at actual 2× is not achieved.**
+
 ## Source241 — appearance-only fallback graph; native qualification pending
 
 The terrain owner now exposes a lazy `createCompactTerrainResolvedAppearance()` graph for composed albedo/roughness. Its original fallback uses the same layer sampling, grass grading, raw coastal dirt, bank mineral/silt, coast-rock, final weights, pond wetness and variation order as the existing material. The live normal/AO path remains separate. The resolver receives explicit world derivatives and final weights; scalar noise/road/composition dependencies are materialized before its spatial branch. Fresh AR sampling is constructed when the callback is invoked inside the fallback, not prebuilt outside it. No page allocation, game caller, default rendering change or measured speedup is added.

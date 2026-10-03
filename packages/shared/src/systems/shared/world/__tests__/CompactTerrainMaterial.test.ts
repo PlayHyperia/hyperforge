@@ -3191,157 +3191,196 @@ describe("complete channel-selective terrain composition (real TSL, not native q
     }
   });
 
-  it("keeps resolved appearance lazy, puts original AR only in the fallback branch, and hoists derivative inputs", () => {
-    const material = createTerrainMaterial(undefined, {
-      ...composedOptions(),
-      compactRockSampling: "exact-zero-v1",
-      compactGroundSampling: "exact-zero-v1",
-    });
-    const cacheTexture = new THREE.DataTexture(
-      new Float32Array([0.12, 0.23, 0.34, 0.91]),
-      1,
-      1,
-      THREE.RGBAFormat,
-      THREE.FloatType,
-    );
-    const cacheEnabled = THREE.TSL.uniform(1),
-      condition = cacheEnabled.greaterThan(0);
-    let resolverCalls = 0,
-      originalCalls = 0;
-    let context: Parameters<CompactTerrainAppearanceResolver>[0] | null = null;
-    let originalCallback: (() => Node<"vec4">) | null = null;
-    try {
-      const owner = material.compactTerrainSurface!,
-        before = owner.getReceipt();
-      const roots = [
-        material.colorNode,
-        material.normalNode,
-        material.roughnessNode,
-        material.aoNode,
-        material.outputNode,
-        material.positionNode,
-      ];
-      const version = material.version;
-      const surface = material.createCompactTerrainResolvedAppearance(
-        (inputs, original) => {
-          resolverCalls++;
-          context = inputs;
-          originalCallback = original;
-          return THREE.TSL.Fn(() => {
+  it.each(["marker", "sampled"] as const)(
+    "keeps resolved appearance lazy, puts original AR only in the fallback branch, and hoists derivative inputs (%s)",
+    (mode) => {
+      const material = createTerrainMaterial(undefined, {
+        ...composedOptions(),
+        compactRockSampling: "exact-zero-v1",
+        compactGroundSampling: "exact-zero-v1",
+      });
+      const cacheTexture = new THREE.DataTexture(
+        new Float32Array([0.12, 0.23, 0.34, 0.91]),
+        1,
+        1,
+        THREE.RGBAFormat,
+        THREE.FloatType,
+      );
+      const cacheEnabled = THREE.TSL.uniform(1),
+        condition = cacheEnabled.greaterThan(0);
+      let resolverCalls = 0,
+        originalCalls = 0;
+      let context: Parameters<CompactTerrainAppearanceResolver>[0] | null =
+        null;
+      let originalCallback: (() => Node<"vec4">) | null = null;
+      try {
+        const owner = material.compactTerrainSurface!,
+          before = owner.getReceipt();
+        const roots = [
+          material.colorNode,
+          material.normalNode,
+          material.roughnessNode,
+          material.aoNode,
+          material.outputNode,
+          material.positionNode,
+        ];
+        const version = material.version;
+        const surface = material.createCompactTerrainResolvedAppearance(
+          (inputs, original) => {
+            resolverCalls++;
+            context = inputs;
+            originalCallback = original;
             const packed = vec4(0).toVar("source241TestResolved");
             THREE.TSL.If(condition, () => {
+              // The marker consumes no derivatives: a mere pre-branch Var
+              // declaration can still sink its initializer into the Else in WGSL.
               packed.assign(
-                texture(cacheTexture, inputs.worldPosition.xz).grad(
-                  inputs.worldDx.xz,
-                  inputs.worldDy.xz,
-                ),
+                mode === "marker"
+                  ? vec4(0.12, 0.23, 0.34, 0.91)
+                  : texture(cacheTexture, inputs.worldPosition.xz).grad(
+                      inputs.worldDx.xz,
+                      inputs.worldDy.xz,
+                    ),
               );
             }).Else(() => {
               originalCalls++;
               packed.assign(original());
             });
             return packed;
-          })();
-        },
-      );
-      if (!surface) throw new Error("Expected owned height appearance surface");
-      expect(Object.isFrozen(surface)).toBe(true);
-      expect(Object.keys(surface).sort()).toEqual(["albedo", "roughness"]);
-      expect(resolverCalls).toBe(0);
-      expect(originalCalls).toBe(0);
-      const nodes = expand(Object.values(surface));
-      expect(resolverCalls).toBe(1);
-      expect(originalCalls).toBe(1);
-      const captured = context as
-        Parameters<CompactTerrainAppearanceResolver>[0] | null;
-      if (!captured)
-        throw new Error("Resolver did not receive its real context");
-      expect(Object.isFrozen(captured)).toBe(true);
-      expect(Object.keys(captured).sort()).toEqual([
-        "weights",
-        "worldDx",
-        "worldDy",
-        "worldPosition",
-      ]);
-      const branch = [...nodes].find(
-        (node) =>
-          node.type === "ConditionalNode" &&
-          Reflect.get(node, "condNode") === condition,
-      );
-      if (!branch) throw new Error("Missing actual resolver conditional");
-      const ifNode: unknown = Reflect.get(branch, "ifNode"),
-        elseNode: unknown = Reflect.get(branch, "elseNode");
-      if (!(ifNode instanceof THREE.Node) || !(elseNode instanceof THREE.Node))
-        throw new Error("Missing real branch stacks");
-      const parent = [...nodes].find(
-        (node) =>
-          node.type === "StackNode" &&
-          (Reflect.get(node, "nodes") as Node[]).includes(captured.worldDx),
-      );
-      if (!parent) throw new Error("Missing derivative-owning uniform stack");
-      const statements = Reflect.get(parent, "nodes") as Node[];
-      expect(statements).toContain(captured.worldPosition);
-      expect(statements).toContain(captured.worldDy);
-      expect(statements).toContain(captured.weights);
-      const hoisted = new Set(
-        statements.filter((node) => node.type === "VarNode"),
-      );
-      const cached = expand([ifNode], hoisted),
-        fallback = expand([elseNode], hoisted);
-      expect(appearanceSamples(cached, owner)).toEqual([]);
-      expect(appearanceSamples(fallback, owner).length).toBeGreaterThan(0);
-      expect(
-        appearanceSamples(
-          expand(Object.values(surface), new Set([elseNode])),
-          owner,
-        ),
-      ).toEqual([]);
-      const nonAppearance = new Set([
-        ...(["grass", "dirt", "rock"] as const).map(
-          (layer) => owner.getNode(layer, "normal-ao").value,
-        ),
-        owner.getHeightNode()!.value,
-      ]);
-      for (const node of fallback) {
-        expect(
-          ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
-        ).toBe(false);
-        if (Reflect.get(node, "isTextureNode") === true)
-          expect(nonAppearance.has(Reflect.get(node, "value"))).toBe(false);
-      }
-      const values = materialInputs(nodes, owner, [342, 28.05, 294]);
-      for (const node of cached)
+          },
+        );
+        if (!surface)
+          throw new Error("Expected owned height appearance surface");
+        expect(Object.isFrozen(surface)).toBe(true);
+        expect(Object.keys(surface).sort()).toEqual(["albedo", "roughness"]);
+        expect(resolverCalls).toBe(0);
+        expect(originalCalls).toBe(0);
+        const nodes = expand(Object.values(surface));
+        expect(resolverCalls).toBe(1);
+        expect(originalCalls).toBe(1);
+        const captured = context as
+          Parameters<CompactTerrainAppearanceResolver>[0] | null;
+        if (!captured)
+          throw new Error("Resolver did not receive its real context");
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(Object.keys(captured).sort()).toEqual([
+          "weights",
+          "worldDx",
+          "worldDy",
+          "worldPosition",
+        ]);
+        const branch = [...nodes].find(
+          (node) =>
+            node.type === "ConditionalNode" &&
+            Reflect.get(node, "condNode") === condition,
+        );
+        if (!branch) throw new Error("Missing actual resolver conditional");
+        const ifNode: unknown = Reflect.get(branch, "ifNode"),
+          elseNode: unknown = Reflect.get(branch, "elseNode");
         if (
-          Reflect.get(node, "isTextureNode") === true &&
-          Reflect.get(node, "value") === cacheTexture
+          !(ifNode instanceof THREE.Node) ||
+          !(elseNode instanceof THREE.Node)
         )
-          values.set(node, [0.12, 0.23, 0.34, 0.91]);
-      expect(vectorValue(surface.albedo, values)).toEqual([0.12, 0.23, 0.34]);
-      expect(vectorValue(surface.roughness, values)).toEqual([0.91]);
-      expect([
-        material.colorNode,
-        material.normalNode,
-        material.roughnessNode,
-        material.aoNode,
-        material.outputNode,
-        material.positionNode,
-      ]).toEqual(roots);
-      expect(material.version).toBe(version);
-      expect(owner.getReceipt()).toEqual(before);
-      material.dispose();
-      expect(
-        material.createCompactTerrainResolvedAppearance((_inputs, original) =>
-          original(),
-        ),
-      ).toBeNull();
-      const retired = originalCallback as (() => Node<"vec4">) | null;
-      expect(retired).not.toBeNull();
-      expect(() => retired!()).toThrow(/no longer owned/);
-    } finally {
-      material.dispose();
-      cacheTexture.dispose();
-    }
-  });
+          throw new Error("Missing real branch stacks");
+        const parent = [...nodes].find(
+          (node) =>
+            node.type === "StackNode" &&
+            (Reflect.get(node, "nodes") as Node[]).includes(captured.worldDx),
+        );
+        if (!parent) throw new Error("Missing derivative-owning uniform stack");
+        const statements = Reflect.get(parent, "nodes") as Node[];
+        expect(statements).toContain(captured.worldPosition);
+        expect(statements).toContain(captured.worldDy);
+        expect(statements).toContain(captured.weights);
+        const branchIndex = statements.indexOf(branch);
+        expect(branchIndex).toBeGreaterThan(0);
+        for (const [target, method] of [
+          [captured.worldDx, "dFdx"],
+          [captured.worldDy, "dFdy"],
+        ] as const) {
+          const assignments = statements.filter(
+            (node) =>
+              node.type === "AssignNode" &&
+              Reflect.get(node, "targetNode") === target,
+          );
+          expect(assignments).toHaveLength(1);
+          expect(statements.indexOf(assignments[0])).toBeLessThan(branchIndex);
+          const source: unknown = Reflect.get(assignments[0], "sourceNode");
+          if (!(source instanceof THREE.Node))
+            throw new Error("Missing concrete derivative assignment");
+          // Canonical r186 wraps TSL MathNode expressions in an anonymous
+          // intent VarNode; inspect that exact wrapper, not an assumed raw node.
+          expect(source.type).toBe("VarNode");
+          expect(Reflect.get(source, "name")).toBeNull();
+          const derivative: unknown = Reflect.get(source, "node");
+          if (!(derivative instanceof THREE.Node))
+            throw new Error("Missing actual derivative expression");
+          expect(derivative.type).toBe("MathNode");
+          expect(Reflect.get(derivative, "method")).toBe(method);
+          expect(Reflect.get(derivative, "aNode")).toBe(positionWorld);
+        }
+        const hoisted = new Set(
+          statements
+            .slice(0, branchIndex)
+            .filter((node) => node.type === "VarNode"),
+        );
+        const cached = expand([ifNode], hoisted),
+          fallback = expand([elseNode], hoisted);
+        expect(appearanceSamples(cached, owner)).toEqual([]);
+        expect(appearanceSamples(fallback, owner).length).toBeGreaterThan(0);
+        expect(
+          appearanceSamples(
+            expand(Object.values(surface), new Set([elseNode])),
+            owner,
+          ),
+        ).toEqual([]);
+        const nonAppearance = new Set([
+          ...(["grass", "dirt", "rock"] as const).map(
+            (layer) => owner.getNode(layer, "normal-ao").value,
+          ),
+          owner.getHeightNode()!.value,
+        ]);
+        for (const node of fallback) {
+          expect(
+            ["dFdx", "dFdy"].includes(String(Reflect.get(node, "method"))),
+          ).toBe(false);
+          if (Reflect.get(node, "isTextureNode") === true)
+            expect(nonAppearance.has(Reflect.get(node, "value"))).toBe(false);
+        }
+        const values = materialInputs(nodes, owner, [342, 28.05, 294]);
+        for (const node of cached)
+          if (
+            Reflect.get(node, "isTextureNode") === true &&
+            Reflect.get(node, "value") === cacheTexture
+          )
+            values.set(node, [0.12, 0.23, 0.34, 0.91]);
+        expect(vectorValue(surface.albedo, values)).toEqual([0.12, 0.23, 0.34]);
+        expect(vectorValue(surface.roughness, values)).toEqual([0.91]);
+        expect([
+          material.colorNode,
+          material.normalNode,
+          material.roughnessNode,
+          material.aoNode,
+          material.outputNode,
+          material.positionNode,
+        ]).toEqual(roots);
+        expect(material.version).toBe(version);
+        expect(owner.getReceipt()).toEqual(before);
+        material.dispose();
+        expect(
+          material.createCompactTerrainResolvedAppearance((_inputs, original) =>
+            original(),
+          ),
+        ).toBeNull();
+        const retired = originalCallback as (() => Node<"vec4">) | null;
+        expect(retired).not.toBeNull();
+        expect(() => retired!()).toThrow(/no longer owned/);
+      } finally {
+        material.dispose();
+        cacheTexture.dispose();
+      }
+    },
+  );
 
   it("admits only owned height recipes and refuses legacy, foreign, retired and dirt-page combinations without invoking the resolver", () => {
     let calls = 0;

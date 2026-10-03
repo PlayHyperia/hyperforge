@@ -2771,8 +2771,13 @@ export function createTerrainMaterial(
       // These scalar expressions can contain implicit noise/road sampling.
       // Materialize every dependency BEFORE any resolver-owned spatial branch.
       const world = positionWorld.toVar("compactAppearanceWorld");
-      const dx = positionWorld.dFdx().toVar("compactAppearanceWorldDx");
-      const dy = positionWorld.dFdy().toVar("compactAppearanceWorldDy");
+      // Explicit assignments keep these operations in this uniform stack even
+      // when only the fallback consumes them. A pure toVar may be deferred to
+      // its first use inside Else by the node builder.
+      const dx = vec3(0).toVar("compactAppearanceWorldDx");
+      const dy = vec3(0).toVar("compactAppearanceWorldDy");
+      dx.assign(positionWorld.dFdx());
+      dy.assign(positionWorld.dFdy());
       const weights = live.weights!.toVar("compactAppearanceWeights");
       const pattern = noiseValue.toVar("compactAppearancePatternNoise");
       const variation = compactWeights.variation.toVar(
