@@ -1,5 +1,19 @@
 # Grass canopy visibility: research checkpoint
 
+## Native243 — matched-workload repeat interrupted by focus loss
+
+**No new timing or speedup claim.** The fresh isolated runtime reused immutable build236, not the newer Native242 fallback change. Native controls reconstructed the target from Native236's recorded quaternion and produced an exactly matching held pose, including its matrices. The actual 3024×1724 / DPR 2 / MSAA 4 scene retained high shadows, full reflections, bloom/postprocessing, held phase 0.56 and exposure 0.850240084.
+
+The [raw attempted repeat](</Users/lucid/Downloads/hyperia-native228-surface-abba (11).json>), SHA256 `0c1f0473ec927d7e8a4ae44974d525e4fa771c212308dfd25eb840ff4d0fdc8c`, stops with `lost-focus` at **36,571.4 ms**: A1 completed, B1 was partial, and B2/A2 never ran. `complete:false`, `restored:true`, errors empty. Its 465 A1 and 164 partial-B1 measured frames are not a complete ABBA comparison. The receipt does not identify which app or action caused the blur; do not attribute it to the user or treat the partial result as replication.
+
+Independent raw-receipt review confirms exact quality, pose, query selectors, helper/probe bodies, loaded seven-map texture receipts and atlas allocation against Native236. All **868 retained rows** preserve **868 calls / 10,567,544 repeated-view triangle slots**, with unchanged primary/mirror terrain and grass workload. Both stock/cached vertex and fragment programs are byte-identical to Native236: 55→18 texture sites with all five PCF sites retained. This is execution/matching evidence, not a completed timing result or shipping visual equivalence.
+
+[Native setup and cleanup](</Users/lucid/Downloads/hyperia-native243-cleanup.json>), SHA256 `10cfacc3ee41b5304ca9b6d7fccb4b5b967ad60bff54a9205eac27c3bcb246f0`, separately records disposed/inactive probe, original fallback restored, resources retired, empty errors, restored renderer/environment exposure and camera/clock, and absent diagnostic owners. The owned game/DevTools windows were closed while retaining the original New Tab. Runtime `runtime-native243-terrain01` stopped at **2026-10-03 17:49:24.261 UTC** with no errors, protected files/public ports/database unchanged and its disposable database removed. The public localhost:3333 game was not operated on.
+
+The seven temporary runtime admissions are reverted and the three served helper copies removed; original evidence helpers remain. All 1,142 runtime-protected files and all 42 unrelated working-file hashes are unchanged. [Combined verification receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native243-rejected-repeat-cleanup.json).
+
+**Next:** determine the focus interruption and use a genuinely uninterrupted 100-second foreground window before retrying; do not loop on the unchanged failure or relax acceptance. Native236 remains one accepted within-run result. Bounded composed AR reuse still requires loaded-art/filtering, live normal/AO, source/coverage/geometry/uniform guards, moving-view tests, bounded total memory and valid performance evidence. **60 FPS / 16.67 ms at actual 2× remains unmet.**
+
 ## Native242 — hardware-verified terrain fallback and derivative fix
 
 **The native test found and corrected a real defect; this is shader correctness, not an FPS gain.** [Attempt 1](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source241-native-shader-attempt1.json) issued three valid Apple/Metal pipelines but failed because `compactAppearanceWorldDx/Dy` evaluated `dpdx/dpdy` inside the spatial Else. Pre-branch `.toVar()` membership did not force execution there: r186 can skip a variable whose recorded analyze parent is only its stack and initialize it at first branch-local use. Explicit outer-stack assignments now force both derivatives before the resolver. No quality setting or original game caller changes.
