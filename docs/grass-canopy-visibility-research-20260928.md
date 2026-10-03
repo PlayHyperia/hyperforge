@@ -1,5 +1,25 @@
 # Grass canopy visibility: research checkpoint
 
+## Native232 — terrain reuse preparation passes; timing replication rejected
+
+**No new speedup or FPS result.** Unchanged build212 and the existing Native227/228 helpers were reused at3024×1724/DPR2/MSAA4, with the same held view, lighting and full reflections. No production source/defaults changed.
+
+The full-composition cache prepared in1078.6 ms. Coverage checked20,480,000 base-mip channel texels: zero invalid values, maximum normal-length error0.00069726. The ordinary renderer completed2731 warm candidate substitutions without probe errors. This proves preparation/execution, **not filtering fidelity, visual parity or performance**; the fixed-view405.33 MiB prototype remains unsuitable for production as-is.
+
+Three independently audited exports all stopped on `lost-focus`, restored correctly and reported no errors:
+
+| Receipt | Recorded rows | Result |
+| --- | ---: | --- |
+| [Attempt3](</Users/lucid/Downloads/hyperia-native228-surface-abba (3).json>) | 0 | Focus lost before start; rejected |
+| [Attempt4](</Users/lucid/Downloads/hyperia-native228-surface-abba (4).json>) | 0 | Focus lost before start; rejected |
+| [Attempt5](</Users/lucid/Downloads/hyperia-native228-surface-abba (5).json>) | 265 stock-only;146 measured | Focus lost after11.200 seconds, before any cached arm; rejected |
+
+No cached timing rows exist, so do not average these into a comparison or extend the earlier one-pair3.4 ms lead. Native231's validated pass attribution and the earlier directly measured terrain→grass priority remain unchanged.
+
+Cleanup verified the probe disposed/resources retired, material hook restored, exposure/camera/clock restored, subscriptions released and diagnostic owners absent. The private tab, runtime and disposable database were closed; all four private ports are free. Public3333/saved DB and all57 pinned source files remain unchanged; the runtime helper is back to its baseline hash and only the three temporary served helper copies were removed. [Cleanup and receipt hashes](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native232-cleanup.json).
+
+**Next:** finish the existing full2× composed-terrain A/B/B/A replication in a stable foreground window. Do not expand profiling wrappers or introduce a speculative GPU page cache solely because this run was interrupted. Only repeatable benefit justifies the bounded-page implementation and its separate moving-view, filtering, memory and lifecycle gates. Sustained60 FPS remains unmet.
+
 ## Native230–231 — completed physical GPU pass attribution at actual 2×
 
 **Outcome: 24 validated GPU samples, not a speedup or 60 FPS acceptance.** Performance remains the sole active priority. The current scene is still substantially above the 16.67 ms budget; no production rendering/defaults change in this checkpoint.
