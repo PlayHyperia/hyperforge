@@ -1,5 +1,54 @@
 # Grass canopy visibility: research checkpoint
 
+## Native247 — current-view trees, actors and mushrooms measured
+
+**The first complete live-scene category screen is saved; 60 FPS is not achieved.** Revalidated immutable build244 matches current source at HEAD `787ac0504` (the only HEAD delta is documentation): 1,121 effective source pins, nine bundles/maps and six build configs match. The private ordinary game retains 3024×1724 / DPR2 / MSAA4, high shadows, full reflections, held phase 0.56/exposure 0.850240084 and rough-leaf grass. Wind, actors, transparent effects and simulation remain live.
+
+[Raw completed screen](</Users/lucid/Downloads/hyperia-native247-category-contributions (2).json>), SHA256 `6dc818695b060035fc18595d084325f759eda208e355fcbdfce4afd10a2259c5`, contains 1,299 valid ticks, 979 measured ticks / 972 cadence intervals over 56.0108 seconds. Every eight-second arm excludes two seconds of warm-up. Three observer hooks restore exactly, errors are empty, and the closing full-content arm completes.
+
+| Condition, in execution order | Wall interval median / p95 (ms) | Synchronous CPU median (ms) |
+| --- | ---: | ---: |
+| Full | 44.40 / 46.20 | 15.50 |
+| Omit exact tree owners | 41.85 / 47.70 | 14.30 |
+| Full | 44.75 / 60.80 | 14.40 |
+| Omit mushrooms | 41.30 / 43.30 | 13.40 |
+| Full | 41.60 / 43.40 | 12.50 |
+| Omit registered actors | 40.50 / 42.90 | 12.10 |
+| Full | 43.65 / 59.80 | 12.90 |
+
+Tree omission improves wall cadence by **2.55–2.90 ms** against both adjacent full arms. Mushroom differences are **0.30–3.45 ms**; actor differences **1.10–3.15 ms**. Their full bookends drift −3.15 ms and +2.05 ms respectively, and the closing full arm contains a 149.4 ms CPU hitch. Do not sort actors versus mushrooms by their bracket averages, claim replicated savings, or convert these tick intervals to displayed FPS. Root and two independent audits reproduce medians (middle-pair for even counts), p95 (floor(0.95×(n−1))), two-second bins and these limitations. [Combined verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native247-categories-verification.json).
+
+### Exact attribution and actual postprocessing
+
+The reviewed Native247 helper preserves the historical strict229 source byte-for-byte in an adjacent archive. It explicitly permits and records ordinary draw-order changes while keeping exact ownership, quality, pose, geometry/material, pipelines and aggregate attempted-work guards. It never retroactively accepts the failed229 run. Two order changes occur at 9.310 and 18.310 seconds; 1,089 rows differ from the initial order. Equal category totals are **not** proof of equal covered pixels or an exact per-object/range multiset.
+
+All 1,299 rows have one mirror capture and two sun-map refreshes, one normalized attempted-work signature, and identical other-view work (two calls / 3,969 triangle slots). Full content submits 864 calls / 10,555,544 repeated-view triangle slots. Exact omissions per frame are:
+
+- Trees: 184 calls / 478,284 triangles across primary, mirror and their shadow captures.
+- Mushrooms: 36 calls / 822,132 triangles across those four views.
+- Actors: 35 calls / 104,992 triangles in primary and mirror; no registered actor shadow draws occur in this view.
+
+These are rendering omissions, not removal of actor simulation or recoverable shipping savings. Census ownership contains 42 batched-tree, 18 mushroom and 57 actor mesh records; these are not unique NPC counts or duplicate-avatar proof. Zero-work draws remain forwarded. The 209 retained original shader-state records are healthy.
+
+[Fresh ownership census](</Users/lucid/Downloads/hyperia-native229-scene-census (1).json>), SHA256 `1158b7691fac755c20f427ec4d3b3ea6fdd2a52cc4d6c042d4f58bd1faf549b6`, confirms **one actual output-transform fullscreen triangle**, with LUT and effective depth blur disabled. No additional composer fullscreen draws appear. Postprocessing/composer/bloom preferences alone do not establish executed effects or their cost. The older overlapping 16.417 ms output interval remains unsuitable as an exclusive postprocessing budget.
+
+### Ranked action queue, not additive GPU percentages
+
+1. **Terrain rendering remains the largest directly ranked content lead**, ahead of grass in the matched Native206 screen. Bulk surface work has a separate repeated ~11 ms diagnostic effect. Native246's small page has zero sampled eligibility: stop unchanged cache/threshold/size sweeps.
+2. **Grass rendering remains the second directly ranked content lead.** Lighting and geometry/coverage are substantial; the earlier 2.35–2.80 ms rough-leaf improvement is already in this baseline, not an extra future saving.
+3. **Repeated planar rendering is a high-priority overlapping multiplier**, with the separate Native208 12.6–13.6 ms capture-omission effect. It repeats terrain/grass/scenery; this is not a numerically established independent third slice.
+4. **Trees are a smaller provisional current-view lead (2.55–2.90 ms).** Actors and mushrooms are measured but not robustly ordered. Do not spend the primary optimization queue on tiny UI/static-matrix work.
+5. Water shading, flowers, remaining scenery/CPU, active output conversion and production-population scaling still lack complete isolated attribution. Unknown does not mean free.
+
+The resolutions/conditions and omitted scopes differ across experiments; never sum these numbers or publish an exhaustive percentage budget. Next pursue a substantial quality-preserving reduction in terrain/grass/repeated-rendering work, retaining unchanged 2× resolution and ordinary content. Replicate category timing when native access returns, but do not turn modest-category precision into another blocker for the larger measured work. Sustained moving-view **16.67 ms / 60 FPS at actual 2× remains open**.
+
+### Refused starts and cleanup boundary
+
+Two starts supply zero rows: residual sun/shadow smoothing at the unchanged 1e−9 guard, then absent document focus. Natural settling and activating the observed native title bar correct them; no guard is weakened. A fresh repeat is installed but never started: macOS ScreenCaptureKit error −3811 then prevents native access even after reconnect/reset. Access subsequently recovers; the exact private3344 tab already contains Chrome's network-error document. Root closes that owned tab and verifies the original New Tab remains. No repeat result or exact former-document held camera/clock/exposure release is claimed. The saved successful screen already restored its render/draw/tick hooks and finished with full content; the old document/context is now retired.
+
+The private runtime stops at **2026-10-03 19:25:17.732 UTC**, errors empty, all 1,142 protected files unchanged, disposable database removed and four private ports free. Process receipt SHA256 `030902942e36d717549862f21483c13b3911af01a828208d7d927809708c4b5b`. Temporary runtime admissions restore byte-for-byte; three served helper copies are removed while source helpers/receipts remain. All 42 unrelated working-file hashes and public3333/5555/5556 ownership stay unchanged. No production/default change or new shipping speedup is claimed.
+
+
 ## Native246 — bounded appearance cache executes but has no sampled 2× coverage
 
 **Reject this configuration for further timing: the cache is unused in all three sampled native-pixel terrain crops.** Fresh build244 uses the current canonical source (HEAD `1d4b3c9e8e85ba13cca4a3f339ff0fe7d34cbc21`), nine bundles / 980 inputs and zero overrides. The private ordinary game retains 3024×1724 / DPR2, with the matched camera and held phase/exposure. This is hardware correctness and eligibility evidence, not an FPS measurement.
