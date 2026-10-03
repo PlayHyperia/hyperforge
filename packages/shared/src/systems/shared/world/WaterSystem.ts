@@ -1404,6 +1404,8 @@ export class WaterSystem {
       previousRendererScissorTest: boolean;
     };
     let captureScope: CaptureScope | null = null;
+    let resizeRenderer: NodeFrame["renderer"] = null;
+    let resizeCamera: THREE.Camera | null = null;
     const scissor = new THREE.Vector4();
     const viewport = new THREE.Vector4();
     const size = new THREE.Vector2();
@@ -1418,6 +1420,15 @@ export class WaterSystem {
         const cropEnabled = this.reflectionCropEnabled;
         const resizeFull = (invalidateCapacity = true) => {
           Reflect.apply(nativeResize, reflection, [target, renderer]);
+          // r186 setup also sizes a shared default target, including after a
+          // real capture. Only the active camera's target owns the sampled UV
+          // and capacity state; shader compilation must not reset either.
+          const camera =
+            resizeRenderer === renderer && resizeCamera
+              ? reflection.virtualCameras.get(resizeCamera)
+              : undefined;
+          if (!camera || reflection.renderTargets.get(camera) !== target)
+            return;
           this.reflectionCropUv.value.set(1, 1, 0, 0);
           if (invalidateCapacity)
             this.reflectionCropCapacities
@@ -1590,6 +1601,8 @@ export class WaterSystem {
       if (!owner) return false;
       const previousWorldAutoUpdate = node.target.matrixWorldAutoUpdate;
       const previousScope = captureScope;
+      const previousResizeRenderer = resizeRenderer;
+      const previousResizeCamera = resizeCamera;
       const scope: CaptureScope | null =
         (this.reflectionFootprintEnabled ||
           this.reflectionGrassFootprintEnabled ||
@@ -1608,6 +1621,10 @@ export class WaterSystem {
             }
           : null;
       captureScope = scope;
+      // Keep authentic full/fallback captures owned even when all optional
+      // footprint modes are off and no CaptureScope is allocated.
+      resizeRenderer = frame.renderer;
+      resizeCamera = owner.camera;
       node.target.matrixWorldAutoUpdate = false;
       try {
         const result = nativeUpdate.call(reflection, frame);
@@ -1636,6 +1653,8 @@ export class WaterSystem {
             }
           } finally {
             captureScope = previousScope;
+            resizeRenderer = previousResizeRenderer;
+            resizeCamera = previousResizeCamera;
             // The nested render must not rebuild this world-owned plane from the
             // legacy ocean-level target transform. Restore its exact owner flag.
             node.target.matrixWorldAutoUpdate = previousWorldAutoUpdate;

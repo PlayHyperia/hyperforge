@@ -109,6 +109,140 @@ function fixture(modules: Modules) {
 describe.sequential(
   "cropped lake capture admission and synchronous lease",
   () => {
+    it.each([false, true])(
+      "keeps shader setup sizing separate from sampled crop ownership (enabled=%s)",
+      async (enabled) => {
+        const modules = await loadModules(enabled),
+          f = fixture(modules);
+        const reflection = f.water["createReflection"]();
+        const foreign = new THREE.RenderTarget(13, 17);
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(),
+          new THREE.MeshStandardNodeMaterial(),
+        );
+        const crop = new THREE.Vector4(
+          1.96875,
+          862 / 134,
+          -0.96875,
+          -344 / 134,
+        );
+        const capacity = new modules.ReflectionCropCapacity();
+        const required = new THREE.Vector4(744, 344, 744, 128);
+        try {
+          f.renderer.setSize(3024, 1724, false);
+          f.water["reflectionCropUv"].value.copy(crop);
+          f.water["reflectionCropCapacities"] = new WeakMap([
+            [foreign, capacity],
+          ]);
+          expect(capacity.select(required, 1512, 862)).not.toBeNull();
+          const resize: unknown = Reflect.get(
+            reflection.reflector,
+            "_updateResolution",
+          );
+          if (typeof resize !== "function")
+            throw new Error("Native resize missing");
+          Reflect.apply(resize, reflection.reflector, [foreign, f.renderer]);
+          expect([foreign.width, foreign.height]).toEqual([1512, 862]);
+          expect(f.water["reflectionCropUv"].value.equals(crop)).toBe(true);
+          // A foreign full resize must not put its existing planner into the
+          // eight-update fallback/re-entry state either.
+          expect(capacity.select(required, 1512, 862)).not.toBeNull();
+
+          // Exercise r186's actual setup -> _updateResolution(_defaultRT),
+          // not a copied setup algorithm or replacement renderer method.
+          const builder = new THREE.WGSLNodeBuilder(mesh, f.renderer);
+          reflection.reflector.setup(builder);
+          expect(f.water["reflectionCropUv"].value.equals(crop)).toBe(true);
+          expect(capacity.select(required, 1512, 862)).not.toBeNull();
+          expect(f.renderer.hasInitialized()).toBe(false);
+        } finally {
+          foreign.dispose();
+          reflection.dispose();
+          mesh.geometry.dispose();
+          mesh.material.dispose();
+          await f.renderer.dispose();
+          f.close();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      "keeps authentic full fallback owned and releases resize ownership (enabled=%s)",
+      async (enabled) => {
+        const modules = await loadModules(enabled),
+          f = fixture(modules);
+        const reflection = f.water["createReflection"]();
+        const material = new THREE.MeshStandardNodeMaterial();
+        f.water["lakeMaterial"] = material;
+        const lake = new THREE.Mesh(
+          new THREE.PlaneGeometry(10, 10).rotateX(-Math.PI / 2),
+          material,
+        );
+        f.scene.add(lake);
+        f.scene.updateMatrixWorld(true);
+        f.water.registerWaterMesh(lake);
+        f.frame.object = lake;
+        f.frame.material = material;
+        f.camera.position.set(0, -2, 3);
+        f.camera.lookAt(0, 0, 0);
+        f.camera.updateMatrixWorld(true);
+        f.renderer.setSize(3024, 1724, false);
+        const mirror = reflection.reflector.getVirtualCamera(f.camera);
+        const actualTarget = reflection.reflector.getRenderTarget(mirror);
+        const capacity = new modules.ReflectionCropCapacity();
+        const required = new THREE.Vector4(744, 344, 744, 128);
+        const crop = new THREE.Vector4(
+          1.96875,
+          862 / 134,
+          -0.96875,
+          -344 / 134,
+        );
+        try {
+          f.water["reflectionCropCapacities"] = new WeakMap([
+            [actualTarget, capacity],
+          ]);
+          expect(capacity.select(required, 1512, 862)).not.toBeNull();
+          actualTarget.setSize(768, 134);
+          f.water["reflectionCropUv"].value.copy(crop);
+          // The actual native update sizes the registered capture, then returns
+          // for a camera below the plane before rendering. Enabled admission
+          // fails full because no normal texture/UV graph is prepared.
+          expect(reflection.reflector.updateBefore(f.frame)).toBeUndefined();
+          expect([actualTarget.width, actualTarget.height]).toEqual([
+            1512, 862,
+          ]);
+          expect(f.water["reflectionCropUv"].value.toArray()).toEqual([
+            1, 1, 0, 0,
+          ]);
+          expect(capacity.select(required, 1512, 862)).toBeNull();
+          expect(f.renderer.hasInitialized()).toBe(false);
+
+          // Even this real camera target has no mutation authority outside the
+          // completed native update. This checks the finally-restored owner.
+          f.water["reflectionCropUv"].value.copy(crop);
+          const resize: unknown = Reflect.get(
+            reflection.reflector,
+            "_updateResolution",
+          );
+          if (typeof resize !== "function")
+            throw new Error("Native resize missing");
+          Reflect.apply(resize, reflection.reflector, [
+            actualTarget,
+            f.renderer,
+          ]);
+          expect(f.water["reflectionCropUv"].value.equals(crop)).toBe(true);
+        } finally {
+          f.water.unregisterWaterMesh(lake);
+          f.scene.remove(lake);
+          lake.geometry.dispose();
+          material.dispose();
+          reflection.dispose();
+          await f.renderer.dispose();
+          f.close();
+        }
+      },
+    );
+
     it("keeps default graphs off and rejects runtime activation without the selected graph", async () => {
       const modules = await loadModules(false),
         f = fixture(modules);

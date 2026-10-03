@@ -1,5 +1,52 @@
 # Grass canopy visibility: research checkpoint
 
+## Native253/254 — reflection transition fixed; per-frame PMREM preblend fails the performance gate
+
+**The concrete improvement is a verified reflection-coordinate correctness fix. The lighting prototype is slower in the completed comparison and has been archived, not retained in production. 60 FPS at true 2× remains unmet.**
+
+### Reflection correctness
+
+The unchanged strict timing guard exposed a real crop-state bug, not a tolerance to relax. A 64-tick trace on build253 records four `ReflectorBaseNode.setup()` calls sizing Three's unrelated default target. Each resets the shared sampled-water UV to identity; the two mode-switch frames (0 and32) end with a cropped768×134 attachment but full-target UV coordinates. The next ordinary capture repairs it.
+
+Source254 adds19 lines to bind UV/capacity mutation to the exact active renderer/camera capture target. Native sizing always runs; unrelated setup cannot mutate the sampled crop. The active-owner references restore in `finally`; disabled/full fallback remains owned even when optional crop scopes are absent. Four new real-Three tests cover actual setup, native resize/facing-away update, full fallback, disabled mode and owner release without replacing renderer methods. The same64-tick native trace on build254 records the same four setup calls, **zero incorrect UV frames**, unchanged attachment/viewport/scissor, empty errors and exact observer/toggle restoration. No timing guard is loosened.
+
+### Opt-in environment preblend: actual shaders and numerical fidelity pass
+
+In experimental builds253/254, `outdoorPmremBlend=atlas-v1` prepares one384×512 RGBA16F target (1.5MiB logical color storage) and blends the two existing packed PMREM maps with two integer loads per texel. The stock PMREM consumer is retained; no angular resampling, blur, tone-map, texture/filter/geometry or intensity change is proposed. Experimental startup defaults to `dual-v1` and allocates no blend target. This variant renders the producer every primary frame, including held-clock measurements; its full cost is included. These candidate-only selectors, runtime changes and tests are subsequently removed from the final source checkpoint.
+
+- Issued build253 primary/mirror terrain shaders: PMREM samples8→4, total static texture sites55→51; all35 terrain-surface sites and five shadow comparisons preserved. All506 object/geometry/material/count records match across modes. Rough-leaf grass fragment programs and texture bindings are exact; vertex differences are generated identifier renames only. The one expected producer draw is additional.
+- Native build254 isolated fidelity check: all60 ordered cases (12 adjacent day-phase pairs ×5 weights),120 rotation samples,47,185,920 producer components and2,799,360 radiance components pass their **predeclared** bounds. All24 endpoints are exact, including sampled radiance; interior blends are tolerance-equivalent, not bit-identical. Maximum radiance budget ratio0.708; bound is absolute1e-4 +0.2% of the larger reference/candidate magnitude. Fourteen serialized preparation steps each finish within the unchanged15-second limit (maximum4.157s). All19 cleanup actions pass.
+- The first fidelity attempt is retained but rejected: it borrowed the live atlas, which ordinary environment rendering may overwrite during asynchronous readbacks. `prepareRenderer` serializes preparation work, not ordinary rendering. The corrected test uses an isolated instance of the exact production class, private weight/target and read-only original phase atlases. No live lighting state is changed.
+- Experimental-source verification:155 tests pass/one native-only skip across five owner/environment/water suites, plus22 screen-coordinate tests pass. After archiving the five prototype source/test changes, the final restored source passes154 tests/one native-only skip across five environment/water/coordinate suites. Scoped lint/format/diff checks pass. Full shared TypeScript still reports the same five inherited procgen-export errors; no new diagnostic.
+
+### One completed performance comparison: no gain
+
+Apple M5/24GiB, AC power; native Chrome, actual3024×1724/DPR2/MSAA4/high shadows, phase0.56, exposure0.850240084, held camera, fixed768×134 reflection crop and identical live scene population. A/B/B/A uses15 seconds per arm with four seconds excluded as warmup. No GPU timestamp query, fence/readback, manual extra world render or content omission occurs inside the timed comparison.
+
+| Median wall interval / p95 (ms) | Dual A1 | Atlas B1 | Atlas B2 | Dual A2 |
+| --- | ---: | ---: | ---: | ---: |
+| Sole complete run | 35.70 /41.60 | 39.50 /41.70 | 39.70 /42.20 | 35.40 /39.30 |
+| Synchronous World.tick median (ms) | 14.20 | 14.40 | 14.50 | 14.10 |
+
+All1,410 rows are valid;1,176 are measured and55 metadata checks retain focus/quality. Every dual frame submits800 calls/8,623,259 repeated-view triangles; every atlas frame submits801/8,623,260, exactly one positive producer draw and one owner-counter increment. Restoration passes with empty errors. Candidate-arm median differences versus adjacent baselines are **+3.8 and+4.3ms (slower)**. Within-arm variation exists (B1 starts lower before rising; B2 falls near its end), so do not label4.05ms as an exclusive producer/GPU cost or a universal regression.
+
+These are ordinary tick wall intervals, **not displayed FPS or GPU-completion times**. One valid run is sufficient to withhold promotion, not to claim a replicated universal result. The original253 guard failure has zero measured rows; build254 attempts (1) and(3) lose focus at about19.8s and42.8s and are excluded. Do not spend another batch repeating this unchanged per-frame candidate. Any revisit needs a materially different, explicitly bounded reuse policy plus moving-clock image/temporal validation and a net whole-frame win. No default/public promotion.
+
+### Evidence, cleanup and next priority
+
+- Shader: [raw](/Users/lucid/Downloads/hyperia-native253-shaders.json), [independent verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native253-shader-verification.json).
+- Transition: [before](/Users/lucid/Downloads/hyperia-native253-crop-transition.json), [fixed](</Users/lucid/Downloads/hyperia-native253-crop-transition (1).json>), [paired verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native254-transition-verification.json).
+- Fidelity: [accepted](</Users/lucid/Downloads/hyperia-native253-pmrem-parity (1).json>), [independent verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native254-pmrem-parity-verification.json). Raw SHA256 `40e3683487240c2b61c8673866b5424c87bc0f385fcc08b5d866bb4bf1111753`.
+- Timing: [complete](</Users/lucid/Downloads/hyperia-native253-pmrem-abba (2).json>), [independent verification including rejected attempts](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native254-pmrem-timing-verification.json). Raw SHA256 `1795dcc014f46f1055fc00a061515e5b2fe70df19bc8b25bb8281718fb91eb58`.
+
+Build254 report SHA256 `5f22be4a95e747dab449a1461276b9014ce41c0bcab8961a6d38a2761900c636`; framework `22287f5df75c35cfb837195411fd3e606929c93629097cd1bcd6f1f1a7923aa7`; WaterSystem `1692de540f0318c9e20988afeacbf67ed2d1b487ace744ad0ae7eddfa8f01d57`. Nine bundles/982 inputs, zero source substitutions and182 protected build artifacts unchanged. PMREM source is identical between253/254; only the water fix changes those experimental build inputs. The final source checkpoint then restores Environment, OutdoorEnvironment and its tests exactly to HEAD, and removes the two candidate-only helper/test files; build254 is not claimed to represent that subsequent removal.
+
+The entire rejected five-file prototype remains recoverable in [native254-pmrem-rejected-production.patch](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native254-pmrem-rejected-production.patch), SHA256 `31a61b525d414ad6c696d3feeb5523fc5f225d186934c7debbd2ba886964d656`. `git apply --check` passes against the restored source. No failed optimization or dormant candidate runtime remains in the production checkpoint. The water fix and its four new regressions are retained;25 pre-existing WaterSystem additions and all other unrelated work remain outside this scoped commit.
+
+Both native sessions restore full1512×862 capture/identity UV, camera, clock and exposure; diagnostic owners are absent and only the owned private tabs close. Native254 runtime stops at2026-10-03T23:13:45.091Z with empty errors, all1,142 protected files unchanged, disposable DB removed, four private ports free and public3333/5555/5556 plus saved DB unchanged. Its process receipt SHA256 is `e5eadeae038f2fe3381a0dc69d8ca20abe2d0f8953a75ca9691e49885c16bc12`. Six temporary runtime admissions are reversed byte-for-byte and seven served helper copies removed; original helpers, failed receipts and accepted evidence remain available.
+
+**Next:** keep the measured terrain-first/grass-second priority below. Reflection repeats their work and must not be added as an independent cost. Preserve the previously measured reflection-crop improvement; finish its moving-edge/day-night/default-graph checks before promotion. The per-frame PMREM experiment supplies no additional saving. Art/asset polish remains deferred, and16.67ms at real2× is still the gate.
+
 ## Native252 — corrected shader verified; reflection savings and lower churn repeat at 2×
 
 **Two complete same-build comparisons demonstrate a reflection-capture improvement; the 60 FPS goal is still unmet.** The native game uses canonical build252 at actual 3024×1724 / DPR2 / MSAA4, high shadows, unchanged materials/content, held camera and phase 0.56. Both 60-second full/cropped/cropped/full comparisons finish with empty errors, all rows valid and exact observer/toggle restoration. Each 15-second arm excludes four seconds of warmup. These are ordinary World.tick wall intervals, not GPU-completion or displayed-frame measurements.
