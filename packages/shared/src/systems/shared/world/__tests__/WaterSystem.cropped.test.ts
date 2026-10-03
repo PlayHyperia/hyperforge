@@ -114,6 +114,7 @@ describe.sequential(
         f = fixture(modules);
       try {
         const before = f.callbacks();
+        expect(f.water["reflectionCropCapacities"]).toBeNull();
         expect(f.begin()).toBeNull();
         expect(() => f.water.setReflectionCropEnabled(true)).toThrow(
           "opt-in shader graph",
@@ -121,6 +122,28 @@ describe.sequential(
         expect(() => f.water.setReflectionCropEnabled(false)).not.toThrow();
         expect(f.begin()).toBeNull();
         expect(f.callbacks()).toEqual(before);
+        expect([f.target.width, f.target.height]).toEqual([1512, 862]);
+      } finally {
+        f.close();
+      }
+    });
+
+    it("retires only candidate capacity metadata on mode changes and destruction", async () => {
+      const modules = await loadModules(true),
+        f = fixture(modules);
+      try {
+        const capacity = new modules.ReflectionCropCapacity();
+        const owners = new WeakMap([[f.target, capacity]]);
+        f.water["reflectionCropCapacities"] = owners;
+        f.water.setReflectionCropEnabled(true);
+        expect(f.water["reflectionCropCapacities"]).toBe(owners);
+        f.water.setReflectionCropEnabled(false);
+        expect(f.water["reflectionCropCapacities"]).toBeNull();
+        f.water.setReflectionCropEnabled(true);
+        expect(f.water["reflectionCropCapacities"]).toBeNull();
+        f.water["reflectionCropCapacities"] = owners;
+        f.water.destroy();
+        expect(f.water["reflectionCropCapacities"]).toBeNull();
         expect([f.target.width, f.target.height]).toEqual([1512, 862]);
       } finally {
         f.close();

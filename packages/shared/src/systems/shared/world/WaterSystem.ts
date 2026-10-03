@@ -51,6 +51,7 @@ import {
   alignCroppedReflectionRect,
   cropReflectionProjection,
   croppedReflectionScreen,
+  ReflectionCropCapacity,
 } from "../../../extras/three/CroppedReflectionScreen";
 import { isOwnedUniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
 import type { World } from "../../../types";
@@ -319,6 +320,11 @@ export class WaterSystem {
   private readonly reflectionScale = new THREE.Vector3(1, 1, 1);
   private reflectionFootprintEnabled = false;
   private reflectionCropEnabled = croppedReflectionScreen.enabled;
+  // Candidate-only capacity state: the default graph allocates no planner.
+  private reflectionCropCapacities: WeakMap<
+    THREE.RenderTarget,
+    ReflectionCropCapacity
+  > | null = null;
   private readonly reflectionCropUv = uniform(new THREE.Vector4(1, 1, 0, 0));
   private reflectionGrassFootprintEnabled = false;
   private reflectionGrassFootprint: LakeGrassFootprint | null = null;
@@ -361,6 +367,8 @@ export class WaterSystem {
   setReflectionCropEnabled(enabled: boolean): void {
     if (enabled && !croppedReflectionScreen.enabled)
       throw new Error("Cropped reflection requires the opt-in shader graph");
+    if (enabled !== this.reflectionCropEnabled)
+      this.reflectionCropCapacities = null;
     this.reflectionCropEnabled = enabled;
   }
 
@@ -1408,9 +1416,13 @@ export class WaterSystem {
       };
       sizedReflection._updateResolution = (target, renderer) => {
         const cropEnabled = this.reflectionCropEnabled;
-        const resizeFull = () => {
+        const resizeFull = (invalidateCapacity = true) => {
           Reflect.apply(nativeResize, reflection, [target, renderer]);
           this.reflectionCropUv.value.set(1, 1, 0, 0);
+          if (invalidateCapacity)
+            this.reflectionCropCapacities
+              ?.get(target)
+              ?.select(null, target.width, target.height);
         };
         // Choose the attachment size BEFORE resizing. Full -> cropped resizing
         // here would dispose/reallocate twice on every reflection capture.
@@ -1487,7 +1499,20 @@ export class WaterSystem {
             resizeFull();
             return;
           }
-          scissor.copy(aligned);
+          this.reflectionCropCapacities ??= new WeakMap();
+          let capacity = this.reflectionCropCapacities.get(target);
+          if (!capacity) {
+            capacity = new ReflectionCropCapacity();
+            this.reflectionCropCapacities.set(target, capacity);
+          }
+          const allocation = capacity.select(aligned, fullWidth, fullHeight);
+          if (!allocation) {
+            // A stable re-entry interval is not another admission failure.
+            // Resetting it here would permanently prevent cropped captures.
+            resizeFull(false);
+            return;
+          }
+          scissor.copy(allocation);
           const scene = scope.owner.scene;
           const direction = scope.owner.camera.getWorldDirection(
             new THREE.Vector3(),
@@ -3204,6 +3229,7 @@ export class WaterSystem {
     this.lakeReflectionUvNode = null;
     this.reflectionGrassFootprint = null;
     this.oceanDisplacementBounds.length = 0;
+    this.reflectionCropCapacities = null;
 
     // Dispose materials
     this.lakeMaterial?.dispose();

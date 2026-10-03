@@ -19,6 +19,9 @@ import {
 } from "three/tsl";
 
 export const CROPPED_REFLECTION_ALIGNMENT = 8;
+export const REFLECTION_CROP_CAPACITY_BUCKET = 64;
+export const REFLECTION_CROP_SHRINK_UPDATES = 60;
+export const REFLECTION_CROP_REENTRY_UPDATES = 8;
 
 /** An explicit experiment; no environment or saved-setting fallback. */
 export function resolveCroppedReflectionCapture(search: string): boolean {
@@ -73,6 +76,144 @@ export function alignCroppedReflectionRect(
   if (x === 0 && y === 0 && right === fullWidth && bottom === fullHeight)
     return null;
   return new Vector4(x, y, right - x, bottom - y);
+}
+
+/** Per-target allocation policy only: it never changes sampling density or
+ * reduces the conservative required rectangle. Construct only for an opted-in
+ * target. The caller must report every full fallback with a null selection.
+ *
+ * Grow immediately; shrink to the maximum demand of 60 uninterrupted admitted
+ * updates. Following full fallback, require eight consecutive admitted updates
+ * and size from their maximum, rather than permanently retaining a full-sized
+ * high-water mark. These update counts and 64-pixel buckets amortize allocation;
+ * they are not visibility, distortion, or image-quality tolerances.
+ */
+export class ReflectionCropCapacity {
+  private fullWidth = 0;
+  private fullHeight = 0;
+  private width = 0;
+  private height = 0;
+  private x = 0;
+  private y = 0;
+  private fullFallback = false;
+  private demandWidth = 0;
+  private demandHeight = 0;
+  private demandUpdates = 0;
+
+  private resetDemand(): void {
+    this.demandWidth = 0;
+    this.demandHeight = 0;
+    this.demandUpdates = 0;
+  }
+
+  private fallback(): null {
+    this.fullFallback = true;
+    this.resetDemand();
+    return null;
+  }
+
+  private capacity(left: number, extent: number, full: number): number {
+    const alignment = CROPPED_REFLECTION_ALIGNMENT;
+    const alignedLeft = Math.floor(left / alignment) * alignment;
+    const required = left + extent - alignedLeft;
+    // Edge-compatible capacities permit an aligned origin at BOTH boundaries.
+    // E.g. full height 862 uses 64*k + 6, not a 128-high target whose bottom
+    // origin would have to be the unsupported, unaligned coordinate 734.
+    const edgeRemainder = full % alignment;
+    return Math.min(
+      full,
+      Math.ceil(required / REFLECTION_CROP_CAPACITY_BUCKET) *
+        REFLECTION_CROP_CAPACITY_BUCKET +
+        edgeRemainder,
+    );
+  }
+
+  private origin(
+    previous: number,
+    left: number,
+    extent: number,
+    capacity: number,
+    full: number,
+  ): number | null {
+    const alignment = CROPPED_REFLECTION_ALIGNMENT;
+    const low =
+      Math.ceil(Math.max(0, left + extent - capacity) / alignment) * alignment;
+    const high =
+      Math.floor(Math.min(left, full - capacity) / alignment) * alignment;
+    if (low > high) return null;
+    return Math.max(low, Math.min(previous, high));
+  }
+
+  /** Returns a detached actual capture rectangle, or null for native full.
+   * Changing full dimensions starts a new epoch. Invalid inputs fail full.
+   */
+  select(
+    required: Vector4 | null,
+    fullWidth: number,
+    fullHeight: number,
+  ): Vector4 | null {
+    if (this.fullWidth !== fullWidth || this.fullHeight !== fullHeight) {
+      this.fullWidth = fullWidth;
+      this.fullHeight = fullHeight;
+      this.width = this.height = this.x = this.y = 0;
+      this.fullFallback = false;
+      this.resetDemand();
+    }
+    if (!required || !validRect(required, fullWidth, fullHeight))
+      return this.fallback();
+    const width = this.capacity(required.x, required.z, fullWidth);
+    const height = this.capacity(required.y, required.w, fullHeight);
+    if (width === fullWidth && height === fullHeight) return this.fallback();
+
+    if (this.fullFallback) {
+      this.demandWidth = Math.max(this.demandWidth, width);
+      this.demandHeight = Math.max(this.demandHeight, height);
+      this.demandUpdates++;
+      if (this.demandUpdates < REFLECTION_CROP_REENTRY_UPDATES) return null;
+      if (this.demandWidth === fullWidth && this.demandHeight === fullHeight)
+        return this.fallback();
+      this.width = this.demandWidth;
+      this.height = this.demandHeight;
+      this.fullFallback = false;
+      this.resetDemand();
+    } else {
+      const grownWidth = Math.max(this.width, width);
+      const grownHeight = Math.max(this.height, height);
+      if (grownWidth === fullWidth && grownHeight === fullHeight)
+        return this.fallback();
+      if (grownWidth !== this.width || grownHeight !== this.height) {
+        this.width = grownWidth;
+        this.height = grownHeight;
+        this.resetDemand();
+      }
+      this.demandWidth = Math.max(this.demandWidth, width);
+      this.demandHeight = Math.max(this.demandHeight, height);
+      this.demandUpdates++;
+      if (this.demandUpdates >= REFLECTION_CROP_SHRINK_UPDATES) {
+        this.width = this.demandWidth;
+        this.height = this.demandHeight;
+        this.resetDemand();
+      }
+    }
+    const x = this.origin(
+      this.x,
+      required.x,
+      required.z,
+      this.width,
+      fullWidth,
+    );
+    const y = this.origin(
+      this.y,
+      required.y,
+      required.w,
+      this.height,
+      fullHeight,
+    );
+    if (x === null || y === null) return this.fallback();
+    this.x = x;
+    this.y = y;
+    return new Vector4(x, y, this.width, this.height);
+  }
 }
 
 /** Return C * P, after the reflector has installed its oblique clip plane.
