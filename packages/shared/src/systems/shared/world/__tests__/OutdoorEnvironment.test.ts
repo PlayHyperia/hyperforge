@@ -6,6 +6,7 @@ import type { Browser } from "playwright";
 import { describe, expect, it } from "vitest";
 import THREE from "../../../../extras/three/three";
 import {
+  float,
   materialEnvRotation,
   mix,
   normalWorld,
@@ -13,6 +14,7 @@ import {
   uniform,
   vec2,
   vec3,
+  vec4,
 } from "three/tsl";
 import type Node from "three/src/nodes/core/Node.js";
 import { World } from "../../../../core/World";
@@ -20,6 +22,8 @@ import { ClientGraphics } from "../../../client/ClientGraphics";
 import { AMBIENT_LIGHT, HEMISPHERE_LIGHT } from "../LightingConfig";
 import {
   OutdoorEnvironment,
+  OutdoorPreparationPhaseTiming,
+  settleOutdoorPreparationOperations,
   OUTDOOR_ENVIRONMENT_PHASES,
   calibrateOutdoorCapture,
   resolveOutdoorCalibration,
@@ -113,6 +117,224 @@ function cpuOwnedGraph(roughLeaf = false) {
   scene.environmentIntensity = 1;
   return { scene, owner, targets, nodeA, nodeB, weight, graph, priorNode };
 }
+
+describe("outdoor startup timing receipts (CPU clock arithmetic, not GPU duration)", () => {
+  it("records active waits and rejected work without changing the result or error", async () => {
+    let now = 100;
+    const timing = new OutdoorPreparationPhaseTiming(3, 0.25, () => now);
+    expect(timing.snapshot()).toMatchObject({
+      phaseIndex: 3,
+      phase: 0.25,
+      startedAtMs: 100,
+      elapsedMs: 0,
+      completed: false,
+      settled: false,
+      activeStep: null,
+      calibrationMs: null,
+      drainMs: null,
+    });
+    expect(timing.measure("calibrationMs", () => (now += 3))).toBe(103);
+    const failure = new Error("actual operation failure");
+    expect(() =>
+      timing.measure("captureCpuMs", () => {
+        now += 2;
+        throw failure;
+      }),
+    ).toThrow(failure);
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, no) => {
+      reject = no;
+    });
+    const work = timing.measureAsync("drainMs", () => pending);
+    now += 7;
+    expect(timing.snapshot()).toMatchObject({
+      activeStep: "drainMs",
+      activeStepElapsedMs: 7,
+      drainMs: null,
+      elapsedMs: 12,
+    });
+    reject(failure);
+    await expect(work).rejects.toBe(failure);
+    timing.finish(false);
+    now += 100;
+    timing.finish(true);
+    expect(timing.snapshot()).toMatchObject({
+      calibrationMs: 3,
+      captureCpuMs: 2,
+      drainMs: 7,
+      elapsedMs: 12,
+      completed: false,
+      settled: true,
+      activeStep: null,
+      activeStepElapsedMs: null,
+    });
+  });
+
+  it("distinguishes successful drain, finally drain and scope-pop waits", async () => {
+    let now = 0;
+    const timing = new OutdoorPreparationPhaseTiming(0, 0, () => now);
+    for (const [step, duration] of [
+      ["compileMs", 11],
+      ["drainMs", 5],
+      ["cleanupDrainMs", 3],
+      ["scopePopMs", 7],
+    ] as const) {
+      expect(
+        await timing.measureAsync(step, () => {
+          now += duration;
+          return Promise.resolve(duration);
+        }),
+      ).toBe(duration);
+    }
+    timing.finish(true);
+    const snapshot = timing.snapshot();
+    expect(snapshot).toMatchObject({
+      compileMs: 11,
+      drainMs: 5,
+      cleanupDrainMs: 3,
+      scopePopMs: 7,
+      elapsedMs: 26,
+      completed: true,
+      settled: true,
+      calibrationMs: null,
+    });
+    snapshot.drainMs = 999;
+    expect(timing.snapshot().drainMs).toBe(5);
+  });
+
+  it("records overlapping completion components without adding their wall times", async () => {
+    let now = 0;
+    const timing = new OutdoorPreparationPhaseTiming(0, 0, () => now);
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const first = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<void>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let scopeWait!: Promise<void>;
+    const completion = timing.measureAsync("completionMs", async () => {
+      const drain = timing.measureAsync("drainMs", () => first);
+      scopeWait = timing.measureAsync("scopePopMs", () => second);
+      await Promise.allSettled([drain, scopeWait]);
+    });
+    now = 5;
+    expect(timing.snapshot().activeSteps).toEqual([
+      { step: "completionMs", elapsedMs: 5 },
+      { step: "drainMs", elapsedMs: 5 },
+      { step: "scopePopMs", elapsedMs: 5 },
+    ]);
+    resolveSecond();
+    await scopeWait;
+    now = 7;
+    resolveFirst();
+    await completion;
+    timing.finish(true);
+    const snapshot = timing.snapshot();
+    expect(snapshot).toMatchObject({
+      completionMs: 7,
+      drainMs: 7,
+      scopePopMs: 5,
+      cleanupDrainMs: null,
+      elapsedMs: 7,
+      activeSteps: [],
+      completed: true,
+    });
+    expect(snapshot.completionMs).toBeLessThan(
+      snapshot.drainMs! + snapshot.scopePopMs!,
+    );
+  });
+
+  it("returns detached twelve-row receipts and retains evidence after retirement", () => {
+    const owner = new OutdoorEnvironment(
+      new THREE.Scene(),
+      "luminance-v1",
+      true,
+    );
+    expect(owner.getStatus().phaseTimings).toEqual([]);
+    expect(owner.getStatus().roughLeaf.phaseTimings).toEqual([]);
+    // Seed diagnostic records only, not initialized state, renderer work or
+    // radiance. This checks the actual owner's receipt snapshot/retirement path.
+    const records = owner as unknown as {
+      phaseTimings: OutdoorPreparationPhaseTiming[];
+      roughLeafPhaseTimings: OutdoorPreparationPhaseTiming[];
+    };
+    for (const [index, phase] of OUTDOOR_ENVIRONMENT_PHASES.entries()) {
+      for (const rows of [
+        records.phaseTimings,
+        records.roughLeafPhaseTimings,
+      ]) {
+        const timing = new OutdoorPreparationPhaseTiming(
+          index,
+          phase,
+          () => index,
+        );
+        timing.finish(true);
+        rows.push(timing);
+      }
+    }
+    const snapshot = owner.getStatus();
+    snapshot.phaseTimings[0].completed = false;
+    snapshot.roughLeaf.phaseTimings.pop();
+    owner.dispose();
+    expect(owner.getStatus().phaseTimings).toHaveLength(12);
+    expect(owner.getStatus().phaseTimings[0].completed).toBe(true);
+    expect(owner.getStatus().roughLeaf.phaseTimings).toHaveLength(12);
+    expect(owner.getStatus().capturesCompleted).toBe(0);
+    expect(owner.getStatus().roughLeaf.capturesCompleted).toBe(0);
+  });
+});
+
+describe("outdoor completion joins (CPU promises, not WebGPU scope semantics)", () => {
+  it("starts every ordered operation despite synchronous failure and waits for every settlement", async () => {
+    const calls: string[] = [];
+    const syncFailure = new Error("synchronous operation failure");
+    const asyncFailure = new Error("asynchronous operation failure");
+    let rejectFirst!: (error: Error) => void;
+    let resolveLast!: (value: string) => void;
+    const first = new Promise<string>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const last = new Promise<string>((resolve) => {
+      resolveLast = resolve;
+    });
+    const completion = settleOutdoorPreparationOperations([
+      () => {
+        calls.push("first");
+        return first;
+      },
+      () => {
+        calls.push("second");
+        throw syncFailure;
+      },
+      () => {
+        calls.push("third");
+        return "immediate value";
+      },
+      () => {
+        calls.push("fourth");
+        return last;
+      },
+    ]);
+    expect(calls).toEqual(["first", "second", "third", "fourth"]);
+    let settled = false;
+    void completion.then(() => {
+      settled = true;
+    });
+    rejectFirst(asyncFailure);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveLast("last value");
+    expect(await completion).toEqual([
+      { status: "rejected", reason: asyncFailure },
+      { status: "rejected", reason: syncFailure },
+      { status: "fulfilled", value: "immediate value" },
+      { status: "fulfilled", value: "last value" },
+    ]);
+    expect(settled).toBe(true);
+  });
+});
 
 describe("outdoor environment CPU contracts (not GPU radiometry or art approval)", () => {
   it("requires one explicit RGB candidate selector and preserves ordinary startup", () => {
@@ -645,6 +867,73 @@ function cpuRoughLeafGraph() {
 }
 
 describe("rough-leaf environment CPU arithmetic/ownership (not native bake, filtering or visual acceptance)", () => {
+  it("retargets one real PMREM bake binding through all twelve phases without rebuilding its graph", () => {
+    const sources = OUTDOOR_ENVIRONMENT_PHASES.map(
+      () =>
+        new THREE.RenderTarget(384, 512, {
+          type: THREE.HalfFloatType,
+          colorSpace: THREE.LinearSRGBColorSpace,
+          depthBuffer: false,
+        }),
+    );
+    let sourceDisposals = 0;
+    for (const source of sources) {
+      source.texture.mapping = THREE.CubeUVReflectionMapping;
+      source.addEventListener("dispose", () => sourceDisposals++);
+    }
+    const direction = createOutdoorRoughLeafDirection(vec2(0.5, 0.5));
+    const pmrem = pmremTexture(
+      sources[0].texture,
+      vec3(direction.x, direction.y.negate(), direction.z),
+      float(1),
+    );
+    const material = new THREE.NodeMaterial();
+    material.fragmentNode = vec4(pmrem.toVar("roughLeafBakedRadiance"), 1);
+    const quad = new THREE.QuadMesh(material);
+    const fragment = material.fragmentNode;
+    const version = material.version;
+    // Exercise Three's real RENDER update and sampled node, without constructing
+    // a renderer or pretending these empty targets contain GPU-filtered pixels.
+    const frame = new THREE.NodeFrame();
+    const sampled = Reflect.get(pmrem, "_texture") as {
+      value: THREE.Texture;
+    };
+    const dimensions = ["_width", "_height", "_maxMip"].map(
+      (key) => Reflect.get(pmrem, key) as { value: number },
+    );
+    try {
+      for (const source of [...sources, ...[...sources].reverse()]) {
+        // A new phase has the same version: identity, not a version bump, must
+        // invalidate PMREMNode's cached binding.
+        expect(Reflect.get(source.texture, "pmremVersion")).toBe(0);
+        pmrem.value = source.texture;
+        expect(Reflect.get(pmrem, "_pmrem")).toBeNull();
+        frame.renderId++;
+        frame.updateBeforeNode(pmrem);
+        expect(Reflect.get(pmrem, "_texture")).toBe(sampled);
+        expect(sampled.value).toBe(source.texture);
+        expect(Reflect.get(pmrem, "_pmrem")).toBe(source.texture);
+        expect(dimensions.map((node) => node.value)).toEqual([
+          1 / 384,
+          1 / 512,
+          7,
+        ]);
+        expect(material.fragmentNode).toBe(fragment);
+        expect(material.version).toBe(version);
+        expect(quad.material).toBe(material);
+      }
+    } finally {
+      try {
+        material.dispose();
+        pmrem.dispose();
+        expect(sourceDisposals).toBe(0);
+      } finally {
+        for (const source of sources) source.dispose();
+      }
+    }
+    expect(sourceDisposals).toBe(12);
+  });
+
   it("allocates no candidate targets or graph on the ordinary path", () => {
     const f = cpuOwnedGraph();
     try {

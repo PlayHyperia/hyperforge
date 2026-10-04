@@ -1,5 +1,70 @@
 # Grass canopy visibility: research checkpoint
 
+## Native274 water — reflection self-inclusion confirmed
+
+The same build272 reload then ran the previously prepared water discriminator with rough-leaf lighting and cropped reflections active. Actual canvas size was 3024×1724 / DPR2, with all 52 terrain and 94 grass owners retained. The candidate was **raw single-sample color/velocity MRT, not a temporal resolve**.
+
+The cloned primary lake material was hidden by the reflector, but nested reflection rendering still used the visible original material. Temporarily hiding that original material only around the cloned primary draw, restoring it in finally, preserved object.material identity and restored the pond's visible reflection. At the unfixed 90-frame capture there were 90 nested lake draws. At the fixed 90-frame capture there were 90 exclusions and restorations, with zero fixed nested lake draws. Final totals were 6,506 primary clone calls, 1,189 unfixed nested draws, 5,317 exclusions/restorations and zero fixed nested draws. No recorded probe errors; all seven renderer/resource restoration checks passed. Independent review confirmed the embedded source exactly matches the executed helper.
+
+Receipt: `/Users/lucid/Downloads/hyperia-native271-water-exclusion.json` (retains the earlier helper name), SHA256 `573cb88b7290fb4352a47af1240324d862167587f6007a39580d2fc6f1170ff1`. Three full-resolution PNGs are embedded. `reason=diagnostic-only`, `complete=false`, empty timing rows/blocks are intentional: **there is no new frame-time or AA-quality acceptance**. The original retained target's MSAA4 setting must not be confused with the raw candidate's single-sample pass.
+
+After export, native console readback confirmed probe/camera/exposure handles removed, original null draw dispatch/MRT restored and samples=4. The owned tab and DevTools were closed. Runtime `runtime-native274-waits01/process.json` reports STOPPED, no cleanup errors, ephemeral database removed, protected files unchanged and all four private ports free. Temporary helper admission restored to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`; all 42 inherited file pins match. Public/default AA, public session and saved state were not modified.
+
+**Next:** carry this scoped exclusion into the private full temporal resolve, verify moving-edge/secondary-pass/lifecycle quality, then obtain a new same-session A/B/B/A and reconcile CPU/draw differences. Do not promote plain MSAA-off or treat the earlier defective candidate's 5.10 ms lead as recovered production savings.
+
+## Native274 — startup joins qualify with exact GPU output
+
+**The lighting startup blocker is resolved in fresh/reload checks without extending the deadline or reducing output.** One material/quad/PMREM graph is reused for all phases. After each phase's compilation/submission, one GPU drain and all three error-scope pops are initiated and every result is joined before acceptance or retirement. Partial failures retain cleanup ownership. The frame-time shader, twelve phases, 129×65 RGBA16F maps, and 15-second preparation deadline remain unchanged.
+
+Fresh preparation is 10,072.6 ms, including 4,636.8 ms leaf preparation. The normal reload is 9,316.4 ms, including 3,742.2 ms leaf preparation. Both reach actual world readiness at 3024×1724 / DPR2. The former failed run is a censored 15-second timeout, so these are **not** an exact percentage cold-start speedup or FPS measurement.
+
+Actual GPU parity reconstructs the original independent material/PMREM graph for each phase, performs a real draw, and compares the live candidate and reference half-float maps excluding padded readback columns. All twelve phases have zero bit mismatches across **100,620 pixels / 402,480 components**; all components are finite, alpha is one, and all twelve phase hashes differ. No GPU error is captured, and all twelve callback/target/MRT/tone/color restorations pass. This proves bake-output preservation, not every game's rendering behavior or full temporal-AA quality.
+
+- GPU receipt: `/Users/lucid/Downloads/hyperia-native272-bake-parity.json` (helper retains its earlier name), SHA256 `b2f9c4ee05c66ab331867adc6e9c1b29a112e4cb5ead8a3f6d324f024d5c58a7`.
+- Reload receipt: `/Users/lucid/Downloads/hyperia-native274-reload.json`, SHA256 `b30424f2581e48d681a609c26ca4b2e5ba4567b41e82eb54280e626bad973825`; queue idle, device live, world ready, no prior probe installed.
+- Native runtime uses build272. A final type-only `ReturnType<GPUDevice["popErrorScope"]>` lint correction is captured in build273; all nine emitted JavaScript bundles independently hash-identically. `/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native274-build-equivalence.json` retains this provenance. Live framework SHA256 is `6cde9f4fc5d315448b7257080b014f7fd187063ebc98d12d211ec586b4cd820b`.
+- Final scoped Vitest: **57 passed, one existing native-only skip**. ESLint, Prettier and diff checks pass. Full shared typecheck still reports the same five unrelated procgen export/recipe errors and no errors in the changed files.
+
+Independent source review confirms the complete error/result join and failure cleanup. Concurrent wait components are explicitly non-additive. The [WebGPU scope contract](https://gpuweb.github.io/gpuweb/#dom-gpudevice-poperrorscope) and [Dawn implementation](https://github.com/google/dawn/blob/main/src/dawn/native/Device.cpp) support initiating scope pops before awaiting their asynchronous results. No public/default lighting selector or rendering quality was changed. The same runtime subsequently confirms water self-exclusion above. Private full temporal-resolve qualification and full-frame optimization remain; **60 FPS at 2× is still not established**.
+
+## Native273 — stage timings identify serialized waits
+
+Actual 3024×1724 / DPR2 startup reaches the unchanged 15-second deadline at 15,165.3 ms. All twelve base PMREMs complete in 1,627.9 ms (38.0 calibration, 41.8 CPU capture and 1,546.5 queue wait). Nine leaf phases are attempted; eight complete before cancellation.
+
+| Leaf stage, summed across attempted phases | Wall milliseconds |
+| --- | ---: |
+| Three sequential error-scope result waits per phase | 6,281.5 |
+| Successful-path GPU completion waits | 3,830.2 |
+| Duplicate finally GPU completion waits | 1,788.9 |
+| First graph compilation | 1,598.5 |
+| CPU draw submission | 2.6 |
+
+These are serialized wall-clock measurements, not GPU timestamps; API/scheduling latency is included. They identify redundant synchronization and sequential result-awaiting as the actionable lead, not expensive 129×65 draw submission. Proposed next change: await compilation, initiate one queue drain and all owned scope pops, then join every result before checking/publishing or disposing. Preserve all error filters and every phase output; no extra aggregate deadline allowance. WebGPU error scopes pop when called and return an asynchronous error result ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/GPUDevice/popErrorScope)).
+
+Receipt: `/Users/lucid/Downloads/hyperia-native273-startup-stages.json`, SHA256 `d0e5464605b9eb308bd46e96cbedf7a414703326ec0463826f9500bfe7f4efeb`. Real queue is idle after failed work drains; device is not lost. Independent package Vitest run: 55 passed, one existing native-only skip. An earlier wrong-runner invocation from the workspace root failed with EMFILE and is not counted as passing validation. Owned native tab, isolated runtime and temporary database are closed; cleanup has no errors, protected files unchanged and all private ports clear. Helper restored to original hash.
+
+## Native272 — graph reuse alone does not clear startup
+
+The build270 candidate retains one real bake material/PMREM graph/quad across all twelve phases; the first graph is explicitly compiled, and each source texture is rebound through Three's PMREM setter. All phase maps, resolution, validation, GPU drains and the 15-second caller deadline are unchanged. Real-node source tests pass (52 passes, one existing native-only skip across the targeted suites).
+
+Native startup still failed at 15,142.3 ms with twelve PMREM captures and ten completed leaf maps. The previous five-map result is not a controlled stage-time comparison. No parity probe, water discriminator or FPS measurement ran. Native receipt: `/Users/lucid/Downloads/hyperia-native272-startup-failure.json`, SHA256 `b7189104acd3168e99bcbe50381553306453a99919f456d6e72468de05f33751`.
+
+Stock-path navigation without the leaf opt-in encountered a retained private connection; one ordinary retry did not recover entry. The owned tab and isolated runtime were then retired, rather than modifying session ownership. Cleanup completed with `errors: []`, protected state unchanged and all four private ports empty. The runtime admission helper returned to its original `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3` hash. A fresh runtime is required next.
+
+Next: bounded startup-only stage timings, then a targeted change based on those measurements. Splitting stages would expand the aggregate startup budget even if each retains a 15-second deadline; it must not be presented as measured performance improvement.
+
+## Native271 — startup blocker is the outdoor preparation deadline
+
+The reflection discriminator was prepared and independently source-reviewed, but **never installed**: both fresh/reload attempts failed ordinary startup with the existing 15,000 ms renderer-preparation timeout. Do not attribute this failure to the unexecuted water change or count it as a timing result.
+
+The second document's public outdoor status reports twelve completed PMREM captures, five completed rough-leaf captures, failed/disposed state and 15,166.6 ms preparation. The renderer is not device-lost, and its preparation queue later becomes idle because failed work drained—not because startup recovered. Terrain and grass initialization never completed. The existing missing-cow placeholder diagnostics are separate.
+
+Next prerequisite: remove repeated invariant rough-leaf bake material/quad/shader compilation while preserving all twelve maps, renderer serialization, per-phase validation/drain, teardown ownership and the unchanged deadline. Native correctness and fresh-loading evidence are required; no timeout increase or quality reduction is accepted as a substitute.
+
+The unexecuted water discriminator keeps the same cloned material and raw MRT but temporarily hides the original shared lake material only around the selected primary draw, with restoration in finally. This tests whether native reflector self-exclusion had hidden only the clone while nested draws still used the visible original. Original object.material identity must stay intact because water-plane admission checks it. Require actual unfixed nested-water draws, zero such draws with exclusion, successful restoration and reviewed images before treating the hypothesis as confirmed.
+
+Receipt: `/Users/lucid/Downloads/hyperia-native271-startup-failure.json`, SHA256 `e3fec966e8f76ddc3f9c43cff2e8f43064561eb74ce2b32c17cd8f0a015fc58c`. No camera/exposure/probe hooks were installed. Owned private tab/console closed; runtime and disposable database stopped cleanly with protected state unchanged and four private listeners absent. Runtime helper restored to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`.
+
 ## Native269/270 — full-scene temporal cost measured; water integration blocks adoption
 
 **The first motion-aware full-game cost screen is complete, but the candidate is not accepted.** Real 2× remains 3024×1724, with high shadows, retained terrain filtering, cropped reflection policy, 52 terrain owners and 94 grass owners. No normal renderer default is changed. This is one held pond view, not sustained gameplay or displayed 60 FPS.

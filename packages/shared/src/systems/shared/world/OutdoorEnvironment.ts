@@ -58,6 +58,116 @@ type RoughLeafBuilderCallback = (
 ) => void;
 type RoughLeafDebug = { onNodeBuilderCreated: RoughLeafBuilderCallback | null };
 
+type OutdoorPreparationStep =
+  | "calibrationMs"
+  | "captureCpuMs"
+  | "compileMs"
+  | "drawCpuMs"
+  | "completionMs"
+  | "drainMs"
+  | "cleanupDrainMs"
+  | "scopePopMs";
+
+/** Startup wall-clock evidence, not GPU timestamps. Null means not attempted.
+ * The clock parameter keeps receipt arithmetic independently CPU-testable. */
+export class OutdoorPreparationPhaseTiming {
+  private readonly startedAtMs: number;
+  private finishedAtMs: number | null = null;
+  private completed = false;
+  private readonly activeSteps = new Map<OutdoorPreparationStep, number>();
+  private readonly steps: Record<OutdoorPreparationStep, number | null> = {
+    calibrationMs: null,
+    captureCpuMs: null,
+    compileMs: null,
+    drawCpuMs: null,
+    completionMs: null,
+    drainMs: null,
+    cleanupDrainMs: null,
+    scopePopMs: null,
+  };
+
+  constructor(
+    private readonly phaseIndex: number,
+    private readonly phase: number,
+    private readonly now: () => number = () => performance.now(),
+  ) {
+    this.startedAtMs = now();
+  }
+
+  private begin(step: OutdoorPreparationStep): void {
+    this.activeSteps.set(step, this.now());
+  }
+
+  private end(step: OutdoorPreparationStep): void {
+    this.steps[step] =
+      (this.steps[step] ?? 0) + this.now() - this.activeSteps.get(step)!;
+    this.activeSteps.delete(step);
+  }
+
+  measure<T>(step: OutdoorPreparationStep, operation: () => T): T {
+    this.begin(step);
+    try {
+      return operation();
+    } finally {
+      this.end(step);
+    }
+  }
+
+  async measureAsync<T>(
+    step: OutdoorPreparationStep,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    this.begin(step);
+    try {
+      return await operation();
+    } finally {
+      this.end(step);
+    }
+  }
+
+  finish(completed: boolean): void {
+    if (this.finishedAtMs !== null) return;
+    this.finishedAtMs = this.now();
+    this.completed = completed;
+  }
+
+  snapshot() {
+    const now = this.now();
+    const activeSteps = [...this.activeSteps].map(([step, startedAtMs]) => ({
+      step,
+      elapsedMs: now - startedAtMs,
+    }));
+    return {
+      phaseIndex: this.phaseIndex,
+      phase: this.phase,
+      startedAtMs: this.startedAtMs,
+      elapsedMs: (this.finishedAtMs ?? now) - this.startedAtMs,
+      completed: this.completed,
+      settled: this.finishedAtMs !== null,
+      activeStep: activeSteps[0]?.step ?? null,
+      activeStepElapsedMs: activeSteps[0]?.elapsedMs ?? null,
+      activeSteps,
+      ...this.steps,
+    };
+  }
+}
+
+/** Start every ordered operation before awaiting any of them. In particular,
+ * popErrorScope removes its scope when called, not when its promise resolves.
+ * Synchronous failures must not prevent later scopes from being popped. */
+export function settleOutdoorPreparationOperations<T>(
+  operations: ReadonlyArray<() => T | Promise<T>>,
+) {
+  const pending = operations.map((operation) => {
+    try {
+      return Promise.resolve(operation());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  });
+  return Promise.allSettled(pending);
+}
+
 type SceneEnvironmentNode = NonNullable<THREE.Scene["environmentNode"]>;
 type SharedGrassEnvironmentNode = Node<"vec3">;
 type GrassEnvironmentOwner = {
@@ -458,6 +568,9 @@ export class OutdoorEnvironment {
   private previousIntensity = 1;
   private readonly interval = { a: 0, b: 1, blend: 0 };
   private preparationMs = 0;
+  private preparationStartedAtMs: number | null = null;
+  private preparationCleanupDrainMs: number | null = null;
+  private readonly phaseTimings: OutdoorPreparationPhaseTiming[] = [];
   private capturesCompleted = 0;
   private roughLeafTargets: THREE.RenderTarget[] = [];
   private roughLeafNodeA: ReturnType<typeof texture> | null = null;
@@ -466,6 +579,9 @@ export class OutdoorEnvironment {
   private roughLeafState: State = "idle";
   private roughLeafFailure: string | null = null;
   private roughLeafCapturesCompleted = 0;
+  private roughLeafPreparationMs: number | null = null;
+  private roughLeafCleanupDrainMs: number | null = null;
+  private readonly roughLeafPhaseTimings: OutdoorPreparationPhaseTiming[] = [];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -494,6 +610,9 @@ export class OutdoorEnvironment {
       blend: this.interval.blend,
       capturesCompleted: this.capturesCompleted,
       preparationMs: this.preparationMs,
+      preparationStartedAtMs: this.preparationStartedAtMs,
+      cleanupDrainMs: this.preparationCleanupDrainMs,
+      phaseTimings: this.phaseTimings.map((timing) => timing.snapshot()),
       roughLeaf: {
         enabled: this.enableRoughLeaf,
         state: this.roughLeafState,
@@ -503,6 +622,13 @@ export class OutdoorEnvironment {
         baseColorBytes:
           this.roughLeafTargets.length * OUTDOOR_ROUGH_LEAF_MAP.bytesPerPhase,
         capturesCompleted: this.roughLeafCapturesCompleted,
+        preparationMs: this.roughLeafPreparationMs,
+        cleanupDrainMs: this.roughLeafCleanupDrainMs,
+        completionTiming:
+          "completionMs contains overlapping drainMs and scopePopMs; do not sum these waits",
+        phaseTimings: this.roughLeafPhaseTimings.map((timing) =>
+          timing.snapshot(),
+        ),
       },
     };
   }
@@ -526,6 +652,7 @@ export class OutdoorEnvironment {
         if (this.closed) throw new Error("Outdoor preparation cancelled");
         this.working = true;
         const started = performance.now();
+        this.preparationStartedAtMs = started;
         const renderer = graphics.renderer;
         let generator: THREE.PMREMGenerator | undefined;
         let submittedDevice: GPUDevice | undefined;
@@ -538,12 +665,18 @@ export class OutdoorEnvironment {
             throw new Error("Outdoor lighting requires initialized WebGPU");
           generator = new THREE.PMREMGenerator(renderer);
           submittedDevice = device;
-          for (const samplePhase of OUTDOOR_ENVIRONMENT_PHASES) {
+          for (const [
+            phaseIndex,
+            samplePhase,
+          ] of OUTDOOR_ENVIRONMENT_PHASES.entries()) {
             if (this.closed) throw new Error("Outdoor preparation cancelled");
-            const calibration = calibrateOutdoorCapture(
-              capture,
+            const timing = new OutdoorPreparationPhaseTiming(
+              phaseIndex,
               samplePhase,
-              this.calibration,
+            );
+            this.phaseTimings.push(timing);
+            const calibration = timing.measure("calibrationMs", () =>
+              calibrateOutdoorCapture(capture, samplePhase, this.calibration),
             );
             capture.setPhase(
               samplePhase,
@@ -567,11 +700,17 @@ export class OutdoorEnvironment {
             target.texture.name = `OutdoorSky.phase-${samplePhase}`;
             target.scissorTest = true;
             this.targets.push(target); // Own before a potentially throwing render.
-            this.capture(renderer, generator, capture.scene, target);
-            await device.queue.onSubmittedWorkDone();
+            timing.measure("captureCpuMs", () =>
+              this.capture(renderer, generator!, capture.scene, target),
+            );
+            await timing.measureAsync("drainMs", () =>
+              device.queue.onSubmittedWorkDone(),
+            );
             this.capturesCompleted++;
+            timing.finish(true);
           }
           if (this.enableRoughLeaf) {
+            const roughLeafStarted = performance.now();
             try {
               await this.prepareRoughLeaf(renderer, device);
             } catch (error) {
@@ -581,6 +720,9 @@ export class OutdoorEnvironment {
               // A cancelled queue operation cannot publish even the stock graph.
               // A failed optional bake otherwise leaves all ordinary PMREMs intact.
               if (this.closed) throw error;
+            } finally {
+              this.roughLeafPreparationMs =
+                performance.now() - roughLeafStarted;
             }
           }
           if (this.closed) throw new Error("Outdoor preparation cancelled");
@@ -598,11 +740,16 @@ export class OutdoorEnvironment {
         } catch (error) {
           errors.push(error);
         } finally {
+          this.phaseTimings.at(-1)?.finish(false);
           // Also drain a partial/throwing capture before retiring its targets.
-          // Device loss rejects the drain; it cannot leave valid work in flight.
+          // Settlement alone is not device-liveness evidence after device loss.
+          const drainStarted = performance.now();
           await submittedDevice?.queue
             .onSubmittedWorkDone()
             .catch(() => undefined);
+          this.preparationCleanupDrainMs = submittedDevice
+            ? performance.now() - drainStarted
+            : null;
           this.preparationMs = performance.now() - started;
           cleanupAfter(errors, [
             () => generator?.dispose(),
@@ -720,31 +867,7 @@ export class OutdoorEnvironment {
     )
       throw new Error("Rough-leaf preparation requires twelve live PMREMs");
     this.roughLeafState = "preparing";
-    for (const [index, source] of this.targets.entries()) {
-      if (this.closed) throw new Error("Outdoor preparation cancelled");
-      const target = new THREE.RenderTarget(
-        OUTDOOR_ROUGH_LEAF_MAP.width,
-        OUTDOOR_ROUGH_LEAF_MAP.height,
-        {
-          minFilter: THREE.LinearFilter,
-          magFilter: THREE.LinearFilter,
-          generateMipmaps: false,
-          type: THREE.HalfFloatType,
-          format: THREE.RGBAFormat,
-          colorSpace: THREE.LinearSRGBColorSpace,
-          depthBuffer: false,
-          stencilBuffer: false,
-          samples: 0,
-        },
-      );
-      target.texture.name = `OutdoorSky.rough-leaf-phase-${OUTDOOR_ENVIRONMENT_PHASES[index]}`;
-      target.texture.wrapS = target.texture.wrapT = THREE.ClampToEdgeWrapping;
-      target.texture.matrixAutoUpdate = false;
-      this.roughLeafTargets.push(target); // Own before any compilation/render.
-      await this.bakeRoughLeafPhase(renderer, device, source.texture, target);
-      if (this.closed) throw new Error("Outdoor preparation cancelled");
-      this.roughLeafCapturesCompleted++;
-    }
+    await this.bakeRoughLeafPhases(renderer, device);
     this.publishRoughLeaf();
   }
 
@@ -781,33 +904,26 @@ export class OutdoorEnvironment {
     this.roughLeafState = "ready";
   }
 
-  private async bakeRoughLeafPhase(
+  private async bakeRoughLeafPhases(
     renderer: ClientGraphics["renderer"],
     device: GPUDevice,
-    source: THREE.Texture,
-    target: THREE.RenderTarget,
   ): Promise<void> {
     const material = new THREE.NodeMaterial();
     let pmrem: ReturnType<typeof pmremTexture> | null = null;
     let compilation: Promise<void> | undefined;
     let restoreCallback: (() => void) | undefined;
     let assertBuilder: (() => void) | undefined;
-    let scopes = 0;
+    let phaseWorkDrained = false;
     const errors: unknown[] = [];
     const requireBake = (condition: unknown, message: string) => {
       if (!condition) throw new Error(`Rough-leaf bake: ${message}`);
     };
     try {
-      requireBake(
-        source.isRenderTargetTexture &&
-          source.mapping === THREE.CubeUVReflectionMapping,
-        "owned render-target PMREM required",
-      );
       const direction = createOutdoorRoughLeafDirection(uv());
       // PMREMNode performs its own Y flip. Cancel it here and use the bake
       // material's identity environment rotation; NO phase/intensity/π gains.
       pmrem = pmremTexture(
-        source,
+        this.targets[0].texture,
         vec3(direction.x, direction.y.negate(), direction.z),
         float(1),
       );
@@ -876,54 +992,149 @@ export class OutdoorEnvironment {
             ),
           "owned roughness-one shader required; compiler fallback rejected",
         );
-      for (const filter of [
-        "out-of-memory",
-        "internal",
-        "validation",
-      ] as const) {
-        device.pushErrorScope(filter);
-        scopes++;
+      // Every source has the same PMREM layout and render-target Y convention;
+      // only its sampled texture changes. Retain one quad/material/node graph
+      // so all twelve phases reuse the first compiled pipeline. PMREMNode.value
+      // resets its cached source; its per-render update retargets the binding.
+      for (const [index, source] of this.targets.entries()) {
+        if (this.closed) throw new Error("Outdoor preparation cancelled");
+        phaseWorkDrained = false;
+        const timing = new OutdoorPreparationPhaseTiming(
+          index,
+          OUTDOOR_ENVIRONMENT_PHASES[index],
+        );
+        this.roughLeafPhaseTimings.push(timing);
+        requireBake(
+          source.texture.isRenderTargetTexture &&
+            source.texture.mapping === THREE.CubeUVReflectionMapping,
+          "owned render-target PMREM required",
+        );
+        pmrem.value = source.texture;
+        const target = new THREE.RenderTarget(
+          OUTDOOR_ROUGH_LEAF_MAP.width,
+          OUTDOOR_ROUGH_LEAF_MAP.height,
+          {
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            generateMipmaps: false,
+            type: THREE.HalfFloatType,
+            format: THREE.RGBAFormat,
+            colorSpace: THREE.LinearSRGBColorSpace,
+            depthBuffer: false,
+            stencilBuffer: false,
+            samples: 0,
+          },
+        );
+        target.texture.name = `OutdoorSky.rough-leaf-phase-${OUTDOOR_ENVIRONMENT_PHASES[index]}`;
+        target.texture.wrapS = target.texture.wrapT = THREE.ClampToEdgeWrapping;
+        target.texture.matrixAutoUpdate = false;
+        this.roughLeafTargets.push(target); // Own before any compilation/render.
+        const phaseErrors: unknown[] = [];
+        let scopes = 0;
+        try {
+          for (const filter of [
+            "out-of-memory",
+            "internal",
+            "validation",
+          ] as const) {
+            device.pushErrorScope(filter);
+            scopes++;
+          }
+          if (compilation === undefined) {
+            await timing.measureAsync("compileMs", async () => {
+              this.withCaptureState(
+                renderer,
+                () => {
+                  compilation = renderer.compileAsync(quad, quad.camera);
+                },
+                target,
+              );
+              await compilation;
+            });
+          }
+          assertBuilder();
+          const issued = timing.measure("drawCpuMs", () =>
+            this.withCaptureState(
+              renderer,
+              () => {
+                const before = renderer.info.render.drawCalls;
+                // QuadMesh.render temporarily overwrites vertexNode without finally.
+                // Use the same explicit fullscreen vertex for compile and draw instead.
+                renderer.render(quad, quad.camera);
+                return renderer.info.render.drawCalls - before;
+              },
+              target,
+            ),
+          );
+          requireBake(issued === 1, "one real phase-map draw required");
+        } catch (error) {
+          phaseErrors.push(error);
+        } finally {
+          await compilation?.catch((error) => {
+            if (!phaseErrors.includes(error)) phaseErrors.push(error);
+          });
+          // Compilation (including a partial failure) has settled, so every
+          // phase command is now submitted. Start its one drain and remove all
+          // scopes immediately, then await ALL results before acceptance or
+          // retirement. The same boundary also protects failed/partial draws.
+          await timing.measureAsync("completionMs", async () => {
+            const drain = timing.measureAsync("drainMs", () =>
+              device.queue.onSubmittedWorkDone(),
+            );
+            const pops: Array<() => ReturnType<GPUDevice["popErrorScope"]>> =
+              [];
+            while (scopes > 0) {
+              scopes--;
+              pops.push(() => device.popErrorScope());
+            }
+            const scopeResults = timing.measureAsync("scopePopMs", () =>
+              settleOutdoorPreparationOperations(pops),
+            );
+            const [drained, popped] = await Promise.allSettled([
+              drain,
+              scopeResults,
+            ]);
+            if (drained.status === "fulfilled") phaseWorkDrained = true;
+            else phaseErrors.push(drained.reason);
+            if (popped.status === "rejected") phaseErrors.push(popped.reason);
+            else {
+              for (const result of popped.value) {
+                if (result.status === "rejected")
+                  phaseErrors.push(result.reason);
+                else if (result.value)
+                  phaseErrors.push(new Error(result.value.message));
+              }
+            }
+          });
+          cleanupAfter(phaseErrors, [
+            assertBuilder,
+            () =>
+              requireBake(
+                renderer.hasInitialized() &&
+                  Reflect.get(renderer, "_isDeviceLost") !== true &&
+                  (renderer.backend as unknown as { device?: GPUDevice })
+                    .device === device,
+                "live original WebGPU device required",
+              ),
+          ]);
+        }
+        if (this.closed) throw new Error("Outdoor preparation cancelled");
+        this.roughLeafCapturesCompleted++;
+        timing.finish(true);
       }
-      this.withCaptureState(
-        renderer,
-        () => {
-          compilation = renderer.compileAsync(quad, quad.camera);
-        },
-        target,
-      );
-      await compilation;
-      assertBuilder();
-      const issued = this.withCaptureState(
-        renderer,
-        () => {
-          const before = renderer.info.render.drawCalls;
-          // QuadMesh.render temporarily overwrites vertexNode without finally.
-          // Use the same explicit fullscreen vertex for compile and draw instead.
-          renderer.render(quad, quad.camera);
-          return renderer.info.render.drawCalls - before;
-        },
-        target,
-      );
-      requireBake(issued === 1, "one real phase-map draw required");
-      await device.queue.onSubmittedWorkDone();
-      assertBuilder();
     } catch (error) {
       errors.push(error);
     } finally {
+      this.roughLeafPhaseTimings.at(-1)?.finish(false);
       await compilation?.catch((error) => {
         if (!errors.includes(error)) errors.push(error);
       });
-      await device.queue
-        .onSubmittedWorkDone()
-        .catch((error) => errors.push(error));
-      while (scopes > 0) {
-        scopes--;
-        try {
-          const error = await device.popErrorScope();
-          if (error) errors.push(new Error(error.message));
-        } catch (error) {
-          errors.push(error);
-        }
+      if (!phaseWorkDrained) {
+        const drainStarted = performance.now();
+        await device.queue
+          .onSubmittedWorkDone()
+          .catch((error) => errors.push(error));
+        this.roughLeafCleanupDrainMs = performance.now() - drainStarted;
       }
       cleanupAfter(errors, [
         () => assertBuilder?.(),
