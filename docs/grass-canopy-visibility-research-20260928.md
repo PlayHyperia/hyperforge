@@ -1,5 +1,40 @@
 # Grass canopy visibility: research checkpoint
 
+## Native266 — connected-tree motion passes native GPU correctness
+
+**The tree-motion prerequisite now has actual GPU evidence; the full-scene temporal-AA experiment is still not enabled.** This targets a possible replacement for the measured 8.50–9.05 ms primary-MSAA cost. It does not claim those savings, full-game temporal quality, or 60 FPS.
+
+### Implementation
+
+- `TreeMotionMaterial` explicitly borrows a connected-wind BatchedMesh and material, clones only the material, and retains prior consumed time, strength and wind direction. Default materials and renderer options remain unchanged. Its caller must keep source resources alive and dispose the experimental owner.
+- Instance history is bounded to 512 slots. Active slot object identity, visibility, geometry ID, all 16 transform values, geometry/attribute identity and versions determine validity. New/recycled/moved/changed instances, returning hidden instances, frame gaps and clock resets reject history. Indirect draw reordering does not change logical identity. Stable neighboring trees keep their history.
+- One owned RGBA8 validity texture is at most 2 KiB; CPU bookkeeping and a small readiness uniform are additional. Native velocity-enabled batching still allocates its own previous matrices; this is not a zero-memory-cost feature.
+- The explicit primary MRT must use `treeMotionVelocity`. Unregistered materials retain native velocity. Changed instances emit a finite out-of-range NDC velocity, causing [Three's TRAA resolve](https://threejs.org/docs/pages/TRAANode.html) to reject old samples. Material-level MRT output is deliberately left null: it would otherwise replace color output in ordinary reflection render targets.
+- Native testing caught a real integration defect: r186 TextureNode.setup rewrites its update type, so attaching the instance callback to that texture did not schedule history updates. A consumed readiness uniform now schedules the update before bindings upload. This was fixed before checkpointing, not excused by CPU test passes.
+
+### Verification and limits
+
+**400 tests pass across seven focused files.** Tree additions cover ownership, bounded storage, first/stable/skipped/reset frames, same-frame idempotence, slot recycling with identical geometry/pose, per-instance movement/visibility/LOD changes, indirect remapping, geometry mutation, renderer/owner rejection, disposal, unchanged no-velocity position-node identity, and prior wind arithmetic. Grass/history tests from Native265 still pass. Scoped ESLint and diff checks pass; full shared typecheck still reports only the five pre-existing procgen-export/recipe errors. The ten older meadow snapshot/shape failures remain separate known debt.
+
+Two native Chrome WebGPU fixture runs agree by labeled result, including a repeated run against the final source bytes:
+
+| GPU readback | Result |
+| --- | --- |
+| First frame | All 4,784 covered tree pixels reject history. |
+| Unchanged next frame | No rejection; motion is exactly zero. |
+| Wind changed, after an ordinary reflection pass | 4,808 of 4,810 covered pixels carry motion; none reject history. |
+| One same-pose instance recycled | Only that tree's 2,397 pixels reject history; its neighbor remains valid. |
+| Stable frame after recycling | No rejection; motion returns to exactly zero. |
+| Secondary color target, source vs motion material | All readback components match exactly; 14,430 nonzero color components confirm visible geometry. |
+
+No captured console or GPU validation errors. This is a **small two-box deformation fixture**, not production foliage assets or a whole-game render. Readback targets are 192×192 RGBA16F; the display canvas is 1200×800 at DPR2. It proves actual shader execution/history scheduling and this reflection-color path—not 3024×1724 game performance, ghosting acceptance, actor/skinning correctness, or temporal-resolve quality.
+
+[Verified source pins, results and cleanup](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native266-verification.json). Raw capture SHA256: `bcd51934822a68408f573fdb7700315f0e4d57f70a8477bad0a7a364a46f5b4b`; compiled fixture SHA256: `f1e9adbab734e2fcc2feb94d9111a5399181d94f709553971b7336207c01b089`. The authoring harness and final bundle are retained beside that receipt. The owned native tab and local3344 fixture server are closed; the original New Tab remains, no database is created, public3333 is untouched, and all 42 inherited file hashes match.
+
+### Next gate
+
+Integrate a private full-island temporal compositor with grass and tree previous positions. Audit remaining deforming/animated shader consumers and isolate reflection/secondary passes; handle camera cuts, resize, first-frame reset and disposal. Then measure full-resolution net cost—including velocity attachments and resolve bandwidth—and inspect moving-camera foliage/disocclusion before any default promotion. Do not spend another checkpoint merely re-running this unchanged fixture. Native264's 36.0–37.2 ms wall medians remain the latest matched game baseline. **16.67 ms / 60 FPS at true 2× remains unmet.**
+
 ## Native265 prerequisite — motion-aware grass source, not a new FPS result
 
 **A bounded grass motion-vector implementation is ready for native qualification; temporal AA is not enabled.** Native259 measured an 8.50–9.05 ms cross-cutting cost from primary 4× MSAA, while plain single-sample and Native260 SMAA failed foliage appearance. This checkpoint develops the missing grass motion input for a different experiment. It neither recovers those milliseconds nor changes the public/default AA, resolution, scene content or filtering.

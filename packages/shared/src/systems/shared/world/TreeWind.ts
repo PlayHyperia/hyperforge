@@ -1,5 +1,6 @@
 import THREE from "../../../extras/three/three";
 import type { Node } from "three/webgpu";
+import { previousFrameVector4 } from "../../../utils/rendering/PreviousFrameUniform";
 import {
   Fn,
   attribute,
@@ -13,16 +14,20 @@ import {
   min,
   normalLocal,
   positionLocal,
+  positionPrevious,
   sin,
   storage,
   tangentGeometry,
   tangentLocal,
   textureLoad,
+  uniform,
   vec3,
+  vec2,
   vec4,
+  velocity,
 } from "three/tsl";
 
-/** No material integration here. The caller owns every cloned geometry and
+/** Default geometry/deformation helpers are caller-owned. The caller owns every cloned geometry and
  * retains the existing renderer/texture/storage lifetimes. r186 applies this
  * position node AFTER batching/instancing, with the pool at world identity.
  * Instance transforms must remain upright yaw + positive uniform scale. */
@@ -34,6 +39,17 @@ export interface TreeWindPoolOptions {
 }
 const MAX_VERTICES = 2_000_000;
 const IDENTITY = new THREE.Matrix4();
+const connectedWindPositions = new WeakMap<Node, TreeWindInputs>();
+const motionVelocities = new WeakMap<THREE.Material, Node<"vec2">>();
+// r186's VelocityNode declaration omits its TSL vec2 extensions.
+const nativeVelocity = velocity as unknown as Node<"vec2">;
+
+/** Use as the primary temporal scene MRT's velocity output. Ordinary materials
+ * retain native velocity. Keeping this out of material.mrtNode is essential:
+ * that property also replaces color output in non-MRT reflection targets. */
+export const treeMotionVelocity = Fn(
+  (builder) => motionVelocities.get(builder.material) ?? nativeVelocity,
+)();
 
 export interface TreeWindDescriptor {
   readonly schemaVersion: 1;
@@ -278,7 +294,7 @@ export function createTreeWindBendNodes(
  * normals use J^-T. Preserve handedness in the unchanged geometry W component.
  * Native r186 shadow override forwards this same positionNode automatically. */
 export function createTreeWindPositionNode(wind: TreeWindInputs): Node<"vec3"> {
-  return Fn((builder) => {
+  const position = Fn((builder) => {
     const metadata = builder.geometry.getAttribute(TREE_WIND_ATTRIBUTE);
     if (
       !metadata ||
@@ -317,6 +333,249 @@ export function createTreeWindPositionNode(wind: TreeWindInputs): Node<"vec3"> {
     const displacement = bend.displacement.toVar();
     return positionLocal.add(vec3(displacement.x, 0, displacement.y));
   })();
+  connectedWindPositions.set(position, wind);
+  return position;
+}
+
+type BatchMotionSlot = {
+  active: boolean;
+  visible: boolean;
+  geometryIndex: number;
+};
+
+/** Private temporal-AA prerequisite for static connected-wind batches. It
+ * rejects only changed/recycled instances, rather than resetting a whole
+ * forest whenever one tree changes LOD. No additional owned previous-matrix
+ * GPU copy; native velocity-enabled batching still allocates its own history.
+ * It owns one <=2 KiB RGBA8 validity texture and one experimental material.
+ * The original batch, geometry, material, uniforms and textures stay borrowed.
+ */
+export class TreeMotionMaterial {
+  readonly material: THREE.MeshStandardNodeMaterial;
+  readonly validityTexture: THREE.DataTexture;
+  private readonly validityData: Uint8Array;
+  private readonly matrices: Float32Array;
+  private readonly slots: (BatchMotionSlot | undefined)[];
+  private readonly geometryIds: Int32Array;
+  private readonly visible: Uint8Array;
+  private frameId = -1;
+  private renderer: THREE.Renderer | null = null;
+  private geometry: THREE.BufferGeometry | null = null;
+  private geometryVersion = "";
+  private geometryAttributes: readonly unknown[] = [];
+  private disposed = false;
+
+  constructor(
+    private readonly batch: THREE.BatchedMesh,
+    source: THREE.MeshStandardNodeMaterial,
+  ) {
+    const wind =
+      source.positionNode instanceof THREE.Node
+        ? connectedWindPositions.get(source.positionNode)
+        : undefined;
+    if (
+      THREE.REVISION !== "186" ||
+      !(batch instanceof THREE.BatchedMesh) ||
+      batch.maxInstanceCount < 1 ||
+      batch.maxInstanceCount > 512 ||
+      !batch.matrixWorld.equals(IDENTITY) ||
+      !wind ||
+      source.mrtNode !== null ||
+      !(wind.time instanceof THREE.UniformNode) ||
+      typeof wind.time.value !== "number" ||
+      !(wind.strength instanceof THREE.UniformNode) ||
+      typeof wind.strength.value !== "number" ||
+      !(wind.direction instanceof THREE.UniformNode) ||
+      !(wind.direction.value instanceof THREE.Vector2)
+    )
+      throw new Error(
+        "Tree motion requires an r186 static connected-wind batch and owned uniforms",
+      );
+    const time = wind.time,
+      strength = wind.strength,
+      direction = wind.direction;
+    const previous = previousFrameVector4((_frame, target) =>
+      target.set(
+        time.value,
+        strength.value,
+        direction.value.x,
+        direction.value.y,
+      ),
+    );
+    const capacity = batch.maxInstanceCount;
+    const width = Math.min(32, capacity),
+      height = Math.ceil(capacity / width);
+    this.validityData = new Uint8Array(width * height * 4);
+    this.validityTexture = new THREE.DataTexture(
+      this.validityData,
+      width,
+      height,
+    );
+    this.validityTexture.name = "tree-motion-instance-validity";
+    this.validityTexture.minFilter = THREE.NearestFilter;
+    this.validityTexture.magFilter = THREE.NearestFilter;
+    this.validityTexture.generateMipmaps = false;
+    this.validityTexture.needsUpdate = true;
+    this.matrices = new Float32Array(capacity * 16);
+    this.slots = new Array(capacity);
+    this.geometryIds = new Int32Array(capacity).fill(-1);
+    this.visible = new Uint8Array(capacity);
+    this.material = source.clone();
+    const current = source.positionNode as Node<"vec3">;
+    this.material.positionNode = Fn((builder) => {
+      if (this.disposed || builder.object !== batch)
+        throw new Error("Tree motion material has lost its live batch owner");
+      const needsPrevious: unknown = Reflect.get(builder, "needsPreviousData");
+      if (typeof needsPrevious !== "function")
+        throw new Error(
+          "Tree motion requires the native previous-data contract",
+        );
+      if (needsPrevious.call(builder) === true) {
+        const sceneMRT = builder.renderer.getMRT();
+        if (
+          sceneMRT?.has("velocity") &&
+          sceneMRT.get("velocity") !== treeMotionVelocity
+        )
+          throw new Error(
+            "Tree motion requires the tree-aware primary velocity output",
+          );
+        // For unchanged slots, current and previous instance transforms are
+        // identical. Recycled/moved/changed slots reject history in the MRT.
+        // Do not trust native per-object matrix history across mirror passes.
+        const frame = createTreeWindFrameNodes(batch);
+        const bend = createTreeWindBendNodes(
+          attribute(TREE_WIND_ATTRIBUTE, "vec2"),
+          frame,
+          { time: previous.x, strength: previous.y, direction: previous.zw },
+        ).displacement.toVar("treePreviousWindDisplacement");
+        positionPrevious.assign(positionLocal.add(vec3(bend.x, 0, bend.y)));
+      }
+      return current;
+    })();
+    const id = int(batchIndirectIndex);
+    // TextureNode.setup() rewrites its own update type in r186. Schedule the
+    // upload from a consumed uniform instead, otherwise the flags never advance.
+    const ready = uniform(1).onObjectUpdate((frame) => {
+      this.prepare(frame);
+      return 1;
+    });
+    const valid = textureLoad(
+      this.validityTexture,
+      ivec2(id.mod(width), id.div(width)),
+    )
+      .x.greaterThan(0.5)
+      .and(ready.greaterThan(0));
+    // A finite +4 NDC offset places every reprojected UV outside [0,1],
+    // making the native TRAA resolve reject stale history for this instance.
+    motionVelocities.set(this.material, valid.select(nativeVelocity, vec2(4)));
+  }
+
+  /** Called only by the velocity readiness uniform, once per renderer frame.
+   * Source membership is settled before any render passes by the tree owner. */
+  prepare(frame: THREE.NodeFrame): void {
+    if (this.disposed || frame.object !== this.batch || !frame.renderer)
+      throw new Error("Tree motion requires its live batch and renderer");
+    if (this.renderer && this.renderer !== frame.renderer)
+      throw new Error("Tree motion textures cannot be shared across renderers");
+    this.renderer = frame.renderer;
+    if (frame.frameId === this.frameId) return;
+    if (!this.batch.matrixWorld.equals(IDENTITY))
+      throw new Error("Tree motion batch transform must remain identity");
+    const slots: unknown = Reflect.get(this.batch, "_instanceInfo");
+    const matrices: unknown = Reflect.get(this.batch, "_matricesTexture");
+    if (
+      this.batch.maxInstanceCount !== this.slots.length ||
+      !Array.isArray(slots) ||
+      slots.length > this.slots.length ||
+      !(matrices instanceof THREE.DataTexture) ||
+      !(matrices.image.data instanceof Float32Array) ||
+      matrices.image.data.length < this.matrices.length
+    )
+      throw new Error("Tree motion batch storage contract changed");
+    const geometry = this.batch.geometry;
+    const attributes = [
+      geometry.getAttribute("position"),
+      geometry.getAttribute(TREE_WIND_ATTRIBUTE),
+      geometry.index,
+    ];
+    const version = (
+      attribute:
+        THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined,
+    ) =>
+      attribute instanceof THREE.InterleavedBufferAttribute
+        ? attribute.data.version
+        : attribute?.version;
+    const versions = [
+      version(geometry.getAttribute("position")),
+      version(geometry.getAttribute(TREE_WIND_ATTRIBUTE)),
+      geometry.index?.version,
+    ].join("/");
+    const continuing =
+      this.frameId >= 0 &&
+      frame.frameId === this.frameId + 1 &&
+      this.geometry === geometry &&
+      this.geometryVersion === versions &&
+      attributes.every(
+        (value, index) => value === this.geometryAttributes[index],
+      );
+    let changed = false;
+    for (let id = 0; id < this.slots.length; id++) {
+      const raw: unknown = slots[id];
+      if (
+        raw !== undefined &&
+        (!raw ||
+          typeof raw !== "object" ||
+          !("active" in raw) ||
+          typeof raw.active !== "boolean" ||
+          !("visible" in raw) ||
+          typeof raw.visible !== "boolean" ||
+          !("geometryIndex" in raw) ||
+          !Number.isInteger(raw.geometryIndex))
+      )
+        throw new Error("Tree motion instance identity contract changed");
+      const slot = raw as BatchMotionSlot | undefined;
+      let valid =
+        continuing &&
+        !!slot?.active &&
+        slot.visible &&
+        this.slots[id] === slot &&
+        this.visible[id] === 1 &&
+        this.geometryIds[id] === slot.geometryIndex;
+      const start = id * 16;
+      for (let component = 0; component < 16; component++) {
+        const value = matrices.image.data[start + component];
+        if (!Number.isFinite(value))
+          throw new Error("Nonfinite tree motion matrix");
+        if (this.matrices[start + component] !== value) valid = false;
+        this.matrices[start + component] = value;
+      }
+      const byte = valid ? 255 : 0;
+      if (this.validityData[id * 4] !== byte) {
+        this.validityData[id * 4] = byte;
+        changed = true;
+      }
+      this.slots[id] = slot;
+      this.visible[id] = slot?.active && slot.visible ? 1 : 0;
+      this.geometryIds[id] = slot?.geometryIndex ?? -1;
+    }
+    if (changed) this.validityTexture.needsUpdate = true;
+    this.geometry = geometry;
+    this.geometryVersion = versions;
+    this.geometryAttributes = attributes;
+    this.frameId = frame.frameId;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.material.dispose();
+    motionVelocities.delete(this.material);
+    this.validityTexture.dispose();
+    this.slots.fill(undefined);
+    this.geometryAttributes = [];
+    this.geometry = null;
+    this.renderer = null;
+  }
 }
 
 /** CPU oracle of the documented equations, not an alternative runtime path. */

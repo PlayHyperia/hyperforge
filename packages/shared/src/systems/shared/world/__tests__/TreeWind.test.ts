@@ -7,17 +7,23 @@ import {
   batchIndirectIndex,
   float,
   instanceIndex,
+  mrt,
   normalLocal,
+  output,
   positionLocal,
+  positionPrevious,
   tangentGeometry,
   tangentLocal,
   vec2,
   vec3,
+  uniform,
+  velocity,
 } from "three/tsl";
 import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
 import {
   TREE_WIND_ATTRIBUTE,
   TREE_WIND_MAX_DISPLACEMENT,
+  TreeMotionMaterial,
   assertTreeWindInstanceMatrix,
   cloneGeometryWithTreeWind,
   createTreeWindBendNodes,
@@ -25,6 +31,7 @@ import {
   createTreeWindPositionNode,
   deriveTreeWindDescriptor,
   evaluateTreeWindBend,
+  treeMotionVelocity,
 } from "../TreeWind";
 
 // Actual geometry, instance buffers, TSL arithmetic and NodeBuilder stacks.
@@ -238,6 +245,265 @@ const numeric = {
   directionX: 0.6,
   directionZ: 0.8,
 };
+
+function motionFixture(capacity = 4) {
+  const sourceGeometry = geometry([0, 6, 12]);
+  const owned = cloneGeometryWithTreeWind(
+    sourceGeometry,
+    deriveTreeWindDescriptor([sourceGeometry], 0),
+  );
+  const wind = {
+    time: uniform(7.3),
+    strength: uniform(1.2),
+    direction: uniform(new THREE.Vector2(0.6, 0.8)),
+  };
+  const source = new THREE.MeshStandardNodeMaterial();
+  source.positionNode = createTreeWindPositionNode(wind);
+  const batch = new THREE.BatchedMesh(capacity, 6, 0, source);
+  const firstGeometry = batch.addGeometry(owned);
+  const secondGeometry = batch.addGeometry(owned);
+  const first = batch.addInstance(firstGeometry);
+  const second = batch.addInstance(firstGeometry);
+  batch.setMatrixAt(first, new THREE.Matrix4().makeTranslation(449, 28, 410));
+  const dom = new JSDOM("<canvas></canvas><canvas></canvas>");
+  const canvases = dom.window.document.querySelectorAll("canvas");
+  const renderer = new THREE.WebGPURenderer({ canvas: canvases[0] });
+  const otherRenderer = new THREE.WebGPURenderer({ canvas: canvases[1] });
+  const frame = new THREE.NodeFrame();
+  frame.renderer = renderer;
+  frame.object = batch;
+  const motion = new TreeMotionMaterial(batch, source);
+  const tick = (id: number) => {
+    frame.frameId = id;
+    frame.renderId++;
+    motion.prepare(frame);
+    return [0, 1].map((id) => motion.validityTexture.image.data[id * 4]);
+  };
+  return {
+    batch,
+    source,
+    owned,
+    wind,
+    motion,
+    frame,
+    renderer,
+    otherRenderer,
+    first,
+    second,
+    firstGeometry,
+    secondGeometry,
+    tick,
+    dispose() {
+      motion.dispose();
+      batch.dispose();
+      source.dispose();
+      owned.dispose();
+      sourceGeometry.dispose();
+      renderer.dispose();
+      otherRenderer.dispose();
+      dom.window.close();
+    },
+  };
+}
+
+describe("explicit tree temporal prerequisite (no native GPU claim)", () => {
+  it("keeps source ownership, first-frame rejection and per-frame bounded uploads", () => {
+    const f = motionFixture(512);
+    const sourcePosition = f.source.positionNode;
+    try {
+      expect(f.motion.validityTexture.image.data.byteLength).toBe(2048);
+      expect(f.batch.material).toBe(f.source);
+      expect(f.source.positionNode).toBe(sourcePosition);
+      expect(f.motion.material.mrtNode).toBeNull();
+      expect(f.source.mrtNode).toBeNull();
+      expect(f.tick(10)).toEqual([0, 0]);
+      expect(f.tick(11)).toEqual([255, 255]);
+      const version = f.motion.validityTexture.version;
+      expect(f.tick(11)).toEqual([255, 255]);
+      expect(f.tick(12)).toEqual([255, 255]);
+      expect(f.motion.validityTexture.version).toBe(version);
+      expect(f.tick(15)).toEqual([0, 0]); // A culled frame cannot reuse old coverage.
+      expect(f.tick(1)).toEqual([0, 0]);
+      expect(f.tick(2)).toEqual([255, 255]);
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each(["recycled", "moved", "hidden", "geometry"] as const)(
+    "rejects %s slots without throwing away a stable neighboring tree",
+    (change) => {
+      const f = motionFixture();
+      try {
+        f.tick(1);
+        f.tick(2);
+        if (change === "recycled") {
+          const matrix = new THREE.Matrix4();
+          f.batch.getMatrixAt(f.first, matrix);
+          f.batch.deleteInstance(f.first);
+          expect(f.batch.addInstance(f.firstGeometry)).toBe(f.first);
+          f.batch.setMatrixAt(f.first, matrix);
+        } else if (change === "moved") {
+          f.batch.setMatrixAt(
+            f.first,
+            new THREE.Matrix4().makeTranslation(450, 28, 410),
+          );
+        } else if (change === "hidden") {
+          f.batch.setVisibleAt(f.first, false);
+        } else {
+          f.batch.setGeometryIdAt(f.first, f.secondGeometry);
+        }
+        expect(f.tick(3)).toEqual([0, 255]);
+        if (change === "hidden") {
+          f.batch.setVisibleAt(f.first, true);
+          expect(f.tick(4)).toEqual([0, 255]);
+          expect(f.tick(5)).toEqual([255, 255]);
+        } else expect(f.tick(4)).toEqual([255, 255]);
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it("retains native indirect identity and invalidates changed vertex data", () => {
+    const f = motionFixture();
+    try {
+      f.tick(1);
+      f.tick(2);
+      const indirect: unknown = Reflect.get(f.batch, "_indirectTexture");
+      if (!(indirect instanceof THREE.DataTexture))
+        throw new Error("Missing native indirect texture");
+      [indirect.image.data[0], indirect.image.data[1]] = [1, 0];
+      indirect.needsUpdate = true;
+      expect(f.tick(3)).toEqual([255, 255]);
+      f.batch.geometry.getAttribute(TREE_WIND_ATTRIBUTE).needsUpdate = true;
+      expect(f.tick(4)).toEqual([0, 0]);
+      expect(f.tick(5)).toEqual([255, 255]);
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("fails closed for a different renderer/owner/transform and disposes only owned resources", () => {
+    const f = motionFixture();
+    let sourceDisposals = 0,
+      ownedDisposals = 0;
+    f.source.addEventListener("dispose", () => sourceDisposals++);
+    f.motion.material.addEventListener("dispose", () => ownedDisposals++);
+    try {
+      f.tick(1);
+      f.frame.renderer = f.otherRenderer;
+      expect(() => f.tick(2)).toThrow("across renderers");
+      f.frame.renderer = f.renderer;
+      f.frame.object = new THREE.Object3D();
+      expect(() => f.tick(2)).toThrow("live batch");
+      f.frame.object = f.batch;
+      f.batch.matrixWorld.makeTranslation(1, 0, 0);
+      expect(() => f.tick(2)).toThrow("identity");
+      f.batch.matrixWorld.identity();
+      f.motion.dispose();
+      f.motion.dispose();
+      expect(ownedDisposals).toBe(1);
+      expect(sourceDisposals).toBe(0);
+      expect(() => f.tick(2)).toThrow("live batch");
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("leaves ordinary/reflection position graphs unchanged and reconstructs prior wind inputs", () => {
+    const f = motionFixture();
+    function expandMotion() {
+      f.batch.material = f.motion.material;
+      const builder = new WGSLNodeBuilder(f.batch, f.renderer);
+      Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+      Reflect.set(builder, "shaderStage", "vertex");
+      const add = Reflect.get(builder, "addStack"),
+        remove = Reflect.get(builder, "removeStack");
+      if (typeof add !== "function" || typeof remove !== "function")
+        throw new Error("Missing actual stack");
+      add.call(builder);
+      try {
+        let call = actualNode(f.motion.material.positionNode);
+        while (Reflect.get(call, "isVarNode"))
+          call = actualNode(Reflect.get(call, "node"));
+        const shader = actualNode(Reflect.get(call, "shaderNode"));
+        const callback: unknown = Reflect.get(shader, "jsFunc");
+        if (typeof callback !== "function")
+          throw new Error("Missing actual motion factory");
+        const result = actualNode(callback(builder));
+        const assignments = [...stackNodes(builder)];
+        return { result, assignments, builder };
+      } finally {
+        remove.call(builder);
+      }
+    }
+    const target = new THREE.RenderTarget(4, 4);
+    try {
+      expect(expandMotion().result).toBe(f.source.positionNode);
+      expect(expandMotion().assignments).toHaveLength(0);
+      f.renderer.setRenderTarget(target);
+      expect(expandMotion().result).toBe(f.source.positionNode);
+      expect(expandMotion().assignments).toHaveLength(0);
+      f.renderer.setMRT(mrt({ output, velocity }));
+      expect(expandMotion).toThrow("tree-aware");
+      f.renderer.setMRT(mrt({ output, velocity: treeMotionVelocity }));
+      const active = expandMotion();
+      expect(active.result).toBe(f.source.positionNode);
+      const assignment = active.assignments.find(
+        (n) => Reflect.get(n, "targetNode") === positionPrevious,
+      );
+      if (!assignment) throw new Error("Missing actual previous assignment");
+      const previous = actualNode(Reflect.get(assignment, "sourceNode"));
+      const graph = new Set<Node>();
+      const visit = (n: Node) => {
+        if (graph.has(n)) return;
+        graph.add(n);
+        if (graph.size > 1024) throw new Error("Graph exceeds bound");
+        for (const child of n.getChildren()) visit(child);
+      };
+      visit(previous);
+      const history = [...graph].find(
+        (n) =>
+          n instanceof THREE.UniformNode && n.value instanceof THREE.Vector4,
+      );
+      if (!history) throw new Error("Missing previous wind uniform");
+      f.frame.frameId = 10;
+      f.frame.renderId = 1;
+      f.frame.updateNode(history);
+      f.wind.time.value = 8.1;
+      f.wind.strength.value = 0.3;
+      f.wind.direction.value.set(-1, 0);
+      f.frame.frameId = 11;
+      f.frame.renderId = 2;
+      f.frame.updateNode(history);
+      for (const height of [0, 3, 6, 12]) {
+        const inputs = new Map<Node, number[]>([
+          [batchIndirectIndex, [0]],
+          [positionLocal, [449, 28 + height, 410]],
+        ]);
+        for (const n of graph)
+          if (Reflect.get(n, "_attributeName") === TREE_WIND_ATTRIBUTE)
+            inputs.set(n, [height, 12]);
+        const actual = evaluator(inputs, active.builder)(previous);
+        const expected = evaluateTreeWindBend({
+          ...numeric,
+          heightAboveRoot: height,
+        }).displacement;
+        expect(actual[0]).toBeCloseTo(449 + expected[0], 10);
+        expect(actual[1]).toBe(28 + height);
+        expect(actual[2]).toBeCloseTo(410 + expected[1], 10);
+      }
+      expect(f.motion.material.mrtNode).toBeNull();
+      f.renderer.setMRT(null);
+      expect(expandMotion().result).toBe(f.source.positionNode);
+      expect(expandMotion().assignments).toHaveLength(0);
+    } finally {
+      target.dispose();
+      f.dispose();
+    }
+  });
+});
 
 describe("connected tree wind geometry ownership", () => {
   it("uses actual full LOD0 union, explicit root, shared part/LOD metadata and owned clones", () => {
