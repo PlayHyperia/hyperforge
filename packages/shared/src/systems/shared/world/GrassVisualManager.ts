@@ -74,6 +74,7 @@ import {
 } from "./TerrainShader";
 import { MeshSSSNodeMaterial, MeshStandardNodeMaterial } from "three/webgpu";
 import { faceDirection } from "three/tsl";
+import { previousFrameVector4 } from "../../../utils/rendering/PreviousFrameUniform";
 import type Node from "three/src/nodes/core/Node.js";
 import type Renderer from "three/src/renderers/common/Renderer.js";
 import {
@@ -111,6 +112,7 @@ import {
 import type { GrassGroundingWorkerPort } from "../../../utils/workers/GrassGroundingWorkerClient";
 import {
   createGroundedGrassMaterial,
+  registerGrassPreviousPosition,
   createMatrixFreeGrassGeometry,
   createMatrixFreeGrassMesh,
   supportsAdaptiveGrassDraw,
@@ -5103,6 +5105,21 @@ export class GrassVisualManager implements QuadTreeListener {
       ).toVar("naturalGrassFade");
       const wt = time.mul(uWindSpeed);
       const heightFlex = usesGrassBladeHeightFlex(this.geometryLayout);
+      // Read only by velocity shaders; the retained MSAA/shadow/reflection
+      // graphs do not schedule this history node or evaluate a second position.
+      const previousFrame = previousFrameVector4((frame, target) =>
+        target.set(frame.time, uPlayerPos.value.x, uPlayerPos.value.z, 0),
+      );
+      const previousDistance = vec3(
+        worldBase.x.sub(previousFrame.y),
+        0,
+        worldBase.z.sub(previousFrame.z),
+      ).length();
+      const previousFade = clamp(
+        float(1).sub(smoothstep(uFadeStart, uFadeEnd, previousDistance)),
+        0,
+        1,
+      );
       const nx = terrainNormal.x;
       const ny = terrainNormal.y;
       const nz = terrainNormal.z;
@@ -5144,7 +5161,11 @@ export class GrassVisualManager implements QuadTreeListener {
         sample: GrassMeadowRefinementSample | GrassMeadowRootFrameSample,
         label = "",
         profile: "original" | "footprint-arch" | "swept-blade" = "original",
+        previous = false,
       ): GrassMeadowRefinementResponse => {
+        const vertexFade = previous ? previousFade : fade;
+        const vertexTime = previous ? previousFrame.x.mul(uWindSpeed) : wt;
+        const vertexFrameValues = previous ? null : frameValues;
         const rawPosition = sample.position;
         const sourceNormal = sample.normal;
         const t =
@@ -5185,18 +5206,22 @@ export class GrassVisualManager implements QuadTreeListener {
         // Chunk-local offsets repeat at each chunk boundary. Key both waves to
         // the actual world-space clump base, not to an animated blade vertex.
         const displacement = vec3(
-          (frameValues
-            ? frameValues.x
-            : sin(wt.add(worldBase.x.mul(0.35)).add(worldBase.z.mul(0.12)))
+          (vertexFrameValues
+            ? vertexFrameValues.x
+            : sin(
+                vertexTime
+                  .add(worldBase.x.mul(0.35))
+                  .add(worldBase.z.mul(0.12)),
+              )
           )
             .mul(uWindStrength)
             .mul(bend)
             .mul(uBladeHeight),
           float(0),
-          (frameValues
-            ? frameValues.y
+          (vertexFrameValues
+            ? vertexFrameValues.y
             : sin(
-                wt
+                vertexTime
                   .mul(0.67)
                   .add(worldBase.x.mul(0.18))
                   .add(worldBase.z.mul(0.28))
@@ -5213,7 +5238,7 @@ export class GrassVisualManager implements QuadTreeListener {
         const position = turnToGround(
           vec3(
             rawPosition.x,
-            rawPosition.y.mul(fade).mul(bankHeightScale),
+            rawPosition.y.mul(vertexFade).mul(bankHeightScale),
             rawPosition.z,
           ).mul(scale),
         )
@@ -5256,7 +5281,7 @@ export class GrassVisualManager implements QuadTreeListener {
                     .mul(curveDerivative),
                 );
           const deformedNormal = horizontalNormal
-            .mul(fade)
+            .mul(vertexFade)
             .mul(bankHeightScale)
             .add(terrainNormal.mul(sourceNormal.y))
             .add(
@@ -5402,6 +5427,20 @@ export class GrassVisualManager implements QuadTreeListener {
         }),
       );
       mat.positionNode = surface.position;
+      registerGrassPreviousPosition(
+        surface.position,
+        () =>
+          evaluateVertex(
+            {
+              position: attribute("position", "vec3"),
+              normal: attribute("normal", "vec3"),
+              t,
+            },
+            "Previous",
+            "original",
+            true,
+          ).position,
+      );
       mat.normalNode = surface.normal;
       if (surface.foldedNormal)
         this.foldedBladeNormalNode = surface.foldedNormal;

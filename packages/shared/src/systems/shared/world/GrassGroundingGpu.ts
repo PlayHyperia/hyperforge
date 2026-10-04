@@ -10,6 +10,7 @@ import {
   attribute,
   Fn,
   normalLocal,
+  positionPrevious,
   float,
   vec4,
   cos,
@@ -55,6 +56,44 @@ const CLUMP_SOURCE_ATTRIBUTES = [
   "instanceRotScaleHash",
   "instanceGroundNormal",
 ] as const;
+
+const previousGrassPositions = new WeakMap<Node, () => Node<"vec3">>();
+
+/** No render-path change. Only fully specified deformation graphs can opt in
+ * to motion vectors. Material clones retain the same position-node identity. */
+export function registerGrassPreviousPosition(
+  current: Node<"vec3">,
+  previous: () => Node<"vec3">,
+): void {
+  if (previousGrassPositions.has(current))
+    throw new Error("Grass position already owns previous-frame inputs");
+  previousGrassPositions.set(current, previous);
+}
+
+/** Explicit experimental clone; never enables temporal AA or changes defaults.
+ * Refined blades with dynamic weights are rejected until their history exists.
+ * The caller owns the clone and must keep its source chunk alive. */
+export function createGrassMotionMaterial(
+  base: MeshStandardNodeMaterial,
+): MeshStandardNodeMaterial {
+  const current = base.positionNode as Node<"vec3"> | null;
+  const previous = current && previousGrassPositions.get(current);
+  if (!current || !previous)
+    throw new Error("Grass material has no complete previous-position recipe");
+  const material = base.clone();
+  material.positionNode = Fn((builder) => {
+    // r186 implements this public builder method; current declarations omit it.
+    const needsPrevious: unknown = Reflect.get(builder, "needsPreviousData");
+    if (typeof needsPrevious !== "function")
+      throw new Error(
+        "Grass motion requires the native previous-data contract",
+      );
+    if (needsPrevious.call(builder) === true)
+      positionPrevious.assign(previous());
+    return current;
+  }, "vec3")();
+  return material;
+}
 
 /** Two vec4 records per clump. No vertex input slots or CPU approximation of
  * the terrain's TSL fields: yaw/slope basis and height/locality/habitat soil. */
@@ -425,6 +464,12 @@ export function createMatrixFreeGrassMesh(
     normalLocal.assign(normalLocal.normalize());
     return position;
   }, "vec3")();
+  const previous = previousGrassPositions.get(position);
+  if (previous)
+    registerGrassPreviousPosition(
+      material.positionNode as Node<"vec3">,
+      previous,
+    );
   groundedMaterialOwners.delete(material);
   matrixFreeGeometryCounts.delete(geometry);
   Object.defineProperty(geometry, "instanceCount", {
@@ -674,6 +719,8 @@ function bindGroundedGrassMaterial(
   const correctedPosition = vec3(basePosition).add(
     vec3(0, mix(delta.x, delta.y, uv().x), 0),
   );
+  const previousRootCorrection = vec3(0, mix(delta.x, delta.y, uv().x), 0);
+  let previousVisibility: Node<"bool"> | undefined;
   let boundPosition: Node<"vec3"> = correctedPosition;
   material.positionNode = boundPosition;
   if (bladeVisibility !== undefined) {
@@ -686,6 +733,7 @@ function bindGroundedGrassMaterial(
       .shiftRight(vertexIndex.div(uint(tier.verticesPerBlade)))
       .bitAnd(uint(1))
       .notEqual(uint(0));
+    previousVisibility = visible;
     // Select after the borrowed deformation and root correction. Every hidden
     // vertex uses one common local anchor, including tips and both root sides;
     // its triangles are degenerate without discards or distant coordinates.
@@ -698,6 +746,16 @@ function bindGroundedGrassMaterial(
     // the existing instanced grass layout already uses eight vertex buffers.
     geometry.setAttribute(GRASS_BLADE_VISIBILITY_ATTRIBUTE, visibility);
   }
+  const previousBase = previousGrassPositions.get(basePosition);
+  if (previousBase)
+    registerGrassPreviousPosition(boundPosition, () =>
+      previousVisibility
+        ? previousVisibility.select(
+            previousBase().add(previousRootCorrection),
+            attribute("instanceOffset", "vec3"),
+          )
+        : previousBase().add(previousRootCorrection),
+    );
   // Not used as a vertex attribute in the shader. This registration lets
   // r186 Geometries dispose the actual storage allocation with the chunk.
   geometry.setAttribute(GRASS_ROOT_STORAGE_ATTRIBUTE, buffer);

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { MeshSSSNodeMaterial, type Node } from "three/webgpu";
+import { MeshSSSNodeMaterial, WGSLNodeBuilder, type Node } from "three/webgpu";
+import { JSDOM } from "jsdom";
+import { Fn, mrt, output, velocity, positionPrevious } from "three/tsl";
 import THREE, {
   cameraViewMatrix,
   cameraPosition,
@@ -30,6 +32,7 @@ import {
 } from "../WorldTerrainProfile";
 import {
   createGroundedGrassMaterial,
+  createGrassMotionMaterial,
   GRASS_ROOT_STORAGE_ATTRIBUTE,
 } from "../GrassGroundingGpu";
 import {
@@ -263,12 +266,40 @@ function requireNode(value: unknown): Node {
   return value;
 }
 
+// The production verge expression now has an explicit TSL function layout.
+// Expand its actual inputs instead of invoking a parameterized function with
+// no arguments. Cache by call node so repeated DAG visits preserve identity.
+const materialCalls = new WeakMap<Node, Node>();
+function materialCall(node: Node): Node | undefined {
+  const shader: unknown = Reflect.get(node, "shaderNode");
+  if (!(shader instanceof THREE.Node)) return;
+  const layout: unknown = Reflect.get(shader, "layout");
+  if (
+    !layout ||
+    typeof layout !== "object" ||
+    !("name" in layout) ||
+    layout.name !== "hyperiaGrassVergeHeightScale"
+  )
+    return;
+  const cached = materialCalls.get(node);
+  if (cached) return cached;
+  const fn: unknown = Reflect.get(shader, "jsFunc");
+  const inputs: unknown = Reflect.get(node, "rawInputs");
+  if (typeof fn !== "function" || !Array.isArray(inputs))
+    throw new Error("Missing actual verge function inputs");
+  const result = requireNode(fn(inputs));
+  materialCalls.set(node, result);
+  return result;
+}
+
 function graph(root: unknown): Set<Node> {
   const found = new Set<Node>();
   const visit = (node: Node) => {
     if (found.has(node)) return;
     if (found.size > 4096) throw new Error("Unexpected shader graph growth");
     found.add(node);
+    const parameterized = materialCall(node);
+    if (parameterized) visit(parameterized);
     // Stage-owned functions still borrow the same real wind/fade nodes. Walk
     // their construction-time bodies as well as the retained wrapper nodes.
     const shader: unknown = Reflect.get(node, "shaderNode");
@@ -286,6 +317,8 @@ function graph(root: unknown): Set<Node> {
 function colorGraph(root: Node): Node {
   let node = root;
   while (Reflect.get(node, "isVarNode")) node = Reflect.get(node, "node");
+  const parameterized = materialCall(node);
+  if (parameterized) return parameterized;
   const shader: unknown = Reflect.get(node, "shaderNode");
   if (shader instanceof THREE.Node) {
     const fn: unknown = Reflect.get(shader, "jsFunc");
@@ -297,6 +330,210 @@ function colorGraph(root: Node): Node {
   }
   return root;
 }
+
+describe("explicit grass motion-vector prerequisite (actual WGSL, no GPU claim)", () => {
+  it.each([0, 1, 2])(
+    "reconstructs LOD%s preceding wind and player-distance fade at every vertex",
+    (lod) => {
+      const owner = createOwner(
+        "fine",
+        true,
+        undefined,
+        false,
+        undefined,
+        "leaf-volume-v1",
+        "meadow-field-v1",
+      );
+      const base = owner["materialForLod"](lod);
+      const geometry = owner["lodGeometries"][lod];
+      const motion = createGrassMotionMaterial(base);
+      const mesh = new THREE.Mesh(geometry, motion);
+      const dom = new JSDOM("<canvas></canvas>");
+      const renderer = new THREE.WebGPURenderer({
+        canvas: dom.window.document.querySelector("canvas")!,
+      });
+      const builder = new WGSLNodeBuilder(mesh, renderer);
+      renderer.setMRT(mrt({ output, velocity }));
+      const add = Reflect.get(builder, "addStack");
+      const remove = Reflect.get(builder, "removeStack");
+      if (typeof add !== "function" || typeof remove !== "function")
+        throw new Error("Missing real node stack");
+      try {
+        add.call(builder);
+        let call = requireNode(motion.positionNode);
+        while (Reflect.get(call, "isVarNode"))
+          call = requireNode(Reflect.get(call, "node"));
+        const shader = requireNode(Reflect.get(call, "shaderNode"));
+        const callback: unknown = Reflect.get(shader, "jsFunc");
+        if (typeof callback !== "function")
+          throw new Error("Missing motion factory");
+        callback(builder);
+        const stack: unknown = Reflect.get(builder, "stack");
+        if (!(stack instanceof THREE.StackNode))
+          throw new Error("Missing real stack");
+        const assignment = stack.nodes.find(
+          (node) => Reflect.get(node, "targetNode") === positionPrevious,
+        );
+        if (!assignment)
+          throw new Error("Missing previous-position assignment");
+        const previous = requireNode(Reflect.get(assignment, "sourceNode"));
+        remove.call(builder);
+        const history = [...graph(previous)].find(
+          (node) =>
+            node instanceof THREE.UniformNode &&
+            node.value instanceof THREE.Vector4 &&
+            node.getUpdateType() === "render",
+        );
+        if (!history) throw new Error("Missing actual history uniform");
+        const player = owner["playerPosUniform"]!;
+        const frame = new THREE.NodeFrame();
+        frame.renderer = renderer;
+        // Put the previous frame within the fade band, then move into full detail.
+        player.value.set(225, 0, 357);
+        frame.frameId = 10;
+        frame.renderId = 1;
+        frame.time = 3.7;
+        frame.updateNode(history);
+        player.value.set(354, 0, 357);
+        frame.frameId = 11;
+        frame.renderId = 2;
+        frame.time = 4.1;
+        frame.updateNode(history);
+        for (
+          let vertex = 0;
+          vertex < geometry.attributes.position.count;
+          vertex++
+        ) {
+          const inputs = inputFor(geometry, vertex);
+          inputs.attributes.instanceGroundNormal = new THREE.Vector3(
+            -0.12,
+            1,
+            0.07,
+          )
+            .normalize()
+            .toArray();
+          const actual = evaluate(previous, { ...inputs, time: 4.1 });
+          player.value.set(225, 0, 357);
+          const expected = evaluate(base.positionNode, inputs);
+          player.value.set(354, 0, 357);
+          actual.forEach((value, index) =>
+            expect(value).toBeCloseTo(expected[index], 10),
+          );
+        }
+      } finally {
+        renderer.dispose();
+        dom.window.close();
+        motion.dispose();
+        owner.destroy();
+      }
+    },
+  );
+
+  it.each([0, 1, 2])(
+    "retains LOD%s current graph and adds previous wind/fade only to MRT",
+    (lod) => {
+      const owner = createOwner(
+        "fine",
+        true,
+        undefined,
+        false,
+        undefined,
+        "leaf-volume-v1",
+        "meadow-field-v1",
+      );
+      const base = owner["materialForLod"](lod);
+      const originalPosition = base.positionNode;
+      const source = owner["lodGeometries"][lod];
+      const geometry = source.clone();
+      for (const [name, values] of [
+        ["instanceOffset", [0, 28, 0]],
+        ["instanceRotScaleHash", [0.7, 0.8, 0.2]],
+        ["instanceGroundNormal", [0, 1, 0]],
+      ] as const)
+        geometry.setAttribute(
+          name,
+          new THREE.InstancedBufferAttribute(new Float32Array(values), 3),
+        );
+      const layout = getGrassBladeLayout(lod, "fine-meadow-ribbon-v1");
+      const roots = new Float32Array(layout.bladesPerClump * 2).fill(0.03);
+      const grounded = createGroundedGrassMaterial(
+        base,
+        geometry,
+        roots,
+        1,
+        lod,
+        "fine-meadow-ribbon-v1",
+        new Uint32Array([2 ** layout.bladesPerClump - 2]),
+      );
+      const originalGroundedPosition = grounded.positionNode;
+      const motion = createGrassMotionMaterial(grounded);
+      const mesh = new THREE.Mesh(geometry, motion);
+      const dom = new JSDOM("<canvas></canvas>");
+      const canvas = dom.window.document.querySelector("canvas")!;
+      const renderer = new THREE.WebGPURenderer({ canvas });
+      function flow(material: THREE.MeshStandardNodeMaterial) {
+        mesh.material = material;
+        const builder = new WGSLNodeBuilder(mesh, renderer);
+        Reflect.set(builder, "camera", new THREE.PerspectiveCamera());
+        Reflect.set(builder, "shaderStage", "vertex");
+        const generate: unknown = Reflect.get(builder, "flowStagesNode");
+        if (typeof generate !== "function")
+          throw new Error("Missing WGSL flow");
+        const result: unknown = generate.call(
+          builder,
+          Fn(() => material.positionNode as Node<"vec3">)(),
+          "vec3",
+        );
+        if (
+          !result ||
+          typeof result !== "object" ||
+          !("code" in result) ||
+          typeof result.code !== "string"
+        )
+          throw new Error("Invalid WGSL flow");
+        return result.code;
+      }
+      try {
+        expect(base.positionNode).toBe(originalPosition);
+        expect(grounded.positionNode).toBe(originalGroundedPosition);
+        const ordinary = flow(grounded);
+        const dormant = flow(motion);
+        expect(dormant).toBe(ordinary);
+        expect(dormant).not.toContain("positionPrevious");
+        renderer.setMRT(mrt({ output, velocity }));
+        const active = flow(motion);
+        expect(active).toContain("positionPrevious =");
+        expect(active).toContain("naturalGrassDisplacementPrevious");
+        expect(active).toContain("smoothstep(");
+        expect(active).toContain("instanceIndex");
+        expect(active).toContain("vertexIndex");
+        expect(active).toContain("mix("); // Both terrain-fitted root edges.
+        expect(active).not.toMatch(/undefined|NaN|Infinity/);
+        expect((active.match(/sin\(/g) ?? []).length).toBeGreaterThan(
+          (ordinary.match(/sin\(/g) ?? []).length,
+        );
+        expect(Object.keys(geometry.attributes)).toContain(
+          GRASS_ROOT_STORAGE_ATTRIBUTE,
+        );
+        const unsupported = new THREE.MeshStandardNodeMaterial();
+        try {
+          expect(() => createGrassMotionMaterial(unsupported)).toThrow(
+            "previous-position",
+          );
+        } finally {
+          unsupported.dispose();
+        }
+      } finally {
+        renderer.dispose();
+        dom.window.close();
+        motion.dispose();
+        grounded.dispose();
+        geometry.dispose();
+        owner.destroy();
+      }
+    },
+  );
+});
 
 interface Inputs {
   attributes: Record<string, number[]>;
@@ -346,7 +583,8 @@ function evaluate(root: unknown, inputs: Inputs): number[] {
       }
       const value = read("value");
       if (typeof value === "number") return [value];
-      if (value instanceof THREE.Vector3) return value.toArray();
+      if (value instanceof THREE.Vector3 || value instanceof THREE.Vector4)
+        return value.toArray();
       if (node.type === "VaryingNode" && inputs.varyings) {
         const name = String(read("name"));
         const varying = inputs.varyings[name];
@@ -381,6 +619,7 @@ function evaluate(root: unknown, inputs: Inputs): number[] {
         return child("condNode")[0] ? child("ifNode") : child("elseNode");
       const a = child("aNode");
       const method = read("method");
+      if (method === "length") return [Math.hypot(...a)];
       if (method === "normalize") {
         const length = Math.hypot(...a);
         return a.map((x) => x / length);

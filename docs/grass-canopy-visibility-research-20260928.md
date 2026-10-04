@@ -1,5 +1,31 @@
 # Grass canopy visibility: research checkpoint
 
+## Native265 prerequisite — motion-aware grass source, not a new FPS result
+
+**A bounded grass motion-vector implementation is ready for native qualification; temporal AA is not enabled.** Native259 measured an 8.50–9.05 ms cross-cutting cost from primary 4× MSAA, while plain single-sample and Native260 SMAA failed foliage appearance. This checkpoint develops the missing grass motion input for a different experiment. It neither recovers those milliseconds nor changes the public/default AA, resolution, scene content or filtering.
+
+### Implementation and constraints
+
+- `previousFrameVector4` captures the actual prior consumed NodeFrame time and fade-anchor inputs, isolated by renderer. Multiple objects and reflection/shadow renders within one frame do not advance history. Skipped animation callbacks retain the last consumed snapshot; a backwards/reset frame clock starts fresh. Camera cuts and temporal-buffer invalidation remain compositor responsibilities.
+- Natural/fine grass registers a previous-position factory using the **same** wind, yaw, ground tilt, bank-height and height-flex arithmetic as its current position. Wind speed/strength/blade-height uniforms remain construction-time constants in this owner. Only time and player-distance fade vary.
+- Grounded clones propagate both root-edge corrections and the exact per-blade path-visibility mask. Hidden triangles keep their shared collapse anchor in both frames. Material clones retain recipe lookup by position-node identity; matrix-free grounding can forward that recipe.
+- `createGrassMotionMaterial` is an **explicit, unselected experimental clone**. Only a real velocity pass evaluates previous positions. Unregistered graphs—including dynamic refined-blade endpoints—are rejected, not silently assigned undeformed coordinates. It borrows source chunk resources; its caller must keep them alive and dispose the clone.
+- Existing materials keep their original position nodes and never schedule the history uniform. No production renderer/composer option or automatic material replacement is added. The intended first runtime scope is immutable, terrain-grounded canonical meadow chunks; dynamic placement/refinement/adaptive-submission combinations need separate admission.
+
+### Verification
+
+**352 tests pass across five targeted files**, including all three LODs, every source vertex's preceding wind plus changed player-distance fade, actual Three NodeFrame multi-pass/multi-renderer/clock behavior, grounding/storage ownership, refinement GPU graph construction and appearance coverage. Generated r186 WGSL for an explicit motion clone **without velocity output is byte-identical to its ordinary counterpart** in all three LOD fixtures. A real MRT node enables previous wind/fade, root-storage and mask expressions. These are actual Three objects and generated shader flow, **not a GPU execution, full game build, moving-camera acceptance or frame-time measurement**.
+
+The pre-existing deformation test helper incorrectly invoked the now-parameterized verge function with no arguments. The same **32 failures / 17 passes** reproduce with both production source files restored exactly to HEAD. The helper now evaluates that actual function's actual inputs, caches call identity and retains the independent expected arithmetic; all 49 old deformation tests plus six new motion tests pass.
+
+A wider six-file run reports **382 passes / 10 failures**. The ten failures in unchanged GrassMeadowFieldAppearance snapshots/legacy dimensions reproduce with both production source files exactly at HEAD (**30 passes / 10 failures**): expected height factors 0.52/0.84/1 differ from current 0.46/0.72/0.86, with associated old hash/shape expectations. They remain open; no source geometry or golden hashes are changed to conceal them. Full shared typecheck still reports only the five existing procgen-export/recipe errors. Scoped ESLint and diff checks pass. All 42 inherited file hashes remain unchanged.
+
+### Next gate
+
+Complete connected-tree previous deformation and stable instance/LOD identity, audit remaining deforming meshes/sky/water/actors, then integrate a **private full-resolution TRAA** compositor with camera cuts, resize, reflection isolation, first-frame history and disposal handled. Three's [r186 TRAA example](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/webgpu_postprocessing_traa.html) uses color/depth/velocity; its [documented contract](https://threejs.org/docs/pages/TRAANode.html) requires MSAA disabled. Disabling MSAA is allowed only inside that explicitly labeled comparison, not as an accepted shipping shortcut. Motion artifacts, disocclusion, foliage coverage, memory/bandwidth and net full-frame timing all require evidence.
+
+Do not repeat unchanged MSAA-off or SMAA experiments. Terrain and grass remain the highest directly ranked content costs; AA is an overlapping cross-cutting target, not an additive budget slice. Native264's 36.0–37.2 ms wall medians remain the latest baseline here. **60 FPS at true 2× remains unmet.** No browser tab/service is opened in this source checkpoint; no new native timing or public-build refresh is claimed.
+
 ## Native264 — same-policy reload does not reproduce the CPU spike
 
 **The bounded fresh-versus-reload check is complete; return to rendering optimization.** One ordinary Chrome reload, with unchanged 16× filtering and the same short authoritative out-and-back route, does not reproduce Native263's 23.6 ms CPU median. Both sessions measure **13.3 ms median synchronous tick CPU**. This is evidence against attributing that earlier spike to every reload, not proof that all lifecycle paths are leak-free.
