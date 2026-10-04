@@ -1,5 +1,40 @@
 # Grass canopy visibility: research checkpoint
 
+## Native263 — normal-loading filtering verified; performance acceptance remains open
+
+**Fresh production-source loading works at true 2×, but this is not another clean causal speedup measurement or a 60 FPS pass.** Native Chrome loads absent 16×, selected 8× (`terrainFiltering=balanced8-v1`), then absent 16× again. All seven actual issued terrain sampler keys agree with each session's immutable policy. The observer never changes filtering. Resolution remains **3024×1724 / DPR2 / MSAA4**, with High shadows, original postprocessing/bloom, rough-leaf grass and cropped reflection.
+
+### Source identity and three complete samples
+
+Build263 compiles the current canonical working sources on checkpoint `7dbf25f9aa3e60b768696580c2a295f059011123`, including the preserved pre-existing working-tree changes. Verification covers nine bundle hashes, all 1,112 current source-input hashes and 962 unique source-map owners. Compared with build255, exactly four production inputs change: viewport selection, TerrainSystem, TerrainShader and CompactTerrainMaterial; no inputs are added or removed. The isolated build reports 182 protected artifacts unchanged. Build report SHA256: `1a0fb1eca4d6385fff6435859d7ab105c86bb7939fba769b221995e71db78d82`; framework client: `24bf8fccc114876a7d728509d14a240956182388182a8db67ada77a7a4313c40`.
+
+Each normal-loaded session has a 60-second recording after readiness/warmup; its first five seconds are excluded from timing. Independent verification passes **5,052 valid ticks, 4,635 measured ticks and 4,632 intervals**, including foreground focus, actual primary samples, source texture owners/versions, camera, phase .56/exposure .850240084 and seven sampler bindings. No screenshots, GPU timestamps, readbacks, fences or forced renders occur during these samples.
+
+| Session | Wall interval median / p95 | Synchronous tick CPU median / p95 | Terrain / grass owners | Issued draw calls |
+| --- | --- | --- | --- | --- |
+| Absent 16×, first | 36.50 / 39.50 ms | 13.10 / 16.58 ms | 52 / 94 | 800 |
+| Selected 8×, reloaded tab | 32.70 / 40.60 ms | 23.60 / 36.72 ms | 61 / 94 | 794–796 |
+| Absent 16×, fresh return tab | 37.80 / 40.30 ms | 14.00 / 16.10 ms | 52 / 94 | 800 |
+
+These are ordinary instrumented **wall tick intervals, not exclusive GPU completion or displayed FPS**. Camera and quality match, but the first player position differs; the reloaded session also has different terrain residency and submitted actors. The selected and final player positions match exactly after authoritative movement, yet terrain owners remain 61 versus 52. Do not subtract these rows into a new filtering speedup or blame filtering for the CPU increase. Native261's repeated same-session **4.80–5.375 ms** result remains the stronger causal evidence.
+
+[First baseline verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native263-baseline1-verification.json), [selected verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native263-selected1-verification.json), [return verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native263-baseline2-verification.json). Their raw captures remain in Downloads with SHA256s `fcb74e1406dfc66104391ca0898d3311c66a1a69b1954d362ebd3b3b43797ab8`, `cbd857c8d1024f12f2c7b4c40ef8eba674f704cc4587e8df1c2aa877d18be1b0`, and `e37fff6e792cb440aa49daa662c6950a1a1ea1aa3257838470b878282db1bebf`.
+
+### Variance to investigate, not a diagnosed leak
+
+Chrome's visible tab-memory estimate rises to about 9.3 GB in the reloaded candidate, versus about 5.5–5.7 GB in fresh tabs. This is a coarse UI observation, **not a heap/GPU-allocation measurement or proof of a leak**. Reconnection also exposes the existing recoverable already-connected/missed-pong path. The selected session requires authoritative walking from a different spawn, so loaded-region history is another confounder. No user process is killed, no forced server session eviction is used, and no cleanup fix is inferred from timing alone.
+
+Next, distinguish fresh-load versus reload/world-lifecycle costs under the **same filtering policy and route** using actual CPU, resource-owner and terrain-residency evidence. Establish whether excess work persists, locate its owner, then change only a proven cause. This variance should not become another unbounded filter-tuning loop. Terrain remains the largest directly ranked content workload, grass second; preserve true 2× and MSAA while pursuing those large costs. Existing omission deltas and cross-cutting AA/reflection interventions are not additive GPU slices.
+
+The candidate remains explicitly opt-in, default 16× unchanged. Native262's temporal/distant-grazing review and full traversal/stability acceptance remain open. Its unreviewed videos are not newly accepted here. All three median intervals remain well above **16.67 ms**.
+
+### Cleanup and checkpoint scope
+
+Every observer hook restores; native console verifies camera/clock/exposure restoration in all three sessions and retains each original 16×/8×/16× policy. The owned game and DevTools close, leaving the original New Tab. Private runtime stops at **2026-10-04T06:07:11.569Z** with no errors; its disposable database is removed, four private ports are free, protected public services/data remain unchanged, two served helpers are removed and all six temporary runtime admissions return to the exact original bytes. All **42 inherited dirty/untracked file hashes** still match. Raw evidence, build263 and retained helpers remain available.
+
+[Cleanup verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native263-cleanup-verification.json), [runtime receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-native263-filter-integrated/process.json) (SHA256 `32a37cbca7ac54215d3e50cb91484af5ded25dd759a4fabf5bb266244e406ade`). No production source changes or new unit-test claim in this checkpoint; Native262's 691 passing tests and five unrelated full-typecheck diagnostics remain the source-test record.
+
+
 ## Native262 — broader filtering screen and explicit loading-path candidate
 
 **Implementation progress; default 16× retained and 60 FPS still unmet.** Native261's repeated 4.80–5.375 ms held-view saving now has a broader bounded visual screen and a production loading-path option: `terrainFiltering=balanced8-v1`. This is explicitly opt-in, not a visual-equivalence claim or default promotion.
