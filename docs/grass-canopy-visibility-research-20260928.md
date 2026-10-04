@@ -1,5 +1,51 @@
 # Grass canopy visibility: research checkpoint
 
+## Native278 — bounded filtering screen and shadow-reuse blockers
+
+**The exposed-ground static screen passes; production filtering and AA defaults remain unchanged.** This is a performance-candidate qualification checkpoint, not a new speedup measurement or 60 FPS pass. The latest matched timing remains Native277's 5.975 ms temporal-AA lead; do not add it to Native261's 4.80–5.375 ms filtering lead.
+
+### Actual shoreline comparison
+
+A native Chrome capture compares original 16× / candidate 8× / original 16× terrain filtering at **3024×1724, DPR2, MSAA4, High shadows**, original postprocessing, rough-leaf grass and cropped reflections. All seven actual issued sampler keys are verified on each frame; texture sources, shader graphs, pinned terrain/grass owners, player position and quality settings remain unchanged. Phase is 0.56 and exposure is 0.850240084. No content or geometry is removed.
+
+- **360/360 requested rows pass**, 120 per arm; nine unmodified full-resolution PNGs cover motion000/060/119. Each row proves one complete primary submission and eleven terrain draws. Six native-pixel comparisons cover exposed soil and the upper slope at those three anchors. Root and independent review find no obvious gross softening, missing soil ridges or color shift at 8× in these bounded crops.
+- The inspected camera translates **0.75 m**, eye [500,22.2,423] → [500,22.2,423.75], with targets [500,20.2,453] → [500,20.2,453.75], FOV70. It looks nearly horizontally across exposed sloping soil. This short route does **not** certify distant-ground depth, fast gameplay motion or every terrain material.
+- The separate recording canvas leaves game output unchanged and adds arm/motion/source-frame labels outside the ground ROI. The video contains **359 encoded frames**, including an initial unqualified frame. Labels confirm that the first original 16× motion000 and final original 16× motion119 are absent; the seven other raw-anchor labels match. All nine raw PNGs exist. Requested frames are not encoded-frame guarantees.
+- Recording, queue waits, canvas copies and PNG readbacks add substantial overhead. These intervals are **not FPS evidence**. Static crops do not close temporal-shimmer acceptance.
+- Two earlier attempts correctly reject changed residency: the idle start fails after camera relocation; the saved six-metre attempt stops after 23 requested frames, before copied motion23 becomes valid. Camera-driven grass LOD can replace chunks asynchronously even with the player fixed; this is a source-supported mechanism, not an exact owner attribution from the combined guard. The successful shorter route retains the same strict guard—no content freeze, density cut or guard relaxation.
+
+The older Native262 videos are now aligned against their retained raw anchors: 32 anchors have consistent three-region image matches; four final anchors remain unqualified. Six native-size seven-frame strips cover near coastal soil and pond foreground. They show no obvious gross 8× loss in the inspected crops, but neither frame matching nor static strips certify continuous-motion shimmer.
+
+### Concrete shadow opportunity, unsafe existing switch
+
+Native277's 82 detailed samples all issue two sun captures into the same 4096² target/camera, each 108 draws / 622,163 triangle submissions. This identifies a specific duplicate to investigate, **not an exclusive GPU cost or proof of equivalent depth**.
+
+Source review finds three blockers in the inherited, unchanged experiment:
+
+1. `PrimaryRenderShadowReuse.begin` installs `scene.onAfterRender`; `WaterSystem.beginLakeCroppedCapture` requires that callback to remain the default. Merely enabling `shadowReuse=primary-v1` can therefore replace the accepted cropped reflection with full-size fallback—even if shadow reuse itself rejects. It is not a clean shadow-only A/B.
+2. Its blanket callback rejection includes Three's native batched-tree callbacks and owned rough-leaf grass callbacks. Comparing every non-caster's visibility can additionally reject the normal silhouette hide.
+3. Current state snapshots do not establish all node-uniform and batched-texture deformation inputs. Do not simply allowlist these objects.
+
+A safe next trial must preserve the crop, observe the authentic primary sun pass, and prove matching effective shadow matrix/layers plus issued caster/transform/deformation state within the **same primary render**. Then verify exactly one shadow pass disappears with every other pass unchanged. Preserve pending shadow updates and restore borrowed flags in finally; no cross-frame cache is qualified.
+
+### GPU budget attribution
+
+Reuse the existing physical-pass timestamp observer rather than build another profiler. Native231 completed 24 sparse timestamp-query samples with 192 ordered pairs, zero GPU errors and 72/72 temporary resources retired. Its full-size reflection differs from the present crop, so those old timings do not rank today's graph. Current build272 capability must be checked on its actual device. Logical render timestamps alone miss water's resumed physical passes; all 24 old samples also overlap (first sample 75.10 ms summed versus 36.70 ms union). Preserve separate intervals and measured omissions—never invent additive exclusive percentages.
+
+### Next performance work
+
+- Run a **clearly unqualified combined-cost diagnostic** of the existing 8× option and private temporal-AA candidate, with exact full-resolution targets, residency and pass reconciliation. Measure the combination directly; retain public defaults and keep visual/shipping acceptance separate. Do not spend another checkpoint repeating unchanged loading checks or this static shoreline crop.
+- Terrain remains the largest causally ranked content cost; grass second. CPU render preparation/submission remains the main CPU target. The duplicated shadow pass is a concrete secondary opportunity, not yet a measured saving.
+- Keep temporal filtering/AA edge stability, distant terrain, full compositor and traversal/lifecycle gates open. **60 FPS / 16.67 ms at true 2× is not achieved.**
+
+### Evidence and teardown
+
+- Raw receipt `Downloads/hyperia-native278-coast-grazing-short.json`: SHA256 `6b7f124f65ce3c1169ba3af7e758eb6b78ecfce5410f27defe1a9c16b707cd4d`.
+- Labeled video `Downloads/hyperia-native278-coast-grazing-short.webm`: SHA256 `165b41921155361f9bf4abbd77d77049f5859304a06ac402b9fc9946e4f5ede3`.
+- Private helper `build272/native278-filter-review.mjs`: SHA256 `882366bb12f60481383c53260ea9b5d43c0a5db583653a60d4652684ffcf59b6`; executed source matches. Syntax check passes. Independent evidence is `native278-qualified-media/audit.json`, with raw PNGs, six comparisons and label sheets beside it; retained-video alignment is `native278-retained-video-map.json`.
+- Sixteen restoration checks pass. Final native readback confirms no probe/camera hold, original seven 16× samplers, MSAA4, null dispatch/MRT, 3024×1724/DPR2 and live GPU. Owned tab/DevTools close; `runtime-native278-filter01` stops without errors, disposable database removed, protected state unchanged, four private ports free. Runtime admission restores to SHA256 `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`; all 42 inherited file pins match. Public localhost3333 and saved state remain untouched.
+- This checkpoint changes evidence/checklists and private diagnostics only. No new production optimization or source-suite result is claimed.
+
 ## Native277 — corrected temporal AA repeats a 6 ms lead at true 2×
 
 **Two complete comparisons establish a repeatable performance lead, not 60 FPS or shipping AA-quality acceptance.** The private candidate renders the real TRAANode resolve, tree/grass previous-position motion, and scoped original-lake exclusion. Original MSAA4 remains the production default. Actual drawing buffer, scene, resolve and history are 3024×1724; DPR2, High shadows, seven original terrain samplers, 52 terrain / 94 grass owners, phase 0.56 and exposure 0.850240084 remain held. Wind and actors remain live.
