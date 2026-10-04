@@ -1,5 +1,26 @@
 # Grass canopy visibility: research checkpoint
 
+## Study256 — conservative terrain simplification rejected as a lossless shortcut
+
+**No runtime geometry change or new FPS gain.** A real CPU World, TerrainSystem and RoadNetworkSystem generate the 12 nearest maximum-depth chunks to the measured pond position, using the exact private Native255 `assets-v10` manifests and current source. This includes the inland pond's refined topology. The installed meshoptimizer 0.22 requests a 75% index reduction at zero requested error; that is an eligibility experiment, not a promise of identical surface interpolation. No dependency is installed.
+
+| Offline variant | Triangles | Reduction | Largest sampled height change |
+| --- | ---: | ---: | ---: |
+| Original | 465,460 | — | Control below 1.5e-14 m |
+| Position-only, locked open borders | 368,594 | 20.81% | 6.99 cm |
+| All 11 normal/material attribute components, plus locked chunk-edge/skirt/refinement vertices | 458,714 | 1.45% | 1.69 cm |
+
+Both simplified variants report zero simplifier error. Independent interpolation probes contradict a lossless interpretation: position-only also changes road influence by 1.0 in a sampled location. Each variant and the unchanged control receive 1,350,408 indexed-surface probes (4,051,224 total), with zero missing samples. The unchanged control's largest attribute error is below 1.2e-13. These are dense probes, not an exhaustive global error bound, seam/collision qualification, actual GPU draws, visible-image review or a performance measurement. The conservative result would also need a compatible retained-surface/grounding owner; it cannot simply replace a renderer index buffer.
+
+**Decision:** do not install this decimation or spend the primary queue integrating a 1.45% triangle reduction with no measured GPU gain. The existing terrain/grass shading leads remain larger. Finish the already repeat-measured reflection crop's ordinary moving-route, fallback/default-graph checks before claiming it as a delivered improvement; do not conflate its prior 7.2–7.9 ms held-view result with this study. Actual 2× / 16.67 ms remains unmet.
+
+**Input correction retained:** the first run accidentally used repository-default manifests, not the private inland scene. Its 175,800-triangle/4.63% conservative result and initial commentary are superseded for this scene. The harness now requires the exact private asset path and southern-meadow profile. The earlier JSON is retained as an excluded input variant. This is not evidence that the game itself loaded the wrong assets.
+
+[Executed study](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native256-terrain-topology-study.ts), SHA256 `1440b26588803e9ab770c080443d2d4e7248cbeef8f644a02f49fe6121b016bc`; [corrected report](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native256-terrain-topology-assetsv10.json), `6fa57ce53fdf0c734d2b4df0a02301e248859ab449964983aa46348c3cd5383c`; [independent verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native256-terrain-topology-verification.json). Source/manifest pins and all 42 inherited working-file hashes match. The verifier's first ArrayBuffer hashing call failed; wrapping it in a Uint8Array corrects that diagnostic-only issue. Production source, public game, saved DB and browser remain untouched; CPU worlds are destroyed.
+
+A read-only retry exporting counter metadata from the historical Native197 trace produces no output and reaches 91 seconds / 4,460,304 KiB RSS. Only the exact owned exporter PID 55683 is terminated; it exits 1. No new GPU capture is taken, and this supplies no hardware-limiter evidence. Do not repeat this failed old-trace export as the next optimization task.
+
+
 ## Native255 — moving reflection coverage and settled-light visual check
 
 **The corrected current source completes a real 2× coverage/visual check. This is not a new timing result or 60 FPS acceptance.** Canonical build255 includes the Source254 UV ownership fix and excludes the rejected PMREM prototype. Nine outputs / 981 inputs, zero substitutions and 182 unchanged protected artifacts; report SHA256 `33496c511624e2ed2474cf976d1086b8134cfe5093fd39d82586dbe44cd42896`, framework `b216c38035f2283604abda07736ba3e8e4974e0513b1047fab9ea00c09deb7d1`.
