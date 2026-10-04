@@ -1,5 +1,49 @@
 # Grass canopy visibility: research checkpoint
 
+## Native259 — 2× MSAA cost confirmed; naive removal fails the visual bar
+
+**Two complete native comparisons identify a substantial anti-aliasing cost: 8.50–9.05 ms less wall cadence without primary 4× MSAA. This is an explicit quality tradeoff, not a shipped optimization.** The actual render resolution stays 3024×1724 / DPR2. Single-sample grass is visibly more speckled and tree silhouettes/interiors harsher in unscaled crops. Restore MSAA4 and do not promote this shortcut. Even the fastest treatment remains 26.7 ms, above the 16.67 ms target.
+
+### Repeated whole-game screen
+
+Apple M5 / 24 GB, AC power, native Chrome WebGPU. Reused immutable build255 matches all 1,112 current source-input hashes; no game source edits or substitutions. Same ordinary World, held camera, phase .56/exposure .850240084, High shadows, original material/geometry owners, loaded textures, rough-leaf grass and cropped 768×134 reflection. Only the existing primary HDR target's sample count changes through Three's native allocation/pipeline path; renderer configuration and game preferences are not rewritten. Actual primary render-context sample counts are verified on every tick, independently of the unchanged renderer preference.
+
+Each run uses 15-second A/B/B/A arms, excluding four seconds per arm as warmup. Both pipeline variants warm through ordinary frames before measurement. There are no GPU queries, fences, readbacks, forced renders or content omissions during timing.
+
+| Run | MSAA4 A1 median / p95 | Single B1 median / p95 | Single B2 median / p95 | MSAA4 A2 median / p95 | Midpoint saving |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 36.30 / 39.00 ms | 27.60 / 29.80 ms | 27.90 / 30.10 ms | 36.20 / 39.60 ms | 8.50 ms / 23.45% |
+| 2 | 35.80 / 38.10 ms | 26.70 / 28.90 ms | 26.90 / 28.70 ms | 35.90 / 37.80 ms | 9.05 ms / 25.24% |
+
+All 3,881 recorded ticks are valid; 2,848 measured ticks yield 2,840 same-arm cadence intervals. Every tick retains **796 draw calls / 8,611,259 repeated-view triangle submissions**, two outer render calls, one mirror capture, 52 terrain and 94 grass owners. CPU medians are 13.0–13.2 ms across run1; run2 is 13.1 ms at MSAA4 and 12.3 ms single-sample. Original method descriptors and sample count restore with empty errors in both runs. These are ordinary tick wall intervals, **not exclusive GPU costs, displayed FPS, an additive budget or 60 FPS acceptance**. Shared-host load and a single held view limit generalization.
+
+[Run1 raw](/Users/lucid/Downloads/hyperia-native259-msaa-run1.json), SHA256 `fccfd44a4fdb36576a57f4118b94f22c313728591bb1bffc833232124eca01fb`; [run2 raw](/Users/lucid/Downloads/hyperia-native259-msaa-run2.json), `2794a78f28bf3a0a593018a95e05d5dbfe83a0f312c1ab94156d35011d503ebb`. [Independent arithmetic/source/ownership verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-verification.json) checks every interval, actual sample count, frame-work totals, exact executed function source, and 42 inherited working-file hashes.
+
+### Actual pixel review: reject direct single-sample promotion
+
+A separate 90-frame MSAA4 / single / restored4 sequence produces three synchronous completed-frame 3024×1724 PNGs. It verifies actual GPU texture sample counts 4/1/4, fixed pose/exposure, empty errors and full restoration. No image readback occurs in timing. All three full images and unscaled grass/roof/tree crop triplets are inspected. The middle single-sample image shows conspicuous fine-grass stippling and harsher foliage compared with both MSAA4 bookends; there is no obvious gross missing-object or displaced-water regression in this limited view. Live wind, water, effects and actors prohibit pixel-identity claims, and static captures do not qualify temporal stability.
+
+[Native image receipt](/Users/lucid/Downloads/hyperia-native259-msaa-images.json), SHA256 `cdd75d2c1f9b237c38c6d03a229a7cb673ba05c5cbf09223d451b4fbd0140c78`. [Unscaled grass/roof comparison](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-images/roof-native-pixel-triplet.png) and [tree comparison](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-images/tree-native-pixel-triplet.png): left MSAA4, middle single, right restored4. The crops are copied native pixels, not resized/retouched. [Original full image](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-images/msaa4.png), [single-sample](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-images/single.png), [restored](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native259-msaa-images/restored4.png).
+
+[Three's renderer documentation](https://threejs.org/docs/pages/WebGPURenderer.html) distinguishes sample count from resolution; [Apple's MSAA reference](https://developer.apple.com/documentation/metal/improving-edge-rendering-quality-with-multisample-antialiasing-msaa) describes the edge-coverage role. The installed r186 source confirms that primary target sample changes recreate matching textures/render contexts. This test measures their combined whole-frame impact, not an assumed fourfold fragment-shading cost.
+
+### Current optimization priorities, not an exclusive cost pie chart
+
+| Priority | Measured evidence | Action |
+| --- | --- | --- |
+| 1. Terrain surface shading | Native206 same-screen omission: 29.1–29.8 ms at 3800×1886; Native215 cheap-material probe: 10.9–11.525 ms at 3024×1724 | Cheaper evaluation retaining authored surface/filtering; do not ship the simplified diagnostic material. |
+| 2. Grass shading/coverage | Native206 omission: 25.45–26.30 ms; Native219 unlit diagnostic: 10.825–11.45 ms | Reduce real shading/raster work with appearance checks, not density disappearance. |
+| Major cross-cutting target: primary MSAA | Native259: 8.50–9.05 ms at 3024×1724 with cropped reflection already active | Evaluate cheaper edge/temporal AA with full foliage coverage; plain MSAA-off is visually rejected. |
+| Repeated reflection rendering | Native208 omission: 12.6–13.6 ms; Native252 complete-content crop: repeated 7.2–7.9 ms | Finish remaining crop qualification; preserve supported footprint/fallback. This overlaps terrain and grass costs. |
+| Trees and smaller scene categories | Native247 tree omission: 2.55–2.90 ms, one screen; actors/mushrooms drift too much for a robust relative order | Secondary work. Do not rank actor versus mushroom costs using unstable bookends. |
+| CPU transforms/submission | Native205 matrix scope: 2.70 ms total, 1.94 ms actors; latest synchronous tick 12.3–13.2 ms | Track CPU headroom; tiny grass/terrain hierarchy traversals are not the main opportunity. |
+
+Numbers come from different controlled interventions/builds/viewports and **cannot be added or used as a numerical most-to-least GPU ranking**. Terrain versus grass is the strongest same-screen ordering. Water-surface-only, shadow-only and isolated postprocess costs remain incomplete; a previous overlapping output-pass interval must not be called an exclusive postprocess budget.
+
+**Next gate:** prototype a bounded explicit AA alternative only if it preserves foliage coverage and improves net full-frame cost after its own overhead. Require moving-camera, wind, tree/grass silhouettes and thin geometry checks at 2×, plus day/night and fallback/lifecycle coverage. Continue terrain/grass work for the remaining roughly 10+ ms gap even under this rejected single-sample treatment. No art changes or public/default promotion.
+
+**Diagnostic correction and cleanup:** initial helper retained two stale identifiers from the light probe; its guard fails before warmup (zero frames), and its receipt construction also throws. Both are corrected in the reviewed v2, not retroactively accepted. Both valid runs and image review restore normally. Native console confirms exposure/camera/clock restoration and samples4. Only the owned World/DevTools close, preserving New Tab. Private runtime stops at 2026-10-04T02:46:13.413Z, errors empty, protected public services/saved DB unchanged, disposable DB removed and all four private ports free. [Process receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-native259-msaa01/process.json), SHA256 `a949cda3a6b846b14bff5ea39d119efd8191129b5af078e1fbccf8afddccf26a`. Four served helper copies are removed; external diagnostic sources/evidence remain. Runtime helper restores exactly to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. No production source changes or new production-test claim in this checkpoint.
+
 ## Native258 — inactive terrain-light gate rejected after a complete 2× screen
 
 **No speedup delivered by this candidate; production source is restored.** A uniform branch skipped the original eight point-light calculations only when every intensity was exactly zero. Tiny nonzero, negative and cancelling lights retained the full expression; the separate lamp lightmap was unchanged. The candidate was lazy/private and never selected by defaults.
