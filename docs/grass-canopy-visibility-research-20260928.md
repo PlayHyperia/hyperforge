@@ -1,5 +1,32 @@
 # Grass canopy visibility: research checkpoint
 
+## Native257 — ordinary moving-route and flag-absent runtime checks pass
+
+**The reflection crop now has ordinary near-water gameplay coverage, not just a held camera sweep. This is compatibility evidence, not a new speedup or 60 FPS acceptance.** Both 120-second sessions use immutable build255, actual 3024×1724 / DPR2 / MSAA4 / High shadows, ordinary UI navigation and camera rotation, the native synchronized clock and live exposure. No teleport, camera/clock override, manual extra render, content omission or quality reduction is introduced.
+
+| Session | Actual mirror captures | Cropped | Full-size | Native phase advance |
+| --- | ---: | ---: | ---: | ---: |
+| Crop graph: crop/full/crop/full | 2,372 | 995 | 1,377 | 0.499663 cycles |
+| Fresh navigation, crop flag absent | 2,527 | 0 | 2,527 | 0.499890 cycles |
+
+The crop session moves the player across X385–395.5 and Z374–400.5; the fresh default session across X384.5–389.5 and Z400.5–413.5. Both include real camera translation and rotation. The crop session contains 171 actual captures with cropping enabled but an unsupported footprint: all safely use the full 1512×862 target. Every captured rectangle/UV transform, required-footprint containment, target bound and eight-pixel crop-origin alignment passes independent raw-data verification. Only actual mirror renders are recorded, not stale off-screen targets.
+
+All 12 saved 3024×1724 PNGs were reviewed. No obvious missing reflection boundary is seen in these bounded pond views. Native clock advances by approximately half its 240-second day in each route, including a midnight wrap in the default session. An additional verifier initially misclassified small backwards synchronized-clock corrections as a full-day wrap; signed unwrap corrects that diagnostic arithmetic. The raw corrections are retained (about 18 ms and 51 ms), not erased or represented as a perfectly monotonic clock. No production clock change is made.
+
+**Limits and observations:**
+
+- This closes ordinary live-clock/translation/near-bank fallback coverage and a fresh flag-absent runtime smoke check. It does **not** establish identical emitted default shaders, pixel identity, all coasts/materials/populations, continuous video quality or sustained displayed 60 FPS. The two routes are not matched poses/light and cannot provide an image-parity comparison.
+- Frame recording, footprint recomputation and six PNG readbacks per route add overhead. Do not use their intervals as performance evidence. The earlier Native252 repeated 7.2–7.9 ms crop saving remains the held-view result; its cropped 39.4–40.4 ms medians remain above 16.67 ms.
+- Initial crop-session graphics preparation times out at the unchanged 15-second guard; one ordinary reload recovers. Fresh default navigation first reports the old character still connected; the normal retry recovers. These are unresolved loading/reconnect observations, not a clean startup claim.
+- Camera-dependent holes/clipping around the avatar head are visible with both full and cropped capture, and again in the flag-absent native view. Preserve this separate rendering defect for diagnosis; do not attribute it to reflection cropping without a controlled test. The deferred cow 404/loader failures remain; no unrelated asset/authentication change is made.
+- A misspelled renderer class in the initial console install throws before observer installation. The corrected helper is the only executed route source; its exact serialized function is checked against both receipts.
+
+**Evidence:** [crop raw](/Users/lucid/Downloads/hyperia-native257-crop-route.json), SHA256 `ac122e2dcb4a754dbe7834eb5d264370323dd467c09d78fa2039b2bf116afeba`; [default raw](/Users/lucid/Downloads/hyperia-native257-default-route.json), `ab55f8a945a4e59d773a4dbf45f9724d8729bb4b7d11ad7f2e419c8d1dc65695`. [Crop verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native257-crop-verification.json), [default verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native257-default-verification.json), [executed observer](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native257-route-review.mjs), [independent verifier](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native257-verify.mjs). Observer SHA256 `bdd07bce95e95171ba620bba1b60b0655070a65595c20057ab192fa81df39c4e`. All raw data and extracted images remain external to Git.
+
+**Cleanup:** both receipts report empty errors and exact tick/render descriptor and crop-setting restoration; ordinary player movement is intentionally not undone. Observer UI and only the owned World tab close. Runtime stops at 2026-10-04T01:14:07.091Z, errors empty, all 1,142 protected files/public 3333/5555/5556 owners/saved DB unchanged; disposable DB removed and four private ports free. [Process receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-native257-route01/process.json) SHA256 `5ac0f85917af9dddc45b9333924456c72e1e054f5313901ebe8f8097cae7b7a0`. Six temporary admissions reverse to exact original runtime SHA `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`; the one served helper is removed, its external source retained. All 42 inherited working-file states remain unchanged.
+
+**Next:** keep cropping explicit/default-off pending broader and matched-image/default-shader acceptance. Move the primary optimization queue back to terrain shading, then grass shading; reflection repeats those costs, so their marginal savings are not additive. Do not run another identical route or restart the rejected PMREM/decimation experiments. No production/default/public change is made in this checkpoint.
+
 ## Study256 — conservative terrain simplification rejected as a lossless shortcut
 
 **No runtime geometry change or new FPS gain.** A real CPU World, TerrainSystem and RoadNetworkSystem generate the 12 nearest maximum-depth chunks to the measured pond position, using the exact private Native255 `assets-v10` manifests and current source. This includes the inland pond's refined topology. The installed meshoptimizer 0.22 requests a 75% index reduction at zero requested error; that is an eligibility experiment, not a promise of identical surface interpolation. No dependency is installed.
