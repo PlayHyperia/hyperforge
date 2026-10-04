@@ -1,5 +1,44 @@
 # Grass canopy visibility: research checkpoint
 
+## Native260 — native SMAA measured, but rejected for foliage quality
+
+**Implemented and exercised a private SMAA1x Medium alternative; not promoted.** This follows Native259's measured AA cost rather than another small shader branch sweep. Three's installed r186 WebGPU SMAA runs before the normal tone-map/sRGB output at unchanged **3024×1724 / DPR2**. A full-content screen improves median wall intervals by **8.825 ms / 23.93%**, but grass remains conspicuously stippled and tree foliage darker/harsher than both MSAA4 bookends. Plain SMAA is not an acceptable replacement as configured. The original composer and MSAA4 restore; no production source, preference or public-build change.
+
+### Native correctness and image gate
+
+Reused immutable build255 matches all **1,112 current source-input hashes** before launch. Apple M5 / 24 GB, AC100%, same private ordinary game, camera, phase .56/exposure .850240084, High shadows, loaded terrain textures, rough-leaf grass and cropped reflection. Both 4096² sun refreshes and the 768×134 mirror remain. A public Three RenderPipeline/scene pass is used, not patched GPU descriptors. Inactive LUT/depth-blur is an explicit admission restriction; this is not a general postprocess integration.
+
+A 160-frame MSAA4 / plain-single / SMAA / restored4 image sequence completes with empty errors and all four restoration checks true. Each actual primary target is full-size with actual samples **4/1/1/4**; SMAA adds its three full-size edges/weights/blend passes. Lookup images decode to 160×560 and 66×33 before use. Four synchronous completed-frame PNGs are retained; original/candidate full views and unscaled grass/roof/tree triplets are visually reviewed. The middle SMAA crops remain markedly noisier in foliage. Live wind/water/actors mean this is not pixel identity or temporal acceptance.
+
+[Raw images](/Users/lucid/Downloads/hyperia-native260-smaa-images.json), SHA256 `11a6b8200a1374808ce36d38e02ac92a44e457ee41a84aad73ae5e570b8e0baf`; [independent source/PNG/pass/pose verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native260-smaa-verification.json). [Grass/roof native pixels](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native260-smaa-images/roof-native-triplet.png), [tree native pixels](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native260-smaa-images/tree-native-triplet.png): left MSAA4, middle SMAA, right restored4. No resampling or image retouching.
+
+### One bounded whole-frame cost screen
+
+Each A/B/B/A arm lasts 15 s with 4 s warmup excluded; both pipelines warm through ordinary frames first. No readbacks, GPU timestamp queries, fences, forced renders or deliberate content omissions occur during timing.
+
+| Arm | Measured frames / intervals | Wall median / p95 | Synchronous tick CPU median |
+| --- | --- | --- | --- |
+| MSAA4 A1 | 295 /294 | 36.75 /42.00 ms | 13.80 ms |
+| SMAA B1 | 398 /397 | 27.90 /29.90 ms | 13.00 ms |
+| SMAA B2 | 391 /390 | 28.20 /30.90 ms | 12.90 ms |
+| MSAA4 A2 | 293 /292 | 37.00 /42.00 ms | 14.00 ms |
+
+All **1,884 recorded ticks** are valid; 1,377 measured ticks produce 1,373 same-arm intervals. Baseline retains 800 calls /8,623,259 repeated-view triangle submissions; candidate 803 /8,623,262 adds exactly three fullscreen SMAA triangles. Every tick retains one mirror capture and two outer render calls. Terrain/grass ownership remains 52/94, with original geometry/material/parent/count pins guarded. These are aggregate checks, not an exhaustive per-object draw signature. This run's aggregate population differs from Native259; **do not subtract across runs to infer isolated SMAA overhead**.
+
+[Raw timing](/Users/lucid/Downloads/hyperia-native260-smaa-run1.json), SHA256 `d37a33e4ebdde3d40e65702468d959d5922091029767dce37bc9e09ebbf277d0`; [independent interval/arithmetic/restoration/hash verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native260-timing-verification.json). Baseline midpoint 36.875 ms versus candidate 28.05 ms includes SMAA overhead. This is one held-view screen, **not repeated performance qualification, exclusive GPU time or displayed FPS**. The candidate still misses 16.67 ms and fails the image gate, so a timing repeat is not prioritized.
+
+### Research decision and next work
+
+[Three's SMAA documentation](https://threejs.org/docs/pages/SMAANode.html) and [r186 example](https://raw.githubusercontent.com/mrdoob/three.js/r186/examples/webgpu_postprocessing_smaa.html) supply the actual pipeline ordering. [Temporal AA](https://threejs.org/docs/pages/TRAANode.html) requires depth, velocity and camera history; it is not a drop-in guarantee of stable moving grass. Installed VelocityNode compares positionLocal with positionPrevious, while the current custom grass/tree positionNode paths do not supply the corresponding previous deformed wind position. A temporal candidate needs a verified previous-frame deformation/instance/camera contract, not merely switching on the addon.
+
+Do not resume the rejected global MSAA attachment-discard shortcut: Native221/222 already demonstrate water depth copies and LOAD continuations, and [Three's RenderTarget contract](https://threejs.org/docs/pages/RenderTarget.html) requires those intermediate samples to remain available. Native222's final-only descriptor pilot is already recorded as a small unreplicated lead, not a production implementation.
+
+**Next queue:** retain terrain and grass as the largest direct categories; pursue a substantial surface/coverage optimization with matched full-content evidence. Keep AA as a measured cross-cutting opportunity, but do not spend another cycle tuning plain single-sample/SMAA or silently lower resolution. Temporal AA remains explicitly unqualified pending correct foliage motion data. The goal stays true 2× / 16.67 ms; no 60 FPS or quality acceptance is claimed.
+
+### Cleanup and preservation
+
+Native console verifies exposure and camera/clock owners restored, MSAA4, absent review/timing controllers and idle precompile. Owned DevTools/game close; the original New Tab remains. Private runtime stops **2026-10-04T03:22:48.784Z**, errors empty, public services/saved database protected, disposable test database removed and all four private ports free. [Process receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-native260-smaa01/process.json), SHA256 `ff3ada17a9fb6021bd7a4df0b2b486a21f875c578f10a5f36b6da83a844a3e53`. Three temporary served helpers are removed; external source/evidence remain. Runtime helper restores exactly to `d9d3611d30bba1bb7691507a0c756d6495c06b5d7fce8799a2f830fed0562eb3`. All 42 inherited working-file hashes verify unchanged. No new production-test claim; this checkpoint is actual WebGPU experimentation and analysis.
+
 ## Native259 — 2× MSAA cost confirmed; naive removal fails the visual bar
 
 **Two complete native comparisons identify a substantial anti-aliasing cost: 8.50–9.05 ms less wall cadence without primary 4× MSAA. This is an explicit quality tradeoff, not a shipped optimization.** The actual render resolution stays 3024×1724 / DPR2. Single-sample grass is visibly more speckled and tree silhouettes/interiors harsher in unscaled crops. Restore MSAA4 and do not promote this shortcut. Even the fastest treatment remains 26.7 ms, above the 16.67 ms target.
