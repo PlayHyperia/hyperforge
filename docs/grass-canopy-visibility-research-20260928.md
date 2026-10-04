@@ -1,5 +1,48 @@
 # Grass canopy visibility: research checkpoint
 
+## Native264 — same-policy reload does not reproduce the CPU spike
+
+**The bounded fresh-versus-reload check is complete; return to rendering optimization.** One ordinary Chrome reload, with unchanged 16× filtering and the same short authoritative out-and-back route, does not reproduce Native263's 23.6 ms CPU median. Both sessions measure **13.3 ms median synchronous tick CPU**. This is evidence against attributing that earlier spike to every reload, not proof that all lifecycle paths are leak-free.
+
+### Matched native evidence
+
+The unchanged build263 matches all **1,112 current source-input hashes**. Both 30-second samples exclude their first five seconds. Independent checks pass **1,642 valid ticks / 1,371 measured ticks / 1,369 intervals**, with identical observer source, camera/player pose, phase/exposure, actual **3024×1724 / DPR2 / MSAA4**, High shadows, original postprocessing, cropped reflection and 16× samplers. Both issue exactly 800 draws / 8,620,259 repeated-view triangle slots on each recorded frame.
+
+| Session | Navigation entry | Wall median / p95 | Tick CPU median / p95 |
+| --- | --- | --- | --- |
+| Fresh tab | navigate | 36.00 / 38.10 ms | 13.30 / 17.115 ms |
+| Same-URL reload | reload | 37.20 / 39.70 ms | 13.30 / 16.14 ms |
+
+Timers wrap the existing eleven world phases; resource snapshots run outside the measured tick body roughly once per second. This instrumentation adds overhead. These intervals are **not displayed FPS, GPU completion, or an optimization gain**. Actors/wind remain live, and aggregate draw parity is not exhaustive per-object identity.
+
+[Fresh verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native264-fresh1-verification.json), [reload verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native264-reload1-verification.json), [independent pair and cleanup verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native264-pair-verification.json). Raw SHA256s: fresh `7cf72993f4ff04bafb9b38ded223631da69b635cc6442cdee374dd7ed269e692`; reload `d5bc99f544eb09a1508131fa7ee1631a7f18317182284ed267bae349ecb492b0`.
+
+### CPU ranking: commit dominates, not ordinary simulation updates
+
+| CPU phase | Fresh mean | Reload mean | Interpretation |
+| --- | ---: | ---: | --- |
+| Commit | 12.070 ms | 11.768 ms | Rendering/submission and all other system commits; largest by far. |
+| Update | 1.580 ms | 1.519 ms | Ordinary world/system/hot-object updates. |
+| Fixed + post-fixed update | 0.118 ms | 0.133 ms | Combined synchronous physics-step phases. |
+| Late update | 0.119 ms | 0.103 ms | Similar small scale to the fixed-step phases. |
+| Each remaining phase | 0.006–0.038 ms | 0.008–0.046 ms | Individual tiny phases are not the high-payoff target. |
+
+This is a **CPU-phase ranking**, not a replacement for Native206's terrain-first/grass-second content-cost ranking. Commit includes preparation, traversal and render submission; these measurements do not isolate exclusive GPU work or prove every commit millisecond belongs to Three. Do not subtract CPU time from wall cadence to invent a GPU duration, or sum overlapping omission/AA/reflection deltas.
+
+### Resource evidence and limits
+
+All **64 resource snapshots** have identical renderer counters: 264 geometries, 299 textures, 28 render targets, 454 programs, and estimated tracked total 1,552,743,840 bytes. All have the same 52 terrain chunk keys / 69 tree nodes / 94 grass owners, zero pending terrain workers/preparations/reserved raw bytes, 120 entities, 114 hot objects and 83 systems; tracked async tick calls are empty. No progressive growth appears in these counters.
+
+Reported JS heap use is about 2.46–2.49 GB at the four start/end snapshots; the reload's allocated heap capacity falls during observation. Chrome's coarse tab-memory label falls from about 6.6 GB after reload to 5.7 GB at cleanup. Neither label nor `performance.memory` is a retained-object analysis. Installed Three Info computes texture sizes from dimensions/type/mips, rather than measuring physical driver allocation; its byte total is **an estimate**, not verified VRAM usage. [Chrome memory investigation guidance](https://developer.chrome.com/docs/devtools/memory-problems), [Three Info contract](https://threejs.org/docs/pages/Info.html).
+
+The earlier route-dependent 61-chunk/9.3-GB observation remains unexplained; this shorter 52-chunk route does not reproduce it. Source inspection also finds that ClientGraphics.destroy does not explicitly dispose its renderer, but this run does **not** establish that as the cause of browser-reload variance. No speculative cleanup patch is applied to the inherited dirty source file.
+
+### Next action and cleanup
+
+Do not repeat the same reload unchanged. Prioritize a substantial terrain/grass rendering or sampling-cost reduction at retained 2×/AA/content, using the existing causal ranking. Native261's opt-in 8× terrain filtering still needs temporal/distant-grazing acceptance; unchanged defaults remain 16×. Keep repeated traversal/hot-reload lifecycle validation in the stability backlog. The current wall cadence still misses 16.67 ms by a large margin.
+
+All sixteen observer restoration checks pass per capture, followed by native camera/clock/exposure restoration. Owned DevTools/game close; the original New Tab remains. Private runtime stops **2026-10-04T06:32:13.280Z** with no errors, disposable database removed, four private ports free, public services/data unchanged, two served helpers removed and runtime admissions restored byte-for-byte. All 42 inherited working-file hashes match. Retained scripts/raw evidence remain recoverable. No production/default change or new unit-test pass is claimed. Runtime receipt SHA256: `ec101a0fa7b2095705089f8717a543d58b633e3cad92f0298d1ff62e7503d2e5`.
+
 ## Native263 — normal-loading filtering verified; performance acceptance remains open
 
 **Fresh production-source loading works at true 2×, but this is not another clean causal speedup measurement or a 60 FPS pass.** Native Chrome loads absent 16×, selected 8× (`terrainFiltering=balanced8-v1`), then absent 16× again. All seven actual issued terrain sampler keys agree with each session's immutable policy. The observer never changes filtering. Resolution remains **3024×1724 / DPR2 / MSAA4**, with High shadows, original postprocessing/bloom, rough-leaf grass and cropped reflection.
