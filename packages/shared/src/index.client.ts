@@ -625,6 +625,14 @@ export { default as THREE } from "./extras/three/three";
 export { BorrowedMaterialEnvironment } from "./extras/three/BorrowedMaterialEnvironment";
 export { fitBoundedDirectionalShadow } from "./extras/three/BoundedDirectionalShadow";
 
+// Explicit temporal consumers must share the live world's deformation registries.
+// Exporting these helpers does not select materials or change renderer defaults.
+export { createGrassMotionMaterial } from "./systems/shared/world/GrassGroundingGpu";
+export {
+  TreeMotionMaterial,
+  treeMotionVelocity,
+} from "./systems/shared/world/TreeWind";
+
 // Export Vector3 compatibility utilities for plugin use
 export {
   toTHREEVector3,

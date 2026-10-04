@@ -943,6 +943,13 @@ export function getPhysXAssetPath(assetName: string): string {
 export { default as THREE } from "./extras/three/three";
 export { BorrowedMaterialEnvironment } from "./extras/three/BorrowedMaterialEnvironment";
 export { fitBoundedDirectionalShadow } from "./extras/three/BoundedDirectionalShadow";
+// Explicit experimental temporal consumers must share the live world's node
+// registries. These exports do not select materials or change renderer defaults.
+export { createGrassMotionMaterial } from "./systems/shared/world/GrassGroundingGpu";
+export {
+  TreeMotionMaterial,
+  treeMotionVelocity,
+} from "./systems/shared/world/TreeWind";
 
 // Export Vector3 compatibility utilities for plugin use
 export {

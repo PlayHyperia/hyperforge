@@ -1,8 +1,47 @@
 # Grass canopy visibility: research checkpoint
 
+## Native269/270 — full-scene temporal cost measured; water integration blocks adoption
+
+**The first motion-aware full-game cost screen is complete, but the candidate is not accepted.** Real 2× remains 3024×1724, with high shadows, retained terrain filtering, cropped reflection policy, 52 terrain owners and 94 grass owners. No normal renderer default is changed. This is one held pond view, not sustained gameplay or displayed 60 FPS.
+
+### Integration and rejected evidence
+
+- Export the explicit grass/tree motion APIs from both shared entry points. The client needs the same module-local deformation registries as the live world; importing a second source copy or exporting only the server entry does not establish this identity.
+- The initial Native268 report is **invalid for motion-aware performance** despite its naive complete flag. TRAANode resets renderer state, clearing the custom render-object callback; inventory stayed empty and recorded draw counters were zero. Exclude its apparent timing gain.
+- Native269 reinstalls dispatch immediately around the exact primary scene/camera/render target, preserving the outer callback. Every candidate tick submits 256 primary object/material pairs, including 42 connected-tree and 45 grass-motion pairs. Another 87 custom/transparent pairs use finite out-of-range history rejection; 82 retain native velocity. These counts do not prove those 87 effects are visually qualified.
+- Actual primary samples are four for the original and one for the temporal candidate, with color/depth/velocity attachments and temporal resolve. This is an explicitly different AA method, not identical shading or an undisclosed quality reduction. [Three's documented TRAA setup](https://threejs.org/docs/pages/TRAANode.html) requires disabling MSAA for the temporal pass.
+
+### Measured result
+
+Native269 records 1,717 valid ticks in a 60-second A/B/B/A. Each 15-second block excludes its first four seconds; the first measured tick in each block has no prior measured interval and is excluded from statistics.
+
+| Condition | Usable intervals | Wall median / p95 (ms) | CPU median (ms) |
+| --- | ---: | ---: | ---: |
+| Original MSAA4 A1 | 291 | 37.70 / 40.10 | 13.40 |
+| Temporal B1 | 337 | 32.60 / 34.42 | 16.00 |
+| Temporal B2 | 338 | 32.40 / 34.90 | 15.90 |
+| Original MSAA4 A2 | 293 | 37.50 / 40.10 | 13.30 |
+
+The bookend/candidate midpoint difference is **5.10 ms (13.6%)**, including velocity/history/resolve overhead in this defective candidate. CPU increases by about 2.6 ms. Baseline submits 800 calls / 8,623,259 repeated-view triangle slots; candidate submits 803 / 8,640,764. The extra geometry needs attribution, so this is not equal-work parity. These are world-tick wall intervals and CPU submission durations, not exclusive GPU time, physical presentation measurements or a shipping speedup.
+
+### Visual blocker and discriminator
+
+Actual completed-frame PNGs show the candidate pond dark and missing its normal reflected appearance; original rendering restores. Native270 removes the temporal resolve and jitter but retains the color/velocity render and material dispatch. Its pond is still dark, locating the defect **before temporal resolve**. Its separate A/B/B/A gives 37.20 / 29.90 / 29.20 / 37.10 ms wall medians (1,817 valid ticks). Do not subtract separate-run numbers to claim an exclusive resolve cost. Raw MRT is not an acceptable AA replacement.
+
+Source review points to a concrete next discriminator: secondary reflection renders use original materials while the primary render uses borrowed clones. Verify that the reflector's material visibility/self-exclusion applies to the material actually drawn in its nested scene. This is a hypothesis, not a confirmed fix. Then check custom output/MRT and transparent composition as needed. No further unchanged full timing run is justified until water is correct.
+
+### Evidence, cleanup and remaining performance priority
+
+- Raw local receipts: Downloads/hyperia-native269-traa-cost.json SHA256 `36568128f2ea2bcc96d9f7ae8f5915ce93819e9690a55f0966e3d12499a4a401`; Native270 SHA256 `5b5c823e2a53f2e516ac7c0e51a861c0afaab0dc8207db24e6b2988d101bf05f`. Both include exact experiment source, pass samples/dimensions, per-tick data, material inventory and native PNGs.
+- Recomputed statistics, raw/source/capture hashes and cleanup are in `inland-pond-integration01-UNQUALIFIED/native270-verification.json`. Build269 verifies nine bundles / 982 compiled inputs / 1,113 current source pins. Seven restoration checks pass per run; no captured GPU errors. Actual private runtime ends cleanly under its watchdog, disposable database is removed, owned PIDs and four listeners are absent, and the owned error-page tab/console are closed.
+- Checkpoint verification reruns all seven relevant motion/grass test files: **400 tests pass**. Both changed framework entry points pass ESLint and Prettier; scoped diff checks pass. This does not remove the five previously recorded unrelated shared type errors or the separate meadow shape/snapshot verification debt.
+- All 1,142 runtime-protected file hashes match. All 42 inherited working files match their retained pins (water uses its current build269 pin, not the superseded source223 hash). The temporary runtime admission is restored. Explicit camera/exposure restoration in the former document was not independently verified; the document subsequently terminated. Do not claim otherwise.
+- Largest content priorities remain terrain and grass. Earlier same-run omission results identify their dominance, but omission costs and cross-cutting AA/filtering/reflection savings overlap and cannot be added. Temporal AA is now a measured candidate, not a recovered budget. Remaining gates include water correctness, other animated/transparent surfaces, moving camera/foliage artifacts, history invalidation, lifecycle/memory, extra submission attribution, and a fresh matched full-content cost check.
+- **60 FPS at true 2× remains unmet.** Even this unaccepted candidate is about 32.5 ms versus the 16.67 ms target. Keep performance-only focus and original public quality/content.
+
 ## Native266 — connected-tree motion passes native GPU correctness
 
-**The tree-motion prerequisite now has actual GPU evidence; the full-scene temporal-AA experiment is still not enabled.** This targets a possible replacement for the measured 8.50–9.05 ms primary-MSAA cost. It does not claim those savings, full-game temporal quality, or 60 FPS.
+**Historical Native266 checkpoint:** the tree-motion prerequisite has actual GPU evidence; full-scene integration was not yet enabled at this checkpoint. Native269/270 above supersede that integration status, without accepting the candidate. This targets a possible replacement for the measured 8.50–9.05 ms primary-MSAA cost; the fixture alone does not recover those savings.
 
 ### Implementation
 
