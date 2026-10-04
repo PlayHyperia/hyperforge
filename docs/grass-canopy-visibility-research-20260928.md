@@ -1,5 +1,39 @@
 # Grass canopy visibility: research checkpoint
 
+## Native261 — terrain filtering is a substantial measured cost
+
+**New performance lead, not a shipped quality reduction or a 60 FPS pass.** Two complete same-runtime 16×/8×/8×/16× anisotropic-filtering comparisons repeat a **4.80–5.375 ms** reduction in median wall tick interval (13.46–14.71%). A separate 16×/1×/1×/16× diagnostic gives 7.20 ms (20.43%). These change the filtering limit on the seven original terrain maps only. Actual 3024×1724 / DPR2 / MSAA4, High shadows, cropped reflections, rough-leaf grass, camera, phase 0.56 and exposure 0.850240084 remain fixed. Lower anisotropy is **not presumed quality-equivalent**.
+
+| Complete 60-second run | Baseline A1 | Candidate B1 | Candidate B2 | Restored A2 | Bookend/middle difference |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16× versus 1× | 35.00 ms | 28.00 ms | 28.10 ms | 35.50 ms | 7.20 ms |
+| 16× versus 8×, first | 36.30 ms | 31.20 ms | 31.15 ms | 36.80 ms | 5.375 ms |
+| 16× versus 8×, repeat | 35.70 ms | 31.40 ms | 30.30 ms | 35.60 ms | 4.80 ms |
+
+Each 15-second arm excludes four seconds of sampler/upload warmup. Independent raw-data recomputation verifies **5,535 valid recorded ticks**, 4,048 measured ticks and 4,036 cadence intervals. Every recorded tick retains 800 issued draws, 8,623,259 repeated-view triangle slots, 29 terrain draws, one mirror capture and primary sample count four. All 52 terrain / 94 grass owners remain; original material nodes, texture/image owners, pose and quality guards pass.
+
+Actual issued terrain bindings supply seven distinct expected texture UUIDs and native sampler keys at 16/1/1/16 or 16/8/8/16. Installed r186 uses those keys to select the GPU sampler; all seven source maps have linear minification, magnification and mip filtering. This is real sampler selection, not merely changing a preference. The shader graph, source texels, geometry and lighting are not replaced. Texture refreshes occur at transitions outside measured arm intervals.
+
+[Verification and complete arm statistics](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native261-filter-verification.json) includes hashes and the rejected first attempt. Raw successful captures: [1× diagnostic](/Users/lucid/Downloads/hyperia-native261-filter-af1-run2.json), SHA256 `59b17452912f25c923bf516ec27924de87c0f0cb0f1a8e8b3e595c900d0d3b75`; [8× first](/Users/lucid/Downloads/hyperia-native261-filter-af8-run1.json), `1d2909a68a0020f61c754d8c8d5f4fc7a8ddc8dd9e95c256e0af74df1e94539d`; [8× repeat](/Users/lucid/Downloads/hyperia-native261-filter-af8-run2.json), `72e135e45fc00a7715faad80b77d079b7353ad83b47e04ce32ed1cf7d30e57f7`.
+
+The initial attempt aborts before any measured frame because the diagnostic classified `SampledTexture` as a sampler (it inherits `Sampler`). Excluding sampled-texture bindings aligns the observer with Three's actual binding dispatch. The rejected receipt and exact first helper are retained; no game/shader change or acceptance threshold relaxation fixes that attempt.
+
+### Bounded appearance screen and remaining gates
+
+Eight original completed-frame PNGs cover the wide gameplay view and a closer exposed pond-bank camera, with 16×/8×/1×/restored16× bookends. They retain native 3024×1724 pixels and MSAA4. Root reviews the wide pair, close-bank baseline and three **unscaled** 16×/8×/restored16× crop triplets. No obvious 8× degradation is visible in these reviewed near-soil/bank crops. The crop named `far-bank` principally shows water and the near pond edge; it is **not** sufficient distant-terrain qualification. Wind, water and actors advance, so these captures are not exact pixel-parity or temporal-aliasing proof. No general visual acceptance is claimed for the 1× diagnostic.
+
+[Wide original images and receipt](/Users/lucid/Downloads/hyperia-native261-filter-images.json), SHA256 `9884903988c080bf92638936dcc6dbad3b0882480d54ff6ba629b3ec416e5419`; [close-bank originals](/Users/lucid/Downloads/hyperia-native261-filter-images-pond-close.json), `d64c75af93ea4f90f4fd3aee0b5240b71bd057c170823aa9ebe2500c658bbbf5`; [native-pixel near-soil triplet](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native261-filter-pond-close/near-soil-native-triplet.png), [bank triplet](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native261-filter-pond-close/grazing-bank-native-triplet.png).
+
+**Next:** qualify a cheaper terrain filtering policy across exposed paths, mineral banks, cliffs/coast, grazing angles and ordinary moving views, including day/night and source replacement. Keep the original 16× fallback and explicit comparison control; do not silently lower the production/default setting. If fixed 8× loses detail, investigate a footprint-aware policy and prove its emitted sampler selection and appearance rather than assuming mathematical equivalence. Keep grass shading as the second main content target.
+
+### Budget interpretation and cleanup
+
+Terrain remains the largest directly ranked content workload, grass second (Native206). This screen identifies **filtering inside terrain** as a substantial part worth targeting; it is not an additional independent budget category. For currently measured optimization leads, cropped reflections have repeated 7.2–7.9 ms savings, terrain 8× filtering 4.80–5.375 ms here, and rough-leaf grass 2.35–2.80 ms in its earlier comparison. Those scenes/baselines differ and the effects overlap: **do not sum them or rank them as exclusive GPU slices**. The current baseline already uses cropped reflection and rough-leaf grass. MSAA remains a large cross-cutting cost, but plain-off/SMAA alternatives failed foliage quality. Trees rank below terrain/grass in the existing interventions; actors/mushrooms have variable signals, and remaining water-surface/shadow-receiver/isolated-postprocessing attribution is incomplete.
+
+The two 8× midpoint intervals remain 31.175 / 30.85 ms, far above 16.67 ms. Timing is ordinary instrumented game-loop cadence, **not GPU completion or displayed FPS**. This same-session repeat supports a held-view lead, not a traversal/stability or multi-device pass. The second repeat has a 41.6 ms B1 p95; do not hide that variability.
+
+Native cleanup restores all seven samplers to 16×, MSAA4, camera/clock/exposure, original dispatch and absent diagnostic owners. Owned game/DevTools close, retaining New Tab. Private runtime stops at **2026-10-04 04:13:13.953 UTC**, with empty errors, protected files unchanged, disposable database removed and all four private ports clear. Five served helpers are removed and six runtime admissions reversed to the exact original hash. All 42 inherited working-file hashes are preserved. No production/default change; no new production-code unit-test claim. [Cleanup verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native261-cleanup-verification.json).
+
 ## Native260 — native SMAA measured, but rejected for foliage quality
 
 **Implemented and exercised a private SMAA1x Medium alternative; not promoted.** This follows Native259's measured AA cost rather than another small shader branch sweep. Three's installed r186 WebGPU SMAA runs before the normal tone-map/sRGB output at unchanged **3024×1724 / DPR2**. A full-content screen improves median wall intervals by **8.825 ms / 23.93%**, but grass remains conspicuously stippled and tree foliage darker/harsher than both MSAA4 bookends. Plain SMAA is not an acceptable replacement as configured. The original composer and MSAA4 restore; no production source, preference or public-build change.
