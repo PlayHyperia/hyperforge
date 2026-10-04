@@ -1,5 +1,30 @@
 # Grass canopy visibility: research checkpoint
 
+## Native258 — inactive terrain-light gate rejected after a complete 2× screen
+
+**No speedup delivered by this candidate; production source is restored.** A uniform branch skipped the original eight point-light calculations only when every intensity was exactly zero. Tiny nonzero, negative and cancelling lights retained the full expression; the separate lamp lightmap was unchanged. The candidate was lazy/private and never selected by defaults.
+
+The isolated actual-WebGPU check passes all 16 light cases, with identical float32 results for both enabled and disabled candidate lanes against the original: 524,288 components per lane, zero changed/nonfinite components, six successful resource disposals. This proves the sampled light calculation, not complete terrain-image equivalence or performance.
+
+One full-game A/B/B/A completes on AC power in native Chrome: actual 3024×1724 / DPR2 / MSAA4 / High shadows, unchanged postprocessing/bloom, full world content, fixed 768×134 reflection crop, phase 0.56 and exposure 0.850240084. Both shaders first warm through ordinary frames. Each 15-second arm excludes four seconds; no GPU query, fence/readback, extra world render or content omission occurs during timing.
+
+| Median wall interval / p95 (ms) | Original A1 | Gated B1 | Gated B2 | Original A2 |
+| --- | ---: | ---: | ---: | ---: |
+| Completed screen | 37.30 / 40.60 | 38.10 / 41.90 | 37.80 / 41.90 | 37.10 / 39.90 |
+| Synchronous World.tick median (ms) | 13.70 | 14.40 | 13.60 | 13.40 |
+| Measured rows | 293 | 287 | 289 | 296 |
+
+All 1,591 rows are valid, including 1,165 measured rows / 1,161 cadence intervals. Every tick issues exactly 796 calls and 8,611,259 repeated-view triangle slots, with one mirror capture; 52 terrain and 94 grass owners remain. Both candidate medians are slower than both original medians. The endpoint/middle averages are 37.20 / 37.95 ms: **no gain**, not an exclusive 0.75 ms GPU cost or a replicated universal regression. These are ordinary tick intervals, not displayed FPS. The 16.67 ms / true 2× goal remains unmet.
+
+**Verification and disposition:** independent raw-data checks reproduce timing, work counts, source serialization, build pins and cleanup. The prototype passes 69 terrain tests and scoped lint/format; its shared typecheck retains five inherited procgen-export errors. The two candidate source/test edits are archived outside production and reversed exactly to HEAD. Final restored-source verification uses the repository's Vitest runner: **67/67 pass**. An initial incorrect direct Bun-test invocation is excluded after EMFILE/module-resolution failure; it is not a product test result. No new dependency, default, quality, public build or asset change is retained.
+
+**Cleanup:** exact owned tick/render hooks and original material graph restore. Native UI confirms held exposure/camera/clock restoration and absent observer, then the owned game and console close. Runtime stops at 2026-10-04T01:59:31.844Z with empty errors; protected runtime/public services/saved DB unchanged, disposable DB removed, four private ports free. Six temporary runtime admissions reverse to the original helper hash; two served test copies are removed while external sources/evidence remain. All 42 inherited working-file hashes match.
+
+[Timing raw](/Users/lucid/Downloads/hyperia-native258-point-light-run1.json), SHA256 `84b907921a06875eaf9d1ade19866d3cdb862b2290c35396f46d64becf048c13`; [isolated parity raw](/Users/lucid/Downloads/hyperia-native258-point-light-parity.json), `82a504035469e73568beeea869f7354754ee262c58a51628cb9b1b13a4eb83b7`; [independent verification](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native258-light-verification.json), [verifier](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native258-light-verify.mjs), [rejected patch](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native258-rejected-point-light.patch). Immutable build258/report and runtime receipt are bound in the verifier.
+
+**Next decision:** stop this point-light micro-optimization. Prioritize a materially cheaper terrain-surface representation, then grass shading, with a bounded memory budget, actual covered-pixel evidence and full-content timing before integration. Do not reopen the zero-coverage appearance page, 405 MiB fixed-view cache, generic extra depth prepass, terrain decimation or per-frame PMREM experiment unchanged. The installed Three r186 opaque sorter already orders by depth after explicit group/render order; merely turning on front-to-back sorting is not a missing optimization. Retain the separately repeated reflection-crop benefit and its still-open default/compatibility gates. Reflection costs overlap terrain and grass and must not be added as independent budget slices.
+
+
 ## Native257 — ordinary moving-route and flag-absent runtime checks pass
 
 **The reflection crop now has ordinary near-water gameplay coverage, not just a held camera sweep. This is compatibility evidence, not a new speedup or 60 FPS acceptance.** Both 120-second sessions use immutable build255, actual 3024×1724 / DPR2 / MSAA4 / High shadows, ordinary UI navigation and camera rotation, the native synchronized clock and live exposure. No teleport, camera/clock override, manual extra render, content omission or quality reduction is introduced.
