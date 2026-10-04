@@ -560,6 +560,19 @@ export function resolveCompactTerrainTextureMatrix(
   return "identity-v1";
 }
 
+/** Explicit filtering candidate; omission retains 16x terrain anisotropy. */
+export function resolveCompactTerrainTextureFiltering(
+  win?: Window,
+): "balanced8-v1" | undefined {
+  const windowRef = getWindowRef(win);
+  if (!windowRef) return undefined;
+  const values = getSearchParams(windowRef)?.getAll("terrainFiltering") ?? [];
+  if (!values.length) return undefined;
+  if (values.length !== 1 || values[0] !== "balanced8-v1")
+    throw new Error("Unknown or duplicate terrain texture filtering candidate");
+  return "balanced8-v1";
+}
+
 /** Skip only the exactly neutral pond-bank domain; no quality default changes. */
 export function resolveCompactTerrainBankEvaluation(
   win?: Window,

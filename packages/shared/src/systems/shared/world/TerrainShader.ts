@@ -72,6 +72,7 @@ import {
   type CompactGroundSampling,
   type CompactTerrainTextureEncoding,
   type CompactTerrainTextureMatrix,
+  type CompactTerrainTextureFiltering,
   type CompactTerrainBankEvaluation,
   type CompactSurfaceBlend,
   type CompactPondBlend,
@@ -1251,6 +1252,7 @@ export function createTerrainMaterial(
     compactGroundSampling?: CompactGroundSampling;
     compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
     compactTerrainTextureMatrix?: CompactTerrainTextureMatrix;
+    compactTerrainTextureFiltering?: CompactTerrainTextureFiltering;
     compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
     compactDirtSurfaceCache?: CompactTerrainDirtSurfaceCache;
     compactTextureRenderer?: THREE.WebGPURenderer;
@@ -1317,6 +1319,14 @@ export function createTerrainMaterial(
     if (!options.compactPbr)
       throw new Error(
         "Terrain texture matrix requires the compact PBR material",
+      );
+  }
+  if (options.compactTerrainTextureFiltering !== undefined) {
+    if (options.compactTerrainTextureFiltering !== "balanced8-v1")
+      throw new Error("Invalid compact terrain texture filtering mode");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain texture filtering requires the compact PBR material",
       );
   }
   if (
@@ -1514,6 +1524,7 @@ export function createTerrainMaterial(
         options.compactTerrainTextureEncoding,
         options.compactTextureRenderer,
         options.compactTerrainTextureMatrix,
+        options.compactTerrainTextureFiltering,
       )
     : null;
 

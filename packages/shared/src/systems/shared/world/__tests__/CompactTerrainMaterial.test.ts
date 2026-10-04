@@ -317,6 +317,157 @@ describe("compact terrain pre-lighting surface (real TSL graph boundary)", () =>
   });
 });
 
+describe("balanced terrain filtering (real textures, not native qualification)", () => {
+  const ownerFor = (height: boolean, filtering: "balanced8-v1" | undefined) =>
+    new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      height ? "height-v1" : undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      filtering,
+    );
+  it.each([1, 16])(
+    "holds default16 or opt-in8 across six/seven actual PNG admissions, global default %i",
+    async (globalDefault) => {
+      const previous = THREE.Texture.DEFAULT_ANISOTROPY;
+      THREE.Texture.DEFAULT_ANISOTROPY = globalDefault;
+      try {
+        for (const height of [false, true]) {
+          for (const filtering of [undefined, "balanced8-v1"] as const) {
+            const owner = ownerFor(height, filtering);
+            const expected = filtering ? 8 : 16;
+            const entries = lifecycle(owner).entries;
+            const check = () => {
+              const receipt = owner.getReceipt();
+              expect(receipt.textures).toHaveLength(height ? 7 : 6);
+              expect(receipt.textureFiltering).toBe(filtering);
+              expect(
+                Reflect.set(
+                  owner,
+                  "textureFiltering",
+                  filtering ? undefined : "balanced8-v1",
+                ),
+              ).toBe(false);
+              expect(() =>
+                Object.defineProperty(owner, "textureFiltering", {
+                  value: "foreign",
+                }),
+              ).toThrow();
+              for (const entry of entries.values()) {
+                expect(entry.node.value.anisotropy).toBe(expected);
+                expect(entry.node.value.minFilter).toBe(
+                  THREE.LinearMipmapLinearFilter,
+                );
+                expect(entry.node.value.magFilter).toBe(THREE.LinearFilter);
+                expect(entry.node.value.generateMipmaps).toBe(true);
+              }
+              expect(
+                receipt.textures.every((row) => row.anisotropy === expected),
+              ).toBe(true);
+              expect(THREE.Texture.DEFAULT_ANISOTROPY).toBe(globalDefault);
+            };
+            try {
+              check();
+              for (const entry of entries.values()) {
+                const old = entry.node.value;
+                let disposed = 0;
+                old.addEventListener("dispose", () => disposed++);
+                const projected = entry.node
+                  .grad(vec2(0.01, 0), vec2(0, 0.01))
+                  .sample(vec2(0.3, 0.4));
+                const decoded = await decodedTexture(entry.key);
+                entry.status = "loading";
+                expect(
+                  lifecycle(owner).installTexture(
+                    entry,
+                    decoded,
+                    entry.key === "ground-height"
+                      ? COMPACT_TERRAIN_HEIGHT_SHA256["ground-height"]
+                      : expectedDigest(entry.key),
+                  ),
+                ).toBe(true);
+                expect(projected.value).toBe(decoded);
+                expect(projected.value.anisotropy).toBe(expected);
+                expect(disposed).toBe(1);
+              }
+              check();
+              expect(owner.getReceipt().status).toBe("ready");
+              const lease = owner.captureLoadedSourceLease()!;
+              expect(lease.isCurrent()).toBe(true);
+              const first = entries.values().next().value!;
+              first.node.value.anisotropy = expected === 8 ? 16 : 8;
+              expect(lease.isCurrent()).toBe(false);
+              first.node.value.anisotropy = expected;
+              expect(lease.isCurrent()).toBe(false);
+              const current = owner.captureLoadedSourceLease()!;
+              expect(current.isCurrent()).toBe(true);
+              owner.dispose();
+              expect(current.isCurrent()).toBe(false);
+              const late = await decodedTexture(first.key);
+              let lateDisposals = 0;
+              late.addEventListener("dispose", () => lateDisposals++);
+              expect(
+                lifecycle(owner).installTexture(
+                  first,
+                  late,
+                  expectedDigest(first.key),
+                ),
+              ).toBe(false);
+              expect(lateDisposals).toBe(1);
+            } finally {
+              owner.dispose();
+            }
+          }
+        }
+      } finally {
+        THREE.Texture.DEFAULT_ANISOTROPY = previous;
+      }
+    },
+  );
+  it("wires normal material construction without altering the default or permitting foreign modes", () => {
+    for (const filtering of [undefined, "balanced8-v1"] as const) {
+      const material = createRuntimeTerrainMaterial(undefined, {
+        compactPbr: true,
+        compactSurfaceBlend: "height-v1",
+        compactTerrainTextureFiltering: filtering,
+      });
+      try {
+        const receipt = material.compactTerrainSurface!.getReceipt();
+        expect(receipt.textureFiltering).toBe(filtering);
+        expect(receipt.textures).toHaveLength(7);
+        expect(
+          receipt.textures.every(
+            (row) => row.anisotropy === (filtering ? 8 : 16),
+          ),
+        ).toBe(true);
+      } finally {
+        material.dispose();
+      }
+    }
+    expect(() =>
+      createRuntimeTerrainMaterial(undefined, {
+        compactTerrainTextureFiltering: "balanced8-v1",
+      }),
+    ).toThrow("requires the compact PBR material");
+    // Runtime validation must also reject untyped external input.
+    // @ts-expect-error intentionally invalid candidate
+    expect(() => ownerFor(true, "unknown")).toThrow(
+      "Unknown compact terrain texture filtering mode",
+    );
+    expect(() =>
+      createRuntimeTerrainMaterial(undefined, {
+        compactPbr: true,
+        // @ts-expect-error intentionally invalid candidate
+        compactTerrainTextureFiltering: "unknown",
+      }),
+    ).toThrow("Invalid compact terrain texture filtering mode");
+  });
+});
+
 describe("identity terrain texture matrices (real TSL ownership, not native qualification)", () => {
   const createOwner = (selected = true) =>
     new CompactTerrainTextureSet(

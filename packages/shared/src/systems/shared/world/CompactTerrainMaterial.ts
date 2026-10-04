@@ -157,6 +157,7 @@ export type CompactGroundSampling = "exact-zero-v1";
 export type CompactSurfaceBlend = "height-v1";
 export type CompactTerrainTextureEncoding = "uastc-v1";
 export type CompactTerrainTextureMatrix = "identity-v1";
+export type CompactTerrainTextureFiltering = "balanced8-v1";
 export type CompactTerrainBankEvaluation = "regional-v1";
 type CompactTerrainCompressedFormat = NonNullable<
   ReturnType<typeof getKTX2TerrainFormat>
@@ -313,6 +314,7 @@ const SOURCE_RECIPE_KEYS = [
   "grassSubstrate",
   "textureEncoding",
   "textureMatrix",
+  "textureFiltering",
 ] as const;
 
 type LoadedSourceImage = {
@@ -507,7 +509,17 @@ export class CompactTerrainTextureSet {
     readonly textureEncoding?: CompactTerrainTextureEncoding,
     private readonly textureRenderer?: THREE.WebGPURenderer,
     readonly textureMatrix?: CompactTerrainTextureMatrix,
+    readonly textureFiltering?: CompactTerrainTextureFiltering,
   ) {
+    if (textureFiltering !== undefined && textureFiltering !== "balanced8-v1")
+      throw new Error("Unknown compact terrain texture filtering mode");
+    // Fix the per-owner policy before either placeholders or decoded maps exist.
+    // A later URL/global-default change must not split one material's samplers.
+    Object.defineProperty(this, "textureFiltering", {
+      value: textureFiltering,
+      writable: false,
+      configurable: false,
+    });
     this.sourceRecipe = SOURCE_RECIPE_KEYS.map((key) => this[key]);
     if (textureMatrix !== undefined && textureMatrix !== "identity-v1")
       throw new Error("Unknown compact terrain texture matrix mode");
@@ -654,6 +666,9 @@ export class CompactTerrainTextureSet {
           : 0),
       bitmapOptions: { ...COMPACT_TERRAIN_BITMAP_OPTIONS },
       ...(this.textureMatrix ? { textureMatrix: this.textureMatrix } : {}),
+      ...(this.textureFiltering
+        ? { textureFiltering: this.textureFiltering }
+        : {}),
       ...(this.textureEncoding
         ? {
             textureEncoding: {
@@ -828,10 +843,13 @@ export class CompactTerrainTextureSet {
     image.wrapS = image.wrapT = THREE.RepeatWrapping;
     image.magFilter = THREE.LinearFilter;
     image.minFilter = THREE.LinearMipmapLinearFilter;
-    // Match the WebGPU terrain quality policy even when image decoding finishes
+    // Apply the owner's explicit policy even when image decoding finishes
     // before ClientGraphics sets Three's constructor default. Existing textures
     // do not inherit later changes to that global default.
-    image.anisotropy = COMPACT_TERRAIN_MATERIAL.anisotropy;
+    image.anisotropy =
+      this.textureFiltering === "balanced8-v1"
+        ? 8
+        : COMPACT_TERRAIN_MATERIAL.anisotropy;
     image.generateMipmaps = !(image instanceof THREE.CompressedTexture);
     // Bitmap decode performs the single Y flip. Explicitly disable a second
     // WebGPU copy flip, and never premultiply packed roughness/AO into RGB.

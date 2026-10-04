@@ -205,6 +205,7 @@ import {
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
+  resolveCompactTerrainTextureFiltering,
   resolveCompactTerrainBankEvaluation,
   resolveCompactDirtSurfaceCache,
   resolveCompactSurfaceBlendCandidate,
@@ -476,6 +477,9 @@ export class TerrainSystem extends System {
   private compactTerrainTextureMatrix: ReturnType<
     typeof resolveCompactTerrainTextureMatrix
   > | null;
+  private compactTerrainTextureFiltering: ReturnType<
+    typeof resolveCompactTerrainTextureFiltering
+  > | null;
   private compactTerrainBankEvaluation: ReturnType<
     typeof resolveCompactTerrainBankEvaluation
   > | null;
@@ -696,6 +700,7 @@ export class TerrainSystem extends System {
       compactRockSampling: this.getCompactRockSampling(),
       compactGroundSampling: this.getCompactGroundSampling(),
       compactTerrainTextureMatrix: this.getCompactTerrainTextureMatrix(),
+      compactTerrainTextureFiltering: this.getCompactTerrainTextureFiltering(),
       compactTerrainBankEvaluation: this.getCompactTerrainBankEvaluation(),
       compactDirtSurfaceCache: this.getCompactDirtSurfaceCache(),
       ...(textureEncoding
@@ -942,6 +947,20 @@ export class TerrainSystem extends System {
     const selection = this.compactTerrainTextureMatrix ?? undefined;
     if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
       throw new Error("Terrain texture matrix requires compact sculpt terrain");
+    return selection;
+  }
+
+  private getCompactTerrainTextureFiltering(): ReturnType<
+    typeof resolveCompactTerrainTextureFiltering
+  > {
+    if (this.compactTerrainTextureFiltering === undefined)
+      this.compactTerrainTextureFiltering =
+        resolveCompactTerrainTextureFiltering() ?? null;
+    const selection = this.compactTerrainTextureFiltering ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain texture filtering requires compact sculpt terrain",
+      );
     return selection;
   }
 
@@ -2412,6 +2431,7 @@ export class TerrainSystem extends System {
     this.getCompactGrassColorGrade();
     this.getCompactRockSampling();
     this.getCompactGroundSampling();
+    this.getCompactTerrainTextureFiltering();
 
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();

@@ -27,6 +27,7 @@ import {
   resolveCompactGroundSampling,
   resolveCompactTerrainTextureEncoding,
   resolveCompactTerrainTextureMatrix,
+  resolveCompactTerrainTextureFiltering,
   resolveCompactTerrainBankEvaluation,
   resolveCompactDirtSurfaceCache,
   resolveCompactSurfaceBlendCandidate,
@@ -233,6 +234,108 @@ describe("explicit regional terrain bank evaluation (no quality defaults)", () =
       );
       Reflect.deleteProperty(globalThis, "window");
       expect(resolveCompactTerrainBankEvaluation()).toBeUndefined();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      world.destroy();
+    }
+  });
+});
+
+describe("explicit balanced terrain filtering (no quality defaults)", () => {
+  const dom = new JSDOM("", { url: "http://localhost:3344/" });
+  afterAll(() => dom.window.close());
+  const visit = (query: string) => {
+    dom.reconfigure({ url: `http://localhost:3344/?${query}` });
+    return dom.window as unknown as Window;
+  };
+  it("is absent by default, independent of peer selectors, and exact when selected", () => {
+    for (const query of [
+      "",
+      "terrainTextureEncoding=invalid",
+      "groundSampling=invalid",
+    ])
+      expect(
+        resolveCompactTerrainTextureFiltering(visit(query)),
+      ).toBeUndefined();
+    expect(
+      resolveCompactTerrainTextureFiltering(
+        visit("terrainFiltering=balanced8-v1"),
+      ),
+    ).toBe("balanced8-v1");
+    for (const value of [
+      "",
+      "BALANCED8-V1",
+      "balanced8-v1%20",
+      "%20balanced8-v1",
+      "off",
+      "8",
+      "balanced8-v1&terrainFiltering=balanced8-v1",
+      "&terrainFiltering=balanced8-v1",
+    ])
+      expect(() =>
+        resolveCompactTerrainTextureFiltering(
+          visit(`terrainFiltering=${value}`),
+        ),
+      ).toThrow("texture filtering candidate");
+  });
+  it.each([false, true])(
+    "captures selection or absence once, and a fresh owner captures the new choice: %s",
+    (selected) => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: visit(selected ? "terrainFiltering=balanced8-v1" : ""),
+      });
+      const world = new World();
+      const restarted = new World();
+      const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+      terrain["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+      try {
+        expect(terrain["getCompactTerrainTextureFiltering"]()).toBe(
+          selected ? "balanced8-v1" : undefined,
+        );
+        visit(selected ? "" : "terrainFiltering=balanced8-v1");
+        expect(terrain["getCompactTerrainTextureFiltering"]()).toBe(
+          selected ? "balanced8-v1" : undefined,
+        );
+        const fresh = restarted.register(
+          "terrain",
+          TerrainSystem,
+        ) as TerrainSystem;
+        fresh["activeTerrainProfile"] = SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE;
+        expect(fresh["getCompactTerrainTextureFiltering"]()).toBe(
+          selected ? undefined : "balanced8-v1",
+        );
+        visit("terrainFiltering=invalid");
+        expect(terrain["getCompactTerrainTextureFiltering"]()).toBe(
+          selected ? "balanced8-v1" : undefined,
+        );
+        expect(terrain.getDependencies()).toEqual({});
+        expect(fresh.getDependencies()).toEqual({});
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        world.destroy();
+        restarted.destroy();
+      }
+    },
+  );
+  it("rejects non-sculpt terrain and has no server-side default", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: visit("terrainFiltering=balanced8-v1"),
+    });
+    const world = new World();
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    terrain["activeTerrainProfile"] = COMPACT_WORLD_TERRAIN_PROFILE;
+    try {
+      expect(() => terrain["getCompactTerrainTextureFiltering"]()).toThrow(
+        "requires compact sculpt terrain",
+      );
+      Reflect.deleteProperty(globalThis, "window");
+      expect(resolveCompactTerrainTextureFiltering()).toBeUndefined();
     } finally {
       if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
       else Reflect.deleteProperty(globalThis, "window");

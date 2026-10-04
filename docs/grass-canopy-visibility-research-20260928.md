@@ -1,5 +1,40 @@
 # Grass canopy visibility: research checkpoint
 
+## Native262 — broader filtering screen and explicit loading-path candidate
+
+**Implementation progress; default 16× retained and 60 FPS still unmet.** Native261's repeated 4.80–5.375 ms held-view saving now has a broader bounded visual screen and a production loading-path option: `terrainFiltering=balanced8-v1`. This is explicitly opt-in, not a visual-equivalence claim or default promotion.
+
+### Matched native views
+
+Four successful native Chrome/WebGPU camera sweeps each record **120 frames per arm at 16× / 8× / restored16×**. Independent checks cover **1,440 recorded frames and 36 completed-frame PNGs**: identical camera poses by frame index, seven actual bound sampler keys/texture UUIDs, held phase/exposure, real **3024×1724 / DPR2 / MSAA4**, High shadows, original postprocessing, cropped reflection and 94 grass owners. All recorded frames report foreground focus.
+
+| View | Held phase | Readiness-wait frames | Evidence |
+| --- | ---: | ---: | --- |
+| Pond-bank midday | 0.56 | 84 | [Verified capture](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-bank-midday-ready/verification.json) |
+| Pond-bank night | 0.125 | 84 | [Verified capture](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-bank-night/verification.json) |
+| Mineral area at dawn | 0.2700000000000001 | 371 | [Verified capture](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-mine-dawn-ready/verification.json) |
+| Exposed coastal rock/soil | 0.56 | 52 | [Verified capture](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-coast-midday/verification.json) |
+
+The path waits at its current pose when normal world/shader readiness is incomplete; those 591 waiting frames are not included in recorded arm rows. The dawn phase check uses a 1e-12 tolerance for ordinary floating-point division; exposure is still held exactly. Initial focus/readiness/phase-check failures are retained separately, not counted as passes. Each successful sequence restores all seven samplers to 16×, original game tick/draw, camera, clock and exposure.
+
+Root reviews the midpoint native-pixel triplets for all four views, full bank/dawn/coast images, plus bank-start and coast-end triplets. **No obvious 8× detail loss appears in the reviewed exposed soil/coast crops.** The night view is dark, and mineral-area terrain is mostly hidden by grass/props; these are limited evidence for distant or grazing-angle ground. [Bank-start native pixels](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-bank-midday-ready/soil-triplet-0.png), [coast-end native pixels](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native262-coast-midday/soil-triplet-119.png): columns are original16× / candidate8× / restored16×, without scaling.
+
+Four canvas videos are retained beside the raw JSON captures in Downloads. **The videos have not been reviewed for temporal shimmer.** Live wind, water and actors continue, and recording/PNG overhead makes this a visual screen, not a timing benchmark. Native261 remains the timing evidence; these frames do not establish 60 FPS or exact pixel parity.
+
+### Explicit integration and source verification
+
+The URL resolver rejects unknown/duplicate values; omission retains 16×. TerrainSystem captures selection **and absence** once per world owner and admits the option only for compact sculpt terrain. TerrainShader passes the typed policy to the existing texture owner. That owner fixes its policy before allocation, applies it consistently to placeholders and loaded maps through the existing PNG/KTX configuration path, includes it in its receipt/source-lease recipe, and never changes Three's global default. No per-frame texture mutation, source-image replacement, shader/geometry simplification, AA or resolution change is introduced.
+
+**691 tests pass**: all 640 viewport tests plus 51 selected actual-Three/texture/material tests (including seven new filtering cases). Coverage includes strict selection, restart/absence capture, six/seven actual PNG admissions, both global anisotropy starting values, linked sample/gradient textures, normal material construction, invalid modes, immutable policy, source-lease invalidation, disposal and late completion. Selected existing identity-matrix, UASTC admission and ownership regressions pass. Scoped ESLint and `git diff --check` pass.
+
+Full shared-package TypeScript checking still fails on **five diagnostics outside the changed files**, involving missing procgen pavilion/flower exports and recipe types; no filtering-file diagnostic is reported. This is not a whole-repository typecheck pass. A fresh compiled native game has **not yet exercised the new URL option**: the visual screen above uses frozen build255 and runtime sampler transitions, before these source edits.
+
+### Cleanup and next acceptance gate
+
+The private runtime stops at 2026-10-04 05:04:59.221 UTC with no errors; its disposable database is removed, all four private ports are free, served helpers retire, and temporary runtime admissions return to their original bytes. Native cleanup reports all seven samplers16× / MSAA4 / absent controls; owned game/DevTools close. Public game and **all 42 inherited dirty/untracked file hashes** are preserved. [Stopped runtime](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/runtime-native262-filter-views/process.json), SHA256 `925578b2aea0bee531934b49f08232bd3e80659265cb1dbce17a2b02004e545e`.
+
+**Next:** fresh-build selected/absent runtime loading and restart checks, actual issued sampler verification, bounded temporal/distant-grazing review, then a matched full-content timing repeat using the normal option. Do not rerun the same diagnostic unchanged or promote the default merely because unit tests pass. Terrain remains the first content target and grass second; current measured candidate cadence is still about 31 ms, not 16.67 ms.
+
 ## Native261 — terrain filtering is a substantial measured cost
 
 **New performance lead, not a shipped quality reduction or a 60 FPS pass.** Two complete same-runtime 16×/8×/8×/16× anisotropic-filtering comparisons repeat a **4.80–5.375 ms** reduction in median wall tick interval (13.46–14.71%). A separate 16×/1×/1×/16× diagnostic gives 7.20 ms (20.43%). These change the filtering limit on the seven original terrain maps only. Actual 3024×1724 / DPR2 / MSAA4, High shadows, cropped reflections, rough-leaf grass, camera, phase 0.56 and exposure 0.850240084 remain fixed. Lower anisotropy is **not presumed quality-equivalent**.
