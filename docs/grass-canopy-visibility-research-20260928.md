@@ -1,5 +1,64 @@
 # Grass canopy visibility: research checkpoint
 
+## Native277 — corrected temporal AA repeats a 6 ms lead at true 2×
+
+**Two complete comparisons establish a repeatable performance lead, not 60 FPS or shipping AA-quality acceptance.** The private candidate renders the real TRAANode resolve, tree/grass previous-position motion, and scoped original-lake exclusion. Original MSAA4 remains the production default. Actual drawing buffer, scene, resolve and history are 3024×1724; DPR2, High shadows, seven original terrain samplers, 52 terrain / 94 grass owners, phase 0.56 and exposure 0.850240084 remain held. Wind and actors remain live.
+
+### Matched timing and exact work reconciliation
+
+Each run is 60 seconds A/B/B/A, four 15-second blocks with four seconds of warmup excluded per block. Quantiles below interpolate sorted finite wall intervals; measured-row counts include each block's first row without an interval.
+
+| Run/block | Measured rows / intervals | Median / p95 wall ms | Median CPU tick ms |
+| --- | ---: | ---: | ---: |
+| 1 / MSAA4 A1 | 297 / 296 | 36.95 / 39.325 | 13.9 |
+| 1 / TRAA B1 | 356 / 355 | 31.10 / 33.30 | 16.2 |
+| 1 / TRAA B2 | 356 / 355 | 31.00 / 33.50 | 15.6 |
+| 1 / MSAA4 A2 | 294 / 293 | 37.10 / 42.70 | 14.7 |
+| 2 / MSAA4 A1 | 288 / 287 | 38.10 / 41.55 | 16.2 |
+| 2 / TRAA B1 | 342 / 341 | 32.40 / 35.00 | 18.7 |
+| 2 / TRAA B2 | 345 / 344 | 32.15 / 34.30 | 18.3 |
+| 2 / MSAA4 A2 | 287 / 286 | 38.40 / 41.70 | 16.4 |
+
+Averaging the two bookend medians and two candidate medians gives **37.025 → 31.05 ms** and **38.25 → 32.275 ms**: **5.975 ms** in each run, **16.14% / 15.62%**. These are ordinary World.tick cadence measurements on a shared Mac, not GPU-exclusive time, presented FPS, or additive savings. CPU medians rise under the candidate; optimizing submission remains important. All **3,497 timed rows** are valid, with zero errors, zero unattributed work, strict full-resolution targets, and matching content/settings across both runs.
+
+| Actual native pass workload | Draws | Triangle submissions | Candidate difference |
+| --- | ---: | ---: | --- |
+| Primary scene | 330 | 4,895,601 | None |
+| Reflection scene | 252 | 2,479,363 | None |
+| Sun shadow map, primary view | 108 | 622,163 | None |
+| Sun shadow map, reflection view | 108 | 622,163 | None |
+| Small secondary sky pass | 1 | 3,968 | None |
+| Final output | 1 | 1 | None |
+| Temporal resolve | 0 → 1 | 0 → 1 | Only added draw |
+
+Baseline is **800 draws / 8,623,259 triangle submissions**; candidate is **801 / 8,623,260** on every timed frame. These are submitted primitives across passes, not unique geometry or pass GPU milliseconds. Both shadow captures use the same 4096×4096 target; their reuse safety and separate timing are not established by this count alone. Texture copies are not draws.
+
+The older unexplained Native269 difference is reconciled: the lake has 26,256 indices / 8,752 triangles and is double-sided. Native270 raw MRT added two draws / 17,504 triangles; Native269 added those plus one resolve. Corrected Native277 adds only the resolve. This is source-and-aggregate attribution supported by the scoped water discriminator, not a historical per-object GPU trace. Run1/2 record **2,728 / 2,676** original-lake hides and exact finally restorations, with zero nested lake draws. Native preview and decoded PNGs retain the bright reflective pond; static images do not establish moving-edge quality.
+
+### Measurement defects found and corrected, not retroactively accepted
+
+- Native275 fails before timing: localhost DevStats resets native draw/triangle counters in postTick. Native276 observes those existing resets and accumulates discarded segments without changing reset behavior. Pass totals, outer rendering and reset-adjusted whole ticks must agree exactly.
+- Native276 fails its first preview size guard. In r186, the first TRAA update reads the initial 1×1 beauty size before its dependent scene pass resizes. Native277 records that precise one-time startup signature as **invalid**, then requires **90 consecutive full-resolution preview frames**. Every timing frame requires full-resolution scene, resolve and history; no timing exception exists.
+- Native277 restores camera aspect as well as view/projection, validates the original effect-free direct compositor, and aborts on effect activation rather than dropping effects. The original factory has no bloom node; the preference is retained and no gain is attributed to removing bloom.
+- Water/unsupported deformation use sentinel history rejection. Closest-depth lookup can select neighboring opaque velocity; rejected pixels use current jittered single-sample color. This remains a quality risk, not proven MSAA4 equivalence.
+
+### Ranked next work and acceptance boundaries
+
+1. **Terrain remains the largest causally ranked content cost; finish the existing 8× filtering acceptance next.** Native261 already repeats 4.80–5.375 ms savings. Review the four retained Native262 videos for temporal shimmer, fill only the exposed distant/grazing-ground gaps, and require a route/residency-matched normal-option comparison. Native263 already verifies issued samplers; do not repeat its unchanged loading smoke test.
+2. **Grass remains second.** The current baseline already uses rough-leaf lighting; finish remaining backlight/shadow-edge/moving-view coverage. Do not count the prior 2.35–2.80 ms gain again or silently reduce density.
+3. **Rendering preparation/submission is the main CPU target.** Native264 commit averages 11.77–12.07 ms versus updates 1.52–1.58 ms. Attribute current graphics preparation, renderer submission and other system commits before changing one proven expensive operation. Those phase times are not exclusive GPU costs.
+4. **TRAA remains a private lead.** Require moving-camera thin foliage, disocclusion, transparent effects, cuts/resize, first-frame initialization without a visible 1×1 flash, lifecycle/memory and complete compositor compatibility before production integration. Measure any accepted combination directly; do not sum AA/filtering/reflection gains.
+5. Trees are secondary in the existing omission evidence (2.55–2.90 ms in one screen). Water-surface-only, shadow-only and isolated-postprocess timing are still incomplete. No invented most-to-least exclusive GPU budget.
+
+### Evidence and cleanup
+
+- Run1: `Downloads/hyperia-native277-traa-cost.json`, SHA256 `f899f68f75c6ddb1334b907590bd8795584d8fb9e6fdcc5f9621ac1ebda05b83`.
+- Run2: `Downloads/hyperia-native277-traa-cost (1).json`, SHA256 `aaabd9e262ee93962d376dc969f9c5e98bd7f8c00242ae37cccd179f85396143`.
+- Private helper `build272/native277-traa.mjs`, SHA256 `ef96863156bf4823722478aa6440562db794435cd424d99145048dd0ed89c0a0`; reviewed source and exact source embedded in each receipt. Both receipts include per-frame target dimensions, pass totals, reset segments, material inventory, captures and restoration flags.
+- Rejected Native275/276 receipt hashes: `b906fc84ffea0c27b3d43dd59a239ab429d400b996ed5d42ca1b8d01f80eae9b` / `fce5e6cd03e477c2f546a694b3e4e640fb51e3c48f48e992a833ada1467591ca`.
+- Twelve benchmark restorations pass per completed run. Final native checks verify no probe/camera/exposure hold, null dispatch/MRT, restored counter method, MSAA4, original aspect and live GPU. Owned tab/DevTools and runtime `runtime-native275-traa01` retire cleanly; its disposable test database is removed, protected state is unchanged and all four private ports are free. Temporary runtime admission restores byte-for-byte; all 42 inherited file pins match. Public localhost3333 and saved game state are untouched.
+- This checkpoint changes documentation and private diagnostics only. Earlier source-test counts are not rerun or relabeled as this checkpoint's results. **60 FPS / 16.67 ms at true 2× remains unmet.**
+
 ## Native274 water — reflection self-inclusion confirmed
 
 The same build272 reload then ran the previously prepared water discriminator with rough-leaf lighting and cropped reflections active. Actual canvas size was 3024×1724 / DPR2, with all 52 terrain and 94 grass owners retained. The candidate was **raw single-sample color/velocity MRT, not a temporal resolve**.
