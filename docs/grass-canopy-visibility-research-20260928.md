@@ -1,5 +1,37 @@
 # Grass canopy visibility: research checkpoint
 
+## Native282 — guard-heavy transform reuse rejected before runtime
+
+**Reject this implementation as a performance candidate.** The private, inert utility implements exact factory-root registration and synchronous render leases, with native first propagation, every outside-render call and leaf SkinnedMesh update retained. Preallocated snapshots check pose, pivot, local/world/manual matrices, flags, ordered topology, parent transforms, stock methods/callbacks, operands and skin state. A mismatch poisons that root for the rest of its lease. Borrowed receivers/unusual arguments stay native; disposal preserves foreign successors and independently restores other descriptors. Factory provenance remains a caller assertion, not proof from captured names.
+
+Root reads the final utility/test/benchmark sources and independently executes **32/32 real-Three r186 tests**. Twin fixtures cover pose/manual-matrix/pivot/binding/parent/topology changes, custom methods/callbacks/accessors, nested leases, native exceptions and restoration. These are selected offline correctness cases—not complete game visual, animation, skin/upload or adversarial semantic certification. Independent review also notes that child.parent and comparison-time children.length can be read before their admission checks, so arbitrary accessors/Proxies are not fully contained. No enforced game-wide render-writer contract is established. Do not install this rejected utility or weaken its checks to turn it into a claimed fast path.
+
+### Net CPU overhead, not game FPS
+
+The screen creates two deterministic equivalent populations: 32 roots, each 51 nodes, 24 bones and one childless skin. Both arms mutate the same pose once per lease and perform four forced propagations. The candidate duration includes the first native call, snapshot capture, three guarded secondary calls, skin leaves and lease cleanup. Eight alternating A/B versus B/A batches retain 96 timed leases per arm after ten warmup leases each. Timed pose, propagation, guard and lease costs are not subtracted; exact-state verification is outside the timed regions. No renderer, GPU, native browser, uploads or forced GC is involved.
+
+| Retained execution | Native median / p95 | Candidate median / p95 | Candidate/native median |
+| --- | ---: | ---: | ---: |
+| Author repeat | 0.516 / 1.077 ms | 30.206 / 37.659 ms | 58.59× |
+| Root independent run | 0.471 / 0.733 ms | 36.049 / 41.950 ms | 76.58× |
+
+Each execution retains all 192 timed rows, nine exact-state checkpoints and 32 exact descriptor restorations. All 10,176 secondary calls reuse successfully, with zero mismatches/guard/native errors; that count includes ten warmup plus 96 timed leases, not 106 timed leases. Independent arithmetic audit reproduces every row's arm/ordinal, all 16 batch-arm distributions, overall medians/p95/means, ratios, hashes and derived counters. Thus even the ideal all-hit case loses badly. Absolute Node timings are not browser predictions, but this large repeated overhead is sufficient to reject the guard-heavy approach **before** an expensive game trial. It never enters a browser, production source, runtime installer or defaults.
+
+### Avoid repeating low-return work
+
+Terrain/grass remain the leading causal GPU owners. The parallel source audit finds no newly proven duplicate same-texture/same-UV fetch. Exact-zero grass/dirt branching already exists; Native207's small unreplicated result is not a reason to recreate it. Ground geometric derivative/cross-product reuse would be distinct from the existing rock reuse, but GPU compiler CSE may already remove the apparent repetition. Historical Native252/264 programs do not match current build272 source pins, so they are not current issued-cost evidence. No new shader performance gain is claimed.
+
+The next **bounded CPU discriminator** is actual shadow override alpha/version/material-key churn on exact live renderer/render-object instances. Count coverage and source-material ownership while preserving native callbacks, return/exception semantics, all views, resolution, original16× maps and content; do not suppress renderer version checks or promote variants before measuring their cause. A future actor fast path would need a cheap **enforced render-time writer contract**. Removing checks from public mutable bone objects is not that contract.
+
+### Evidence and preservation
+
+- [Private utility](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/build272/native282-avatar-transform-reuse.mjs), SHA256 `c3e59d6b973cff237c6b1b346e59cb37285ebd21681bcb0a812beed5c05333a9`; [32-case tests](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native282-avatar-transform-reuse.test.mjs), `46ef07b6f86ef474bc5303937cb09128bf16dd33c383cd6cba9b211775e642c1`.
+- [Shared benchmark](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native282-avatar-transform-reuse.bench.mjs), `fc810b895a9d8e27d20803772e2cc66dd5a74664806cc47b9fc4b0e2dbed837d`; [author raw repeat](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native282-avatar-transform-reuse-benchmark.json), `e1e572a69cfe04f8f7115421c4eb5d5a92a301b935be442f5373f4c6c0c66b9d`.
+- [Root raw run and test summary](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native282-root-overhead-audit.json), `c93d7cc3a042fc788357e747a0dab5095a6530ac3e3daca79209d145a5eb7eb4`; [root test log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native282-root-tests.log), `adcb4348d16ab9e37c938b1cd3dadf51638940375f977f555f935ece37a91208`.
+- No game runtime, browser tab or disposable database is created for Native282. Production/defaults, public session and saved data remain untouched.
+
+**60 FPS / 16.67 ms at true 2× remains unmet.** This checkpoint rejects a bad candidate; it does not recover frame time. Native279's repeated 24–26% private combined lead remains about28.75 ms cadence, with shipping quality and integrated acceptance open.
+
 ## Native281 — actor transform receivers and safe next candidate
 
 **The live census identifies a concrete implementation scope; it does not claim a speedup.** Eight ordinary, focused frames keep the actual 3024×1724 / DPR2 / MSAA4 primary target, High shadows, seven original16× terrain maps, 52 terrain and 94 grass owners. Exact-instance wrappers observe the existing tick, renderer, scene and non-overlapping direct-child transform methods; no extra update/render, prototype patch or scene callback is introduced.
