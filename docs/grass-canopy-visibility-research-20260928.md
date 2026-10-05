@@ -1,5 +1,77 @@
 # Grass canopy visibility: research checkpoint
 
+## Native279 — combined cost repeats and current renderer attribution
+
+**The combined candidate is a repeatable 24–26% performance lead at real 2×, not 60 FPS or a shipping-quality pass.** Original MSAA4/16× remains the production default. The experiment combines the existing corrected private temporal resolve with seven 8× terrain samplers; it measures the combination directly rather than adding earlier separate savings.
+
+### Two matched full-content comparisons
+
+Both native Chrome runs complete 60-second A/B/B/A sequences: four 15-second blocks, excluding four seconds of transition warmup per block. Actual drawing buffer, scene, resolve and history remain **3024×1724 / DPR2**; High shadows, 52 terrain / 94 grass owners, full geometry, phase 0.56 and exposure 0.850240084 remain held. Wind and actors stay live. All seven native issued sampler keys match each arm on every timed frame. Original shared terrain maps also affect reflections; this is not a primary-only filtering intervention.
+
+| Run/block | Measured rows | Median / p95 cadence ms | Median CPU tick ms |
+| --- | ---: | ---: | ---: |
+| 1 / MSAA4 + 16× A1 | 288 | 38.30 / 41.40 | 16.7 |
+| 1 / TRAA + 8× B1 | 375 | 29.20 / 32.60 | 19.6 |
+| 1 / TRAA + 8× B2 | 373 | 28.30 / 36.55 | 19.0 |
+| 1 / MSAA4 + 16× A2 | 278 | 39.30 / 44.96 | 17.9 |
+| 2 / MSAA4 + 16× A1 | 290 | 37.80 / 42.16 | 18.1 |
+| 2 / TRAA + 8× B1 | 387 | 28.70 / 31.30 | 20.5 |
+| 2 / TRAA + 8× B2 | 385 | 28.80 / 31.185 | 20.3 |
+| 2 / MSAA4 + 16× A2 | 289 | 38.20 / 40.665 | 18.9 |
+
+Mean bookend/candidate block medians are **38.80 → 28.75 ms** and **38.00 → 28.75 ms**: **10.05 / 9.25 ms, 25.90% / 24.34%**. Candidate block medians span 28.3–29.2 ms. Another approximately 12.08 ms would be needed from the 28.75 ms level to reach 16.67 ms. These are ordinary world-tick cadence measurements on a shared Mac, not exclusive GPU duration or presented FPS.
+
+Independent verification passes all **3,625 timed rows**, including warmups, with zero failed checks/errors and twenty restorations per run. Every baseline submits 800 draws / 8,623,259 triangles; every candidate 801 / 8,623,260. The sole addition is one temporal resolve draw/triangle. Primary 330 draws / 4,895,601 triangles, reflection 252 / 2,479,363 and each of two sun captures 108 / 622,163 remain identical. Original-lake visibility restores exactly; no nested self-reflection is recorded. Loaded-source texture provenance and held quality match between runs apart from fresh texture UUIDs.
+
+This does not close temporal/disocclusion, transparent effect, distant/grazing filtering, cuts/resize, initial-frame, lifecycle or compositor compatibility gates. Candidate CPU medians increase, and the original effect-free graph must remain compatible. No resolution/content reduction is credited and no production/default setting changes.
+
+### Current CPU attribution—not the old aggregate commit label
+
+A separate warm, focused 30-second capture reuses the existing CPU observer factory byte-for-byte, with no GPU/per-draw observer. All **833 contiguous rows** have one graphics call and one successful primary CPU submission; world/renderer continuity, context, canvas/DPR/configured-MSAA metadata and all six cleanup checks pass. Actual physical targets are verified separately by the GPU and combined captures.
+
+| Synchronous CPU span | Median / p95 ms | Mean ms |
+| --- | ---: | ---: |
+| Whole world tick | 17.90 / 20.84 | 18.100 |
+| graphics.render, including its nested rendering work | 15.70 / 18.30 | 15.864 |
+| Per-row tick minus graphics, arithmetic remainder | 2.20 / 2.70 | 2.236 |
+
+These are CPU spans including observer overhead, **not GPU time**; the remainder is subtraction rather than independently attributed simulation/preparation subsystems. Baseline tick-start cadence is 36.30 ms median / 38.70 ms p95. Current graphics work—not an assumed expensive pre-render step inferred from Native264's entire commit phase—is the clear CPU target. Find the expensive operation inside that span before changing one.
+
+### Refresh of the actual cropped GPU graph
+
+The existing physical-pass timestamp observer completes **24 sparse samples / 192 ordered timestamp pairs** on the current actual device. It observes initial and resumed physical passes, not just logical render calls. Every sample retains 800 draws / 8,623,259 triangles, full-resolution primary/output, a 768×134 reflection and two 4096² sun captures into the same target/camera.
+
+| Observed scope | Median interval union ms | Interpretation |
+| --- | ---: | --- |
+| Primary, initial plus two resumed physical segments | 27.296 | Largest observed union; overlapping segments, not an exclusive material budget |
+| Output | 17.302 | Overlaps primary by 16.843 ms median; ends only 0.426 ms later—not an isolated 17 ms output shader cost |
+| Cropped reflection | 9.798 | Includes the existing scene work; overlaps other scopes |
+| Primary sun capture | 0.754 | Same 108 draws / 622,163 triangles |
+| Reflection sun capture | 0.721 | Concrete repeated work; safe reuse and net saving remain unproved |
+| Fog | 0 | Nineteen zero-duration written pairs at coarse timing granularity; not proof of free work |
+
+All 24 samples overlap. Median all-pass interval sum is 83.919 ms versus union 33.751 ms; median overlap 49.873 ms. **Do not add the rows, rank output as an isolated bottleneck, or invert these numbers into FPS.** Copies/resolves/compute outside render passes are not separately attributed. Sampler 16× setup is independently verified; this timestamp receipt itself does not record sampler keys. Resources 72/72, encoder hooks 144/144 and six outer hooks restore; no errors, rejected samples, pending resources or device loss.
+
+### Ranked improvement queue
+
+1. **Terrain first, grass second: largest causal content contributions.** Native206 omissions establish this ordering at a different, larger drawing buffer; their absolute deltas are not today's exclusive budget. Current 7-map filtering and AA are substantial cross-cutting candidates, with combined savings now directly measured. Preserve representative scene content and 2×.
+2. **Rendering CPU preparation/submission: confirmed 15.70 ms median span.** Use native CPU sampling / existing attribution tooling to locate its hotspot; reduce repeated render/material/node/batch work only after evidence identifies it. Do not spend this budget on unmeasured small gameplay phases or blanket matrix caching.
+3. **Reflection: an overlapping multiplier, not an additive category.** Current crop already reduces area, but 252 draws remain. Evaluate scene/pass work with exact reflection image/culling proof; do not remove the pond reflection to advertise a gain.
+4. **Trees are secondary/provisional** in prior 2.55–2.90 ms omission evidence. Their geometry and callbacks matter, but counts alone do not rank GPU costs.
+5. **Same-render sun reuse is a bounded secondary opportunity.** The current second capture is about 0.721 ms observed interval plus unisolated CPU draw work; require crop compatibility and exact caster/deformation/state proof. Native278's inherited switch remains unsafe. Fog, isolated water-surface shading, actors and postprocessing are not causally ordered by this receipt.
+
+This is a ranked intervention queue, not an invented additive 100% GPU partition. Next: sample inside current graphics.render and implement one proved hotspot with matched full-scene cost/quality checks. **60 FPS / 16.67 ms at actual 2× remains open.**
+
+### Retained evidence and teardown
+
+- Combined run1: [raw receipt](/Users/lucid/Downloads/hyperia-native279-combined-cost.json), SHA256 `77b7f7603dbf43d595419eba530747b78882842cec720081eb1c9d4d524fb1f0`; run2: [raw receipt](</Users/lucid/Downloads/hyperia-native279-combined-cost (1).json>), SHA256 `caf2f7dbe6870900d000106b85c6a71ca9709c89cbef5a895d7f0c2d381431e2`.
+- [Combined independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native279-independent-audit.json), SHA256 `02de75b514440f938ada91d7533b8429e0a0a130e77f79efbe431fd7711a7075`. Reviewed/executed combined helper SHA256 `af9640b5de941fcc4b0803aa147680b006eb2566262a4b7569c4e5a2a4a132fb`.
+- [CPU receipt](/Users/lucid/Downloads/hyperia-native279-cpu.json), SHA256 `4fbcaab7e0f53eccd53df73fa610200b5c062a547d22aa83933d8b2a50c58114`; [independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native279-current-cpu-audit.json), SHA256 `eb93a725b973b576bf671afe6685f489d62bbdf6409ff1f2a6974aed3761abd7`. Copied factory exact SHA256 `70aa342105f723f57361b65f379995b49a0bbe7785bf4f49ac7a2f37845aaeee`; whole private wrapper `d5f4ab25bef90a6fc9d4bb6f586a8391d9fded7c68ace2e8ae1260357e4ab352`.
+- [Current GPU receipt](</Users/lucid/Downloads/hyperia-native231-gpu-passes (1).json>), SHA256 `c92caa079f7eed3c9df608144331744b4836dfdb3272a1a8ec36ddc10be7ae33`; [independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native279-current-gpu-audit.json), SHA256 `983cacad54f7a65d287c1a8872a89a193fdff3d067c9883d6d9eb3be8d17a84b`. Unchanged observer helper `92baec874b4eeb9178d404fa1028f69ecb9590ac8a249211586ca13a3b4587ad`.
+- Final native readback confirms no CPU/GPU/combined/camera/exposure owner, samples 4, null draw dispatch/MRT, actual 3024×1724/DPR2, live GPU and seven 16× samplers. Owned private tab/DevTools close. runtime-native279-combined02 stops with errors[], disposable database removed, protected state unchanged and all four ports free. Its process receipt SHA256 `8d56e655bd71a82bba7852093efef3346dd3ee6fb54c2e392c30993ba77048ad`. The earlier overnight runtime-native279-combined01 also stopped cleanly before the repeat.
+- Temporary admission restores byte-for-byte to runtime helper SHA256 `d95bcf76dde5ebd7cb3a25beedde72b6ddf9854d3f45aad2c8cf2b9bddd9409f`; ordinary-client helper remains `5187b685df0fc47d695957eb642335a03a8e9b60d873a6a1878aa6efe2cf0c6a`. All 42 inherited file pins match. Public localhost3333 and saved data are untouched.
+- This checkpoint changes evidence/checklists and private diagnostics only. Syntax checks pass; existing test-suite results are not rerun or relabeled as new source verification.
+
 ## Native278 — bounded filtering screen and shadow-reuse blockers
 
 **The exposed-ground static screen passes; production filtering and AA defaults remain unchanged.** This is a performance-candidate qualification checkpoint, not a new speedup measurement or 60 FPS pass. The latest matched timing remains Native277's 5.975 ms temporal-AA lead; do not add it to Native261's 4.80–5.375 ms filtering lead.
