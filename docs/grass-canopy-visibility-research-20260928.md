@@ -1,5 +1,47 @@
 # Grass canopy visibility: research checkpoint
 
+## Native283 — shadow version churn confirmed without replacements
+
+**The bounded native capture proves repeated same-key revalidation, not a speedup.** Eight consecutive ordinary frames retain actual 3024×1724 / DPR2 / MSAA4, High PCF shadows, cropped reflection, phase0.56/exposure0.850240084, 52 terrain / 94 grass owners and seven original16× maps. The initial serialized quality/population pins are backed by the reviewed controller's before/after-tick owner, focus and readiness guards; they are not independent per-frame snapshots.
+
+Root executes 13 actual-r186 cache/Material tests plus 15 **separately labeled simulated synchronous adapter** tests: 28 pass, zero failures/skips. These selected offline tests do not establish native GPU/output parity. Root and an independent reviewer compare all six recorded function strings byte-for-byte with the actual private runtime's pinned Vite webgpu/core modules, not similarly named package functions or dynamically self-asserted identity alone.
+
+Root also reads and independently re-executes the complete retained evaluator: **116,835 receipt/source/arithmetic/restoration checks pass**, errors[]. This count is audit assertions over the eight-frame receipt, not another test suite or extra measured game frames. The independent report and root output agree byte-for-byte.
+
+### Exact natural invocations
+
+| Actual pass role | Direct dispatches / frame | Full-key calls / frame | Nested material-key calls / frame | Selected actual target |
+| --- | ---: | ---: | ---: | --- |
+| Primary | 337 | 0 | 0 | 3024×1724 |
+| Cropped reflection | 259 | 0 | 0 | 768×134 |
+| Primary shadow | 112 | 112 | 112 | 4096×4096 |
+| Reflection shadow | 112 | 112 | 112 | Same light camera/map, 4096×4096 |
+| Auxiliary scenes | 2 | 0 | 0 | 126×72 and default output |
+
+All **1,792 natural getCacheKey evaluations** (224/frame) occur under the two shadow views. Each contains one getMaterialCacheKey evaluation; these are **not3,584 independent material-key operations**. Every full-key return exactly equals that render object's initialCacheKey, although its cachedVersion trails the effective shadow material.version by28. Every corresponding native lookup publishes the current version without replacement. There are 824 warm render objects, zero newly discovered objects, zero constructor gaps, unknown objects, truncation or suspended observations, and fullKeyCallCoverage=true. General allConstructorCallsObserved=false is intentionally retained: constructors cannot be wrapped before an exact instance exists.
+
+One shared shadow override serves 84 distinct source materials. All 224 **observed dispatch-entry state transitions** are alpha0↔0.5 with version+1: 112 in each direction, 14 per shadow view/frame. This is boundary correlation, not a setter-invocation count or proof that no other writer can act. Both current and stored source-material identities are preserved. No setter, needsUpdate getter or key method is invoked synthetically, no prototype/callback hook is added, and no extra render is issued.
+
+The capture has **48 views / 6,576 dispatches / 6,576 lookups**, all eight frame continuities and clean nested scopes. Current live actor-driven draw populations differ from Native279's330/252/108: do not compare this census's absolute cadence, triangles or draw counts as an optimization result. Inclusive lookup/full-key/material-key spans include observer overhead and nesting; do not add them or advertise them as recoverable CPU/GPU time. Native280's0.644ms sampled material-key allocation remains attribution, not promised savings.
+
+### Next implementation — preserve invalidation, not just versions
+
+The candidate seam is the exact renderer._renderObjectDirect after stock shadow/object callbacks and native override-field transfer, with source ownership still in renderer._currentSourceMaterial. An admitted owned effective material can be passed to the original direct method while scene.overrideMaterial stays untouched. This avoids changing callback-visible shadow material identity or replacing the native shadow dispatcher. The [official r186 renderer](https://github.com/mrdoob/three.js/blob/r186/src/renderers/common/Renderer.js) and [shadow dispatcher](https://github.com/mrdoob/three.js/blob/r186/src/nodes/lighting/ShadowBaseNode.js) are the reference contracts; retained local/Vite strings prove which implementations actually ran.
+
+Two alpha-polarity variants are the minimum measured target, but **cloning two materials and keeping versions constant is not a safe fix**. Source version/graph, geometry attribute/layout, morph/skin/object state, clipping and effective shadow graph changes need legitimate variant invalidation or native fallback. Per-source variants may simplify isolated invalidation at a larger bounded material count. Do not suppress native version/key checks or bypass callbacks/refresh/upload work. Screen real-Three invalidation stress cases and total guard/update overhead first, then native shadow/issued-output parity and matched full-scene timing before production integration.
+
+Terrain → grass remains the largest causal GPU-content ordering. This smaller, now-proven CPU waste is one targeted work item, not a replacement for that priority or a claim that it alone can reach60FPS. The rejected Native282 guard-heavy transform implementation stays uninstalled.
+
+### Evidence and cleanup
+
+- [Raw native census](/Users/lucid/Downloads/hyperia-native283-shadow-key-census.json), SHA256 `c4adbcbafcc530089196617ddf0f341c4d57a2694ca20ac3c4efb4020b8cce38`, 21,061,342 bytes; [observer](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/build272/native283-shadow-key-observer.mjs), `64fe7ea56b37d250210ace0ce24b8f042804ee8cc153d0845c04073e6afbf619`; [trusted controller](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/build272/native283-shadow-key-controller.mjs), `4a1c7ea81005f7087a5c01d5cbc2c2a6381f5ec8ab9d9235e474984cf3244b4b`.
+- [Native/source/cleanup protocol](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native283-capture-protocol.json), `6602514a552af37c95f324243cda0abc7eaa4855539e49bd5e863f6b5b280068`; [root28-case log](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native283-root-tests.log), `f970c29c70fd44a2a676e223d391631796ff5b0953b8830edc2f0c2310b08ef0`.
+- [Independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native283-independent-audit.json), `db7b8eb107b285b0b2556cbb9a0fd510a32381dac5906efba9ba2b139e9bb1ab`; [root-reexecuted evaluator](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native283-independent-evaluator.mjs), `0416f0f88fbd8906f9117049dc12c7252c340c334d594bb4ac3f6c48bc183574`.
+- All **1,649 key/lookup hooks + four outer/alias descriptors** restore exactly. Native console readback verifies exact original get/scene/direct strings and alias, then releases controller, camera/clock and exposure owners; environment/renderer exposure equal their saved values. Owned game and developer-tools windows close; original New Tab remains.
+- runtime-native283-shadow-key01 stops errors[], removes only its disposable database, preserves protected files/public listeners/saved database and frees3344/5565/5566/57841. Temporary runtime helper restores exactly to `d95bcf76dde5ebd7cb3a25beedde72b6ddf9854d3f45aad2c8cf2b9bddd9409f`; ordinary-client remains `5187b685df0fc47d695957eb642335a03a8e9b60d873a6a1878aa6efe2cf0c6a`; all42 inherited file pins match.
+
+**60 FPS / 16.67ms at true2× remains unmet.** Production/defaults are unchanged. Native279's repeated24–26% private combined lead remains about28.75ms cadence, with shipping and presented-FPS gates still open.
+
 ## Native282 — guard-heavy transform reuse rejected before runtime
 
 **Reject this implementation as a performance candidate.** The private, inert utility implements exact factory-root registration and synchronous render leases, with native first propagation, every outside-render call and leaf SkinnedMesh update retained. Preallocated snapshots check pose, pivot, local/world/manual matrices, flags, ordered topology, parent transforms, stock methods/callbacks, operands and skin state. A mismatch poisons that root for the rest of its lease. Borrowed receivers/unusual arguments stay native; disposal preserves foreign successors and independently restores other descriptors. Factory provenance remains a caller assertion, not proof from captured names.
