@@ -1,5 +1,55 @@
 # Grass canopy visibility: research checkpoint
 
+## Native280 — current renderer CPU hotspot ranking
+
+**The native CPU trace locates concrete repeated work; it is not a new speedup or 60 FPS pass.** A focused 30-second CPU observer runs alongside native Chrome Performance sampling on the unchanged build272. All **731 rows** pass source, continuity, visibility/focus and cleanup checks. Canvas/DPR/configured MSAA remain **3024×1724 / 2 / 4**, with High shadows, held camera, phase 0.56 and exposure 0.850240084. Physical-pass targets and terrain samplers are not newly measured by this CPU receipt.
+
+With sampling active, tick median/p95 is 19.20/23.45 ms and graphics.render is 16.90/20.55 ms; arithmetic remainder is 2.30/3.10 ms. **Do not compare these absolute values with the previous unprofiled run as a regression or improvement.** Native DevTools is undocked, CPU/network unthrottled, JavaScript samples enabled, and screenshots/memory/advanced-paint/CSS statistics disabled.
+
+### Largest current CPU leaf costs, most to least
+
+The table allocates raw sampled leaf intervals only inside the 731 graphics windows, totaling **12,635.4 ms**. Exact URL/function/line/column distinguishes identically named functions. Dividing pooled sample time by 731 gives an allocation per recorded frame—not a measured per-frame median, GPU duration or recoverable saving. These ten leaves are distinct; inclusive ancestor costs are deliberately not added.
+
+| Rank | Source-matched sampled leaf | Pooled sampled ms | Allocation / recorded frame ms |
+| --- | --- | ---: | ---: |
+| 1 | Renderer._renderObjectDirect: draw/setup orchestration self | 1,456.822 | 1.993 |
+| 2 | Object3D.updateMatrixWorld self | 1,200.842 | 1.643 |
+| 3 | Renderer._projectObject: scene projection/traversal self | 1,183.001 | 1.618 |
+| 4 | Matrix4.multiplyMatrices self | 890.729 | 1.219 |
+| 5 | Native/builtin writeBuffer sampled leaf | 586.888 | 0.803 |
+| 6 | UniformsGroup.update self | 498.996 | 0.683 |
+| 7 | RenderObject.getMaterialCacheKey self | 470.541 | 0.644 |
+| 8 | UniformsGroup.updateByType self | 441.092 | 0.603 |
+| 9 | Object3D.traverseVisible self | 400.795 | 0.548 |
+| 10 | RenderObjects.get self | 398.546 | 0.545 |
+
+This refines the existing terrain → grass causal-content priority; it does not replace it with triangle-count guesses or an additive GPU partition. Rendering preparation, traversal and uploads now have current source-located CPU evidence. Four disjoint ancestry bins separately cover primary/preparation/other, reflection, primary shadow and reflection shadow; their raw leaf allocations reconcile exactly to the same graphics-window total. These are CPU call paths, not GPU physical-pass costs.
+
+### Highest-return conditional next work
+
+1. **Repeated scene world-matrix propagation first.** Of updateMatrixWorld self, **1,175.141 ms** terminates directly at Renderer._renderScene after recursive world updates. A distinct **803.115 ms** of multiplyMatrices self follows that same scene-driven chain. Together **1,978.256 ms**, approximately 2.71 allocated ms/frame, occur across the main view, reflection and both shadow views. This identifies repeated work, not an already recoverable 2.71 ms. Per-object generic EventNode callback multiplication accounts for only 60.324 ms and does not prove a specific model-view callback.
+2. **Prove the actual receiver and mutation ownership before reuse.** Next is a bounded private census on exact live owner instances, without patching Three's prototype, adding matrix updates, or changing normal rendering. Record non-overlapping subtree attribution, parent/topology/local/world state and actual callback owners across the views. A subsequent synchronous primary-render lease may retain the first native scene propagation and reuse only proven unchanged poses; cameras, model/view matrices, draws, culling, animation, shadows and reflections must remain live. Unknown callbacks or ownership reject reuse. Do not use scene render hooks: they conflict with current cropped-reflection admission.
+3. **Preserve existing transform contracts.** World.tick tests explicitly require normal root propagation for dynamic parent/root transforms, invisible children, bones/camera and static-local reparenting. Equipment callbacks really change wrapper/arrow poses during rendering, even when they publish child matrices themselves; they cannot be assumed neutral. Pavilions, lodge, docks and structural batches provide narrower local-static candidates, but counts do not establish their share of the trace. Terrain/grass already freeze their local transforms, Stage already owns explicit mesh matrices, and topology-only VRM skeleton propagation is existing work—not a new gain.
+4. **Shadow override material churn is the localized second lead.** **470.279 / 470.541 ms** of material-key self occurs under shadows. Stock r186 copies each source alphaTest into one shadow override per light; zero/positive transitions increment material version and can trigger repeated full keys. The source mechanism is verified, but live alpha/version transitions are not recorded by this trace. Count source/class/version/key evaluations before attempting per-source owned variants; preserve both captures, stock callback order, source changes, disposal and finally restoration. Do not suppress renderer version checks.
+5. **Uniform grouping remains secondary pending ownership attribution.** Packing/upload is measured, but assigning its budget to four grass uniforms is unproved. Likewise, this trace does not establish a safe object-traversal pruning rule. Pick the largest qualified receiver, then measure a full-scene comparison without lowering 2×, density, content or shadows.
+
+### Clock, reconstruction and verification limits
+
+The unique start User Timing mark joins page performance time to the same renderer PID59773 / thread22080331 trace. Its optional finish attachment fails because the capture-listener microtask precedes onclick installation; the CPU observer itself completes normally. **Only one anchor exists; no two-point drift verification is claimed.** All 731 ordered long update callbacks match the receipt ticks; observed boundary residuals and ±250 µs sensitivity are retained. Top-ten order stays unchanged for both shifts.
+
+The parser follows [Chrome's sample reconstruction source](https://raw.githubusercontent.com/ChromeDevTools/devtools-frontend/main/front_end/models/cpu_profile/CPUProfileDataModel.ts) and [profile/chunk ownership](https://raw.githubusercontent.com/ChromeDevTools/devtools-frontend/main/front_end/models/trace/handlers/SamplesHandler.ts): accumulate signed deltas, then sort timestamp/sample pairs; never clamp/drop/absolute-value negative deltas. This is **raw leaf allocation**, not exact DevTools Bottom-Up: program/native/GC repairs are not applied. Root independently recomputes all windows and the top ten; total and ranks match.
+
+**78/78 existing regression tests pass** across World.tick, AvatarSkeletonPropagation and EquipmentVisualMaterials. They protect current contracts; they are not a new optimization, performance acceptance or visual-equivalence pass. No production source/default changes.
+
+### Retained evidence and cleanup
+
+- [Native trace](/Users/lucid/Downloads/hyperia-native280-chrome-cpu01-20261005.json.gz), SHA256 `4167b58ab5de23e1f758198c31b045ff3c09c51fa468e40b3f09b9c9698a6207`; [paired CPU receipt](</Users/lucid/Downloads/hyperia-native279-cpu (1).json>), SHA256 `ff11679cf289fe4d5dde1b1f871be977b5d29fd44e1b6282e06cdf39a2fff270`.
+- [Independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native280-independent-cpu-trace-audit.json), SHA256 `f492e25a086052770c6315ee498c82acecd1540d54dc99a38efdb284a9e7eb51`; [read-only root recheck](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native280-root-recheck.cjs); [native settings/cleanup protocol](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native280-capture-protocol.json).
+- Six CPU observer restoration flags pass. Separate native readback verifies CPU control/observer, trace owner and camera/exposure holds absent. Owned World tab/DevTools close; original New Tab is preserved.
+- runtime-native280-cpu-profile01 stops with errors[], disposable private database removed, protected state unchanged and ports3344/5565/5566/57841 free. Temporary runtime admission restores exactly to `d95bcf76dde5ebd7cb3a25beedde72b6ddf9854d3f45aad2c8cf2b9bddd9409f`; ordinary-client remains `5187b685df0fc47d695957eb642335a03a8e9b60d873a6a1878aa6efe2cf0c6a`. All 42 inherited file pins match. Public localhost3333 and saved data untouched.
+
+**60 FPS / 16.67 ms at actual 2× remains open.** Native279's combined 24–26% private lead remains the latest matched optimization evidence. This checkpoint replaces guesswork about graphics.render with a current ranked CPU target and explicit safety gates.
+
 ## Native279 — combined cost repeats and current renderer attribution
 
 **The combined candidate is a repeatable 24–26% performance lead at real 2×, not 60 FPS or a shipping-quality pass.** Original MSAA4/16× remains the production default. The experiment combines the existing corrected private temporal resolve with seven 8× terrain samplers; it measures the combination directly rather than adding earlier separate savings.
