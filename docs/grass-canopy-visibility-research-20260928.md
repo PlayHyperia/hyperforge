@@ -1,5 +1,44 @@
 # Grass canopy visibility: research checkpoint
 
+## Native281 — actor transform receivers and safe next candidate
+
+**The live census identifies a concrete implementation scope; it does not claim a speedup.** Eight ordinary, focused frames keep the actual 3024×1724 / DPR2 / MSAA4 primary target, High shadows, seven original16× terrain maps, 52 terrain and 94 grass owners. Exact-instance wrappers observe the existing tick, renderer, scene and non-overlapping direct-child transform methods; no extra update/render, prototype patch or scene callback is introduced.
+
+Independent validation and root re-execution pass the exact factory/receipt hashes, frame continuity, all **145 losslessly reconstructed boundaries / 2,346 nodes / 262 roots / 9,176 calls**, and eight each of primary, primary-shadow, cropped reflection and reflection-shadow propagation. All 265 method descriptors restore exactly. Focus/population/texture ownership is enforced by the pinned live guards, not a separate serialized measurement of each field.
+
+### Actual receiver priority
+
+| Exact receiver group | Descendant nodes | Four-view native call spans over 8 frames | Allocation / observed frame |
+| --- | ---: | ---: | ---: |
+| 20 mob entity.mesh roots | 1,020 | 7.7 ms | 0.963 ms |
+| 12 NPC entity.mesh roots | 612 | 5.6 ms | 0.700 ms |
+| Grass container | 95 | 1.0 ms | 0.125 ms |
+| Water container | 52 | 0.6 ms | 0.075 ms |
+| Terrain container | 53 | 0.5 ms | 0.063 ms |
+
+The 32 identified actors own 768 bones and 32 skins. Including their outside-view calls, they account for **18.6 / 26.7 ms, 69.66% of observed direct-root spans**; rendering alone is 13.3 ms pooled, with 10.6 ms in the three secondary views. These are neither 69.66% of the frame budget nor recoverable savings. Individual timers are approximately0.1 ms quantized—8,912/9,176 read zero—and full-state snapshots heavily perturb scheduling. The unidentified 52-node/two-skin root stays unclassified. Do not infer owner or static eligibility from its name.
+
+### Concrete next implementation
+
+All 1,632 identified actor descendants have stock empty object render/shadow callbacks and stock Object3D/SkinnedMesh world-update semantics in this census; the 32 materials also have the stock callback. Each skin is an attached-mode leaf. Root local/world auto flags are already false, so changing those flags is not a new solution. The current NPC manifest uses VRM assets; optimizing the unused GLB per-bone path would likely provide no current island gain.
+
+Build a **private, factory-owned actor transform-reuse primitive**, with a synchronous render lease, first native propagation and every outside-render call unchanged. Before a later forced propagation, compare preallocated local/world/manual matrices, pose, flags, ordered topology, parent state, method/callback ownership and skin bindings. Any difference/unknown owner falls through to native behavior. Preserve the leaf SkinnedMesh native update (including bindMatrixInverse), skeleton updates, draws, model-view/camera transforms and all four views. Measure comparison overhead rather than assuming it is cheap.
+
+Native281 did not inventory updateMatrix or pivot, so both require explicit admission in the implementation. Raw scene/bone objects are publicly mutable; equal sampled endpoints do not prove future or transient immutability. Exclude cameras, water, unknown/local-player/equipment rigs and custom semantics. Use real-Three twin fixtures with pose/manual-world/topology/parent/pivot/binding changes, nested leases, exception forwarding and exact restoration, followed by a full-scene matched timing/parity trial before production integration.
+
+### Why scene-wide freezing is rejected
+
+First primary propagation repairs 98–190 changed nodes per frame, including animated poses. Reflection target236 begins primary at stored worldY24.6, updates to local-derivedY16, then reflection directly writesY24.6 with world-auto temporarily false; restoring the flag intentionally does not restore that matrix. Lake visibility/side, silhouette visibility and scene callbacks also change temporarily. All 24 secondary actor propagations show unchanged tracked endpoints, supporting the narrower candidate—not a blanket scene cache.
+
+### Evidence and preservation
+
+- [Raw census](/Users/lucid/Downloads/hyperia-native281-transform-census.json), SHA256 `464cba44ddb75e3d296cb127f0aa02bd3993921ceed089b362f24f723f2a6feb`; reviewed helper `7f11b3de1908cc3b809c7d6dc7461ae8dc5290f64b5c47893957b952434c1e1a`.
+- [Independent audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native281-independent-transform-audit.json), SHA256 `f350341c8affca821ec05d5ddb7cec29767a152a756b3681ff0000ff079f268f`; [read-only evaluator](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native281-independent-transform-audit.mjs) re-executed by root. Its assertion count is validation work, not a test-suite count.
+- Census hooks/listeners and unchanged graphics/scene-callback owners pass cleanup. Separate native readback confirms census/camera/exposure owners absent and environment/renderer exposure restored. Owned DevTools/game tab close; original New Tab remains.
+- Private runtime-native281-transform-census01 stops errors[], disposable database removed, protected state unchanged and four ports free. Runtime helper restores exactly to `d95bcf76dde5ebd7cb3a25beedde72b6ddf9854d3f45aad2c8cf2b9bddd9409f`; ordinary-client remains `5187b685df0fc47d695957eb642335a03a8e9b60d873a6a1878aa6efe2cf0c6a`. All 42 inherited file pins match; public game and saved data untouched.
+
+**60 FPS / 16.67 ms at true 2× remains open.** Production source/defaults are unchanged. Native279's 24–26% private combined lead remains the latest matched performance improvement; Native282 must prove its own net gain and correctness.
+
 ## Native280 — current renderer CPU hotspot ranking
 
 **The native CPU trace locates concrete repeated work; it is not a new speedup or 60 FPS pass.** A focused 30-second CPU observer runs alongside native Chrome Performance sampling on the unchanged build272. All **731 rows** pass source, continuity, visibility/focus and cleanup checks. Canvas/DPR/configured MSAA remain **3024×1724 / 2 / 4**, with High shadows, held camera, phase 0.56 and exposure 0.850240084. Physical-pass targets and terrain samplers are not newly measured by this CPU receipt.
