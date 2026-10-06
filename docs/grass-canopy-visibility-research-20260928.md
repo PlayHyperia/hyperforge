@@ -1,5 +1,27 @@
 # Grass canopy visibility: research checkpoint
 
+## Native296 — original rock mask completes; reprioritize exact triangle ordering
+
+The fresh foregrounded private Chrome run completes **COMPLETE_STANDALONE_PRE_OUTPUT_SCREEN_ONLY**, using the frozen Native292 module unchanged and a separately admitted Native296 runtime companion. The actual mask retains 3024×1724 / DPR2 / MSAA4 and seven loaded original 1024²/16× maps. Exactly one standalone original-scene/current-camera pass issues 17 terrain draws; 244 main dispatch calls and 323 backend calls are different seams, not additive counts. No attachment gaps, diagnostic errors, GPU errors or device loss are reported; all nine restoration flags pass.
+
+| Final retained-mask measure | Native result |
+| --- | ---: |
+| Nonzero required-rock coverage |35,175 pixels / 0.674707% of screen|
+| Fully required |10,717 / 0.205567%|
+| Fully required with at least one eligible axis |6,471 / 0.124123%|
+| Eligible axis-pixel pairs |6,521 = 687 X + 0 Y + 5,834 Z|
+| AR-site×full-pixel subset ceiling |19,563|
+| Aligned coherent 2×2 axis-blocks |758; not hardware quads|
+
+The 60.38% eligible proportion *within fully required pixels* must not obscure its small screen footprint. Nearly 70% of nonzero required pixels are fractional. The quantized alpha sum is approximately 21,811.416 pixel equivalents, not shader invocations. Transparent/non-terrain draws write zero, so previously shaded or overwritten fragments are absent; fractional eligibility, helper lanes, overdraw and mirrors remain outside the full-pixel figure. This is a conservative retained subset, **not a global work ceiling or proof that terrain/rock work is cheap**.
+
+Root and independent review reconcile dimensions, padded 21,184,320-byte readback, histogram, channel-alpha arithmetic, eligible/count/coherence relationships and restoration/error fields. Root reruns two acceptance/six refusal CPU reducer fixtures. Only the reduced receipt and padded raster digest were exported; raw raster is unavailable, so its digest and reduction are **not independently reproduced**. [Raw 8,080-byte receipt](/Users/lucid/Downloads/hyperia-native296-rock-ar-mask-01.json), SHA256 `b861db22cd12aefbbc77f29eae11dfd589659830ea76aafe131ac17286c6e31d`; [root receipt/fixture audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native296-root-mask-audit.json), SHA256 `f1012ea5a251ba69d5c9b32d23221a6055a059b11529df60e3fb4bcec2e2fe76`.
+
+Finished-only disposal removes the alias; native UI verifies ordinary null dispatch/MRT/targets, animation restored and unchanged 2×/MSAA4/postprocessing. Only the owned DevTools and private game tab close; the original New Tab remains. Runtime stops without errors at 2026-10-06T05:05:58.071Z. Root freshly checks 1,145 protected files, 42 inherited working-file pins, unchanged public services/database/mounts, all four private ports free and disposable database removed. [Postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native296-root-postflight.json), SHA256 `3ad83cd7f5227c12e463c271c0e4c8f2e8f0475bec3d4a1f5cbbf776397059d9`.
+
+**Decision:** deprioritize further fixed-ε AR qualification for this pond-view priority; do not run another same-view threshold/parity/timing loop. This is not a global rejection. Exact triangle ordering is the next quality-equivalent candidate: Source294 preserves actual geometry and Source295 qualifies its synchronous CPU draw contract, but candidate-only native upload/delete, actual draw admission, main/mirror image parity and net timing are still required. No production default or quality setting changed. **60 FPS at true 2× remains unmet.**
+
+
 ## Native293 / Source295 — actual issued shaders retained; render-index CPU contract verified
 
 The foregrounded native Chrome one-shot completes **COMPLETE_ISSUED_WGSL_ONLY** on canonical build291. Four ordinary advancing O/C0/E/C0 graphics calls each issue 17 terrain draws in the main view and 17 in a fresh natural mirror: 136 observed terrain draws. Actual main settings are 3024×1724 / DPR2 / MSAA4 / seven original 16× maps / postprocessing enabled. Original uses cached native programs; control and candidate programs are observed being created and issued. All twelve retained UTF-8 stage byte lengths and SHA-256 identities match the [complete 1,189,267-byte export](/Users/lucid/Downloads/hyperia-native293-issued-wgsl-01.json), SHA256 `5a70f93d52495c1ed194e754c952af077f48ff9b07048fceddb029bbf9b8ab1e`.
@@ -34,7 +56,7 @@ The first CPU run refuses an incorrect ordinary-Mesh count assumption; actual r1
 
 Current [meshoptimizer guidance](https://github.com/zeux/meshoptimizer#vertex-cache-optimization) explicitly distinguishes modern GPU reuse from fixed-size cache models; the earlier 18.28–22.36% modeled miss reduction is not a GPU-time prediction. The [Three Renderer contract](https://threejs.org/docs/pages/Renderer.html#setRenderObjectFunction) documents a draw-dispatch override, not acceptance of this experimental private buffer-lifecycle seam.
 
-**Next:** run the already-reviewed original-graph AR-required mask only after actual focused/readiness admission; qualify useful coverage, original-versus-split full PBR and moving main/mirror views before focused ordinary-topology timing. Independently admit candidate-only render indices before their own native parity and net-cost comparison. No new counter recapture, quality reduction or default promotion. Terrain remains the historical first causal content priority, grass second; reflection/shadows/AA and CPU rendering overlap that work. **60 FPS / 16.67ms at true 2× remains unmet; neither checkpoint recovers measured frame time.**
+**At this earlier checkpoint:** the focused original-graph mask and render-index native admission were next. Native296 above now completes the mask and deprioritizes further narrow AR qualification; exact render indices remain the active candidate. No new counter recapture, quality reduction or default promotion. Terrain remains the historical first causal content priority, grass second; reflection/shadows/AA and CPU rendering overlap that work. **60 FPS / 16.67ms at true 2× remains unmet; neither checkpoint recovers measured frame time.**
 
 ## Native292 / Source293–294 — native refusal isolated; exact triangle-order potential repeats
 
