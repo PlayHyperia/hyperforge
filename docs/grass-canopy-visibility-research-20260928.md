@@ -1,5 +1,36 @@
 # Grass canopy visibility: research checkpoint
 
+## Native292 / Source293–294 — native refusal isolated; exact triangle-order potential repeats
+
+The private Native292 one-shot is actually scheduled and observed through native Chrome. It refuses its combined foreground/readiness gate **before a diagnostic frame or renderer-state acquisition**: attempted=true, frameSubmissions=0, valid=false, no GPU errors and requiresPageClose=false. The individual failed conjunct is not recorded, so focus alone is not a diagnosed cause. No native mask, shader/parity result or speedup follows. `restored=false` at this pre-acquisition gate is not a restoration failure. The export command never successfully executes; [the root receipt](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native292-root-observed-refusal.json>) preserves the actual displayed API fields, not an invented full downloaded receipt.
+
+The owned private DevTools and game tab close, preserving the existing New Tab. Runtime292 stops without errors at 2026-10-06T03:57:32.775Z; root freshly rehashes 1,145 protected files and 42 inherited working-file pins, verifies unchanged public 3333/5555/5556 identities and saved database/mounts, checks all four private ports free and confirms the disposable database is removed. Original lifecycle helper remains exact d95bcf…9409f. [Postflight](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native292-root-postflight.json>). Production settings, public session and unrelated work remain unchanged.
+
+### Distinct CPU geometry-order screen
+
+Source294 uses the actual world/provider/quadtree generation but only the four previously censused compact-island nodes 27/46/49/64. Each geometry matches the exact retained Source289 hash. One existing installed `MeshoptEncoder.reorderMesh(copy,true,false)` call per chunk reorders copied triangles; its remap is inverted back to the original vertex IDs. Exact sorted oriented triplet multisets, surface/skirt counts, all attributes/ref/version hashes, bounds and canonical indices remain unchanged. This is **not** decimation, welding or a retained-topology change.
+
+The independent run and root rerun complete in 7.970 s and 7.307 s, each with 40 queue-oracle arithmetic fixtures, four actual chunks, 189,261 vertices and 373,092 triangles (10,780 skirts), no errors/cleanup errors and source/manifest/helper pins rechecked. Only the inherited road-resolution warning appears. Root independently recomputes all aggregates and compares every geometry, original/reordered index and proof hash across both runs.
+
+| Mathematical cold-per-chunk cache model | Modeled miss reduction |
+| --- | ---: |
+| FIFO 16 / 32 / 64 |22.36% /18.39% /18.28%|
+| LRU 16 / 32 / 64 |22.01% /18.62% /18.33%|
+
+These are **CPU locality models, not Apple's actual cache policy, vertex invocations, GPU milliseconds or FPS**. Passing the predeclared 10% screen floor earns only potential, not adoption. The summed 4,477,104-byte index payload is hypothetical installed render-index overhead, not persistent memory left by this screen; reported per-node scratch excludes generated geometry, WASM/JS/world/RSS. Actual optimizer/inverse CPU durations are one-time preparation observations, not frame costs. [Root pair audit](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source294-root-pair-audit.json>); [first run](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source294-terrain-index-locality-01.json>); [root rerun](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source294-terrain-index-locality-root02.json>).
+
+Do not reorder canonical retained indices: terrain cell/face lookup depends on their original order. A disposable geometry sharing source BufferAttributes is also unsafe because actual Three geometry disposal deletes those GPU attributes. A distinct render-only owner first needs explicit ownership, main/mirror pixel parity and repeated full-content timing; reject weak gains or added preparation/memory churn.
+
+### Next native phase is prepared, not executed
+
+Source293's 237-line issued-WGSL-only module and 229-line literal canonical companion are fully source-reviewed by root and an independent reviewer. Exact inverse proves the original lifecycle/header. Syntax, one CPU acceptance/five refusal fixtures and canonical preflight pass with 744 UI sources/four overlays/zero virtual overrides; no runtime output is created. [Preflight](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source293-root-preflight.json>). **It has not been installed or run.**
+
+It observes four strictly advancing natural O/C0/E/C0 `graphics.render` calls, retaining ordinary preparation/composer/grass cleanup and actual 2×/16×/MSAA4. Both clones use the same original material-owned normal-only seam; color/roughness use resolved appearance plus the original pre-light multiplier. Actual backend draws must match healthy pipeline/module/NodeBuilder code and known main/fresh-natural-mirror ownership. Every stage is capped 1MiB, all observed+retained code references 12MiB, at most six shader-pair/context records; one non-renewing 45s deadline bounds frame collection, queue and every digest. Admission failures fail forward to original draw owners. A native exception pauses only the still-owned animation loop and requires page closure. Device loss/owner changes block completion.
+
+This phase submits no extra target/MRT/readback and is **not image parity, a hardware-work census or a benchmark**. Actual WGSL control-flow/derivative inspection, original-versus-split full PBR parity, meaningful primary/mirror AR-required coverage and motion checks remain required before existing matched focused timing. No threshold sweep or unchanged counter recapture.
+
+**60 FPS / 16.67ms at true 2× remains unmet.** These checkpoints recover no measured frame time. Terrain remains the historical first causal content target, grass second; reflection, shadows and AA overlap that work rather than forming additive exclusive percentages.
+
 ## Source289 — terrain axis-read census qualifies a local candidate, not an FPS gain
 
 **Move performance implementation forward without waiting on unusable counter exports.** The distinct retrieval review finds no qualified practical complete-value route yet. An additional Instruments open attempt still exposes no document; cause unknown, and the owned app closes. A bounded completed error/fault log query reports invalid view geometry, but does not establish causality; a separate incomplete query is not interpreted. No new capture/export, installed-browser/signing/SIP/sandbox change or public-game change follows. [Retrieval disposition](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source289-retrieval-disposition.json).
