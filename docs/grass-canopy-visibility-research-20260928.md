@@ -1,5 +1,14 @@
 # Grass canopy visibility: research checkpoint
 
+## Native350 — current CPU and geometry budget captured at actual 2×
+
+The fresh canonical Build349 includes pushed `e88e8193` and no private source overrides. Focus-bounded Chrome tracing now records approximately **28.5 Hz** callback/presentation feedback, not 60 FPS. The conservative focused sample ranks matrix propagation/multiplication, scene traversal, buffer writes, direct dispatch, bindings/uniforms and material keys; inclusive graphics averages10.333ms/callback, World.tick12.077ms, without adding overlapping costs. Three ordinary frames each reconcile800 actual draw increments/8,623,259 triangle slots; grass alone is5,116,788 slots, not59.3% of frame time.
+
+Later actual scene/view identity reads resolve the reflection camera and97/98 unnamed IDs, with explicit cross-frame attribution limits. Existing mushroom spheres intersect all relevant views: no culling gain is admitted. Old terrain-AABB gating is not a new candidate. A whole-scene matrix freeze is also not safe without contracts for render-time equipment/skinning/camera writers;1.299ms of repeated sampled propagation is a work ceiling, not predicted savings. Hardware per-feature GPU attribution remains open; Chrome GPU-process CPU events are not that budget.
+
+[Full current ranked report and next gates](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/performance-budget-native350-20261006.md). Native350 stops cleanly, closes only owned test windows and freshly rehashes2,288 protected files, preserving42 inherited changes/public services/saved database. Art polish remains deferred; no further production/default quality change or sustained60FPS claim.
+
+
 ## Source348 — measured empty-tree optimization integrated; 60 FPS remains open
 
 The production factory now contains the exact five Source332 spans (13 added lines), SHA256 `f30516991d43b321651d989b1cc68ffc84d3935609aa8a3802ea05896c7a02d7`. Existing per-slot visibility selects the population; only zero-visible-slot LOD roots are hidden. Successful additions unhide all parts immediately, including after this frame's primary preparation. No LOD algorithm, geometry, material, lighting, wind, dissolve, texture, filtering, resolution or shadow-quality change is introduced. Foreign children/callbacks and temporal-history modes remain outside the verified scope.

@@ -6,26 +6,36 @@ October 1 direction: performance is the sole active priority. World, terrain-mat
 
 ### Current performance decision board — October 6
 
-Target: **60 FPS at actual 2×**, with no silent quality cuts. Latest warmed stationary ordinary-frame completion medians remain roughly **35 ms**, not verified presented FPS. The exact-empty tree candidate repeats approximately **1.3–1.5 ms (~10%) less synchronous CPU tick work**. Source348 now integrates its five production spans with 95/95 focused tests, independent 25/25 real-fixture integration tests and actual client/server compilation. Strict native projected-transfer/pixel qualification and sustained 60 FPS remain open.
+Target: **60 FPS at actual 2×**, with no silent quality cuts. Native350's current canonical build records **approximately 28.5 Hz** game callbacks and browser presentation feedback in an actual focus-bounded 46.2-second interval at **3024×1724/DPR2/MSAA4/High shadows**. Every retained callback-start interval exceeds 16.667 ms. This profiled stationary screen is not sustained uninstrumented gameplay acceptance; **60 FPS remains open**.
 
-This is a **most-to-least optimization priority**, not an exclusive/additive budget. Historical content-omission screens and overlapping GPU pass timestamps do not transfer unchanged to today's view or sum to frame time.
+Source348's exact-empty tree optimization is committed/pushed as `e88e8193`, with repeated prior 1.3–1.5 ms (~10%) synchronous CPU saving, 95/95 focused tests, independent 25/25 real-fixture tests and actual compilation. Native350 verifies a fresh canonical build with zero private overrides, not a further production optimization.
 
-| Priority | Area | Evidence / best next opportunity |
-| --- | --- | --- |
-| 1 | Terrain shading | Largest historical same-screen content impact; three-read and index probes did not establish meaningful gains. Obtain attributable shader pressure before another small rewrite. |
-| 2 | Grass rendering | Second historical content impact. Existing road-mask removal, chunk culling and cached basis work are already baseline; determine vertex, overdraw or sampling pressure before a new architecture. |
-| 3 | CPU render preparation | Source348 integrates the measured exact-empty factory gain without skipping wind/material updates. Real-fixture LOD transfer, same-frame late addition and native-slot reuse pass. Native340 covers positive commands; finish remaining native visual/movement acceptance without repeating unchanged timing. |
-| 4 | Reflections | Existing cropped capture savings are already baseline. Repeated reflection work remains relevant; preserve main/water visual contracts and distinguish overlapped work. |
-| 5 | Tree rendering | Provisional historical omission costs are smaller; current per-view index eligibility is only 1.52% of the whole-frame triangle counter. Empty-root CPU work is covered separately above. |
-| 6 | Sun-shadow/material-key preparation | Real revalidation is observed, but the safely owned tiny subset is not a large gain. Broad caching requires actual writer ownership; do not pursue repeated tiny probes. |
+**Current measured CPU ranking** (sampled self mean per complete game callback, conservative focused 35–78 s window):
 
-Water surface shading, avatars/animation, UI and other systems do **not** yet have a qualified current exclusive ranking. Their absence from the table is not proof they are free. Preserve raw stalls and report measurement limits.
+| Rank | Work | Mean |
+| --- | --- | ---: |
+| 1 | Matrix-world updates | 1.491 ms |
+| 2 | Matrix multiplication, across callers | 1.108 ms |
+| 3 | Scene traversal/projection | 1.042 ms |
+| 4 | CPU buffer submission | 0.700 ms |
+| 5 | Direct render dispatch | 0.602 ms |
+| 6 | Binding updates | 0.438 ms |
+| 7 | Uniform-group updates | 0.431 ms |
+| 8 | Material cache-key work | 0.408 ms |
 
-Next: larger quality-equivalent terrain/grass optimization and attributable pressure → fresh-build movement/day/arena and remaining native empty-root visual/projected-transfer checks → sustained actual 2× 60 FPS acceptance. Source integration is a scoped checkpoint, not launch certification. Art polish remains deferred.
+Inclusive graphics is10.333 ms/callback and World.tick 12.077 ms; **these overlap, do not add them**. Reflection plus its shadow accounts for 4.602 ms of sampled graphics CPU. Repeated scene propagation beyond the required first update is 1.299 ms of sampled work, not promised savings. Render-time equipment/camera/skinning writers prevent a blanket scene-update freeze without an ownership/fallback contract.
+
+**Geometry ranking is separate, not a GPU-time budget.** All three ordinary inventory frames submit 800 actual draw increments/8,623,259 triangle slots: grass 5,116,788 (59.3%), quad terrain 923,466, mushrooms 822,132, rooted flowers 496,928, confirmed batched roots 478,284, pond foliage 220,510, stations 171,526, remaining instanced roots 136,092, then smaller actors/water/sky/props. Later scene metadata resolves 97/98 initially unnamed IDs; species and the remaining auxiliary/instanced ownership are not inferred.
+
+Next: use this current ranking for a substantial quality-equivalent rendering change, with writer ownership and matched before/after verification. Existing-sphere mushroom culling has **zero useful eligibility in this view**; old terrain-AABB gating already showed inconsistent gains. Large full-island shadow coverage makes outside-map grass gating an unproved lower-priority screen, not an assumed large win. Historical terrain/grass omission rankings and overlapping GPU timestamps are not exclusive current costs. Actual hardware GPU attribution remains open; GPU-process CPU events cannot fill that gap.
+
+[Full ranked budget, raw evidence, limitations and implementation gates](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/performance-budget-native350-20261006.md). Native350 restores its draw hook/aliases, closes owned test windows and retires private services/database; root freshly rehashes 2,288 protected files. Public services/saved database and 42 inherited changes are preserved. Strict native movement/projected-transfer/pixel qualification and sustained 60 FPS acceptance remain open. Art polish remains deferred.
 
 ### Retained performance evidence and task history
 
-- [ ] **Screen exact outside-shadow-map receiver gating before a larger shader change.** Current draw-uniform PCF evaluates five comparisons even when its final receiver result is one. Admit only complete terrain/grass wind-swept bounds outside a stock receiver halfspace after current normal/depth bias and conservative numerical expansion; retain original filtering for inside/straddling draws. Installed r186 has x/y bounds and z≤1, not z≥0: ordinary six-plane frustum rejection is unsafe. Useful current-view coverage, ownership, native output equivalence and total net cost remain unproved; no distance-based shadow cut or promised milliseconds.
+- [x] **Screen outside-shadow-map receiver opportunity without enabling a quality cut.** The full-island sun map spans 400 m around the compact island; grass chunks are unlikely to be wholly outside it, and useful exact halfspace coverage remains unproved. Installed r186 accepts x/y∈[0,1], z≤1 with no z≥0: ordinary six-plane receiver rejection is unsafe. Retain original filtering; no shadow-gate implementation or measured gain. Current Native350 CPU/render inventory supersedes this as the assumed next substantial optimization.
+
+- [x] **Native350: qualify current focused CPU/cadence and full render inventory.** Fresh canonical Build349 with zero source overrides retains actual3024×1724/DPR2/MSAA4/High shadows. A focus-bounded46.2-second trace records1,316 game callbacks and approximately28.5Hz callback/presentation feedback, not60FPS; conservative35–78s sampled CPU ranking uses1,229 complete callbacks. Three ordinary frames each reconcile800 actual draws/8,623,259 triangle slots. Later read-only ownership resolves97/98 unnamed IDs without claiming same-frame ancestry/species. Draw hook/alias restoration, owned-tab/runtime retirement, fresh2,288 protected-file hashes,42 inherited pins and public services/database preservation pass. [Ranked budget and limits](/Users/lucid/Documents/hyperia/hyperia-implementation/docs/performance-budget-native350-20261006.md).
 
 - [x] **Source348: integrate the measured empty-tree CPU optimization.** Five exact factory spans hide only LOD batches whose existing visibility loop selects zero slots; successful late additions immediately unhide every material part. LOD, wind, lighting, dissolve, geometry, textures and quality settings are unchanged. Two new/extended real-fixture tests fail for the intended reason before the patch; final 95/95 focused tests, independent 25/25 integration cases, ESLint, formatting and actual client/server/worker compilation pass. [Verification and limits](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source348-production-empty-tree-verification.json).
 - [ ] **Retain the remaining native visual/projected-transfer and 60 FPS gates.** Native340 already proves actual cold-ready/add/remove/reuse and positive main/mirror/shadow commands. Native344/R3 supplementary attempts refuse before addition because the chosen full-sized maple placements are too large, steep or underwater; no native projected-transfer/pixel pass is claimed. Real GLB source fixtures now cover projected transfer, same-prepared-frame reactivation and hidden-all-six wind updates. A normal 2× candidate world is visible, not pixel parity. Native346/347 retire safely; 2,327 protected files, 42 inherited pins, public services and saved database remain unchanged.
