@@ -1,5 +1,41 @@
 # Grass canopy visibility: research checkpoint
 
+## Native340 — empty-tree lifecycle and command gate passes; default integration still open
+
+**Advance the repeated CPU lead. This is a lifecycle/command gate, not visual parity or 60 FPS.** Source336 changes the private initial selector to C and exposes three same-bundle factory lifecycle calls; actual add/remove/has-instance bodies remain unchanged. Source337's private build keeps only two effective source overrides; nine bundle/source-map checks and inverse/protected-input admission pass. No production/default source is changed.
+
+Native339 initially refuses with 16 capped table-contract messages, no retained frames/additions and no lifecycle qualification. Installed r186 keeps cached multi-draw starts in their original 2-byte units even when WebGPU uploads widen indices to4 bytes. The old diagnostic also over-constrained hidden roots whose first upload replaces an index array. Its missing operand record prevents claiming all past errors' exact conjunctions were replayed. Source340 fixes the diagnostic only: exact stock offset units plus bounded, value-exact one-way Uint16→Uint32 promotion at actual draw. No warm-O pre-upload, GPU mock or index-array write is introduced. Root/author pass **71/71 actual-source CPU/static contracts**; source pins/inverse and two independent reviews pass. These CPU fixtures do not simulate a GPU device. [Root CPU receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source340-root-cpu01.json), SHA256 `9372a9def942fad1ae8a2a2e7447891899bc9ef5a962de3df538789cd9d79bce`.
+
+Focused native Chrome then passes **all seven contiguous ordinary frames2275–2281**, at unchanged **3024×1724/DPR2/MSAA4**, original1024²/16× maps and cropped768×134/sample1 reflection:
+
+| Phase | Selected tree backend visits | Hidden roots | Positive slots |
+| --- | --- | --- | --- |
+| Cold-ready C |32|34|46|
+| First add issued C |40|32|48|
+| First removal C |32|34|46|
+| Reused add issued C |40|32|48|
+| Second removal C |32|34|46|
+| Original O |168|0|46|
+| Final C |32|34|46|
+
+Both successful asynchronous maple additions complete in their prepared frame and issue positive LOD0 commands next frame. Owners7/8, native slot1/geometry0 reuse exactly; both removals restore the entire original active/positive population. An actual projected LOD transfer is **not witnessed**. Ordered positive commands match O/C across **three camera identities/four sweeps**: the same shadow camera twice, main and mirror. The **168→32** visit change removes only136 zero-command visits, not136 indexed draws or whole-frame draw-counter entries. Native checks report27 retained healthy pipelines; full pipeline handles and original index arrays are not serialized, so raw audits cannot replay those live comparisons.
+
+All42 first-width witnesses report cached2/current4. The34 unique native upload promotions total371,961 compared index elements: maple7/8 on first issuance, remaining32 initially hidden owners when O becomes visible. Source guards compare every value, including restart widening, and retain old arrays read-only. The complete raw receipt is **391,863 bytes**, SHA256 `273f767397067e4e47739310c2ebbd425a5e744ec33cfac33136bf91f3380be8`. [Native raw](/Users/lucid/Downloads/hyperia-native340-empty-tree-correctness-01.json); [root audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native340-root-lifecycle-audit.json), SHA256 `74d532d175ab60643bbf40e80981cbc54c6c8a7d66da574abd06f69e61b0112e`. Root independently checks **19,398 assertions over every294 owner snapshot/683 active tuples/326 positive slots/376 draw rows/1,304 command tuples**; two independent readers agree. All declared byte/time/row caps pass.
+
+Attempt duration10.785s includes handoff/queue activity. The instrumented cold O frame takes960ms and includes first upload work: **it is not a net-cost sample or claimed saving**. Only Native335's two unchanged-setting O/C/C/O screens establish the repeated1.3–1.5ms synchronous tick reduction. Native340 establishes neither image/motion parity, physical presented FPS, exclusive GPU costs, first-ever shader creation nor complete startup-error capture.
+
+Actual native readback confirms source O/reset, released controller/alias, ordinary animation loop, no forced interval/owned render/draw/postTick hooks, null callback/MRT/targets and healthy device. Owned DevTools/private World close; the pre-existing New Tab stays. Runtime341 stops at **2026-10-06T13:25:32.872Z**, errors[]. [Fresh postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native341-root-postflight.json), SHA256 `da1f809b5cbc7b17142299ec11489fb00e24fd5e3d2745402e989450a29800f8`, rehashes **2,327 protected files/42 inherited pins**, preserves public services/database/mounts, confirms private ports free and removes only the disposable test database.
+
+**Next:** finish ordinary main/mirror/shadow visual/motion and actual projected-transfer qualification, then scoped default integration/retest. Do not park the repeated CPU lead or repeat unchanged timing. Terrain→grass remain the largest historical content opportunities; current exclusive attribution and actual2× 60FPS/16.67ms acceptance remain open.
+
+### Grass-shadow and Apple silicon disposition
+
+Current rough-leaf grass is opaque/depth-writing. Default qualification does not enable distance-PCF; that optional profile uses one far sample, **not zero far shadow reception**. Authored grass deformation fade is not visibility fade. The shadow function can still sample before selecting an out-of-frustum constant, to preserve varying derivative semantics. Do not call that work free or remove far receivers by default.
+
+A distinct quality-preserving skip would require an entire wind-swept chunk outside the actual shadow frustum, including bias/numeric margins; inside or straddling chunks keep original filtering. There is no accepted eligibility/net-gain census. Terrain normal fade also does not erase packed normal/AO reads because AO/cavity still consumes them.
+
+Apple advises avoiding redundant attachment load/store traffic and notes that opaque hidden-surface removal can make a performance-only depth prepass unnecessary. Inference: no blanket depth-prepass optimization is justified here; an opaque material declaration alone does not prove every actual shader/attachment behaves as fully opaque. Attribute real shader pressure first. [Apple silicon Metal performance](https://developer.apple.com/videos/play/wwdc2020/10632/).
+
 ## Native335 / Source333–334 — repeated full-scene CPU gain; correctness gate next
 
 **Advance this CPU lead; do not promote it to the default yet.** Source333 provides a source-owned O/C switch: O executes the original visibility body without candidate counting/publication, C executes frozen Source332's exact-empty body, and returning O immediately unhides owned roots. Both select before ordinary World preparation; no forced render or per-draw scan. Author/root pass **10/10 actual-source CPU checks**. [Root receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source333-root-cpu01.json), SHA256 `4f8bffd278bddf24cff6c91dc420069a829112464d0954e56dfc05ef02353348`.
