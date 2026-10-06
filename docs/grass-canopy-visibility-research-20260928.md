@@ -1,5 +1,26 @@
 # Grass canopy visibility: research checkpoint
 
+## Native299 / Source297–298 — exact terrain indices reach the actual GPU; net benefit still open
+
+Source297 prepares four exact actual terrain chunks: 189,261 vertices / 373,092 oriented triangles, all eight attributes, bounds and skirts retained. The installed encoder passes 16 numerical CPU checks in both runs; the root packet audit reconciles all segment ranges/hashes and original Source294 proof identities. Total serialized candidate payload is **4,477,104 bytes across four segments**, not that amount per segment or measured GPU memory. [Packet audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source297-root-packet-audit.json).
+
+The freshly reviewed 317-line Source298 helper (`a8ffa8883e741bc226c5716686b88aa33beafad96e98638f9d533044afdc636b`) qualifies only actual indexed-draw and managed-buffer ownership. Native299 runs three focused, natural graphics frames **10600/10601/10602, O/C/O**. Main remains **3024×1724 / DPR2 / MSAA4 / postprocessing** with all seven original loaded 1024²/16× maps. The ordinary owned reflection retains its actual **768×134 / sample1 cropped target**; no diagnostic replacement target or material graph is introduced.
+
+| Native ownership result | Evidence |
+| --- | --- |
+| Selected chunks |27, 46, 49, 64; each one main + one mirror draw per arm|
+| Distinct candidate indices and GPU buffers |All four issue in C; final O restores exact first-O tokens|
+| Stable per-view lineage |Same pipelines, contexts, cameras, matrices, projections and targets|
+| Draw counts |24 selected draws; 6,715,656 index slots / 2,238,552 triangle slots, not invocations|
+| Managed lifecycle |Four uploads, settled queue, four candidate-only deletions; zero unretired attempted payload|
+| Restoration/errors |Owners restored; no reported diagnostic/GPU errors or device loss|
+
+Root and two independent full readers reconcile the raw receipt with packet hashes, counts, disjoint tokens and restoration. [Raw 22,421-byte receipt](/Users/lucid/Downloads/hyperia-native299-index-ownership-01.json), SHA256 `46b4179dda3e3ffa2ed3bf0789a1b99577a58eb92acf374d68e10a5ae823332a`; [root numerical audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native299-root-index-ownership-audit.json), SHA256 `a050e674a1b319e56fb16ee23cd67c3ef03da80c8af886309f16e1217a8c183c`. Actual canonical pre/post hashes are source-enforced; the receipt is not independent GPU-byte readback. All selected secondary/shadow counts are zero, so native shadow coverage is not established. Natural light phase advances across the three frames; these are **not matched pixel comparands or a timing sample**. The receipt has no start timestamp; the 45-second deadline is source-enforced, not independently recomputable from exported duration.
+
+Finished-only disposal removes the alias. Native UI verifies null dispatch/MRT/targets, animation present and unchanged 2×/MSAA4/postprocessing; only owned DevTools/private tab close, preserving the original New Tab. Runtime stops without errors at **2026-10-06T05:39:52.753Z**. Root rehashes **1,148 protected files / 42 inherited working-file pins**, verifies unchanged public services/database/mounts, all four private ports free and disposable database removed. [Postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native299-root-postflight.json), SHA256 `5ffb20628e055cff6e53c2b26407b01f9533bd932bc87f394d73819f0ed6d4d4`.
+
+**Next:** use a bounded ordinary-topology net-cost timing screen to reject insufficient gain before expensive parity. Any promising result still needs same-state full-PBR main/cropped-mirror image comparison and repeated focused matched timing, accounting for preparation and steady-state hook cost. No public/default setting or production index changes. **60 FPS / 16.67ms at true 2× remains unmet.**
+
 ## Native296 — original rock mask completes; reprioritize exact triangle ordering
 
 The fresh foregrounded private Chrome run completes **COMPLETE_STANDALONE_PRE_OUTPUT_SCREEN_ONLY**, using the frozen Native292 module unchanged and a separately admitted Native296 runtime companion. The actual mask retains 3024×1724 / DPR2 / MSAA4 and seven loaded original 1024²/16× maps. Exactly one standalone original-scene/current-camera pass issues 17 terrain draws; 244 main dispatch calls and 323 backend calls are different seams, not additive counts. No attachment gaps, diagnostic errors, GPU errors or device loss are reported; all nine restoration flags pass.
