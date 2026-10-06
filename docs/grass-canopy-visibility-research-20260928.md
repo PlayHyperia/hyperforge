@@ -1,5 +1,24 @@
 # Grass canopy visibility: research checkpoint
 
+## Native331 R2 — live tree eligibility; exact-empty CPU lead next
+
+A single fully ready natural Chrome frame at unchanged **3024×1724 / DPR2 / MSAA4 / postprocessing** completes the read-only screen. All 42 factory owners, 20 rest geometries / 99,188 inspected vertices and three view aggregates reconcile in root and independent audits. [Raw receipt](/Users/lucid/Downloads/hyperia-native331-tree-frustum-eligibility-01.json): 18,864 bytes, SHA256 `fbf8ef756bdb2e3c3b3d5097abcf2408e89e2e0c8a935a9e80976f755cf81a74`. [Root aggregate audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native331-root-eligibility-audit.json), SHA256 `6b75ac52d4544280427a2a12dd12c5d3fe9102e9959d4f1a2fde77dfe64fb4f0`.
+
+| Actual view | Backend visits | Material-instance slots | Eligible / baseline index references |
+| --- | ---: | ---: | ---: |
+| Main | 42 | 46 | 44,343 / 358,713 (12.36%) |
+| Cropped mirror, 768×134/sample1 | 42 | 46 | 347,862 / 358,713 (96.98%) |
+| Two shadow captures, one unchanged camera | 84 | 92 | 0 / 717,426 |
+
+These are repeated submission references, not unique geometry, GPU invocations, indexed commands or saved milliseconds. The combined 130,735 eligible triangle references represent only **1.52%** of the frame's 8,611,067 triangle counter; cropped-mirror eligibility alone is **1.35%**. Off-frustum triangles are already raster-clipped, so the candidate chiefly concerns vertex/driver work, not a large fragment ceiling. Proposed wind plus 1 cm numerical padding has no native silhouette proof; bounds culling stays secondary.
+
+**More concrete CPU lead:** 34 zero-slot owners generate **136 / 774 backend visits (17.57%)**, but stock r186 emits no indexed draw when their current multi-draw count is zero. Empty visible population does not prove empty allocated instance maps. A small factory-owned publication at the existing visibility boundary can prevent empty roots from entering render-list/material/uniform preparation, with immediate reactivation on successful late addition. No per-draw scan or general culling lease is warranted. Existing wind/material/LOD update loops must stay intact; cold compile/reactivation and future temporal-history modes need explicit checks. One matched net-cost screen decides whether this deserves promotion, not callback percentages.
+
+The actual frame is guard-attested focused; initial `focused:false` is DevTools arming, not a failed capture. Export does not separately retain a final focus history or full per-draw table replay. Whole attempt is 11.156 seconds including 11.119 seconds waiting; the 37.7 ms captured interval includes diagnostic inspection and is **not timing/FPS evidence**. No diagnostic errors, geometry/buffer/culling/quality mutation or page-close requirement. Native restoration/disposal and owned-tab cleanup pass. [Postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native331-root-postflight.json), SHA256 `0d3b5b81de0dab68482bcaacdceccd1be84e87fd0958b671136480729235d8d0`, verifies 1,145 protected files / 42 inherited pins, unchanged public services/database/mounts, free private ports and removed disposable database. Native331 has no GPU-error listener; do not substitute empty diagnostic errors for that evidence.
+
+**Next:** the bounded exact-empty CPU candidate, plus source investigation of larger whole-clump grass work elimination with coherent roots/masks/history and per-view ownership. Terrain and grass remain the largest historical content priorities. No production/default change, accepted speedup, pixel parity or 60 FPS result.
+
+
 ## Source329–330 R2 — stop the failed shader harness; qualify tree CPU prerequisites only
 
 The grass verge-factor emission harness stops before any emitted shader case: its first [failure receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source329-grass-verge-factor-author01.json) records a long-module-URL transport failure. The distinct documented-loader R2 author attempt then stops on a Bun 1.3.6 segfault (exit 133), without an emission receipt. Root independently verifies the frozen original/R2 hashes, both R2 Node syntax checks and absent R2 output receipts. All 14 planned shader contexts remain unqualified. This is a harness failure, not mathematical rejection, GPU evidence or a gain; preserve both attempts and do not repeat unchanged.
@@ -8,7 +27,7 @@ Source330's original 29 selected CPU checks pass, but independent full-source re
 
 The separately retained [bounded CPU overhead screen](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source330-r2-root-cpu-overhead01.json), SHA256 `b2476dc27e5b36a2ce6a67cec5665ae367a0e64671aa0b65523f5d9fb885c5d3`, uses 96 paired synthetic 48-instance/four-camera cycles. Native-forward median is 0.0094165 ms versus candidate 0.0576875 ms. This measures only that CPU fixture, including recorder work; it cannot predict live GPU savings or FPS. Count-zero slots retain every draw command and counter increment. The 1 cm numerical allowance remains explicitly proposed/unqualified for native silhouettes.
 
-**Next:** one bounded, read-only native ownership/frustum eligibility screen before tree integration. Do not enable stock per-object culling blindly: nested shadow/reflection renders can rewrite shared submission tables. No production/default change, accepted image parity, saved GPU work or 60 FPS result follows from these CPU prerequisites. Terrain remains the largest directly ranked historical content lead, grass second; current full-quality cadence remains about 36 ms, not the 16.67 ms target.
+**Follow-up:** Native331 above completes the bounded read-only eligibility screen; do not repeat it unchanged. Stock per-object culling still must not be enabled blindly across nested views. Bounds culling is secondary to the simpler exact-empty CPU publication lead; neither is an accepted gain. Terrain remains the largest directly ranked historical content lead, grass second; current full-quality cadence remains about 36 ms, not the 16.67 ms target.
 
 ## Native326 / Source327–328 — focused net-cost screen completes; park the three-read guard
 
