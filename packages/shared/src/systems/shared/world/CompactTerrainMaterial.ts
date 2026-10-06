@@ -154,6 +154,11 @@ export type CompactDirtProjection = "stochastic-v1";
 export type CompactRockProjection = "stochastic-v1";
 export type CompactRockSampling = "exact-zero-v1";
 export type CompactGroundSampling = "exact-zero-v1";
+/** Private first-screen appearance study, not a threshold sweep or startup option. */
+export type CompactTerrainRockArAxisPolicy = Readonly<{
+  mode: "private-continuous-ar-axis-v1";
+  epsilon: 0 | 1e-6;
+}>;
 export type CompactSurfaceBlend = "height-v1";
 export type CompactTerrainTextureEncoding = "uastc-v1";
 export type CompactTerrainTextureMatrix = "identity-v1";
@@ -242,6 +247,9 @@ export type CompactTerrainDiagnosticSources = Readonly<{
   geometricCliff: Node<"float">;
   effectiveCliff: Node<"float">;
   coastSoil: Node<"float">;
+  /** Present only on the material-owned diagnostic getter, never coverage inputs. */
+  rockAppearanceRequired?: Node<"bool">;
+  rockAxisWeights?: Node<"vec3">;
 }>;
 export type CompactTerrainDiagnosticOutputs = Readonly<{
   schemaVersion: 1;
@@ -2745,9 +2753,13 @@ export function createCompactTerrainAppearanceLayerFactory(
   textures: CompactTerrainTextureSet,
   patternNoise: Node<"float">,
   worldDerivatives: CompactTerrainWorldDerivatives,
+  rockArAxisPolicy?: CompactTerrainRockArAxisPolicy,
 ): CompactTerrainAppearanceLayerFactory {
   if (!worldDerivatives?.dx?.isNode || !worldDerivatives.dy?.isNode)
     throw new Error("Appearance layers require explicit world derivatives");
+  const rockArAxisEpsilon = validateCompactRockArAxisPolicy(rockArAxisPolicy);
+  if (rockArAxisEpsilon > 0 && textures.rockProjection !== "stochastic-v1")
+    throw new Error("Private rock AR axes require stochastic-v1 projection");
   const factory = createCompactTerrainLayerFactoryInternal(
     textures,
     float(0),
@@ -2755,8 +2767,46 @@ export function createCompactTerrainAppearanceLayerFactory(
     "appearance",
     undefined,
     worldDerivatives,
+    rockArAxisEpsilon,
   );
   return { createGround: factory.createGround, createRock: factory.createRock };
+}
+
+function validateCompactRockArAxisPolicy(
+  policy: CompactTerrainRockArAxisPolicy | undefined,
+): 0 | 1e-6 {
+  if (policy === undefined) return 0;
+  if (
+    !policy ||
+    policy.mode !== "private-continuous-ar-axis-v1" ||
+    (policy.epsilon !== 0 && policy.epsilon !== 1e-6)
+  )
+    throw new Error("Invalid private continuous rock AR axis policy");
+  return policy.epsilon;
+}
+
+/** Actual TSL policy arithmetic for the private AR-only study. Input is the
+ * original normalized quartic axis weight. It is not a normal/AO weight.
+ * Zero/undefined returns that SAME weight node without constructing policy nodes.
+ */
+export function createCompactRockArAxisWeights(
+  axisWeights: Node<"vec3">,
+  policy?: CompactTerrainRockArAxisPolicy,
+): Readonly<{ weights: Node<"vec3">; factors?: Node<"vec3"> }> {
+  const epsilon = validateCompactRockArAxisPolicy(policy);
+  if (epsilon === 0) return { weights: axisWeights };
+  const factors = smoothstep(
+    float(epsilon / 4),
+    float(epsilon / 2),
+    axisWeights,
+  ).toVar("compactRockArAxisFactors");
+  const weighted = axisWeights.mul(factors).toVar("compactRockArAxisWeighted");
+  return {
+    factors,
+    weights: weighted
+      .div(weighted.x.add(weighted.y).add(weighted.z).max(1e-12))
+      .toVar("compactRockArAxisWeights"),
+  };
 }
 
 function createCompactTerrainLayerFactoryInternal(
@@ -2779,6 +2829,7 @@ function createCompactTerrainLayerFactoryInternal(
   mode: "appearance",
   dirtSurfacePage: undefined,
   worldDerivatives: CompactTerrainWorldDerivatives,
+  rockArAxisEpsilon?: 0 | 1e-6,
 ): CompactTerrainLayerFactory<CompactTerrainAppearanceLayer> &
   CompactTerrainAppearanceLayerFactory;
 function createCompactTerrainLayerFactoryInternal(
@@ -2788,6 +2839,7 @@ function createCompactTerrainLayerFactoryInternal(
   mode: boolean | "appearance",
   dirtSurfacePage?: CompactTerrainDirtSurfaceResolver,
   explicitWorldDerivatives?: CompactTerrainWorldDerivatives,
+  rockArAxisEpsilon: 0 | 1e-6 = 0,
 ): CompactTerrainLayerFactory<CompactTerrainSampledLayer> {
   const includeAppearance = mode !== false;
   const includeNormals = mode !== "appearance";
@@ -3080,6 +3132,16 @@ function createCompactTerrainLayerFactoryInternal(
     const normalizedWeights = weights.div(
       weights.x.add(weights.y).add(weights.z).max(1e-12),
     );
+    // Only the reflectance-only overload can supply a positive epsilon. Keep
+    // absent/zero construction and all full/normal factory graphs unchanged.
+    const arAxes =
+      rockArAxisEpsilon > 0
+        ? createCompactRockArAxisWeights(normalizedWeights, {
+            mode: "private-continuous-ar-axis-v1",
+            epsilon: rockArAxisEpsilon,
+          })
+        : undefined;
+    const blendWeights = arAxes?.weights ?? normalizedWeights;
     const projectRock = (projection: {
       uv: Node<"vec2">;
       dx: Node<"vec2">;
@@ -3095,7 +3157,7 @@ function createCompactTerrainLayerFactoryInternal(
         sharedRockNormal,
         worldDerivatives,
       );
-    const rock = (
+    const buildAxis = (
       worldPlane: Node<"vec2">,
       axis: "X" | "Y" | "Z",
       worldDx?: Node<"vec2">,
@@ -3190,6 +3252,31 @@ function createCompactTerrainLayerFactoryInternal(
           : {}),
       };
     };
+    const rock = (
+      ...args: Parameters<typeof buildAxis>
+    ): CompactTerrainSampledLayer => {
+      if (!arAxes) return buildAxis(...args);
+      const axis = args[1];
+      const factor = {
+        X: arAxes.factors!.x,
+        Y: arAxes.factors!.y,
+        Z: arAxes.factors!.z,
+      }[axis];
+      const packed = Fn(() => {
+        const result = vec4(0, 0, 0, 1).toVar(`compactRockArAxis${axis}`);
+        If(factor.greaterThan(0), () => {
+          // Construct all three original AR reads, stochastic projections and
+          // contrast operations inside this axis's branch. Caller-assigned
+          // world derivatives already dominate both this and the whole-rock If.
+          const source = buildAxis(...args);
+          result.assign(vec4(source.albedo!, source.roughness!));
+        });
+        return result;
+      })()
+        .context({ uniformFlow: false })
+        .toVar(`compactRockArAxis${axis}Result`);
+      return { albedo: packed.rgb, roughness: packed.a };
+    };
     const sides = [
       rock(
         vec2(positionWorld.z, positionWorld.y),
@@ -3216,18 +3303,18 @@ function createCompactTerrainLayerFactoryInternal(
       c: Node<"vec3">,
     ): Node<"vec3"> =>
       a
-        .mul(normalizedWeights.x)
-        .add(b.mul(normalizedWeights.y))
-        .add(c.mul(normalizedWeights.z));
+        .mul(blendWeights.x)
+        .add(b.mul(blendWeights.y))
+        .add(c.mul(blendWeights.z));
     const blendScalar = (
       a: Node<"float">,
       b: Node<"float">,
       c: Node<"float">,
     ): Node<"float"> =>
       a
-        .mul(normalizedWeights.x)
-        .add(b.mul(normalizedWeights.y))
-        .add(c.mul(normalizedWeights.z));
+        .mul(blendWeights.x)
+        .add(b.mul(blendWeights.y))
+        .add(c.mul(blendWeights.z));
     return {
       ...(includeNormals
         ? {

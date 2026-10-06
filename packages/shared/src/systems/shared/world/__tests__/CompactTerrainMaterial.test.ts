@@ -47,6 +47,7 @@ import {
   createCompactTerrainLayerFactory,
   createCompactTerrainNormalLayerFactory,
   createCompactTerrainAppearanceLayerFactory,
+  createCompactRockArAxisWeights,
   createCompactRockAppearanceRequired,
   createCompactGrassAppearanceRequired,
   createCompactDirtAppearanceRequired,
@@ -112,6 +113,7 @@ import {
   type CompactTerrainNormalLayer,
   type CompactTerrainAppearanceLayer,
   type CompactGrassSubstrate,
+  type CompactTerrainRockArAxisPolicy,
 } from "../CompactTerrainMaterial";
 import {
   createCompactTerrainColorOperations,
@@ -8140,6 +8142,400 @@ describe("exact-zero ground appearance (real-node arithmetic, not native qualifi
   });
 });
 
+describe("private continuous rock AR axes (CPU arithmetic and real TSL construction only)", () => {
+  const policy: CompactTerrainRockArAxisPolicy = {
+    mode: "private-continuous-ar-axis-v1",
+    epsilon: 1e-6,
+  };
+  const graphBoundaries = new Set<Node>([
+    positionWorld,
+    normalWorldGeometry,
+    cameraPosition,
+    cameraViewMatrix,
+  ]);
+  const expand = (roots: readonly Node[]) => {
+    const seen = new Set<Node>();
+    const visit = (node: Node) => {
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (graphBoundaries.has(node)) return;
+      const stack = numericShaderStack(node);
+      if (stack) visit(stack);
+      else for (const child of node.getChildren()) visit(child);
+    };
+    roots.forEach(visit);
+    return seen;
+  };
+  // CPU graph shape, not generated WGSL, native filtering or rendered pixels.
+  const shape = (roots: readonly Node[]) => {
+    const nodes = [...expand(roots)],
+      ids = new Map(nodes.map((node, i) => [node, i]));
+    return nodes.map((node) => ({
+      type: node.type,
+      fields: ["name", "op", "method", "components", "convertTo"].map((key) =>
+        Reflect.get(node, key),
+      ),
+      value:
+        Reflect.get(node, "value") instanceof THREE.Texture
+          ? Reflect.get(node, "value").uuid
+          : typeof Reflect.get(node, "value") === "number"
+            ? Reflect.get(node, "value")
+            : null,
+      children: (numericShaderStack(node)
+        ? [numericShaderStack(node)!]
+        : [...node.getChildren()]
+      ).map((child) => ids.get(child)),
+    }));
+  };
+  const samples = (nodes: Iterable<Node>, owner: CompactTerrainTextureSet) =>
+    [...nodes].filter(
+      (node) =>
+        Reflect.get(node, "isTextureNode") === true &&
+        Reflect.get(node, "value") ===
+          owner.getNode("rock", "albedo-roughness").value &&
+        Array.isArray(Reflect.get(node, "gradNode")),
+    );
+
+  it("retains the exact weight node for absent/zero policy and refuses invalid policy inputs", () => {
+    const weights = vec3(0.01, 0.97, 0.02);
+    for (const disabled of [undefined, { ...policy, epsilon: 0 as const }]) {
+      const result = createCompactRockArAxisWeights(weights, disabled);
+      expect(result.weights).toBe(weights);
+      expect(result.factors).toBeUndefined();
+    }
+    for (const invalid of [
+      { ...policy, epsilon: -1 },
+      { ...policy, epsilon: Infinity },
+      { ...policy, epsilon: NaN },
+      { ...policy, epsilon: 1.000001e-6 },
+      { ...policy, epsilon: 0.5e-6 },
+      { ...policy, epsilon: Number.MIN_VALUE },
+      { ...policy, epsilon: 1e-300 },
+      { ...policy, epsilon: 1e-46 },
+      { ...policy, mode: "foreign" },
+      null,
+    ])
+      expect(() =>
+        createCompactRockArAxisWeights(
+          weights,
+          invalid as CompactTerrainRockArAxisPolicy,
+        ),
+      ).toThrow(/Invalid private/);
+  });
+
+  it("evaluates actual continuous TSL weights against an independent polynomial and bounded AR error", () => {
+    let seed = 289;
+    const random = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const cases: [number, number, number][] = [
+      [0, 1, 0],
+      [1 / 3, 1 / 3, 1 / 3],
+    ];
+    for (const a of [0, 0.1, 0.25, 0.250001, 0.375, 0.499999, 0.5, 0.7])
+      for (const b of [0, 0.2, 0.35, 0.49, 0.6]) {
+        const x = a * policy.epsilon,
+          y = b * policy.epsilon;
+        cases.push([x, y, 1 - x - y], [1 - x - y, x, y], [y, 1 - x - y, x]);
+      }
+    for (let i = 0; i < 512; i++) {
+      const x = random() * policy.epsilon,
+        y = random() * policy.epsilon;
+      cases.push([x, 1 - x - y, y]);
+    }
+    for (const weights of cases) {
+      const result = createCompactRockArAxisWeights(vec3(...weights), policy);
+      const factors = weights.map((w) => {
+        const t = Math.max(
+          0,
+          Math.min(1, (w - policy.epsilon / 4) / (policy.epsilon / 4)),
+        );
+        return t * t * (3 - 2 * t);
+      });
+      const kept = weights.map((w, i) => w * factors[i]);
+      const sum = kept.reduce((a, b) => a + b, 0);
+      const actual = vectorValue(result.weights),
+        actualFactors = vectorValue(result.factors!);
+      actual.forEach((v, i) => expect(v).toBeCloseTo(kept[i] / sum, 14));
+      actualFactors.forEach((v, i) => expect(v).toBeCloseTo(factors[i], 14));
+      expect(actual.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 14);
+      expect(factors.filter((f) => f === 0).length).toBeLessThanOrEqual(2);
+      const removed = weights.reduce((a, w, i) => a + w * (1 - factors[i]), 0);
+      expect(removed).toBeLessThanOrEqual(0.540208 * policy.epsilon + 1e-15);
+      for (const values of [
+        [0, 1, 0.4],
+        [1, 0, 0.9],
+        [0.2, 0.7, 1],
+        [0.65, 1, 0.8],
+      ]) {
+        const oldValue = weights.reduce((a, w, i) => a + w * values[i], 0);
+        const newValue = actual.reduce((a, w, i) => a + w * values[i], 0);
+        const range = Math.max(...values) - Math.min(...values);
+        expect(Math.abs(newValue - oldValue)).toBeLessThanOrEqual(
+          range * removed + 2e-15,
+        );
+      }
+    }
+    // Selected approach-to-boundary checks, not a native temporal-parity claim.
+    for (const boundary of [policy.epsilon / 4, policy.epsilon / 2]) {
+      const delta = policy.epsilon * 1e-7;
+      const values = [-delta, 0, delta].map((d) =>
+        vectorValue(
+          createCompactRockArAxisWeights(
+            vec3(boundary + d, 1 - boundary - d, 0),
+            policy,
+          ).weights,
+        ),
+      );
+      expect(Math.abs(values[2][0] - values[0][0])).toBeLessThan(3 * delta);
+    }
+    // Independent expansion: g(h) = 3h²/[a(1-a)] + O(h³), a=epsilon/4.
+    // This checks CPU arithmetic onset, not GPU precision or temporal quality.
+    const a = policy.epsilon / 4,
+      h = a * 1e-4;
+    const onset = (offset: number) =>
+      vectorValue(
+        createCompactRockArAxisWeights(
+          vec3(a + offset, 1 - a - offset, 0),
+          policy,
+        ).weights,
+      )[0];
+    expect(onset(0)).toBe(0);
+    expect(onset(h) / onset(h / 2)).toBeCloseTo(4, 3);
+    expect(onset(h) / ((3 * h * h) / (a * (1 - a)))).toBeCloseTo(1, 3);
+  });
+
+  it("keeps absent/zero appearance construction equal and isolates three lazy AR-only axis branches", () => {
+    const owner = new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      "height-v1",
+      "stochastic-v1",
+    );
+    const dual = new CompactTerrainTextureSet(
+      "/assets",
+      "stochastic-v1",
+      "height-v1",
+    );
+    try {
+      const derivatives = { dx: vec3(0.1, 0.01, 0), dy: vec3(0, 0.02, 0.1) },
+        noise = float(0.37),
+        required = float(1).greaterThan(0);
+      const rock = (choice?: CompactTerrainRockArAxisPolicy) =>
+        createCompactTerrainAppearanceLayerFactory(
+          owner,
+          noise,
+          derivatives,
+          choice,
+        ).createRock(required);
+      const original = rock(),
+        zero = rock({ ...policy, epsilon: 0 });
+      expect(shape([zero.albedo, zero.roughness])).toEqual(
+        shape([original.albedo, original.roughness]),
+      );
+      expect(() =>
+        createCompactTerrainAppearanceLayerFactory(
+          dual,
+          noise,
+          derivatives,
+          policy,
+        ),
+      ).toThrow(/stochastic-v1/);
+      expect(() =>
+        createCompactTerrainAppearanceLayerFactory(dual, noise, derivatives, {
+          ...policy,
+          epsilon: 0,
+        }),
+      ).not.toThrow();
+      const receipt = owner.getReceipt();
+      const candidate = THREE.TSL.Fn(() => {
+        const dx = vec3(0).toVar("axisStudyWorldDx"),
+          dy = vec3(0).toVar("axisStudyWorldDy");
+        dx.assign(positionWorld.dFdx());
+        dy.assign(positionWorld.dFdy());
+        const layer = createCompactTerrainAppearanceLayerFactory(
+          owner,
+          noise,
+          { dx, dy },
+          policy,
+        ).createRock(required);
+        return vec4(layer.albedo, layer.roughness);
+      })();
+      // Canonical r186 Fn calls and derivative expressions carry intent VarNodes.
+      // Inspect the actual owning call's stack, not an assumed bare call result.
+      const owningCall = (node: Node): Node => {
+        let call = node;
+        while (call.type === "VarNode" || call.type === "ConvertNode") {
+          const child: unknown = Reflect.get(call, "node");
+          if (!(child instanceof THREE.Node))
+            throw new Error("Missing actual call wrapper child");
+          call = child;
+        }
+        expect(Reflect.get(call, "isShaderCallNodeInternal")).toBe(true);
+        return call;
+      };
+      const outer = numericShaderStack(owningCall(candidate));
+      if (!outer || outer.type !== "StackNode")
+        throw new Error("Missing actual outer shader stack");
+      const rawStatements: unknown = Reflect.get(outer, "nodes");
+      if (
+        !Array.isArray(rawStatements) ||
+        rawStatements.some((n) => !(n instanceof THREE.Node))
+      )
+        throw new Error("Missing actual outer shader statements");
+      const statements = rawStatements as Node[];
+      const rockResult = statements.find(
+        (n) => Reflect.get(n, "name") === "compactRockRawAppearanceResult",
+      );
+      if (!(rockResult instanceof THREE.Node))
+        throw new Error("Missing actual whole-rock call result");
+      const rockCall = owningCall(rockResult);
+      const rockCallIndex = statements.findIndex((n) => graph(n).has(rockCall));
+      expect(rockCallIndex).toBeGreaterThan(0);
+      for (const [name, method] of [
+        ["axisStudyWorldDx", "dFdx"],
+        ["axisStudyWorldDy", "dFdy"],
+      ]) {
+        const target = statements.find((n) => Reflect.get(n, "name") === name);
+        if (!(target instanceof THREE.Node))
+          throw new Error("Missing actual derivative target");
+        expect(target.type).toBe("VarNode");
+        const assignments = statements.filter(
+          (n) =>
+            n.type === "AssignNode" && Reflect.get(n, "targetNode") === target,
+        );
+        expect(assignments).toHaveLength(1);
+        expect(statements.indexOf(target)).toBeLessThan(
+          statements.indexOf(assignments[0]),
+        );
+        expect(statements.indexOf(assignments[0])).toBeLessThan(rockCallIndex);
+        const source: unknown = Reflect.get(assignments[0], "sourceNode");
+        if (!(source instanceof THREE.Node))
+          throw new Error("Missing actual derivative assignment");
+        expect(source.type).toBe("VarNode");
+        expect(Reflect.get(source, "name")).toBeNull();
+        const derivative: unknown = Reflect.get(source, "node");
+        if (!(derivative instanceof THREE.Node))
+          throw new Error("Missing actual derivative expression");
+        expect(derivative.type).toBe("MathNode");
+        expect(Reflect.get(derivative, "method")).toBe(method);
+        expect(Reflect.get(derivative, "aNode")).toBe(positionWorld);
+      }
+      const nodes = expand([candidate]);
+      expect(samples(nodes, owner)).toHaveLength(9);
+      const forbidden = new Set([
+        owner.getNode("rock", "normal-ao").value,
+        owner.getHeightNode()!.value,
+      ]);
+      expect(
+        [...nodes].some(
+          (n) =>
+            Reflect.get(n, "isTextureNode") === true &&
+            forbidden.has(Reflect.get(n, "value")),
+        ),
+      ).toBe(false);
+      for (const axis of ["X", "Y", "Z"]) {
+        const result = [...nodes].find(
+          (n) =>
+            n.type === "VarNode" &&
+            Reflect.get(n, "name") === `compactRockArAxis${axis}Result`,
+        );
+        expect(result).toBeDefined();
+        const branchNodes = expand([result!]);
+        expect(
+          [...branchNodes].filter((n) => n.type === "ConditionalNode"),
+        ).toHaveLength(1);
+        expect(samples(branchNodes, owner)).toHaveLength(3);
+        expect(
+          [...branchNodes].some((n) =>
+            ["dFdx", "dFdy"].includes(String(Reflect.get(n, "method"))),
+          ),
+        ).toBe(false);
+      }
+      expect(owner.getReceipt()).toEqual(receipt);
+    } finally {
+      owner.dispose();
+      dual.dispose();
+    }
+  });
+
+  it("forwards policy only through lazy original appearance and retains material normal/ordinary graph ownership", () => {
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: true,
+      compactDirtProjection: "stochastic-v1",
+      compactRockProjection: "stochastic-v1",
+      compactSurfaceBlend: "height-v1",
+    });
+    try {
+      const normal = material.getCompactTerrainNormalSurface();
+      const ordinary = [
+        material.colorNode,
+        material.roughnessNode,
+        material.normalNode,
+        material.aoNode,
+      ];
+      let calls = 0;
+      const candidate = material.createCompactTerrainResolvedAppearance(
+        (_context, original) => {
+          calls++;
+          return original(policy);
+        },
+      );
+      expect(calls).toBe(0);
+      expect(candidate).not.toBeNull();
+      const nodes = expand([candidate!.albedo, candidate!.roughness]);
+      expect(calls).toBe(1);
+      expect(
+        [...nodes].filter(
+          (n) =>
+            n.type === "VarNode" &&
+            /^compactRockArAxis[XYZ]Result$/.test(
+              String(Reflect.get(n, "name")),
+            ),
+        ),
+      ).toHaveLength(3);
+      expect(material.getCompactTerrainNormalSurface()).toBe(normal);
+      expect([
+        material.colorNode,
+        material.roughnessNode,
+        material.normalNode,
+        material.aoNode,
+      ]).toEqual(ordinary);
+      const diagnostic = material.getCompactTerrainDiagnosticOutputs()!;
+      expect(diagnostic.sources.rockAppearanceRequired).toBeInstanceOf(
+        THREE.Node,
+      );
+      expect(diagnostic.sources.rockAxisWeights).toBeInstanceOf(THREE.Node);
+      const weights = diagnostic.sources.weights;
+      for (const rock of [0, 1e-12, 1])
+        expect(
+          vectorValue(
+            diagnostic.sources.rockAppearanceRequired!,
+            new Map([[weights, [0, 1 - rock, rock, 0]]]),
+          ),
+        ).toEqual([rock === 0 ? 0 : 1]);
+      const normalValue = [0.1, 0.98, -0.03],
+        fourth = normalValue.map((v) => v ** 4),
+        total = fourth.reduce((a, b) => a + b, 0);
+      vectorValue(
+        diagnostic.sources.rockAxisWeights!,
+        new Map([[normalWorldGeometry, normalValue]]),
+      ).forEach((v, i) => expect(v).toBeCloseTo(fourth[i] / total, 14));
+      // Same required predicate used by the getter: mineral-graded final soil is
+      // a real consumer even when direct final rock coverage is exactly zero.
+      expect(
+        vectorValue(
+          createCompactRockAppearanceRequired(vec4(0, 1, 0, 0), float(1e-12)),
+        ),
+      ).toEqual([1]);
+    } finally {
+      material.dispose();
+    }
+    expect(material.getCompactTerrainDiagnosticOutputs()).toBeNull();
+  });
+});
+
 describe("exact-zero rock appearance (CPU arithmetic plus explicit native WGSL gate)", () => {
   it("evaluates only the explicit uniform-flow context arithmetic identity", () => {
     for (const uniformFlow of [true, false])
@@ -10474,8 +10870,14 @@ describe("lazy compact terrain diagnostics (actual graph, not native or GPU-cost
         "compactDiagnosticPondCauses",
       );
       const { sources } = diagnostic;
-      for (const source of Object.values(sources))
-        expect(allNodes.has(source)).toBe(true);
+      for (const [name, source] of Object.entries(sources)) {
+        // These two expressions are lazy diagnostic-only outputs. They must
+        // not enter the ordinary material graph merely by being requested.
+        const diagnosticOnly =
+          name === "rockAppearanceRequired" || name === "rockAxisWeights";
+        expect(source).toBeInstanceOf(THREE.Node);
+        expect(allNodes.has(source)).toBe(!diagnosticOnly);
+      }
       // Identity, not equivalent recreated expressions: the same final weight
       // vector drives every physical surface channel before debug is requested.
       for (const nodes of originalGraphs) {

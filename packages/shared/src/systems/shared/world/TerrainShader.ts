@@ -58,6 +58,7 @@ import {
   createCompactTerrainLayerFactory,
   createCompactTerrainNormalLayerFactory,
   createCompactTerrainAppearanceLayerFactory,
+  type CompactTerrainRockArAxisPolicy,
   createCompactDirtRawAppearance,
   createCompactDirtProjections,
   createCompactRockAppearanceRequired,
@@ -180,7 +181,9 @@ export type CompactTerrainAppearanceResolver = (
     worldDy: Node<"vec3">;
     weights: Node<"vec4">;
   }>,
-  createOriginal: () => Node<"vec4">,
+  createOriginal: (
+    rockArAxisPolicy?: CompactTerrainRockArAxisPolicy,
+  ) => Node<"vec4">,
 ) => Node<"vec4">;
 
 export const TERRAIN_SHADER_CONSTANTS = {
@@ -2837,7 +2840,9 @@ export function createTerrainMaterial(
               wetness: coast.wetness,
             }
           : null;
-      const createOriginal = (): Node<"vec4"> => {
+      const createOriginal = (
+        rockArAxisPolicy?: CompactTerrainRockArAxisPolicy,
+      ): Node<"vec4"> => {
         if (!ownsCompactRecipe())
           throw new Error(
             "Terrain appearance fallback source is no longer owned",
@@ -2848,6 +2853,7 @@ export function createTerrainMaterial(
           compactTextures,
           pattern,
           { dx, dy },
+          rockArAxisPolicy,
         );
         const ground = factory.createGround(
           normalRecipe.deferredGround
@@ -2935,6 +2941,14 @@ export function createTerrainMaterial(
       geometricCliff: compactWeights.geometricCliff,
       effectiveCliff: compactWeights.cliff,
       coastSoil: coastRockSurface?.soil ?? float(0),
+      rockAppearanceRequired: createCompactRockAppearanceRequired(
+        compactBaseSurface.weights,
+        pondBankComposition?.mineralAppearance ?? float(0),
+      ),
+      rockAxisWeights: (() => {
+        const weights = normalWorldGeometry.abs().pow(vec3(4));
+        return weights.div(weights.x.add(weights.y).add(weights.z).max(1e-12));
+      })(),
     });
     return diagnosticOutputs;
   };
