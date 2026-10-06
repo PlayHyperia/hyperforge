@@ -1,5 +1,41 @@
 # Grass canopy visibility: research checkpoint
 
+## Source289 — terrain axis-read census qualifies a local candidate, not an FPS gain
+
+**Move performance implementation forward without waiting on unusable counter exports.** The distinct retrieval review finds no qualified practical complete-value route yet. An additional Instruments open attempt still exposes no document; cause unknown, and the owned app closes. A bounded completed error/fault log query reports invalid view geometry, but does not establish causality; a separate incomplete query is not interpreted. No new capture/export, installed-browser/signing/SIP/sandbox change or public-game change follows. [Retrieval disposition](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source289-retrieval-disposition.json).
+
+The next concrete terrain candidate is **continuous albedo/roughness-only triplanar axis elision**. A projection with zero attenuated contribution need not issue its three original stochastic AR reads. Keep all nine rock normal/AO reads, all height reads, geometry, final material coverage, original 16× filtering, MSAA4 and actual 2×. At most six AR sample sites can disappear; that is neither a removed-work measurement nor a millisecond prediction.
+
+### Actual geometry census
+
+Root and two independent readers review the entire 344-line CPU helper before the terrain run. It uses actual DataManager/TerrainSystem/RoadNetworkSystem/quadtree initialization and original indexed geometry, not reconstructed height-gradient normals or simplified meshes. Each original Float32 vertex normal is bounded through unit normalization before its triangle interpolation hull, matching the **ideal rigid-camera/translation-only** construction. Native world matrices, issued varyings and GPU f32 remain unqualified. Source buffers hash identically before/after; all geometries and the CPU world dispose.
+
+The bounded child completes in 14.435 s, exit0, with 52 chunks, 410,701 vertices and 803,140 triangles. Sources/manifests recheck; no nonfinite geometry or cleanup error. Its one stderr warning concerns existing road texture resolution, not a new census failure. 518 arithmetic fixtures pass 111,876 barycentric and 4,662 endpoint comparisons; these are CPU safety/math checks, **not game-performance tests**. The installed MathNode source also hashes identically before/after.
+
+The global surface-area percentage is deliberately **not** a relevance metric: distant flat/off-envelope ocean-floor chunks dominate it. The four full 100 m chunks surrounding focus 385,374 contain 362,312 surface triangles and approximate 41,852 m². They still include possible underwater/nonvisible portions; no raster or original-rock-required gate is applied.
+
+| Local four-chunk ideal geometry | No omitted axis | One omitted axis | Two omitted axes |
+| --- | ---: | ---: | ---: |
+| Exact source-zero potential, triangle share |90.47%|1.75%|7.77%|
+| Continuous ε=10⁻⁶ zero-sample eligibility, triangle share |51.53%|25.44%|23.02%|
+| Same continuous eligibility, approximate 3D area share |45.74%|24.08%|30.18%|
+
+Thus the most conservative nonzero surveyed policy certifies at least one potential zero-sample axis on 48.47% of local triangles. Western rocky cohorts are much weaker. Triangle counts depend on adaptive tessellation; all area arithmetic is approximate binary64. Lower-bound possible counts are overinclusive ceilings, not proven attainable coverage. Source-zero is not GPU-zero.
+
+The proposed AR policy is f(w)=smoothstep(ε/4,ε/2,w), with renormalized w·f(w), preserving the original normal/AO weights. Samples disappear only for w≤ε/4; the fade band still samples. For ε=10⁻⁶, the conservative ideal pre-light linear RGB bound is 1.241414×10⁻⁶ and roughness bound 3.5×10⁻⁷. These do **not** bound final PBR/tonemapped pixels, temporal appearance or native arithmetic. Zero/absent policy must retain the original graph; no shipping threshold is accepted.
+
+[Geometry receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source289-rock-ar-axis-census-01.json), SHA256 `40152d0755d367765a06e2595df850bd8ac844a925330fc2ef1d3dd317544bcb`; [root audit](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source289-root-census-audit.json). Helper SHA256 `6a2fa85d2283082fe8578d2a66122a20c03abeae6dcfac73c2c0ace1102a7faa`.
+
+### Implementation and native acceptance gate
+
+A private optional appearance-only seam is being authored; it is **not tested, timed or promoted yet**. The original assignment-bearing packed normal graph can retain AR reads even after changing color/roughness. Control and candidate must therefore share the same admitted normal-only seam, with original-versus-split parity qualified separately. Derivatives require explicit outer-stack assignments before dynamic branches, lazy AR construction inside them, exact original projection hashes/gradients/contrast and unchanged later bank/coast/wetness/variation.
+
+Next: inspect issued WGSL and actual covered **AR-required** terrain pixels using the original dependency gate, including rock borrowed by mineral-graded soil. Verify native transforms, full-scene occlusion and primary/mirror coverage; raster 2×2 coherence is only a hardware-quad proxy. Only useful coverage earns full PBR/motion comparison and matched focused timing at 3024×1724/DPR2, original 16×/MSAA4, full content and shadows. No scalar threshold sweep or unchanged counter recapture.
+
+An exact-source-zero full-axis alternative and stronger normal/AO cone/AO-feedback math are retained only as unqualified research. The one canonical rock PNG’s CPU base-level extrema do not prove complete mip/native owner/composed-normal/lighting fidelity; approximate full-channel omission is not approved. [Base-level bounds](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source289-rock-base-normal-bounds.json).
+
+**60 FPS / 16.67 ms remains unmet; this checkpoint recovers no measured frame time.** Terrain remains the historical first causal content target, grass second. Reflection and AA/shadows overlap those categories; no invented additive budget or new shipping-quality claim.
+
 ## Native288 — narrower GPU profile returns verified metadata; values are not yet qualified
 
 **The capture-finalization blocker is cleared for this bounded admission.** A new template is created through Instruments' actual UI with exactly two active instruments, Metal Application and GPU, retaining Performance Limiters/profile13, the current M5 device, Default performance state, disabled Shader Timeline and Deferred recording. The old template is unchanged. Root independently verifies the archived active identifier/settings pairs and exact binary pins; UI mode storage is not an active-instrument census.
