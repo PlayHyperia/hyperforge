@@ -121,6 +121,8 @@ interface BatchedLODPool {
    */
   sourceGeometries: (THREE.BufferGeometry[] | null)[];
   windMode: TreeWindMode;
+  /** Published by the existing primary visibility loop; not a draw-table count. */
+  visibleInstanceCount: number;
 }
 
 interface TreeTypePool {
@@ -436,6 +438,7 @@ function createBatchedLODPool(
       instanceIds: new Map(),
       sourceGeometries,
       windMode: mode,
+      visibleInstanceCount: 0,
     };
   } catch (error) {
     for (const batch of batches) {
@@ -785,6 +788,8 @@ function addToPool(
       pool.batches[i].setColorAt(instId, _tmpColor);
     }
     pool.instanceIds.set(entityId, ids);
+    // Newly admitted native slots are visible, even after this frame was prepared.
+    for (const batch of pool.batches) batch.visible = true;
   } catch (error) {
     ids.forEach((id, index) => pool.batches[index].deleteInstance(id));
     throw error;
@@ -1382,6 +1387,8 @@ function updateTreeVisibility(camera: THREE.PerspectiveCamera): void {
   _cullFrustum.setFromProjectionMatrix(_cullProjScreenMatrix);
 
   for (const pool of pools.values()) {
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool) lodPool.visibleInstanceCount = 0;
     for (const slot of pool.instances.values()) {
       const lodPool = getLodPool(pool, slot);
       if (!lodPool) continue;
@@ -1416,7 +1423,13 @@ function updateTreeVisibility(camera: THREE.PerspectiveCamera): void {
       for (let i = 0; i < lodPool.batches.length; i++) {
         lodPool.batches[i].setVisibleAt(ids[i], visible);
       }
+      if (visible) lodPool.visibleInstanceCount++;
     }
+    // Native counts may be stale while hidden. Publish only this exact slot result.
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool)
+        for (const batch of lodPool.batches)
+          batch.visible = lodPool.visibleInstanceCount > 0;
   }
 }
 

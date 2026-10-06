@@ -763,10 +763,18 @@ describe("actual GLB projected tree LOD candidate", () => {
       async ({ pool, track }) => {
         await withTreeViewport(pool.world, async () => {
           const camera = pool.world.camera;
+          const expectPublishedRoots = (visibleLOD: 0 | 1 | null) => {
+            const records = pool.ownership()!.records;
+            // Resource inventory includes hidden/empty roots, not draw calls.
+            expect(records).toHaveLength(6);
+            for (const record of records)
+              expect(record.mesh.visible).toBe(record.lod === visibleLOD);
+          };
           expect(await track(pool.add(0, "late-camera"))).toBe(true);
           for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
           batched.prepareGLBTreeBatchedInstancerForRender(camera);
           for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+          expectPublishedRoots(1);
 
           batched.startDissolve("late-camera", 1, false);
           pool.world.frame++;
@@ -775,6 +783,7 @@ describe("actual GLB projected tree LOD candidate", () => {
             verifyRow(row, 0, 1, "batched");
             expect(row.dissolve).toBeCloseTo(0.1);
           }
+          expectPublishedRoots(1);
 
           // A camera owner changes pose after hot updates. Deliberately leave
           // its matrixWorld stale: primary preparation must finalize it.
@@ -796,6 +805,8 @@ describe("actual GLB projected tree LOD candidate", () => {
             );
             expect(row.dissolve).toBeCloseTo(0.1);
           }
+          expectPublishedRoots(null);
+          expect(activeRows(pool)).toHaveLength(2);
 
           // Repeated preparation, hot updates and secondary cameras cannot
           // change membership/visibility or advance animation in this frame.
@@ -809,6 +820,7 @@ describe("actual GLB projected tree LOD candidate", () => {
             );
             expect(row.dissolve).toBeCloseTo(0.1);
           }
+          expectPublishedRoots(null);
           pool.world.frame++;
           batched.updateGLBTreeBatchedInstancer(0.03);
           batched.prepareGLBTreeBatchedInstancerForRender(camera);
@@ -819,6 +831,7 @@ describe("actual GLB projected tree LOD candidate", () => {
             );
             expect(row.dissolve).toBeCloseTo(0.2);
           }
+          expectPublishedRoots(0);
 
           pool.world.frame++;
           batched.updateGLBTreeBatchedInstancer(0.03);
@@ -833,6 +846,7 @@ describe("actual GLB projected tree LOD candidate", () => {
                 .cameraPos.value,
             ).toEqual(camera.position);
           }
+          expectPublishedRoots(1);
 
           // Reinitializing at the same world.frame must not retain preparation
           // ownership from the destroyed pool.
@@ -842,6 +856,114 @@ describe("actual GLB projected tree LOD candidate", () => {
           for (const row of activeRows(pool)) verifyRow(row, 0, 0, "batched");
           batched.prepareGLBTreeBatchedInstancerForRender(camera);
           for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+        });
+      },
+      { lodCandidate: "projected-v1" },
+    );
+  });
+
+  it("unhides an awaited late add before another preparation and reuses removed native slots", async () => {
+    await withTrees(
+      "batched",
+      async ({ pool, track }) => {
+        await withTreeViewport(pool.world, async () => {
+          const camera = pool.world.camera;
+          const wind = pool.world.register("wind", Wind);
+          if (!(wind instanceof Wind)) throw new Error("Expected actual Wind");
+          const priorStrength = wind.getStrength(),
+            priorDirection = wind.getDirection(),
+            priorIntensity = wind.getIntensity();
+          try {
+            expect(await track(pool.add(0, "recycled"))).toBe(true);
+            const initialLod0 = activeRows(pool);
+            expect(initialLod0).toHaveLength(2);
+            const records = pool.ownership()!.records;
+            expect(records).toHaveLength(6);
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            for (const row of activeRows(pool)) verifyRow(row, 0, 1, "batched");
+
+            pool.remove("recycled");
+            expect(pool.has("recycled")).toBe(false);
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            expect(activeRows(pool)).toHaveLength(0);
+            for (const record of records) {
+              expect((record.mesh as THREE.BatchedMesh).instanceCount).toBe(0);
+              expect(record.mesh.visible).toBe(false);
+            }
+
+            // Hidden roots remain live wind/material owners.
+            wind.setStrength(0.7);
+            wind.setDirection(new THREE.Vector3(3, 0, 4));
+            wind.update(0.25);
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            for (const record of records) {
+              const uniforms = (record.material as TreeDissolveMaterial)
+                .treeUniforms;
+              expect(record.mesh.visible).toBe(false);
+              expect(uniforms.windTime.value).toBe(0.25);
+              expect(uniforms.windStrength.value).toBe(0.7);
+              expect(uniforms.windDirection.value.x).toBeCloseTo(0.6);
+              expect(uniforms.windDirection.value.y).toBeCloseTo(0.8);
+            }
+
+            const preparedFrame = pool.world.frame;
+            expect(await track(pool.add(0, "recycled", 12))).toBe(true);
+            expect(pool.world.frame).toBe(preparedFrame);
+            expect(pool.has("recycled")).toBe(true);
+            const readded = activeRows(pool);
+            expect(readded).toHaveLength(2);
+            for (const row of readded) {
+              const original = initialLod0.find(
+                (item) => item.part === row.part,
+              )!;
+              expect(row.mesh).toBe(original.mesh);
+              expect(row.slot).toBe(original.slot);
+              expect(row.matrix.elements[12]).toBe(12);
+              verifyRow(row, 0, 0, "batched");
+            }
+            for (const record of records)
+              expect(record.mesh.visible).toBe(record.lod === 0);
+            // Awaited insertion must unhide immediately, even after this frame's
+            // sole primary preparation; a repeated prepare cannot rescue it.
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            expect(activeRows(pool).map((row) => row.mesh)).toEqual(
+              readded.map((row) => row.mesh),
+            );
+            for (const row of readded) expect(row.mesh.visible).toBe(true);
+
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            const transferred = activeRows(pool);
+            expect(transferred).toHaveLength(2);
+            for (const row of transferred) {
+              verifyRow(row, 0, 1, "batched");
+              expect(readded.some((prior) => prior.mesh === row.mesh)).toBe(
+                false,
+              );
+            }
+            for (const record of records)
+              expect(record.mesh.visible).toBe(record.lod === 1);
+
+            pool.remove("recycled");
+            pool.world.frame++;
+            batched.updateGLBTreeBatchedInstancer(0);
+            batched.prepareGLBTreeBatchedInstancerForRender(camera);
+            expect(activeRows(pool)).toHaveLength(0);
+            expect(records.every((record) => !record.mesh.visible)).toBe(true);
+            // Ownership still inventories all six allocations, not submissions.
+            expect(
+              pool.ownership()!.records.map((record) => record.mesh),
+            ).toEqual(records.map((record) => record.mesh));
+          } finally {
+            wind.setStrength(priorStrength);
+            wind.setDirection(priorDirection);
+            wind.setIntensity(priorIntensity);
+          }
         });
       },
       { lodCandidate: "projected-v1" },
