@@ -1,5 +1,41 @@
 # Grass canopy visibility: research checkpoint
 
+## Native293 / Source295 — actual issued shaders retained; render-index CPU contract verified
+
+The foregrounded native Chrome one-shot completes **COMPLETE_ISSUED_WGSL_ONLY** on canonical build291. Four ordinary advancing O/C0/E/C0 graphics calls each issue 17 terrain draws in the main view and 17 in a fresh natural mirror: 136 observed terrain draws. Actual main settings are 3024×1724 / DPR2 / MSAA4 / seven original 16× maps / postprocessing enabled. Original uses cached native programs; control and candidate programs are observed being created and issued. All twelve retained UTF-8 stage byte lengths and SHA-256 identities match the [complete 1,189,267-byte export](/Users/lucid/Downloads/hyperia-native293-issued-wgsl-01.json), SHA256 `5a70f93d52495c1ed194e754c952af077f48ff9b07048fceddb029bbf9b8ab1e`.
+
+### Issued-code result, not GPU execution savings
+
+| Arm | Retained fragment bytes | Lexical texture-sampling statements |
+| --- | ---: | ---: |
+| O — original packed graph |156,399|55|
+| C0 — split-normal control, zero axis policy |194,442|55|
+| E — continuous AR-axis candidate, ε=10⁻⁶ |196,233|55|
+
+Main/mirror code is byte-identical per retained arm. C0/E share exact vertex code, the pre-rock appearance slice and the entire 62,760-byte normal/lighting suffix. Independent issued-WGSL inspection places explicit world derivatives before dynamic branches; E has three conditional AR-axis blocks, each containing three original gradient samples. All nine original normal/AO samples and the separate required-rock/mineral-soil dependency remain. Derivative diagnostics being disabled by Three is not a substitute for this control-flow inspection.
+
+C0 adds 38,043 bytes / 24.32% of static WGSL and 200 assignment statements relative to O; E adds another 1,791 bytes / twelve assignments. These are lexical observations, not machine-instruction, register-pressure or measured runtime costs. The intended conditional reads reached the issued shader; realized omissions, final pixels and any net gain remain unproved. Original-versus-split overhead and full PBR parity must be measured separately from E-versus-C0.
+
+The first root offline evaluator run refuses an ambiguous slice marker in both ordinary/self-test modes. The exact zero-initializer anchor fixes only that diagnostic marker; frozen shaders/export/pins remain unchanged. The repaired fixed-artifact audit and one acceptance/twelve refusal fixtures then pass. [Evaluator](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source293-issued-wgsl-audit.mjs), SHA256 `80ed340f8dc740536ae378c05c37ac2aa7c5ac0af1a2445035f9557e5cb269e7`; [retained first failure](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source293-issued-wgsl-audit-failure-01.json). No rejected result is counted as a pass.
+
+### Collector scope and teardown
+
+Installed r186 pipeline objects have no `id`; the key therefore retained the **first** pair per arm/view rather than an exhaustive pipeline census. RenderTarget has no `uuid`, so the exported “canvas” labels are fallbacks, not proof of attachment identity. Main/mirror classification still checks exact live camera/context/owned-target identities. Actual diagnostic mirror dimensions are 1512×862, unlike the historical 768×134 cropped workload; this capture cannot supply ordinary-topology timing.
+
+Finished-only disposal removes the diagnostic alias and restores null dispatch/MRT/targets, original 2×/MSAA4/postprocessing and all owned descriptors. Native UI verifies owned DevTools/private game tab closed, existing New Tab preserved. Runtime stops without errors at 2026-10-06T04:36:31.152Z. Root freshly verifies 1,145 protected files, 42 inherited working-file pins, unchanged public 3333/5555/5556 process identities and saved database/mounts, all private ports free and disposable database removed. [Postflight](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native293-root-postflight.json), SHA256 `8997d5dcf7511e2f88d7db92d8407c9e76717681f956c6e9f1722fb529a627d4`.
+
+### Render-only index ownership: CPU prerequisite now complete
+
+Source295 leaves canonical terrain geometry/index/attributes intact and temporarily selects a unique same-oriented-triangle index attribute only within a synchronous, descriptor-owned draw. It does not replace geometry or dispose borrowed vertex attributes. Independent review finds and fixes two lifecycle gaps before native installation: an escaped temporary getter now expires, and post-invocation nonfatal errors escalate while retaining code/cause.
+
+The first CPU run refuses an incorrect ordinary-Mesh count assumption; actual r186 count is exactly one. That failure and the subsequent historical 35-check receipt remain preserved. The reviewed latest 188-line helper / 300-line test passes Node syntax and **38/38 checks** in the root rerun, with all fifteen dependency pins rechecked, no stderr, 0.337s bounded child lifecycle and 17.170ms internal CPU fixture duration. Real installed RenderObject/Geometries methods, retained terrain queries and raycasts run against explicitly synthetic numerical geometry/context fixtures, not an actual GPU render or mocked backend.
+
+[Root receipt](/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source295-index-draw-contract-root02.json), SHA256 `9c7adb126577f127d5a39305455094cab39aad1c95cad52dd3548625ff80a029`; helper SHA256 `2b66adc3d9cd0c468c9beb2732f6e4f91c2ebf0f908e90b8311c9cdee5140f73`; test SHA256 `4c97783fd81b507d0569b42064231c09264df21e1ed43e43708589e5480572ea`. This helper is **not** a native installer. GPU upload/deletion, actual main/mirror/shadow contexts, queued-device lifecycle, pixels and FPS remain open. Source revision checks cannot detect arbitrary unversioned external writes.
+
+Current [meshoptimizer guidance](https://github.com/zeux/meshoptimizer#vertex-cache-optimization) explicitly distinguishes modern GPU reuse from fixed-size cache models; the earlier 18.28–22.36% modeled miss reduction is not a GPU-time prediction. The [Three Renderer contract](https://threejs.org/docs/pages/Renderer.html#setRenderObjectFunction) documents a draw-dispatch override, not acceptance of this experimental private buffer-lifecycle seam.
+
+**Next:** run the already-reviewed original-graph AR-required mask only after actual focused/readiness admission; qualify useful coverage, original-versus-split full PBR and moving main/mirror views before focused ordinary-topology timing. Independently admit candidate-only render indices before their own native parity and net-cost comparison. No new counter recapture, quality reduction or default promotion. Terrain remains the historical first causal content priority, grass second; reflection/shadows/AA and CPU rendering overlap that work. **60 FPS / 16.67ms at true 2× remains unmet; neither checkpoint recovers measured frame time.**
+
 ## Native292 / Source293–294 — native refusal isolated; exact triangle-order potential repeats
 
 The private Native292 one-shot is actually scheduled and observed through native Chrome. It refuses its combined foreground/readiness gate **before a diagnostic frame or renderer-state acquisition**: attempted=true, frameSubmissions=0, valid=false, no GPU errors and requiresPageClose=false. The individual failed conjunct is not recorded, so focus alone is not a diagnosed cause. No native mask, shader/parity result or speedup follows. `restored=false` at this pre-acquisition gate is not a restoration failure. The export command never successfully executes; [the root receipt](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/native292-root-observed-refusal.json>) preserves the actual displayed API fields, not an invented full downloaded receipt.
@@ -21,9 +57,9 @@ These are **CPU locality models, not Apple's actual cache policy, vertex invocat
 
 Do not reorder canonical retained indices: terrain cell/face lookup depends on their original order. A disposable geometry sharing source BufferAttributes is also unsafe because actual Three geometry disposal deletes those GPU attributes. A distinct render-only owner first needs explicit ownership, main/mirror pixel parity and repeated full-content timing; reject weak gains or added preparation/memory churn.
 
-### Next native phase is prepared, not executed
+### Historical preflight before Native293 execution
 
-Source293's 237-line issued-WGSL-only module and 229-line literal canonical companion are fully source-reviewed by root and an independent reviewer. Exact inverse proves the original lifecycle/header. Syntax, one CPU acceptance/five refusal fixtures and canonical preflight pass with 744 UI sources/four overlays/zero virtual overrides; no runtime output is created. [Preflight](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source293-root-preflight.json>). **It has not been installed or run.**
+At this historical preflight, Source293's 237-line issued-WGSL-only module and 229-line literal canonical companion are fully source-reviewed by root and an independent reviewer. Exact inverse proves the original lifecycle/header. Syntax, one CPU acceptance/five refusal fixtures and canonical preflight pass with 744 UI sources/four overlays/zero virtual overrides; no runtime output is created at that point. [Preflight](</Users/lucid/Documents/hyperia/asset-studio/game-test-integration/inland-pond-integration01-UNQUALIFIED/source293-root-preflight.json>). The later actual execution and limited shader result are recorded above; coverage, pixels and performance remain open.
 
 It observes four strictly advancing natural O/C0/E/C0 `graphics.render` calls, retaining ordinary preparation/composer/grass cleanup and actual 2×/16×/MSAA4. Both clones use the same original material-owned normal-only seam; color/roughness use resolved appearance plus the original pre-light multiplier. Actual backend draws must match healthy pipeline/module/NodeBuilder code and known main/fresh-natural-mirror ownership. Every stage is capped 1MiB, all observed+retained code references 12MiB, at most six shader-pair/context records; one non-renewing 45s deadline bounds frame collection, queue and every digest. Admission failures fail forward to original draw owners. A native exception pauses only the still-owned animation loop and requires page closure. Device loss/owner changes block completion.
 
