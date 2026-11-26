@@ -470,9 +470,9 @@ export function createTerrainMaterial(
 
   // === ROAD OVERLAY (optional) ===
   // Roads are compacted dirt paths - use same dirt colors as terrain for consistency
-  let colorWithRoads: Node = variedColor;
+  let colorWithRoads: Node<"vec3"> = variedColor;
   if (includeRoadOverlay) {
-    const roadInfluence = attribute("roadInfluence", "float");
+    const roadInfluence = attribute<"float">("roadInfluence", "float");
 
     // Use same dirt colors as terrain dirt patches (dirtBrown, dirtDark defined above)
     // Add noise variation for natural look - compacted dirt has less variation

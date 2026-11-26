@@ -16,9 +16,22 @@
  *   acceptFinal       — only valid in CONFIRMING
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import { DataManager } from "@hyperforge/shared";
 import { DuelSystem } from "../index";
 import { createMockWorld, createDuelPlayers, type MockWorld } from "./mocks";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 // ============================================================================
 // Helpers

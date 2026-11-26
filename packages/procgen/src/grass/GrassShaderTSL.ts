@@ -23,6 +23,7 @@ import {
   vec2,
   vec3,
   float,
+  uint,
   sin,
   cos,
   mix,
@@ -118,7 +119,7 @@ export function createGameGrassMaterial(
 
   // BOTTOM DITHER DISSOLVE - fade grass base into ground
   const bottomFade = smoothstep(float(0), uniforms.uBottomFadeHeight, h);
-  const ditherNoise = hash(instanceIndex.add(h.mul(1000))).mul(0.3);
+  const ditherNoise = hash(instanceIndex.add(uint(h.mul(1000)))).mul(0.3);
   const bottomOpacity = clamp(bottomFade.add(ditherNoise.sub(0.15)), 0, 1);
   material.opacityNode = bottomOpacity;
 
@@ -262,7 +263,7 @@ export function createGameGrassMaterial(
   const grassDark = vec3(0.22, 0.42, 0.1);
 
   // Variation between light and dark grass
-  const noiseValue = hash(instanceIndex.mul(0.73).add(offsetX.mul(0.01)));
+  const noiseValue = hash(instanceIndex.mul(0.73).add(uint(offsetX.mul(0.01))));
   const grassVariation = smoothstep(float(0.4), float(0.6), noiseValue);
   const baseGrassColor = mix(grassGreen, grassDark, grassVariation);
 

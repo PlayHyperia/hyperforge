@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve fishing rod launch candidate",
+  "equipments": [
+    {
+      "asset": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/fishing-rod-fitted.glb",
+      "itemId": "fishing_rod",
+      "avatarId": "steve",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

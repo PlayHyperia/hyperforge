@@ -37,12 +37,11 @@ export const character: Character = {
   plugins: [
     hyperiaPlugin,
     "@elizaos/plugin-sql",
-    "@elizaos/plugin-openrouter",
     "@elizaos/plugin-openai",
     "@elizaos/plugin-anthropic",
   ],
   clients: [],
-  modelProvider: "openrouter", // Use openrouter as primary (falls back to openai if not configured)
+  modelProvider: "openai",
   settings: {
     secrets: {},
   },

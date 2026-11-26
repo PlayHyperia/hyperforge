@@ -84,8 +84,19 @@ import type { AnyEvent } from "../../../types/events";
 import type { World } from "../../../types/index";
 import { SystemConfig } from "../../../types/core/core";
 import { SystemLogger } from "../../../utils/Logger";
-import type { EventMap } from "../../../types/events";
-import { EventType } from "../../../types/events";
+import type {
+  EventMap,
+  ProcessingProgressPhase,
+  ProcessingRejectionReason,
+  ProcessingSkill,
+} from "../../../types/events";
+import {
+  EventType,
+  getProcessingRequestOperationId,
+} from "../../../types/events";
+
+/** Six seconds at the authoritative 600 ms game tick. */
+const PROCESSING_PROGRESS_HEARTBEAT_TICKS = 10;
 
 /**
  * SystemBase - Enhanced system base class with automatic resource management
@@ -99,6 +110,7 @@ export abstract class SystemBase extends System {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly intervals = new Set<ReturnType<typeof setInterval>>();
   private readonly eventSubscriptions = new Set<EventSubscription>();
+  private readonly processingProgressTicks = new Map<string, number>();
   protected readonly eventBus: EventBus;
 
   constructor(world: World, config: SystemConfig) {
@@ -215,18 +227,16 @@ export abstract class SystemBase extends System {
       // For known events, deliver handler the payload directly
       const subscription = this.eventBus.subscribe(
         eventType as string,
-        (event: SystemEvent<AnyEvent>) => {
-          (handler as (data: AnyEvent) => void | Promise<void>)(event.data);
-        },
+        (event: SystemEvent<AnyEvent>) =>
+          (handler as (data: AnyEvent) => void | Promise<void>)(event.data),
       );
       this.eventSubscriptions.add(subscription);
       return subscription;
     }
     const subscription = this.eventBus.subscribe(
       eventType as string,
-      (event: SystemEvent<AnyEvent>) => {
-        (handler as (data: AnyEvent) => void | Promise<void>)(event.data);
-      },
+      (event: SystemEvent<AnyEvent>) =>
+        (handler as (data: AnyEvent) => void | Promise<void>)(event.data),
     );
     this.eventSubscriptions.add(subscription);
     return subscription;
@@ -255,18 +265,16 @@ export abstract class SystemBase extends System {
     if (isTypedEvent) {
       const subscription = this.eventBus.subscribeOnce(
         eventType as string,
-        (event: SystemEvent<AnyEvent>) => {
-          (handler as (data: AnyEvent) => void | Promise<void>)(event.data);
-        },
+        (event: SystemEvent<AnyEvent>) =>
+          (handler as (data: AnyEvent) => void | Promise<void>)(event.data),
       );
       this.eventSubscriptions.add(subscription);
       return subscription;
     }
     const subscription = this.eventBus.subscribeOnce(
       eventType as string,
-      (event: SystemEvent<AnyEvent>) => {
-        (handler as (data: AnyEvent) => void | Promise<void>)(event.data);
-      },
+      (event: SystemEvent<AnyEvent>) =>
+        (handler as (data: AnyEvent) => void | Promise<void>)(event.data),
     );
     this.eventSubscriptions.add(subscription);
     return subscription;
@@ -282,6 +290,135 @@ export abstract class SystemBase extends System {
   protected emitTypedEvent(eventType: string, data: AnyEvent): void;
   protected emitTypedEvent(eventType: string, data: AnyEvent): void {
     this.eventBus.emitEvent(eventType, data, this.systemName);
+  }
+
+  /**
+   * End a caller-correlated processing request without leaking internal errors.
+   * Legacy requests do not carry an identity and retain their prior UI-only
+   * rejection behavior.
+   */
+  protected rejectProcessingRequest(
+    playerId: string,
+    requestId: string | undefined,
+    skill: ProcessingSkill,
+    reason: ProcessingRejectionReason,
+    retryable = false,
+  ): void {
+    if (!requestId) return;
+    this.processingProgressTicks.delete(requestId);
+    const emitRejection = (
+      emittedReason: ProcessingRejectionReason,
+      emittedRetryable: boolean,
+    ): void => {
+      this.emitTypedEvent(EventType.PROCESSING_REQUEST_REJECTED, {
+        playerId,
+        requestId,
+        skill,
+        reason: emittedReason,
+        retryable: emittedRetryable,
+      });
+    };
+    const operationId = getProcessingRequestOperationId(skill, requestId);
+    const database = this.world.getSystem("database") as
+      | {
+          rejectProcessingRequestAsync?: (
+            playerId: string,
+            operationId: string,
+            requestId: string,
+            skill: ProcessingSkill,
+            reason: ProcessingRejectionReason,
+            retryable: boolean,
+          ) => Promise<boolean>;
+        }
+      | undefined;
+    if (operationId && database?.rejectProcessingRequestAsync) {
+      void database
+        .rejectProcessingRequestAsync(
+          playerId,
+          operationId,
+          requestId,
+          skill,
+          reason,
+          retryable,
+        )
+        .then((rejected) => {
+          // Only the durable owner may publish a terminal rejection. A stale
+          // server epoch that lost ownership stays silent.
+          if (rejected) emitRejection(reason, retryable);
+        })
+        .catch(() => {
+          emitRejection("persistence_rejected", true);
+        });
+      return;
+    }
+    emitRejection(reason, retryable);
+  }
+
+  /**
+   * Confirm that authority still owns a caller-correlated processing request.
+   * Repeated calls are tick-throttled so a hung or reconciling transaction can
+   * keep the caller safe without creating per-frame network traffic.
+   */
+  protected reportProcessingRequestProgress(
+    playerId: string,
+    requestId: string | undefined,
+    skill: ProcessingSkill,
+    phase: ProcessingProgressPhase,
+    force = false,
+  ): void {
+    if (!requestId) return;
+    const currentTick = this.world.currentTick ?? 0;
+    const lastTick = this.processingProgressTicks.get(requestId);
+    if (
+      !force &&
+      lastTick !== undefined &&
+      currentTick - lastTick < PROCESSING_PROGRESS_HEARTBEAT_TICKS
+    ) {
+      return;
+    }
+    this.processingProgressTicks.set(requestId, currentTick);
+    const operationId = getProcessingRequestOperationId(skill, requestId);
+    const database = this.world.getSystem("database") as
+      | {
+          heartbeatProcessingRequestAsync?: (
+            playerId: string,
+            operationId: string,
+            requestId: string,
+            skill: ProcessingSkill,
+          ) => Promise<boolean>;
+        }
+      | undefined;
+    if (operationId && database?.heartbeatProcessingRequestAsync) {
+      void database
+        .heartbeatProcessingRequestAsync(
+          playerId,
+          operationId,
+          requestId,
+          skill,
+        )
+        .then((owned) => {
+          if (!owned) return;
+          this.emitTypedEvent(EventType.PROCESSING_REQUEST_PROGRESS, {
+            playerId,
+            requestId,
+            skill,
+            phase,
+          });
+        })
+        .catch(() => {});
+      return;
+    }
+    this.emitTypedEvent(EventType.PROCESSING_REQUEST_PROGRESS, {
+      playerId,
+      requestId,
+      skill,
+      phase,
+    });
+  }
+
+  /** Remove liveness bookkeeping after an authoritative completion event. */
+  protected finishProcessingRequest(requestId: string | undefined): void {
+    if (requestId) this.processingProgressTicks.delete(requestId);
   }
 
   /**
@@ -327,6 +464,7 @@ export abstract class SystemBase extends System {
       subscription.unsubscribe();
     });
     this.eventSubscriptions.clear();
+    this.processingProgressTicks.clear();
 
     // Call parent cleanup
     super.destroy();

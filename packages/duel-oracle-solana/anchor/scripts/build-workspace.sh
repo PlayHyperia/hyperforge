@@ -44,10 +44,22 @@ generate_idl() {
 mkdir -p "${ROOT_DIR}/target/idl"
 
 if command -v anchor >/dev/null 2>&1; then
-  (cd "${ROOT_DIR}" && anchor build)
+  # The Solana platform Cargo can lag host Cargo. Keep the audited dependency
+  # graph exact so an SBF build cannot silently select a newer Rust edition.
+  (
+    cd "${ROOT_DIR}"
+    anchor build --no-idl -- --tools-version "${TOOLS_VERSION}" -- --locked
+    anchor idl build \
+      --program-name "${PROGRAM}" \
+      --out "${ROOT_DIR}/target/idl/${PROGRAM}.json" \
+      --out-ts "${ROOT_DIR}/target/types/${PROGRAM}.ts"
+  )
 else
   if cargo --list | grep -q "build-sbf"; then
-    cargo build-sbf --tools-version "${TOOLS_VERSION}" --manifest-path "${ROOT_DIR}/programs/${PROGRAM}/Cargo.toml"
+    cargo build-sbf --tools-version "${TOOLS_VERSION}" --manifest-path "${ROOT_DIR}/programs/${PROGRAM}/Cargo.toml" -- --locked
+  else
+    echo "missing required SBF builder: install anchor or cargo build-sbf" >&2
+    exit 1
   fi
 
   generate_idl

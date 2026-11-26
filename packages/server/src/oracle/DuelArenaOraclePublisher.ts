@@ -11,32 +11,14 @@ import {
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  type Chain,
-  type Hex,
-} from "viem";
-import {
-  foundry,
-  avalanche,
-  avalancheFuji,
-  base,
-  baseSepolia,
-  bsc,
-  bscTestnet,
-} from "viem/chains";
-import { privateKeyToAccount } from "viem/accounts";
 import { Logger } from "../systems/ServerNetwork/services/index.js";
-import { DUEL_OUTCOME_ORACLE_ABI } from "./duelOutcomeOracleAbi.js";
+import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
 import type {
   DuelArenaOracleAbortEvent,
   DuelArenaOracleAnnouncementEvent,
   DuelArenaOracleChainKey,
   DuelArenaOracleChainState,
   DuelArenaOracleConfig,
-  DuelArenaOracleEvmTargetConfig,
   DuelArenaOracleFightStartEvent,
   DuelArenaOracleParticipant,
   DuelArenaOracleRecord,
@@ -55,32 +37,13 @@ const SOLANA_STATUS_TO_VARIANT: Record<DuelArenaOracleStatus, number> = {
   RESOLVED: 3,
   CANCELLED: 4,
 };
-const EVM_STATUS_TO_VARIANT: Record<DuelArenaOracleStatus, number> = {
-  BETTING_OPEN: 2,
-  LOCKED: 3,
-  RESOLVED: 4,
-  CANCELLED: 5,
-};
 const WINNER_SIDE_TO_VARIANT: Record<DuelArenaOracleWinnerSide, number> = {
   A: 1,
   B: 2,
 };
-const EVM_CHAIN_MAP: Record<DuelArenaOracleEvmTargetConfig["key"], Chain> = {
-  anvil: foundry,
-  baseSepolia,
-  bscTestnet,
-  avaxFuji: avalancheFuji,
-  base,
-  bsc,
-  avax: avalanche,
-};
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function prefixedHex(value: string): Hex {
-  return (value.startsWith("0x") ? value : `0x${value}`) as Hex;
 }
 
 function hashParticipant(participantId: string): string {
@@ -195,112 +158,6 @@ function parseSolanaSignerSecret(raw: string | null): Keypair | null {
 
 function awaitReadJsonSecret(filePath: string): string {
   return readFileSync(filePath, "utf8").trim();
-}
-
-class EvmOracleTarget {
-  public readonly key: DuelArenaOracleChainKey;
-  public readonly label: string;
-  private readonly contractAddress: `0x${string}`;
-  private readonly publicClient;
-  private readonly walletClient;
-  private readonly account;
-
-  public constructor(config: DuelArenaOracleEvmTargetConfig) {
-    this.key = config.key;
-    this.label = config.label;
-    this.contractAddress = config.contractAddress;
-    const chain = EVM_CHAIN_MAP[config.key];
-    this.account = privateKeyToAccount(config.privateKey);
-    this.publicClient = createPublicClient({
-      chain,
-      transport: http(config.rpcUrl),
-    });
-    this.walletClient = createWalletClient({
-      account: this.account,
-      chain,
-      transport: http(config.rpcUrl),
-    });
-  }
-
-  public async publishAnnouncement(
-    record: DuelArenaOracleRecord,
-  ): Promise<string> {
-    return this.upsertRecord(record, "BETTING_OPEN");
-  }
-
-  public async publishFightStart(
-    record: DuelArenaOracleRecord,
-  ): Promise<string> {
-    return this.upsertRecord(record, "LOCKED");
-  }
-
-  public async publishCancellation(
-    record: DuelArenaOracleRecord,
-  ): Promise<string> {
-    await this.upsertRecord(
-      record,
-      record.fightStartTime ? "LOCKED" : "BETTING_OPEN",
-    );
-    const hash = await this.walletClient.writeContract({
-      account: this.account,
-      address: this.contractAddress,
-      abi: DUEL_OUTCOME_ORACLE_ABI,
-      functionName: "cancelDuel",
-      args: [prefixedHex(record.duelKeyHex), record.metadataUri],
-    });
-    await this.publicClient.waitForTransactionReceipt({ hash });
-    return hash;
-  }
-
-  public async publishResolution(
-    record: DuelArenaOracleRecord,
-  ): Promise<string> {
-    await this.upsertRecord(record, "LOCKED");
-    if (!record.winnerSide || !record.seed || !record.replayHashHex) {
-      throw new Error("Resolved duel is missing winner/seed/replayHash data");
-    }
-    const hash = await this.walletClient.writeContract({
-      account: this.account,
-      address: this.contractAddress,
-      abi: DUEL_OUTCOME_ORACLE_ABI,
-      functionName: "reportResult",
-      args: [
-        prefixedHex(record.duelKeyHex),
-        WINNER_SIDE_TO_VARIANT[record.winnerSide],
-        BigInt(record.seed),
-        prefixedHex(record.replayHashHex),
-        prefixedHex(record.resultHashHex || buildResultHash(record)),
-        BigInt(record.duelEndTime || Date.now()),
-        record.metadataUri,
-      ],
-    });
-    await this.publicClient.waitForTransactionReceipt({ hash });
-    return hash;
-  }
-
-  private async upsertRecord(
-    record: DuelArenaOracleRecord,
-    status: Extract<DuelArenaOracleStatus, "BETTING_OPEN" | "LOCKED">,
-  ): Promise<string> {
-    const hash = await this.walletClient.writeContract({
-      account: this.account,
-      address: this.contractAddress,
-      abi: DUEL_OUTCOME_ORACLE_ABI,
-      functionName: "upsertDuel",
-      args: [
-        prefixedHex(record.duelKeyHex),
-        prefixedHex(record.participantA.hashHex),
-        prefixedHex(record.participantB.hashHex),
-        BigInt(record.betOpenTime),
-        BigInt(record.betCloseTime),
-        BigInt(resolveOracleDuelStartTime(record)),
-        record.metadataUri,
-        EVM_STATUS_TO_VARIANT[status],
-      ],
-    });
-    await this.publicClient.waitForTransactionReceipt({ hash });
-    return hash;
-  }
 }
 
 class SolanaOracleTarget {
@@ -546,23 +403,46 @@ type OracleWorld = World & {
   duelArenaOraclePublisher?: DuelArenaOraclePublisher;
 };
 
+type DuelArenaOraclePublisherDeps = {
+  getStreamingDuelScheduler?: typeof getStreamingDuelScheduler;
+};
+
+type AuthoritativeEventExpectation = {
+  eventName: string;
+  duelId: string;
+  cycleId: string;
+  duelKeyHex: string;
+  agent1Id: string;
+  agent2Id: string;
+  phases: readonly string[];
+  outcome?: "win" | "draw";
+  winnerId?: string | null;
+  loserId?: string | null;
+  betOpenTime?: number;
+  betCloseTime?: number;
+  fightStartTime?: number;
+  duelEndTime?: number;
+  seed?: string | null;
+  replayHash?: string | null;
+};
+
 export class DuelArenaOraclePublisher {
   private readonly records = new Map<string, DuelArenaOracleRecord>();
   private readonly listeners: Array<{
     event: string;
     handler: (payload: unknown) => void;
   }> = [];
-  private readonly evmTargets: EvmOracleTarget[];
   private readonly solanaTargets: SolanaOracleTarget[];
+  private readonly getStreamingDuelSchedulerFn: typeof getStreamingDuelScheduler;
   private persistQueue: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly world: World,
     private readonly config: DuelArenaOracleConfig,
+    deps: DuelArenaOraclePublisherDeps = {},
   ) {
-    this.evmTargets = config.evmTargets.map(
-      (target) => new EvmOracleTarget(target),
-    );
+    this.getStreamingDuelSchedulerFn =
+      deps.getStreamingDuelScheduler ?? getStreamingDuelScheduler;
     this.solanaTargets = config.solanaTargets.map(
       (target) => new SolanaOracleTarget(target),
     );
@@ -574,7 +454,6 @@ export class DuelArenaOraclePublisher {
     (this.world as OracleWorld).duelArenaOraclePublisher = this;
     Logger.info("DuelArenaOraclePublisher", "Initialized duel arena oracle", {
       profile: this.config.profile,
-      evmTargets: this.evmTargets.length,
       solanaTargets: this.solanaTargets.length,
       metadataBaseUrl: this.config.metadataBaseUrl,
       storePath: this.config.storePath,
@@ -600,22 +479,106 @@ export class DuelArenaOraclePublisher {
 
   private attach(): void {
     this.on("streaming:announcement:start", (payload) => {
-      void this.handleAnnouncement(payload);
+      this.runEventHandler("streaming:announcement:start", () =>
+        this.handleAnnouncement(payload),
+      );
     });
     this.on("streaming:fight:start", (payload) => {
-      void this.handleFightStart(payload);
+      this.runEventHandler("streaming:fight:start", () =>
+        this.handleFightStart(payload),
+      );
     });
     this.on("streaming:resolution:start", (payload) => {
-      void this.handleResolution(payload);
+      this.runEventHandler("streaming:resolution:start", () =>
+        this.handleResolution(payload),
+      );
     });
     this.on("streaming:cycle:aborted", (payload) => {
-      void this.handleAbort(payload);
+      this.runEventHandler("streaming:cycle:aborted", () =>
+        this.handleAbort(payload),
+      );
+    });
+  }
+
+  private runEventHandler(
+    eventName: string,
+    handler: () => Promise<void>,
+  ): void {
+    void handler().catch((error) => {
+      Logger.error(
+        "DuelArenaOraclePublisher",
+        `Failed to handle ${eventName}`,
+        error instanceof Error ? error : null,
+      );
     });
   }
 
   private on(event: string, handler: (payload: unknown) => void): void {
     this.listeners.push({ event, handler });
     this.world.on(event, handler);
+  }
+
+  private rejectTransition(
+    eventName: string,
+    duelId: string | null,
+    reason: string,
+  ): void {
+    Logger.error(
+      "DuelArenaOraclePublisher",
+      "Rejected non-canonical oracle lifecycle event",
+      null,
+      { eventName, duelId, reason },
+    );
+  }
+
+  private getAuthoritativeMismatch(
+    expected: AuthoritativeEventExpectation,
+  ): string | null {
+    const scheduler = this.getStreamingDuelSchedulerFn();
+    const cycle = scheduler?.getCurrentCycle();
+    if (!cycle) return "authoritative_cycle_missing";
+    if (cycle.duelId !== expected.duelId) return "duel_id_mismatch";
+    if (cycle.cycleId !== expected.cycleId) return "cycle_id_mismatch";
+    if (cycle.duelKeyHex !== expected.duelKeyHex) return "duel_key_mismatch";
+    if (cycle.agent1?.characterId !== expected.agent1Id)
+      return "participant_a_mismatch";
+    if (cycle.agent2?.characterId !== expected.agent2Id)
+      return "participant_b_mismatch";
+    if (!expected.phases.includes(cycle.phase)) return "phase_mismatch";
+    if (expected.outcome !== undefined && cycle.outcome !== expected.outcome)
+      return "outcome_mismatch";
+    if (expected.winnerId !== undefined && cycle.winnerId !== expected.winnerId)
+      return "winner_mismatch";
+    if (expected.loserId !== undefined && cycle.loserId !== expected.loserId)
+      return "loser_mismatch";
+    if (
+      expected.betOpenTime !== undefined &&
+      cycle.betOpenTime !== expected.betOpenTime
+    )
+      return "bet_open_time_mismatch";
+    if (
+      expected.betCloseTime !== undefined &&
+      cycle.betCloseTime !== expected.betCloseTime
+    )
+      return "bet_close_time_mismatch";
+    if (
+      expected.fightStartTime !== undefined &&
+      cycle.phaseStartTime !== expected.fightStartTime
+    )
+      return "fight_start_time_mismatch";
+    if (
+      expected.duelEndTime !== undefined &&
+      cycle.duelEndTime !== expected.duelEndTime
+    )
+      return "duel_end_time_mismatch";
+    if (expected.seed !== undefined && cycle.seed !== expected.seed)
+      return "seed_mismatch";
+    if (
+      expected.replayHash !== undefined &&
+      cycle.replayHash !== expected.replayHash
+    )
+      return "replay_hash_mismatch";
+    return null;
   }
 
   private async handleAnnouncement(payload: unknown): Promise<void> {
@@ -625,8 +588,37 @@ export class DuelArenaOraclePublisher {
       !event.cycleId ||
       !event.duelKeyHex ||
       !event.agent1?.id ||
-      !event.agent2?.id
+      !event.agent2?.id ||
+      event.agent1.id === event.agent2.id ||
+      !Number.isFinite(event.betOpenTime) ||
+      !Number.isFinite(event.betCloseTime) ||
+      event.betCloseTime <= event.betOpenTime
     ) {
+      this.rejectTransition(
+        "streaming:announcement:start",
+        event?.duelId ?? null,
+        "invalid_payload",
+      );
+      return;
+    }
+
+    const authoritativeMismatch = this.getAuthoritativeMismatch({
+      eventName: "streaming:announcement:start",
+      duelId: event.duelId,
+      cycleId: event.cycleId,
+      duelKeyHex: event.duelKeyHex,
+      agent1Id: event.agent1.id,
+      agent2Id: event.agent2.id,
+      phases: ["ANNOUNCEMENT"],
+      betOpenTime: event.betOpenTime,
+      betCloseTime: event.betCloseTime,
+    });
+    if (authoritativeMismatch) {
+      this.rejectTransition(
+        "streaming:announcement:start",
+        event.duelId,
+        authoritativeMismatch,
+      );
       return;
     }
 
@@ -641,7 +633,26 @@ export class DuelArenaOraclePublisher {
       hashHex: hashParticipant(event.agent2.id),
     };
     const existing = this.records.get(event.duelId);
-    const createdAt = existing?.createdAt ?? nowIso();
+    if (existing) {
+      const isExactReplay =
+        existing.status === "BETTING_OPEN" &&
+        existing.cycleId === event.cycleId &&
+        existing.duelKeyHex === event.duelKeyHex &&
+        existing.participantA.id === event.agent1.id &&
+        existing.participantB.id === event.agent2.id &&
+        existing.betOpenTime === event.betOpenTime &&
+        existing.betCloseTime === event.betCloseTime;
+      if (!isExactReplay) {
+        this.rejectTransition(
+          "streaming:announcement:start",
+          event.duelId,
+          "immutable_record_mismatch",
+        );
+      }
+      return;
+    }
+
+    const createdAt = nowIso();
     const updatedAt = nowIso();
     const record: DuelArenaOracleRecord = {
       duelId: event.duelId,
@@ -653,18 +664,18 @@ export class DuelArenaOraclePublisher {
       participantB,
       betOpenTime: event.betOpenTime,
       betCloseTime: event.betCloseTime,
-      fightStartTime: existing?.fightStartTime ?? null,
-      duelEndTime: existing?.duelEndTime ?? null,
-      winnerId: existing?.winnerId ?? null,
-      loserId: existing?.loserId ?? null,
-      winnerSide: existing?.winnerSide ?? null,
-      winnerName: existing?.winnerName ?? null,
-      loserName: existing?.loserName ?? null,
-      winReason: existing?.winReason ?? null,
-      seed: existing?.seed ?? null,
-      replayHashHex: existing?.replayHashHex ?? null,
-      resultHashHex: existing?.resultHashHex ?? null,
-      chainState: existing?.chainState ?? {},
+      fightStartTime: null,
+      duelEndTime: null,
+      winnerId: null,
+      loserId: null,
+      winnerSide: null,
+      winnerName: null,
+      loserName: null,
+      winReason: null,
+      seed: null,
+      replayHashHex: null,
+      resultHashHex: null,
+      chainState: {},
       createdAt,
       updatedAt,
     };
@@ -675,93 +686,358 @@ export class DuelArenaOraclePublisher {
 
   private async handleFightStart(payload: unknown): Promise<void> {
     const event = payload as DuelArenaOracleFightStartEvent;
-    if (!event?.duelId) {
+    if (
+      !event?.duelId ||
+      !event.cycleId ||
+      !event.duelKeyHex ||
+      !event.agent1Id ||
+      !event.agent2Id ||
+      event.agent1Id === event.agent2Id ||
+      !Number.isFinite(event.betCloseTime) ||
+      !Number.isFinite(event.fightStartTime)
+    ) {
+      this.rejectTransition(
+        "streaming:fight:start",
+        event?.duelId ?? null,
+        "invalid_payload",
+      );
       return;
     }
 
     const existing = this.records.get(event.duelId);
     if (!existing) {
+      this.rejectTransition(
+        "streaming:fight:start",
+        event.duelId,
+        "record_missing",
+      );
       return;
     }
 
-    existing.status = "LOCKED";
-    existing.betCloseTime = Math.min(existing.betCloseTime, event.betCloseTime);
-    existing.fightStartTime = event.fightStartTime;
-    existing.updatedAt = nowIso();
-    this.records.set(existing.duelId, existing);
+    const authoritativeMismatch = this.getAuthoritativeMismatch({
+      eventName: "streaming:fight:start",
+      duelId: event.duelId,
+      cycleId: event.cycleId,
+      duelKeyHex: event.duelKeyHex,
+      agent1Id: event.agent1Id,
+      agent2Id: event.agent2Id,
+      phases: ["FIGHTING"],
+      betCloseTime: event.betCloseTime,
+      fightStartTime: event.fightStartTime,
+    });
+    const recordMismatch =
+      existing.cycleId !== event.cycleId ||
+      existing.duelKeyHex !== event.duelKeyHex ||
+      existing.participantA.id !== event.agent1Id ||
+      existing.participantB.id !== event.agent2Id;
+    if (authoritativeMismatch || recordMismatch) {
+      this.rejectTransition(
+        "streaming:fight:start",
+        event.duelId,
+        authoritativeMismatch ?? "immutable_record_mismatch",
+      );
+      return;
+    }
+    if (existing.status === "LOCKED") {
+      if (
+        existing.fightStartTime !== event.fightStartTime ||
+        existing.betCloseTime !== event.betCloseTime
+      ) {
+        this.rejectTransition(
+          "streaming:fight:start",
+          event.duelId,
+          "locked_record_mismatch",
+        );
+      }
+      return;
+    }
+    if (existing.status !== "BETTING_OPEN") {
+      this.rejectTransition(
+        "streaming:fight:start",
+        event.duelId,
+        "terminal_state_regression",
+      );
+      return;
+    }
+
+    const lockedRecord: DuelArenaOracleRecord = {
+      ...existing,
+      status: "LOCKED",
+      betCloseTime: event.betCloseTime,
+      fightStartTime: event.fightStartTime,
+      updatedAt: nowIso(),
+    };
+    this.records.set(lockedRecord.duelId, lockedRecord);
     await this.persistRecords();
-    await this.publishAcrossTargets(existing, "UPSERT");
+    await this.publishAcrossTargets(lockedRecord, "UPSERT");
   }
 
   private async handleResolution(payload: unknown): Promise<void> {
     const event = payload as DuelArenaOracleResolutionEvent;
-    if (!event?.duelId || !event.winnerId || !event.loserId) {
+    if (
+      !event?.duelId ||
+      !event.cycleId ||
+      !event.duelKeyHex ||
+      (event.outcome !== "win" && event.outcome !== "draw") ||
+      !Number.isFinite(event.duelEndTime)
+    ) {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        event?.duelId ?? null,
+        "invalid_payload",
+      );
       return;
     }
 
     const existing = this.records.get(event.duelId);
     if (!existing) {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        event.duelId,
+        "record_missing",
+      );
       return;
     }
 
-    existing.status = "RESOLVED";
-    existing.duelEndTime = event.duelEndTime;
-    existing.winnerId = event.winnerId;
-    existing.loserId = event.loserId;
-    existing.winnerName = event.winnerName;
-    existing.loserName = event.loserName;
-    existing.winReason = event.winReason;
-    existing.seed = event.seed;
-    existing.replayHashHex = event.replayHash;
-    existing.winnerSide =
-      existing.participantA.id === event.winnerId
-        ? "A"
-        : existing.participantB.id === event.winnerId
-          ? "B"
-          : null;
-    existing.resultHashHex = buildResultHash(existing);
-    existing.updatedAt = nowIso();
-    this.records.set(existing.duelId, existing);
+    if (event.outcome === "draw") {
+      if (
+        event.winReason !== "draw" ||
+        event.winnerId !== null ||
+        event.loserId !== null
+      ) {
+        this.rejectTransition(
+          "streaming:resolution:start",
+          event.duelId,
+          "contradictory_draw_payload",
+        );
+        return;
+      }
+      await this.handleAbort({
+        duelId: event.duelId,
+        cycleId: event.cycleId,
+        duelKeyHex: event.duelKeyHex,
+        reason: "draw",
+        agent1Id: existing.participantA.id,
+        agent2Id: existing.participantB.id,
+        agent1Name: existing.participantA.name,
+        agent2Name: existing.participantB.name,
+      });
+      return;
+    }
+
+    if (
+      !event.winnerId ||
+      !event.loserId ||
+      event.winnerId === event.loserId ||
+      event.winReason === "draw" ||
+      !event.seed ||
+      !event.replayHash
+    ) {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        event.duelId,
+        "invalid_win_payload",
+      );
+      return;
+    }
+
+    const participantPairMatches =
+      (existing.participantA.id === event.winnerId &&
+        existing.participantB.id === event.loserId) ||
+      (existing.participantA.id === event.loserId &&
+        existing.participantB.id === event.winnerId);
+    const authoritativeMismatch = this.getAuthoritativeMismatch({
+      eventName: "streaming:resolution:start",
+      duelId: event.duelId,
+      cycleId: event.cycleId,
+      duelKeyHex: event.duelKeyHex,
+      agent1Id: existing.participantA.id,
+      agent2Id: existing.participantB.id,
+      phases: ["RESOLUTION"],
+      outcome: "win",
+      winnerId: event.winnerId,
+      loserId: event.loserId,
+      duelEndTime: event.duelEndTime,
+      seed: event.seed,
+      replayHash: event.replayHash,
+    });
+    const recordMismatch =
+      existing.cycleId !== event.cycleId ||
+      existing.duelKeyHex !== event.duelKeyHex ||
+      !participantPairMatches;
+    if (authoritativeMismatch || recordMismatch) {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        event.duelId,
+        authoritativeMismatch ?? "immutable_record_mismatch",
+      );
+      return;
+    }
+
+    if (existing.status === "RESOLVED") {
+      const isExactReplay =
+        existing.winnerId === event.winnerId &&
+        existing.loserId === event.loserId &&
+        existing.duelEndTime === event.duelEndTime &&
+        existing.seed === event.seed &&
+        existing.replayHashHex === event.replayHash;
+      if (!isExactReplay) {
+        this.rejectTransition(
+          "streaming:resolution:start",
+          event.duelId,
+          "resolved_record_mismatch",
+        );
+      }
+      return;
+    }
+    if (existing.status !== "BETTING_OPEN" && existing.status !== "LOCKED") {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        event.duelId,
+        "terminal_state_conflict",
+      );
+      return;
+    }
+
+    const winnerSide: DuelArenaOracleWinnerSide =
+      existing.participantA.id === event.winnerId ? "A" : "B";
+    const resolvedRecord: DuelArenaOracleRecord = {
+      ...existing,
+      status: "RESOLVED",
+      duelEndTime: event.duelEndTime,
+      winnerId: event.winnerId,
+      loserId: event.loserId,
+      winnerName: event.winnerName,
+      loserName: event.loserName,
+      winReason: event.winReason,
+      seed: event.seed,
+      replayHashHex: event.replayHash,
+      winnerSide,
+      resultHashHex: null,
+      updatedAt: nowIso(),
+    };
+    resolvedRecord.resultHashHex = buildResultHash(resolvedRecord);
+    this.records.set(resolvedRecord.duelId, resolvedRecord);
     await this.persistRecords();
 
     if (this.config.settlementDelayMs > 0) {
       Logger.info(
         "DuelArenaOraclePublisher",
-        `Delaying oracle publish for ${existing.duelId} by ${this.config.settlementDelayMs}ms to sync with stream`,
+        `Delaying oracle publish for ${resolvedRecord.duelId} by ${this.config.settlementDelayMs}ms to sync with stream`,
       );
       await new Promise((resolve) =>
         setTimeout(resolve, this.config.settlementDelayMs),
       );
     }
 
-    await this.publishAcrossTargets(existing, "RESOLVE");
+    const latest = this.records.get(resolvedRecord.duelId);
+    if (
+      latest?.status !== "RESOLVED" ||
+      latest.resultHashHex !== resolvedRecord.resultHashHex
+    ) {
+      this.rejectTransition(
+        "streaming:resolution:start",
+        resolvedRecord.duelId,
+        "terminal_state_changed_during_delay",
+      );
+      return;
+    }
+    await this.publishAcrossTargets(resolvedRecord, "RESOLVE");
   }
 
   private async handleAbort(payload: unknown): Promise<void> {
     const event = payload as DuelArenaOracleAbortEvent;
-    if (!event?.duelId) {
+    if (
+      !event?.duelId ||
+      !event.cycleId ||
+      !event.duelKeyHex ||
+      !event.reason ||
+      !event.agent1Id ||
+      !event.agent2Id ||
+      event.agent1Id === event.agent2Id
+    ) {
+      this.rejectTransition(
+        "streaming:cycle:aborted",
+        event?.duelId ?? null,
+        "invalid_payload",
+      );
       return;
     }
 
     const existing = this.records.get(event.duelId);
     if (!existing) {
+      this.rejectTransition(
+        "streaming:cycle:aborted",
+        event.duelId,
+        "record_missing",
+      );
       return;
     }
 
-    existing.status = "CANCELLED";
-    existing.updatedAt = nowIso();
-    this.records.set(existing.duelId, existing);
+    const isDraw = event.reason === "draw";
+    const authoritativeMismatch = this.getAuthoritativeMismatch({
+      eventName: "streaming:cycle:aborted",
+      duelId: event.duelId,
+      cycleId: event.cycleId,
+      duelKeyHex: event.duelKeyHex,
+      agent1Id: event.agent1Id,
+      agent2Id: event.agent2Id,
+      phases: isDraw
+        ? ["RESOLUTION"]
+        : ["ANNOUNCEMENT", "COUNTDOWN", "FIGHTING"],
+      outcome: isDraw ? "draw" : undefined,
+      winnerId: isDraw ? null : undefined,
+      loserId: isDraw ? null : undefined,
+    });
+    const recordMismatch =
+      existing.cycleId !== event.cycleId ||
+      existing.duelKeyHex !== event.duelKeyHex ||
+      existing.participantA.id !== event.agent1Id ||
+      existing.participantB.id !== event.agent2Id;
+    if (authoritativeMismatch || recordMismatch) {
+      this.rejectTransition(
+        "streaming:cycle:aborted",
+        event.duelId,
+        authoritativeMismatch ?? "immutable_record_mismatch",
+      );
+      return;
+    }
+
+    if (existing.status === "CANCELLED") {
+      return;
+    }
+    if (existing.status === "RESOLVED") {
+      this.rejectTransition(
+        "streaming:cycle:aborted",
+        event.duelId,
+        "resolved_state_is_immutable",
+      );
+      return;
+    }
+
+    const cancelledRecord: DuelArenaOracleRecord = {
+      ...existing,
+      status: "CANCELLED",
+      winnerId: null,
+      loserId: null,
+      winnerSide: null,
+      winnerName: null,
+      loserName: null,
+      winReason: isDraw ? "draw" : null,
+      seed: null,
+      replayHashHex: null,
+      resultHashHex: null,
+      updatedAt: nowIso(),
+    };
+    this.records.set(cancelledRecord.duelId, cancelledRecord);
     await this.persistRecords();
-    await this.publishAcrossTargets(existing, "CANCEL");
+    await this.publishAcrossTargets(cancelledRecord, "CANCEL");
   }
 
   private async publishAcrossTargets(
     record: DuelArenaOracleRecord,
     action: "UPSERT" | "RESOLVE" | "CANCEL",
   ): Promise<void> {
-    for (const target of this.evmTargets) {
-      await this.publishToTarget(record, target, action);
-    }
     for (const target of this.solanaTargets) {
       await this.publishToTarget(record, target, action);
     }
@@ -769,7 +1045,7 @@ export class DuelArenaOraclePublisher {
 
   private async publishToTarget(
     record: DuelArenaOracleRecord,
-    target: EvmOracleTarget | SolanaOracleTarget,
+    target: SolanaOracleTarget,
     action: "UPSERT" | "RESOLVE" | "CANCEL",
   ): Promise<void> {
     try {
@@ -786,7 +1062,7 @@ export class DuelArenaOraclePublisher {
       }
       this.updateChainState(record.duelId, target.key, {
         target: target.key,
-        kind: target instanceof EvmOracleTarget ? "evm" : "solana",
+        kind: "solana",
         label: target.label,
         lastAction: action,
         lastTxHash: txHash,
@@ -797,7 +1073,7 @@ export class DuelArenaOraclePublisher {
       let errorMessage = error instanceof Error ? error.message : String(error);
 
       if (error && typeof error === "object" && "logs" in error) {
-        const logs = (error as any).logs;
+        const logs = (error as { logs?: unknown }).logs;
         if (Array.isArray(logs)) {
           errorMessage = errorMessage
             .replace(
@@ -817,7 +1093,7 @@ export class DuelArenaOraclePublisher {
 
       this.updateChainState(record.duelId, target.key, {
         target: target.key,
-        kind: target instanceof EvmOracleTarget ? "evm" : "solana",
+        kind: "solana",
         label: target.label,
         lastAction: action,
         lastTxHash: null,

@@ -6,7 +6,14 @@
  */
 
 import React, { useEffect, useRef, useState } from "react";
-import type { StreamingState, AgentInfo } from "../../screens/StreamingMode";
+import type {
+  StreamingCombatRole,
+  StreamingState,
+} from "../../screens/StreamingMode";
+import {
+  formatStreamingCombatRole,
+  resolveActiveStreamingCombatRole,
+} from "./streamingCombatRole";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,7 +26,8 @@ type EventKind =
   | "big_hit"
   | "heal"
   | "critical"
-  | "kill";
+  | "kill"
+  | "style_switch";
 
 interface LogEvent {
   id: number;
@@ -56,6 +64,8 @@ function kindColor(kind: EventKind): string {
       return "#f87171";
     case "heal":
       return "#34d399";
+    case "style_switch":
+      return "#67e8f9";
     case "hit":
       return "#cbd5e1";
     default:
@@ -78,6 +88,8 @@ function kindGlyph(kind: EventKind): string {
       return "☠";
     case "heal":
       return "💚";
+    case "style_switch":
+      return "↻";
     case "hit":
       return "•";
     default:
@@ -85,16 +97,46 @@ function kindGlyph(kind: EventKind): string {
   }
 }
 
-const MAX_EVENTS = 28;
+const MAX_EVENTS = 20;
+const MAX_VISIBLE_EVENTS = 7;
+
+/**
+ * Remove a shared name prefix when the full names would repeatedly dominate
+ * the broadcast. The full identities remain visible in the fight HUD.
+ */
+export function getStreamingCombatLogName(
+  name: string,
+  opponentName: string,
+): string {
+  const tokens = name.trim().split(/\s+/).filter(Boolean);
+  const opponentTokens = opponentName.trim().split(/\s+/).filter(Boolean);
+  let commonPrefixLength = 0;
+  while (
+    commonPrefixLength < tokens.length - 1 &&
+    commonPrefixLength < opponentTokens.length - 1 &&
+    tokens[commonPrefixLength]?.toLocaleLowerCase() ===
+      opponentTokens[commonPrefixLength]?.toLocaleLowerCase()
+  ) {
+    commonPrefixLength += 1;
+  }
+  const candidate = tokens.slice(commonPrefixLength).join(" ") || name.trim();
+  return candidate.length > 18
+    ? `${candidate.slice(0, 17).trimEnd()}…`
+    : candidate;
+}
 
 // ---------------------------------------------------------------------------
 // Hook: derive events from streaming state deltas
 // ---------------------------------------------------------------------------
 
 function useCombatEvents(state: StreamingState | null): LogEvent[] {
-  const [events, setEvents] = useState<LogEvent[]>([]);
+  const [eventState, setEventState] = useState<{
+    cycleId: string | null;
+    events: LogEvent[];
+  }>({ cycleId: null, events: [] });
 
   // Refs for previous-tick values
+  const prevCycleIdRef = useRef<string | null>(null);
   const prevPhaseRef = useRef<string | null>(null);
   const prevA1HpRef = useRef<number | null>(null);
   const prevA2HpRef = useRef<number | null>(null);
@@ -102,11 +144,33 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
   const prevA2HealRef = useRef<number>(0);
   const prevA1HitRef = useRef<number>(0);
   const prevA2HitRef = useRef<number>(0);
+  const prevA1RoleRef = useRef<StreamingCombatRole | null>(null);
+  const prevA2RoleRef = useRef<StreamingCombatRole | null>(null);
 
   useEffect(() => {
     if (!state) return;
     const { cycle } = state;
-    const { phase, agent1, agent2, winnerName, winReason } = cycle;
+    const { cycleId, phase, agent1, agent2, winnerName, winReason } = cycle;
+    const agent1LogName = agent1
+      ? getStreamingCombatLogName(agent1.name, agent2?.name ?? "")
+      : "";
+    const agent2LogName = agent2
+      ? getStreamingCombatLogName(agent2.name, agent1?.name ?? "")
+      : "";
+
+    const isNewCycle = cycleId !== prevCycleIdRef.current;
+    if (isNewCycle) {
+      prevCycleIdRef.current = cycleId;
+      prevPhaseRef.current = null;
+      prevA1HpRef.current = null;
+      prevA2HpRef.current = null;
+      prevA1HealRef.current = 0;
+      prevA2HealRef.current = 0;
+      prevA1HitRef.current = 0;
+      prevA2HitRef.current = 0;
+      prevA1RoleRef.current = null;
+      prevA2RoleRef.current = null;
+    }
 
     const newEvents: LogEvent[] = [];
 
@@ -114,7 +178,10 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
     if (phase !== prevPhaseRef.current) {
       if (phase === "FIGHTING" && agent1 && agent2) {
         newEvents.push(
-          mkEvent("fight_start", `${agent1.name} vs ${agent2.name} — FIGHT!`),
+          mkEvent(
+            "fight_start",
+            `${agent1LogName} vs ${agent2LogName} — FIGHT!`,
+          ),
         );
         // Reset per-fight baselines
         prevA1HpRef.current = agent1.hp;
@@ -123,20 +190,26 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
         prevA2HealRef.current = agent2.healsUsed ?? 0;
         prevA1HitRef.current = agent1.highestHit ?? 0;
         prevA2HitRef.current = agent2.highestHit ?? 0;
+        prevA1RoleRef.current = resolveActiveStreamingCombatRole(agent1);
+        prevA2RoleRef.current = resolveActiveStreamingCombatRole(agent2);
       }
       if (phase === "RESOLUTION") {
         const reason =
           winReason === "kill"
             ? "by knockout"
-            : winReason === "hp_advantage"
-              ? "by HP advantage"
-              : winReason === "damage_advantage"
-                ? "by damage"
-                : "— draw";
+            : winReason === "forfeit"
+              ? "by forfeit"
+              : winReason === "hp_advantage"
+                ? "by HP advantage"
+                : winReason === "damage_advantage"
+                  ? "by damage"
+                  : "— draw";
         newEvents.push(
           mkEvent(
             winReason === "kill" ? "kill" : "fight_end",
-            winnerName ? `${winnerName} wins ${reason}` : "Draw",
+            winnerName
+              ? `${winnerName === agent1?.name ? agent1LogName : winnerName === agent2?.name ? agent2LogName : winnerName} wins ${reason}`
+              : "Draw",
           ),
         );
       }
@@ -145,11 +218,39 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
 
     // Only track hits/heals during FIGHTING
     if (phase !== "FIGHTING" || !agent1 || !agent2) {
-      if (newEvents.length > 0) {
-        setEvents((prev) => [...prev, ...newEvents].slice(-MAX_EVENTS));
+      if (isNewCycle || newEvents.length > 0) {
+        setEventState((previous) => ({
+          cycleId,
+          events: [
+            ...(previous.cycleId === cycleId ? previous.events : []),
+            ...newEvents,
+          ].slice(-MAX_EVENTS),
+        }));
       }
       return;
     }
+
+    // --- Authoritative frozen-loadout style switches ---
+    const a1Role = resolveActiveStreamingCombatRole(agent1);
+    const a2Role = resolveActiveStreamingCombatRole(agent2);
+    if (prevA1RoleRef.current && a1Role && a1Role !== prevA1RoleRef.current) {
+      newEvents.push(
+        mkEvent(
+          "style_switch",
+          `${agent1LogName} switches to ${formatStreamingCombatRole(a1Role)}`,
+        ),
+      );
+    }
+    if (prevA2RoleRef.current && a2Role && a2Role !== prevA2RoleRef.current) {
+      newEvents.push(
+        mkEvent(
+          "style_switch",
+          `${agent2LogName} switches to ${formatStreamingCombatRole(a2Role)}`,
+        ),
+      );
+    }
+    if (a1Role) prevA1RoleRef.current = a1Role;
+    if (a2Role) prevA2RoleRef.current = a2Role;
 
     const prevA1Hp = prevA1HpRef.current ?? agent1.hp;
     const prevA2Hp = prevA2HpRef.current ?? agent2.hp;
@@ -163,7 +264,7 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
       newEvents.push(
         mkEvent(
           isCrit ? "critical" : "hit",
-          `${agent2.name} hits ${agent1.name} — ${dmgToA1} dmg`,
+          `${agent2LogName} hits ${agent1LogName} — ${dmgToA1} dmg`,
         ),
       );
     }
@@ -172,7 +273,7 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
       newEvents.push(
         mkEvent(
           isCrit ? "critical" : "hit",
-          `${agent1.name} hits ${agent2.name} — ${dmgToA2} dmg`,
+          `${agent1LogName} hits ${agent2LogName} — ${dmgToA2} dmg`,
         ),
       );
     }
@@ -182,12 +283,12 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
     const a2Hit = agent2.highestHit ?? 0;
     if (a1Hit > prevA1HitRef.current && a1Hit > 0) {
       newEvents.push(
-        mkEvent("big_hit", `${agent1.name} new best hit: ${a1Hit}`),
+        mkEvent("big_hit", `${agent1LogName} new best hit: ${a1Hit}`),
       );
     }
     if (a2Hit > prevA2HitRef.current && a2Hit > 0) {
       newEvents.push(
-        mkEvent("big_hit", `${agent2.name} new best hit: ${a2Hit}`),
+        mkEvent("big_hit", `${agent2LogName} new best hit: ${a2Hit}`),
       );
     }
 
@@ -200,8 +301,8 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
         mkEvent(
           "heal",
           healed > 0
-            ? `${agent1.name} heals +${healed} HP`
-            : `${agent1.name} eats food`,
+            ? `${agent1LogName} heals +${healed} HP`
+            : `${agent1LogName} eats food`,
         ),
       );
     }
@@ -211,8 +312,8 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
         mkEvent(
           "heal",
           healed > 0
-            ? `${agent2.name} heals +${healed} HP`
-            : `${agent2.name} eats food`,
+            ? `${agent2LogName} heals +${healed} HP`
+            : `${agent2LogName} eats food`,
         ),
       );
     }
@@ -226,11 +327,17 @@ function useCombatEvents(state: StreamingState | null): LogEvent[] {
     prevA2HitRef.current = a2Hit;
 
     if (newEvents.length > 0) {
-      setEvents((prev) => [...prev, ...newEvents].slice(-MAX_EVENTS));
+      setEventState((previous) => ({
+        cycleId,
+        events: [
+          ...(previous.cycleId === cycleId ? previous.events : []),
+          ...newEvents,
+        ].slice(-MAX_EVENTS),
+      }));
     }
   }, [state]);
 
-  return events;
+  return eventState.cycleId === state?.cycle.cycleId ? eventState.events : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -251,25 +358,45 @@ export function CombatLog({ state }: CombatLogProps) {
   const visible =
     phase === "FIGHTING" || phase === "RESOLUTION" || phase === "COUNTDOWN";
 
-  if (!visible || events.length === 0) return null;
+  if (!visible) return null;
+
+  const emptyCopy =
+    phase === "COUNTDOWN"
+      ? "Waiting for the opening bell"
+      : phase === "FIGHTING"
+        ? "Waiting for the opening strike"
+        : "Finalizing the result";
+  const visibleEvents = events.slice(-MAX_VISIBLE_EVENTS);
 
   return (
-    <div style={styles.root}>
+    <div
+      className="streaming-combat-log"
+      style={styles.root}
+      aria-label="Fight log"
+      data-total-events={events.length}
+      data-visible-events={visibleEvents.length}
+    >
       <div style={styles.header}>
         <span style={styles.headerDot} />
         <span style={styles.headerText}>FIGHT LOG</span>
       </div>
       <div ref={scrollRef} style={styles.scroll}>
-        {events.map((ev) => (
-          <div key={ev.id} style={styles.row}>
-            <span style={{ ...styles.glyph, color: kindColor(ev.kind) }}>
-              {kindGlyph(ev.kind)}
-            </span>
-            <span style={{ ...styles.text, color: kindColor(ev.kind) }}>
-              {ev.text}
-            </span>
+        {events.length === 0 ? (
+          <div className="streaming-combat-log-empty" style={styles.empty}>
+            {emptyCopy}
           </div>
-        ))}
+        ) : (
+          visibleEvents.map((ev) => (
+            <div key={ev.id} style={styles.row} data-event-kind={ev.kind}>
+              <span style={{ ...styles.glyph, color: kindColor(ev.kind) }}>
+                {kindGlyph(ev.kind)}
+              </span>
+              <span style={{ ...styles.text, color: kindColor(ev.kind) }}>
+                {ev.text}
+              </span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
@@ -284,8 +411,8 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: 72,
     left: 16,
-    width: 268,
-    maxHeight: "calc(100vh - 160px)",
+    width: 232,
+    maxHeight: 232,
     display: "flex",
     flexDirection: "column",
     background:
@@ -305,7 +432,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 7,
-    padding: "7px 12px 6px",
+    padding: "6px 10px 5px",
     borderBottom: "1px solid rgba(96,165,250,0.12)",
     background: "rgba(96,165,250,0.05)",
     flexShrink: 0,
@@ -332,17 +459,26 @@ const styles: Record<string, React.CSSProperties> = {
     overflowX: "hidden",
     display: "flex",
     flexDirection: "column",
-    gap: 1,
-    padding: "4px 0 6px",
+    gap: 0,
+    padding: "3px 0 5px",
     // Hide scrollbar
     scrollbarWidth: "none",
     msOverflowStyle: "none",
+  },
+  empty: {
+    padding: "10px 12px 11px",
+    color: "rgba(191,219,254,0.72)",
+    fontSize: "0.68rem",
+    fontWeight: 600,
+    fontFamily: "'IBM Plex Mono', monospace",
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
   },
   row: {
     display: "flex",
     alignItems: "baseline",
     gap: 7,
-    padding: "3px 12px 3px 10px",
+    padding: "2px 9px 2px 8px",
     borderRadius: 4,
   },
   glyph: {
@@ -351,10 +487,10 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1,
   },
   text: {
-    fontSize: "0.7rem",
+    fontSize: "0.64rem",
     fontWeight: 600,
     fontFamily: "'IBM Plex Mono', monospace",
-    lineHeight: 1.45,
+    lineHeight: 1.35,
     letterSpacing: "0.01em",
     wordBreak: "break-word",
   },

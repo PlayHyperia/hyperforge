@@ -49,7 +49,7 @@ type RendererBackendFlags = {
   isWebGLBackend?: boolean;
 };
 
-type RendererWithBackendState = WebGPURenderer & {
+type RendererWithBackendState = {
   backend?: RendererBackendFlags;
   _getFallback?: (() => unknown) | null;
 };
@@ -227,7 +227,7 @@ export async function createRenderer(
     // Hyperia is WebGPU-only. Allowing Three's implicit WebGL fallback lets
     // the app continue in a broken state where TSL shaders and compute systems
     // quietly fail later.
-    (candidate as RendererWithBackendState)._getFallback = null;
+    (candidate as unknown as RendererWithBackendState)._getFallback = null;
   };
 
   // First attempt: request extended texture array layers
@@ -254,7 +254,7 @@ export async function createRenderer(
     // so the retry can acquire a fresh context on the same canvas.
     if (renderer) {
       try {
-        renderer.dispose();
+        await renderer.dispose();
       } catch {
         // Ignore dispose errors on a partially-initialized renderer
       }
@@ -326,7 +326,7 @@ export function isWebGPURenderer(
  * Always returns "webgpu" since that's the only supported backend.
  */
 export function getRendererBackend(renderer: WebGPURenderer): RendererBackend {
-  const backend = (renderer as RendererWithBackendState).backend;
+  const backend = (renderer as unknown as RendererWithBackendState).backend;
 
   if (backend?.isWebGPUBackend === true) {
     return "webgpu";
@@ -396,7 +396,7 @@ export function configureShadowMaps(
     type?: THREE.ShadowMapType;
   } = {},
 ): void {
-  const { enabled = true, type = THREE.PCFSoftShadowMap } = options;
+  const { enabled = true, type = THREE.PCFShadowMap } = options;
 
   renderer.shadowMap.enabled = enabled;
   renderer.shadowMap.type = type;

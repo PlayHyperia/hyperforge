@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "title": "Small fishing net technical motion review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "net-windup",
+      "name": "Net · windup",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "net-early-release",
+      "name": "Net · early release",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "net-release",
+      "name": "Net · release",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "net-recovery",
+      "name": "Net · recovery",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

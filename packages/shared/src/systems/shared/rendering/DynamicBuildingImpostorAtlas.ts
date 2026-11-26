@@ -404,7 +404,7 @@ export class DynamicBuildingImpostorAtlas {
       );
 
       // Decode sRGB to linear for lighting calculations
-      const blendedColorLinear = pow(blendedColorSRGB, vec3(2.2, 2.2, 2.2));
+      const blendedColorLinear = blendedColorSRGB.pow(vec3(2.2, 2.2, 2.2));
 
       // Blend and decode normals (stored as 0-1, decode to -1 to 1)
       const blendedNormalEncoded = add(

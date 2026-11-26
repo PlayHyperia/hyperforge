@@ -91,6 +91,8 @@ export interface Player {
 
   // Combat
   combat: PlayerCombatData;
+  /** Persisted autocast selection restored before competitive preparation. */
+  selectedSpell?: string | null;
   stats?: {
     attack: number;
     strength: number;
@@ -219,6 +221,7 @@ export class PlayerMigration {
         combatTarget: null,
         autoRetaliate: true, // classic MMORPG default: ON
       },
+      selectedSpell: old.selectedSpell ?? null,
       death: {
         deathLocation: null,
         respawnTime: 0,

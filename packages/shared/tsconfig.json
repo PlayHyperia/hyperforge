@@ -29,7 +29,7 @@
       "../../node_modules/@types",
       "../../node_modules"
     ],
-    "types": ["node", "bun-types"],
+    "types": ["node", "bun-types", "@webgpu/types"],
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },

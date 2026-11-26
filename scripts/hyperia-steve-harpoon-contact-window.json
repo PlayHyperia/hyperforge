@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "motions": [
+    {
+      "id": "steve-contact-65",
+      "name": "65%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "steve-contact-68",
+      "name": "68%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.68
+    },
+    {
+      "id": "steve-contact-70",
+      "name": "70%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.7
+    },
+    {
+      "id": "steve-contact-72",
+      "name": "72%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.72
+    },
+    {
+      "id": "steve-contact-74",
+      "name": "74%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.74
+    },
+    {
+      "id": "steve-contact-76",
+      "name": "76%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.76
+    },
+    {
+      "id": "steve-contact-78",
+      "name": "78%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.78
+    },
+    {
+      "id": "steve-contact-80",
+      "name": "80%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.8
+    },
+    {
+      "id": "steve-contact-82",
+      "name": "82%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.82
+    },
+    {
+      "id": "steve-contact-84",
+      "name": "84%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.84
+    },
+    {
+      "id": "steve-contact-86",
+      "name": "86%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.86
+    },
+    {
+      "id": "steve-contact-88",
+      "name": "88%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.88
+    },
+    {
+      "id": "steve-contact-90",
+      "name": "90%",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/kaykit-harpoon-water-strike.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

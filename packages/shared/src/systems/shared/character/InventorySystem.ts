@@ -27,9 +27,989 @@ import { EntityManager } from "..";
 import { SystemBase } from "../infrastructure/SystemBase";
 import { Logger } from "../../../utils/Logger";
 import type { DatabaseSystem } from "../../../types/systems/system-interfaces";
+import type {
+  BoneBurialCommitRequest,
+  QuestStartCommitReceipt,
+  QuestStartCommitRequest,
+  QuestCompletionCommitReceipt,
+  QuestCompletionCommitRequest,
+  QuestCompletionProgressReceipt,
+  QuestCompletionRewardItem,
+  QuestCompletionRewardXp,
+  QuestRewardSkill,
+  FoodConsumptionCommitReceipt,
+  FoodConsumptionCommitRequest,
+  GroundItemDropCommitReceipt,
+  GroundItemDropCommitRequest,
+  GroundItemPickupCommitReceipt,
+  GroundItemPickupCommitRequest,
+  GatheringRewardCommitRequest,
+  GatheringRewardItem,
+  GatheringRewardSkill,
+  InventoryDebitRequirement,
+  InventorySaveItem,
+  ProcessingActionCommitRequest,
+  ProcessingActionConsumable,
+  ProcessingActionConsumableState,
+  ProcessingActionFireEffect,
+  ProcessingActionFireEffectRequest,
+  ProcessingActionItem,
+  ProcessingActionSkill,
+  ProjectileRuneCostOperationStatus,
+  ProjectileRuneCostSettlementHandle,
+} from "../../../types/network/database";
+import { PROCESSING_CONSTANTS } from "../../../constants/ProcessingConstants";
+import { TICK_DURATION_MS, worldToTile } from "../movement/TileSystem";
 import type { GroundItemSystem } from "../economy/GroundItemSystem";
 import type { CoinPouchSystem } from "./CoinPouchSystem";
 import { DeathState } from "../../../types/entities";
+import {
+  parseStreamingDuelFoodObservationContext,
+  type StreamingDuelFoodObservationContext,
+} from "../../../types/game/streaming-duel-action-observation";
+import { generateGroundItemDropOperationId } from "../../../utils/game/GroundItemSourceIdentity";
+import { serializeGroundItemDropCommitFingerprint } from "../../../utils/game/GroundItemDropRegistration";
+
+export type AtomicInventoryDebitFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "insufficient_items"
+  | "persistence_failed"
+  | "committed_state_apply_failed";
+
+export type AtomicInventoryDebitReceipt =
+  | {
+      ok: true;
+      playerId: string;
+      operationId: string;
+      changed: true;
+      replayed: boolean;
+      requirements: InventoryDebitRequirement[];
+    }
+  | {
+      ok: false;
+      playerId: string;
+      operationId: string;
+      changed: false;
+      replayed: false;
+      requirements: InventoryDebitRequirement[];
+      reason: AtomicInventoryDebitFailureReason;
+    };
+
+export type AtomicProjectileRuneCostReceipt =
+  | {
+      ok: true;
+      playerId: string;
+      operationId: string;
+      changed: true;
+      replayed: boolean;
+      requestFingerprint: string;
+      requirements: InventoryDebitRequirement[];
+      status: ProjectileRuneCostOperationStatus;
+    }
+  | {
+      ok: false;
+      playerId: string;
+      operationId: string;
+      changed: false;
+      replayed: false;
+      requirements: InventoryDebitRequirement[];
+      reason: AtomicInventoryDebitFailureReason;
+    };
+
+export type AtomicGroundItemDropFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "player_unavailable"
+  | "duel_locked"
+  | "death_locked"
+  | "atomic_persistence_unavailable"
+  | "source_unavailable"
+  | "insufficient_items"
+  | "persistence_ambiguous"
+  | "committed_state_apply_failed";
+
+export type AtomicGroundItemDropReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      liveCoinsApplied: boolean;
+      presentationReady: boolean;
+      receipt: GroundItemDropCommitReceipt;
+    }
+  | {
+      ok: false;
+      committed: false | "unknown";
+      liveInventoryApplied: false;
+      liveCoinsApplied: false;
+      presentationReady: false;
+      playerId: string;
+      operationId: string;
+      itemId: string;
+      quantity: number;
+      reason: AtomicGroundItemDropFailureReason;
+    };
+
+export type AtomicGroundItemPickupFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "source_unavailable"
+  | "inventory_full"
+  | "persistence_ambiguous";
+
+export type AtomicGroundItemPickupReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      liveCoinsApplied: boolean;
+      receipt: GroundItemPickupCommitReceipt;
+    }
+  | {
+      ok: false;
+      committed: false;
+      liveInventoryApplied: false;
+      liveCoinsApplied: false;
+      playerId: string;
+      operationId: string;
+      sourceEntityId: string;
+      itemId: string;
+      quantity: number;
+      reason: AtomicGroundItemPickupFailureReason;
+    };
+
+export type AtomicFoodConsumptionFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "insufficient_items"
+  | "full_health"
+  | "player_not_alive"
+  | "persistence_failed";
+
+export type AtomicFoodConsumptionReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      receipt: FoodConsumptionCommitReceipt;
+    }
+  | {
+      ok: false;
+      committed: false;
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      itemId: string;
+      healAmount: number;
+      reason: AtomicFoodConsumptionFailureReason;
+    };
+
+export type AtomicGatheringRewardFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "resource_unavailable"
+  | "inventory_full"
+  | "secondary_missing"
+  | "persistence_ambiguous";
+
+export type AtomicGatheringRewardReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      playerId: string;
+      operationId: string;
+      replayed: boolean;
+      resourceId: string;
+      depleteAfterCommit: boolean;
+      respawnTicks: number;
+      depletedUntil: number | null;
+      skill: GatheringRewardSkill;
+      xpAmount: number;
+      reward: GatheringRewardItem;
+      secondaryItemId: string | null;
+      awardedXp: number;
+      operationCommittedXp: number;
+      currentXp: number;
+      currentLevel: number;
+    }
+  | {
+      ok: false;
+      committed: false;
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      replayed: false;
+      skill: GatheringRewardSkill | null;
+      xpAmount: number;
+      reward: GatheringRewardItem | null;
+      secondaryItemId: string | null;
+      retryable: boolean;
+      reason: AtomicGatheringRewardFailureReason;
+    };
+
+export type AtomicBoneBurialFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "item_missing"
+  | "level_required"
+  | "xp_cap"
+  | "persistence_ambiguous";
+
+export type AtomicBoneBurialReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      playerId: string;
+      operationId: string;
+      replayed: boolean;
+      itemId: string;
+      xpAmount: number;
+      levelRequired: number;
+      awardedXp: number;
+      operationCommittedXp: number;
+      currentXp: number;
+      currentLevel: number;
+    }
+  | {
+      ok: false;
+      committed: false;
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      replayed: false;
+      itemId: string;
+      xpAmount: number;
+      levelRequired: number;
+      retryable: boolean;
+      reason: AtomicBoneBurialFailureReason;
+    };
+
+export type AtomicQuestCompletionFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "inventory_full"
+  | "quest_state_conflict"
+  | "persistence_ambiguous";
+
+export type AtomicQuestCompletionReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      receipt: QuestCompletionCommitReceipt;
+    }
+  | {
+      ok: false;
+      committed: false | "unknown";
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      questId: string;
+      retryable: boolean;
+      reason: AtomicQuestCompletionFailureReason;
+    };
+
+export type AtomicQuestStartFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "inventory_full"
+  | "quest_state_conflict"
+  | "persistence_ambiguous";
+
+export type AtomicQuestStartReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      receipt: QuestStartCommitReceipt;
+    }
+  | {
+      ok: false;
+      committed: false | "unknown";
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      questId: string;
+      retryable: boolean;
+      reason: AtomicQuestStartFailureReason;
+    };
+
+export type AtomicProcessingActionFailureReason =
+  | "invalid_request"
+  | "inventory_not_initialized"
+  | "inventory_busy"
+  | "atomic_persistence_unavailable"
+  | "insufficient_items"
+  | "insufficient_coins"
+  | "inventory_full"
+  | "fire_tile_occupied"
+  | "fire_capacity_reached"
+  | "persistence_ambiguous";
+
+export type AtomicProcessingActionReceipt =
+  | {
+      ok: true;
+      committed: true;
+      liveInventoryApplied: boolean;
+      playerId: string;
+      operationId: string;
+      replayed: boolean;
+      skill: ProcessingActionSkill;
+      xpAmount: number;
+      inputs: InventoryDebitRequirement[];
+      requiredItems: InventoryDebitRequirement[];
+      consumables: ProcessingActionConsumable[];
+      consumableStates: ProcessingActionConsumableState[];
+      outputs: ProcessingActionItem[];
+      coinCost?: number;
+      currentCoins?: number;
+      worldEffect?: ProcessingActionFireEffect;
+      awardedXp: number;
+      operationCommittedXp: number;
+      currentXp: number;
+      currentLevel: number;
+    }
+  | {
+      ok: false;
+      committed: false;
+      liveInventoryApplied: false;
+      playerId: string;
+      operationId: string;
+      replayed: false;
+      skill: ProcessingActionSkill | null;
+      xpAmount: number;
+      inputs: InventoryDebitRequirement[];
+      requiredItems: InventoryDebitRequirement[];
+      consumables: ProcessingActionConsumable[];
+      consumableStates: ProcessingActionConsumableState[];
+      outputs: ProcessingActionItem[];
+      coinCost?: number;
+      worldEffect?: ProcessingActionFireEffectRequest;
+      retryable: boolean;
+      reason: AtomicProcessingActionFailureReason;
+    };
+
+const GATHERING_REWARD_SKILLS = new Set<GatheringRewardSkill>([
+  "woodcutting",
+  "mining",
+  "fishing",
+]);
+const QUEST_REWARD_SKILLS = new Set<QuestRewardSkill>([
+  "attack",
+  "strength",
+  "defense",
+  "constitution",
+  "ranged",
+  "magic",
+  "prayer",
+  "woodcutting",
+  "mining",
+  "fishing",
+  "firemaking",
+  "cooking",
+  "smithing",
+  "agility",
+  "crafting",
+  "fletching",
+  "runecrafting",
+]);
+const PROCESSING_ACTION_SKILLS = new Set<ProcessingActionSkill>([
+  "firemaking",
+  "cooking",
+  "smithing",
+  "crafting",
+  "fletching",
+  "runecrafting",
+]);
+const BONE_BURIAL_OPERATION_ID_PATTERN =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|bone-burial:[A-Za-z0-9_-]{20})$/;
+const MAX_SKILL_XP = 200_000_000;
+
+async function sha256Hex(value: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("web_crypto_unavailable");
+  const digest = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function normalizeDebitRequirements(
+  value: InventoryDebitRequirement[],
+  maxQuantity: number,
+): InventoryDebitRequirement[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 28) {
+    return null;
+  }
+  const totals = new Map<string, number>();
+  for (const raw of value) {
+    const itemId = String(raw?.itemId ?? "").trim();
+    const quantity = Number(raw?.quantity);
+    if (
+      !isValidItemID(itemId) ||
+      itemId.length > 256 ||
+      !getItem(itemId) ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0 ||
+      quantity > maxQuantity
+    ) {
+      return null;
+    }
+    const combined = (totals.get(itemId) ?? 0) + quantity;
+    if (!Number.isSafeInteger(combined) || combined > maxQuantity) return null;
+    totals.set(itemId, combined);
+  }
+  return [...totals.entries()]
+    .map(([itemId, quantity]) => ({ itemId, quantity }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+}
+
+function normalizeOptionalDebitRequirements(
+  value: InventoryDebitRequirement[],
+  maxQuantity: number,
+): InventoryDebitRequirement[] | null {
+  if (!Array.isArray(value)) return null;
+  if (value.length === 0) return [];
+  return normalizeDebitRequirements(value, maxQuantity);
+}
+
+function normalizeProcessingConsumables(
+  value: ProcessingActionConsumable[],
+): ProcessingActionConsumable[] | null {
+  if (!Array.isArray(value) || value.length > 28) return null;
+  const itemIds = new Set<string>();
+  const normalized: ProcessingActionConsumable[] = [];
+  for (const raw of value) {
+    const itemId = String(raw?.itemId ?? "").trim();
+    const usesPerItem = Number(raw?.usesPerItem);
+    if (
+      !isValidItemID(itemId) ||
+      itemId.length > 256 ||
+      !getItem(itemId) ||
+      itemIds.has(itemId) ||
+      !Number.isSafeInteger(usesPerItem) ||
+      usesPerItem <= 0 ||
+      usesPerItem > 1_000_000
+    ) {
+      return null;
+    }
+    itemIds.add(itemId);
+    normalized.push({ itemId, usesPerItem });
+  }
+  normalized.sort((left, right) => left.itemId.localeCompare(right.itemId));
+  return normalized;
+}
+
+function normalizeProcessingConsumableStates(
+  value: ProcessingActionConsumableState[],
+  expected: ProcessingActionConsumable[],
+): ProcessingActionConsumableState[] | null {
+  if (!Array.isArray(value) || value.length !== expected.length) return null;
+  const normalizedConsumables = normalizeProcessingConsumables(value);
+  if (
+    !normalizedConsumables ||
+    JSON.stringify(normalizedConsumables) !== JSON.stringify(expected)
+  ) {
+    return null;
+  }
+  const rawByItem = new Map(
+    value.map((entry) => [String(entry?.itemId ?? "").trim(), entry]),
+  );
+  const normalized: ProcessingActionConsumableState[] = [];
+  for (const consumable of expected) {
+    const raw = rawByItem.get(consumable.itemId);
+    const remainingUses = Number(raw?.remainingUses);
+    const consumedQuantity = Number(raw?.consumedQuantity);
+    if (
+      !Number.isSafeInteger(remainingUses) ||
+      remainingUses < 0 ||
+      remainingUses >= consumable.usesPerItem ||
+      (consumedQuantity !== 0 && consumedQuantity !== 1) ||
+      (consumedQuantity === 1 && remainingUses !== 0) ||
+      (consumedQuantity === 0 && remainingUses === 0)
+    ) {
+      return null;
+    }
+    normalized.push({
+      ...consumable,
+      remainingUses,
+      consumedQuantity: consumedQuantity as 0 | 1,
+    });
+  }
+  return normalized;
+}
+
+function normalizeProcessingFireEffectRequest(
+  value: ProcessingActionFireEffectRequest,
+  skill: ProcessingActionSkill,
+): ProcessingActionFireEffectRequest | null {
+  if (!value || typeof value !== "object" || skill !== "firemaking") {
+    return null;
+  }
+  const fireId = String(value.fireId ?? "").trim();
+  const position = value.position;
+  const tile = value.tile;
+  const durationMs = Number(value.durationMs);
+  if (
+    value.kind !== "fire" ||
+    fireId !== value.fireId ||
+    !/^fire_[A-Za-z0-9_-]+$/.test(fireId) ||
+    fireId.length > 256 ||
+    !position ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y) ||
+    !Number.isFinite(position.z) ||
+    !tile ||
+    !Number.isSafeInteger(tile.x) ||
+    !Number.isSafeInteger(tile.z) ||
+    !Number.isSafeInteger(durationMs) ||
+    durationMs <
+      PROCESSING_CONSTANTS.FIRE.minDurationTicks * TICK_DURATION_MS ||
+    durationMs > PROCESSING_CONSTANTS.FIRE.maxDurationTicks * TICK_DURATION_MS
+  ) {
+    return null;
+  }
+  const expectedTile = worldToTile(position.x, position.z);
+  if (expectedTile.x !== tile.x || expectedTile.z !== tile.z) return null;
+  return {
+    kind: "fire",
+    fireId,
+    position: { x: position.x, y: position.y, z: position.z },
+    tile: { x: tile.x, z: tile.z },
+    durationMs,
+  };
+}
+
+function normalizeCommittedProcessingFireEffect(
+  value: ProcessingActionFireEffect | undefined,
+  expected: ProcessingActionFireEffectRequest | undefined,
+): ProcessingActionFireEffect | null | undefined {
+  if (!expected) return value === undefined ? undefined : null;
+  if (!value || value.kind !== "fire") return null;
+  const createdAt = Number(value.createdAt);
+  const expiresAt = Number(value.expiresAt);
+  if (
+    value.fireId !== expected.fireId ||
+    JSON.stringify(value.position) !== JSON.stringify(expected.position) ||
+    JSON.stringify(value.tile) !== JSON.stringify(expected.tile) ||
+    !Number.isSafeInteger(createdAt) ||
+    createdAt <= 0 ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt - createdAt !== expected.durationMs
+  ) {
+    return null;
+  }
+  return {
+    kind: "fire",
+    fireId: expected.fireId,
+    position: expected.position,
+    tile: expected.tile,
+    createdAt,
+    expiresAt,
+  };
+}
+
+function normalizeQuestCompletionProgress(
+  value: Record<string, number> | null | undefined,
+): Record<string, number> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const keys = Object.keys(value).sort((left, right) =>
+    left.localeCompare(right),
+  );
+  if (keys.length > 64) return null;
+  const normalized: Record<string, number> = {};
+  for (const rawKey of keys) {
+    const key = String(rawKey ?? "").trim();
+    const quantity = Number(value[rawKey]);
+    if (
+      !key ||
+      key !== rawKey ||
+      key.length > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(key) ||
+      !Number.isSafeInteger(quantity) ||
+      quantity < 0 ||
+      quantity > 2_147_483_647
+    ) {
+      return null;
+    }
+    normalized[key] = quantity;
+  }
+  return normalized;
+}
+
+function normalizeQuestCompletionItems(
+  value: Array<{ itemId: string; quantity: number }> | null | undefined,
+  maxQuantity: number,
+): QuestCompletionRewardItem[] | null {
+  if (!Array.isArray(value) || value.length > 28) return null;
+  const totals = new Map<string, number>();
+  for (const raw of value) {
+    const itemId = String(raw?.itemId ?? "").trim();
+    const quantity = Number(raw?.quantity);
+    const item = getItem(itemId);
+    if (
+      !isValidItemID(itemId) ||
+      itemId.length > 256 ||
+      !item ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0 ||
+      quantity > maxQuantity
+    ) {
+      return null;
+    }
+    const combined = (totals.get(itemId) ?? 0) + quantity;
+    if (!Number.isSafeInteger(combined) || combined > maxQuantity) return null;
+    totals.set(itemId, combined);
+  }
+  return [...totals.entries()]
+    .map(([itemId, quantity]) => ({
+      itemId,
+      quantity,
+      stackable: getItem(itemId)?.stackable === true,
+    }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+}
+
+function normalizeQuestCompletionXp(
+  value: Record<string, number> | null | undefined,
+): QuestCompletionRewardXp[] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const normalized: QuestCompletionRewardXp[] = [];
+  for (const rawSkill of Object.keys(value).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const skill = String(rawSkill ?? "").trim() as QuestRewardSkill;
+    const xpAmount = Number(value[rawSkill]);
+    if (
+      skill !== rawSkill ||
+      !QUEST_REWARD_SKILLS.has(skill) ||
+      !Number.isSafeInteger(xpAmount) ||
+      xpAmount <= 0 ||
+      xpAmount > 1_000_000
+    ) {
+      return null;
+    }
+    normalized.push({ skill, xpAmount });
+  }
+  return normalized.length <= QUEST_REWARD_SKILLS.size ? normalized : null;
+}
+
+function questCompletionErrorReason(
+  error: unknown,
+): AtomicQuestCompletionFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("quest_completion_inventory_full")) {
+    return "inventory_full";
+  }
+  if (
+    message.includes("quest_completion_progress_state_conflict") ||
+    message.includes("quest_completion_progress_missing")
+  ) {
+    return "quest_state_conflict";
+  }
+  if (
+    message.includes("quest_completion_request_invalid") ||
+    message.includes("quest_completion_operation_id_conflict") ||
+    message.includes("quest_completion_player_missing") ||
+    message.includes("quest_completion_skill_state_invalid") ||
+    message.includes("quest_completion_prayer_state_invalid") ||
+    message.includes("quest_completion_points_state_invalid") ||
+    message.includes("quest_completion_progress_state_invalid") ||
+    message.includes("quest_completion_points_overflow") ||
+    message.includes("quest_completion_inventory_invalid") ||
+    message.includes("quest_completion_inventory_metadata_invalid")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryQuestCompletion(error: unknown): boolean {
+  return questCompletionErrorReason(error) === "persistence_ambiguous";
+}
+
+function questStartErrorReason(error: unknown): AtomicQuestStartFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("quest_start_inventory_full")) {
+    return "inventory_full";
+  }
+  if (
+    message.includes("quest_start_progress_state_conflict") ||
+    message.includes("quest_start_progress_exists")
+  ) {
+    return "quest_state_conflict";
+  }
+  if (
+    message.includes("quest_start_request_invalid") ||
+    message.includes("quest_start_operation_id_conflict") ||
+    message.includes("quest_start_player_missing") ||
+    message.includes("quest_start_inventory_invalid") ||
+    message.includes("quest_start_inventory_metadata_invalid") ||
+    message.includes("quest_start_quantity_overflow")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryQuestStart(error: unknown): boolean {
+  return questStartErrorReason(error) === "persistence_ambiguous";
+}
+
+function inventoryDebitErrorReason(
+  error: unknown,
+): AtomicInventoryDebitFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("inventory_debit_insufficient_items")) {
+    return "insufficient_items";
+  }
+  if (
+    message.includes("inventory_debit_request_invalid") ||
+    message.includes("inventory_debit_requirements_invalid") ||
+    message.includes("inventory_debit_operation_id_conflict") ||
+    message.includes("inventory_debit_player_missing")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_failed";
+}
+
+function shouldRetryInventoryDebit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return ![
+    "inventory_debit_request_invalid",
+    "inventory_debit_requirements_invalid",
+    "inventory_debit_operation_id_conflict",
+    "inventory_debit_player_missing",
+    "inventory_debit_insufficient_items",
+    "inventory_debit_inventory_invalid",
+    "inventory_debit_inventory_metadata_invalid",
+  ].some((code) => message.includes(code));
+}
+
+function groundItemDropErrorReason(
+  error: unknown,
+): AtomicGroundItemDropFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("ground_item_drop_insufficient_items") ||
+    message.includes("ground_item_drop_insufficient_coins")
+  ) {
+    return "insufficient_items";
+  }
+  if (
+    message.includes("ground_item_drop_request_invalid") ||
+    message.includes("ground_item_drop_operation_id_conflict") ||
+    message.includes("ground_item_drop_player_missing") ||
+    message.includes("ground_item_drop_coin_state_invalid") ||
+    message.includes("ground_item_drop_slot_mismatch") ||
+    message.includes("ground_item_drop_source_preexisting") ||
+    message.includes("ground_item_drop_source_receipt_invalid") ||
+    message.includes("ground_item_source_request_invalid") ||
+    message.includes("ground_item_source_contribution_id_conflict") ||
+    message.includes("ground_item_source_quantity_overflow") ||
+    message.includes("ground_item_source_lifetime_overflow") ||
+    message.includes("ground_item_source_state_invalid")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryGroundItemDrop(error: unknown): boolean {
+  return groundItemDropErrorReason(error) === "persistence_ambiguous";
+}
+
+function groundItemPickupErrorReason(
+  error: unknown,
+): AtomicGroundItemPickupFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("ground_item_pickup_source_claimed") ||
+    message.includes("ground_item_pickup_source_missing")
+  ) {
+    return "source_unavailable";
+  }
+  if (message.includes("ground_item_pickup_inventory_full")) {
+    return "inventory_full";
+  }
+  if (
+    message.includes("ground_item_pickup_request_invalid") ||
+    message.includes("ground_item_pickup_operation_id_conflict") ||
+    message.includes("ground_item_pickup_player_missing") ||
+    message.includes("ground_item_pickup_coin_state_invalid") ||
+    message.includes("ground_item_pickup_quantity_overflow") ||
+    message.includes("ground_item_pickup_source_mismatch")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryGroundItemPickup(error: unknown): boolean {
+  return groundItemPickupErrorReason(error) === "persistence_ambiguous";
+}
+
+function foodConsumptionErrorReason(
+  error: unknown,
+): AtomicFoodConsumptionFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("inventory_debit_insufficient_items")) {
+    return "insufficient_items";
+  }
+  if (message.includes("food_consumption_full_health")) return "full_health";
+  if (message.includes("food_consumption_player_not_alive")) {
+    return "player_not_alive";
+  }
+  if (
+    message.includes("food_consumption_request_invalid") ||
+    message.includes("food_consumption_operation_id_conflict") ||
+    message.includes("food_consumption_player_missing")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_failed";
+}
+
+function shouldRetryFoodConsumption(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return ![
+    "food_consumption_request_invalid",
+    "food_consumption_operation_id_conflict",
+    "food_consumption_player_missing",
+    "food_consumption_player_not_alive",
+    "food_consumption_full_health",
+    "food_consumption_health_state_invalid",
+    "inventory_debit_insufficient_items",
+  ].some((code) => message.includes(code));
+}
+
+function gatheringRewardErrorReason(
+  error: unknown,
+): AtomicGatheringRewardFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("gathering_reward_inventory_full")) {
+    return "inventory_full";
+  }
+  if (message.includes("gathering_reward_secondary_missing")) {
+    return "secondary_missing";
+  }
+  if (message.includes("gathering_reward_resource_unavailable")) {
+    return "resource_unavailable";
+  }
+  if (
+    message.includes("gathering_reward_request_invalid") ||
+    message.includes("gathering_reward_operation_id_conflict") ||
+    message.includes("gathering_reward_player_missing") ||
+    message.includes("gathering_reward_skill_state_invalid") ||
+    message.includes("gathering_reward_quantity_overflow")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryGatheringReward(error: unknown): boolean {
+  return gatheringRewardErrorReason(error) === "persistence_ambiguous";
+}
+
+function boneBurialErrorReason(error: unknown): AtomicBoneBurialFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("bone_burial_insufficient_items")) {
+    return "item_missing";
+  }
+  if (message.includes("bone_burial_level_required")) {
+    return "level_required";
+  }
+  if (message.includes("bone_burial_xp_cap")) return "xp_cap";
+  if (
+    message.includes("bone_burial_request_invalid") ||
+    message.includes("bone_burial_operation_id_conflict") ||
+    message.includes("bone_burial_player_missing") ||
+    message.includes("bone_burial_skill_state_invalid") ||
+    message.includes("bone_burial_prayer_state_invalid") ||
+    message.includes("bone_burial_inventory_invalid") ||
+    message.includes("bone_burial_inventory_metadata_invalid")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryBoneBurial(error: unknown): boolean {
+  return boneBurialErrorReason(error) === "persistence_ambiguous";
+}
+
+function exactSkillLevelForXp(xp: number): number {
+  let cumulative = 0;
+  for (let level = 2; level <= 99; level++) {
+    const increment =
+      Math.floor(level - 1 + 300 * Math.pow(2, (level - 1) / 7)) / 4;
+    cumulative = Math.floor(cumulative + increment);
+    if (xp < cumulative) return level - 1;
+  }
+  return 99;
+}
+
+function processingActionErrorReason(
+  error: unknown,
+): AtomicProcessingActionFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("processing_action_insufficient_items")) {
+    return "insufficient_items";
+  }
+  if (message.includes("processing_action_insufficient_coins")) {
+    return "insufficient_coins";
+  }
+  if (message.includes("processing_action_inventory_full")) {
+    return "inventory_full";
+  }
+  if (message.includes("processing_action_fire_tile_occupied")) {
+    return "fire_tile_occupied";
+  }
+  if (message.includes("processing_action_fire_capacity_reached")) {
+    return "fire_capacity_reached";
+  }
+  if (
+    message.includes("processing_action_request_invalid") ||
+    message.includes("processing_action_operation_id_conflict") ||
+    message.includes("processing_action_player_missing") ||
+    message.includes("processing_action_skill_state_invalid") ||
+    message.includes("processing_action_coin_state_invalid") ||
+    message.includes("processing_action_consumable_state_invalid") ||
+    message.includes("processing_action_consumable_config_conflict") ||
+    message.includes("processing_action_world_effect_state_invalid") ||
+    message.includes("processing_action_quantity_overflow")
+  ) {
+    return "invalid_request";
+  }
+  return "persistence_ambiguous";
+}
+
+function shouldRetryProcessingAction(error: unknown): boolean {
+  return processingActionErrorReason(error) === "persistence_ambiguous";
+}
 
 export class InventorySystem extends SystemBase {
   protected playerInventories = new Map<PlayerID, PlayerInventory>();
@@ -68,6 +1048,7 @@ export class InventorySystem extends SystemBase {
     }>
   >();
   private processingQueues = new Set<string>();
+  private isDestroying = false;
 
   constructor(world: World) {
     super(world, {
@@ -128,14 +1109,14 @@ export class InventorySystem extends SystemBase {
         await this.removeItem(data);
       },
     );
-    this.subscribe(EventType.ITEM_DROP, (data) => {
-      this.dropItem(data);
+    this.subscribe(EventType.ITEM_DROP, async (data) => {
+      await this.dropItem(data);
     });
     this.subscribe(EventType.INVENTORY_USE, (data) => {
       this.useItem(data);
     });
-    this.subscribe(EventType.ITEM_PICKUP, (data) => {
-      this.pickupItem({
+    this.subscribe(EventType.ITEM_PICKUP, async (data) => {
+      await this.pickupGroundItem({
         playerId: data.playerId,
         entityId: data.entityId,
         itemId: data.itemId,
@@ -242,6 +1223,19 @@ export class InventorySystem extends SystemBase {
     }
 
     const playerId = createPlayerID(playerData.id);
+
+    // PLAYER_REGISTERED can legitimately be delivered more than once, and
+    // embedded players also emit it after PLAYER_JOINED has already started
+    // the asynchronous database fallback. Never replace an existing or
+    // in-flight inventory with an empty one: doing so can make the live
+    // snapshot disagree with PostgreSQL and a later graceful shutdown would
+    // persist that empty projection over valid custody.
+    if (
+      this.playerInventories.has(playerId) ||
+      this.loadingInventories.has(playerData.id)
+    ) {
+      return;
+    }
 
     const inventory: PlayerInventory = {
       playerId: playerId,
@@ -594,17 +1588,31 @@ export class InventorySystem extends SystemBase {
     return emptySlots >= slotsNeeded;
   }
 
-  private async removeItem(data: {
-    playerId: string;
-    itemId: string | number;
-    quantity: number;
-    slot?: number;
-  }): Promise<boolean> {
+  private async removeItem(
+    data: {
+      playerId: string;
+      itemId: string | number;
+      quantity: number;
+      slot?: number;
+    },
+    allowWhileTransactionLocked = false,
+  ): Promise<boolean> {
     if (!data.playerId) {
       Logger.systemError(
         "InventorySystem",
         "Cannot remove item: playerId is undefined",
         new Error("Cannot remove item: playerId is undefined"),
+      );
+      return false;
+    }
+
+    if (
+      this.transactionLocks.has(data.playerId) &&
+      !allowWhileTransactionLocked
+    ) {
+      Logger.system(
+        "InventorySystem",
+        `Cannot remove item during transaction lock: ${data.playerId}`,
       );
       return false;
     }
@@ -707,80 +1715,311 @@ export class InventorySystem extends SystemBase {
   private async dropItem(data: {
     playerId: string;
     itemId: string;
-    quantity: number;
+    quantity?: number;
     slot?: number;
+    operationId?: string;
   }): Promise<void> {
-    // Server-authoritative only
-    if (!this.world.isServer) {
-      return;
-    }
-
-    // Ensure valid identifiers
-    if (
-      !isValidPlayerID(data.playerId) ||
-      !isValidItemID(String(data.itemId))
-    ) {
-      Logger.systemError(
+    const operationId = data.operationId || generateGroundItemDropOperationId();
+    const result = await this.dropOwnedItemAtomic(
+      data.playerId,
+      operationId,
+      data.itemId,
+      data.quantity ?? 1,
+      data.slot,
+    );
+    if (!result.ok) {
+      Logger.system(
         "InventorySystem",
-        "dropItem: invalid playerId or itemId",
-        new Error("dropItem invalid IDs"),
+        `Drop ${operationId} rejected for ${data.playerId}: ${result.reason}`,
       );
+      // Replace any browser-side optimistic projection immediately with the
+      // current server truth. The correlated result still tells agents why the
+      // request failed; this snapshot prevents a five-second false removal.
+      if (this.isInventoryReady(data.playerId)) {
+        const playerId = toPlayerID(data.playerId);
+        if (playerId) this.emitInventoryUpdate(playerId);
+      }
+      this.emitTypedEvent(EventType.ITEM_DROP_RESULT, {
+        success: false,
+        committed: result.committed,
+        playerId: result.playerId,
+        operationId: result.operationId,
+        itemId: result.itemId,
+        quantity: result.quantity,
+        reason: result.reason,
+      });
       return;
     }
-    const qty = Math.max(1, Number(data.quantity) || 1);
-    const removed = await this.removeItem({
-      playerId: data.playerId,
-      itemId: data.itemId,
-      quantity: qty,
-      slot: data.slot,
+    this.emitTypedEvent(EventType.ITEM_DROP_RESULT, {
+      success: true,
+      committed: true,
+      playerId: result.receipt.playerId,
+      operationId: result.receipt.operationId,
+      itemId: result.receipt.itemId,
+      quantity: result.receipt.quantity,
+      sourceId: result.receipt.source.sourceId,
+      position: result.receipt.source.position,
+      replayed: result.receipt.replayed,
+      liveInventoryApplied: result.liveInventoryApplied,
+      liveCoinsApplied: result.liveCoinsApplied,
+      presentationReady: result.presentationReady,
     });
+    this.world.emit(EventType.ITEM_DROPPED, {
+      playerId: result.receipt.playerId,
+      itemId: result.receipt.itemId,
+      quantity: result.receipt.quantity,
+      position: result.receipt.source.position,
+      operationId: result.receipt.operationId,
+      sourceId: result.receipt.source.sourceId,
+    });
+  }
 
-    if (removed) {
-      const player = this.world.getPlayer(data.playerId);
-      if (!player) {
-        Logger.systemError(
-          "InventorySystem",
-          `Player not found: ${data.playerId}`,
-          new Error(`Player not found: ${data.playerId}`),
-        );
-        return;
-      }
-      const position = player.node.position;
-
-      // Use GroundItemSystem for proper pile management (classic MMORPG-style)
-      const groundItems = this.world.getSystem("ground-items");
-      if (groundItems) {
-        // Spawn through GroundItemSystem for tile-based pile management
-        await groundItems.spawnGroundItem(
-          data.itemId,
-          qty,
-          {
-            x: position.x,
-            y: position.y,
-            z: position.z,
-          },
-          {
-            despawnTime: 120000, // 2 minutes default despawn
-            droppedBy: data.playerId,
-          },
-        );
-      } else {
-        // Fallback to old method if GroundItemSystem not available
-        Logger.system(
-          "InventorySystem",
-          "GroundItemSystem not available, using legacy spawn",
-        );
-        this.emitTypedEvent(EventType.ITEM_SPAWN_REQUEST, {
-          itemId: data.itemId,
-          quantity: qty,
-          position: {
-            x: position.x,
-            y: position.y,
-            z: position.z,
-          },
-        });
-      }
+  /**
+   * Debit one owned item (or coin quantity) and create its durable source in
+   * one idempotent transaction. A database commit is authoritative even when
+   * applying the returned snapshot or exposing the presentation needs retry.
+   */
+  async dropOwnedItemAtomic(
+    playerId: string,
+    operationId: string,
+    itemId: string,
+    quantity: number,
+    slot?: number,
+  ): Promise<AtomicGroundItemDropReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const normalizedItemId = String(itemId ?? "").trim();
+    const normalizedQuantity = Number(quantity);
+    const slotIndex = slot === undefined ? null : Number(slot);
+    const failure = (
+      reason: AtomicGroundItemDropFailureReason,
+    ): AtomicGroundItemDropReceipt => ({
+      ok: false,
+      committed: reason === "persistence_ambiguous" ? "unknown" : false,
+      liveInventoryApplied: false,
+      liveCoinsApplied: false,
+      presentationReady: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      itemId: normalizedItemId,
+      quantity: Number.isFinite(normalizedQuantity) ? normalizedQuantity : 0,
+      reason,
+    });
+    const item = getItem(normalizedItemId);
+    if (
+      !this.world.isServer ||
+      !isValidPlayerID(normalizedPlayerId) ||
+      !/^ground-item-drop:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        normalizedOperationId,
+      ) ||
+      !isValidItemID(normalizedItemId) ||
+      !item ||
+      !Number.isSafeInteger(normalizedQuantity) ||
+      normalizedQuantity <= 0 ||
+      normalizedQuantity > this.MAX_QUANTITY ||
+      (slotIndex !== null &&
+        (!Number.isSafeInteger(slotIndex) ||
+          slotIndex < 0 ||
+          slotIndex >= this.MAX_INVENTORY_SLOTS)) ||
+      (normalizedItemId === "coins" && slotIndex !== null)
+    ) {
+      return failure("invalid_request");
     }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized");
+    }
+    const database = this.getDatabase();
+    const groundItems = this.world.getSystem<GroundItemSystem>("ground-items");
+    if (
+      !database?.commitGroundItemDropOperationAsync ||
+      !groundItems?.prepareDurableSourceRegistration ||
+      !groundItems.exposeCommittedDurableSource
+    ) {
+      return failure("atomic_persistence_unavailable");
+    }
+
+    let result: AtomicGroundItemDropReceipt = failure("persistence_ambiguous");
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        const duelSystem = this.world.getSystem("duel") as
+          { isPlayerInDuel?: (id: string) => boolean } | undefined;
+        if (duelSystem?.isPlayerInDuel?.(normalizedPlayerId)) {
+          result = failure("duel_locked");
+          return false;
+        }
+        if (this.isPlayerInDeathState(normalizedPlayerId)) {
+          result = failure("death_locked");
+          return false;
+        }
+        const player = this.world.getPlayer(normalizedPlayerId);
+        const position = player?.node?.position;
+        if (
+          !position ||
+          ![position.x, position.y, position.z].every(Number.isFinite)
+        ) {
+          result = failure("player_unavailable");
+          return false;
+        }
+        const source = await groundItems.prepareDurableSourceRegistration(
+          normalizedItemId,
+          normalizedQuantity,
+          { x: position.x, y: position.y, z: position.z },
+          {
+            despawnTime: 120_000,
+            droppedBy: normalizedPlayerId,
+            lootProtection: 0,
+          },
+        );
+        if (!source) {
+          result = failure("source_unavailable");
+          return false;
+        }
+
+        const fingerprintInput: Omit<
+          GroundItemDropCommitRequest,
+          "requestFingerprint"
+        > = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          itemId: normalizedItemId,
+          quantity: normalizedQuantity,
+          slotIndex,
+          source,
+        };
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            serializeGroundItemDropCommitFingerprint(fingerprintInput),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable");
+          return false;
+        }
+        const request: GroundItemDropCommitRequest = {
+          ...fingerprintInput,
+          requestFingerprint,
+        };
+        let receipt: GroundItemDropCommitReceipt | null = null;
+        let attempts = 0;
+        while (!receipt && !this.isDestroying) {
+          attempts++;
+          try {
+            receipt =
+              await database.commitGroundItemDropOperationAsync(request);
+          } catch (error) {
+            if (!shouldRetryGroundItemDrop(error)) {
+              result = failure(groundItemDropErrorReason(error));
+              return false;
+            }
+            if (attempts === 1 || (attempts & (attempts - 1)) === 0) {
+              Logger.systemError(
+                "InventorySystem",
+                `Ground-item drop ${normalizedOperationId} remains unresolved after ${attempts} attempt(s): ${String(error)}`,
+              );
+            }
+            if (attempts > 1) {
+              await new Promise<void>((resolve) => {
+                setTimeout(resolve, Math.min(250 * 2 ** (attempts - 2), 5_000));
+              });
+            }
+          }
+        }
+        if (!receipt) {
+          result = failure("persistence_ambiguous");
+          return false;
+        }
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.itemId !== normalizedItemId ||
+          receipt.quantity !== normalizedQuantity ||
+          receipt.slotIndex !== slotIndex ||
+          receipt.source.contributionId !== source.contributionId ||
+          receipt.source.requestFingerprint !== source.requestFingerprint ||
+          receipt.source.itemId !== normalizedItemId ||
+          receipt.source.droppedBy !== normalizedPlayerId ||
+          (normalizedItemId === "coins") !==
+            (receipt.operationCommittedCoins !== null) ||
+          !Number.isSafeInteger(receipt.currentCoins) ||
+          receipt.currentCoins < 0 ||
+          receipt.currentCoins > this.MAX_QUANTITY
+        ) {
+          Logger.systemError(
+            "InventorySystem",
+            `Ground-item drop ${normalizedOperationId} committed with an invalid receipt`,
+          );
+          result = failure("persistence_ambiguous");
+          return false;
+        }
+
+        let liveInventoryApplied = false;
+        try {
+          liveInventoryApplied = this.applyCommittedInventorySnapshot(
+            normalizedPlayerId,
+            receipt.committed,
+          );
+        } catch (error) {
+          Logger.systemError(
+            "InventorySystem",
+            `Ground-item drop committed but live inventory apply threw for ${normalizedPlayerId}: ${String(error)}`,
+          );
+        }
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Ground-item drop committed but inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        let liveCoinsApplied = normalizedItemId !== "coins";
+        if (!liveCoinsApplied) {
+          try {
+            liveCoinsApplied =
+              this.getCoinPouchSystem()?.applyCommittedBalance(
+                normalizedPlayerId,
+                receipt.currentCoins,
+              ) === true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Ground-item drop committed but live coin apply threw for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        let presentationReady = false;
+        try {
+          presentationReady = await groundItems.exposeCommittedDurableSource(
+            receipt.source,
+          );
+        } catch (error) {
+          Logger.systemError(
+            "InventorySystem",
+            `Ground-item drop committed but presentation validation failed for ${normalizedOperationId}: ${String(error)}`,
+          );
+        }
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          liveCoinsApplied,
+          presentationReady,
+          receipt,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
   }
 
   /**
@@ -885,15 +2124,178 @@ export class InventorySystem extends SystemBase {
     });
   }
 
-  private async pickupItem(data: {
+  /**
+   * Complete one spatially admitted server-side ground-item pickup through the
+   * inventory lock, protection, capacity, world-removal, and persistence
+   * boundary. The boolean is a completion receipt, not merely event dispatch.
+   */
+  async commitGroundItemPickupAtomic(
+    playerId: string,
+    operationId: string,
+    sourceEntityId: string,
+    itemId: string,
+    quantity: number,
+  ): Promise<AtomicGroundItemPickupReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const normalizedSourceEntityId = String(sourceEntityId ?? "").trim();
+    const normalizedItemId = String(itemId ?? "").trim();
+    const normalizedQuantity = Number(quantity);
+    const failure = (
+      reason: AtomicGroundItemPickupFailureReason,
+    ): AtomicGroundItemPickupReceipt => ({
+      ok: false,
+      committed: false,
+      liveInventoryApplied: false,
+      liveCoinsApplied: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      sourceEntityId: normalizedSourceEntityId,
+      itemId: normalizedItemId,
+      quantity: Number.isFinite(normalizedQuantity) ? normalizedQuantity : 0,
+      reason,
+    });
+    const item = getItem(normalizedItemId);
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !/^ground-item-pickup:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        normalizedOperationId,
+      ) ||
+      !normalizedSourceEntityId ||
+      normalizedSourceEntityId.length > 256 ||
+      !isValidItemID(normalizedItemId) ||
+      !item ||
+      !Number.isSafeInteger(normalizedQuantity) ||
+      normalizedQuantity <= 0 ||
+      normalizedQuantity > this.MAX_QUANTITY
+    ) {
+      return failure("invalid_request");
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized");
+    }
+    const db = this.getDatabase();
+    if (!db?.commitGroundItemPickupOperationAsync) {
+      return failure("atomic_persistence_unavailable");
+    }
+
+    let result: AtomicGroundItemPickupReceipt = failure(
+      "persistence_ambiguous",
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              sourceEntityId: normalizedSourceEntityId,
+              itemId: normalizedItemId,
+              quantity: normalizedQuantity,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable");
+          return false;
+        }
+        const request: GroundItemPickupCommitRequest = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          sourceEntityId: normalizedSourceEntityId,
+          itemId: normalizedItemId,
+          quantity: normalizedQuantity,
+        };
+        let receipt: GroundItemPickupCommitReceipt;
+        try {
+          receipt = await db.commitGroundItemPickupOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryGroundItemPickup(firstError)) {
+            result = failure(groundItemPickupErrorReason(firstError));
+            return false;
+          }
+          try {
+            receipt = await db.commitGroundItemPickupOperationAsync(request);
+          } catch (retryError) {
+            const reason = groundItemPickupErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic ground-item pickup is unresolved for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(reason);
+            return false;
+          }
+        }
+
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.sourceEntityId !== normalizedSourceEntityId ||
+          receipt.itemId !== normalizedItemId ||
+          receipt.quantity !== normalizedQuantity ||
+          receipt.stackable !== (item.stackable === true) ||
+          (normalizedItemId === "coins") !==
+            (receipt.operationCommittedCoins !== null) ||
+          !Number.isSafeInteger(receipt.currentCoins) ||
+          receipt.currentCoins < 0 ||
+          receipt.currentCoins > this.MAX_QUANTITY
+        ) {
+          result = failure("persistence_ambiguous");
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Ground-item pickup committed but inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        const liveCoinsApplied =
+          normalizedItemId !== "coins" ||
+          this.getCoinPouchSystem()?.applyCommittedBalance(
+            normalizedPlayerId,
+            receipt.currentCoins,
+          ) === true;
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          liveCoinsApplied,
+          receipt,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  async pickupGroundItem(data: {
     playerId: string;
     entityId: string;
     itemId?: string;
-  }): Promise<void> {
+    operationId?: string;
+  }): Promise<boolean> {
     // SERVER-SIDE ONLY: Prevent duplication by ensuring only server processes pickups
     if (!this.world.isServer) {
       // Client just sent the request, don't process locally
-      return;
+      return false;
     }
 
     // Validate input parameters
@@ -903,7 +2305,7 @@ export class InventorySystem extends SystemBase {
         "Cannot pickup item: playerId is undefined",
         new Error("Cannot pickup item: playerId is undefined"),
       );
-      return;
+      return false;
     }
 
     if (!data.entityId) {
@@ -912,7 +2314,7 @@ export class InventorySystem extends SystemBase {
         "Cannot pickup item: entityId is undefined",
         new Error("Cannot pickup item: entityId is undefined"),
       );
-      return;
+      return false;
     }
 
     // ATOMIC OPERATION: Acquire lock to prevent race conditions
@@ -920,10 +2322,11 @@ export class InventorySystem extends SystemBase {
     const lockKey = `pickup:${data.entityId}`;
     if (this.pickupLocks.has(lockKey)) {
       // Another pickup in progress for this item - silently ignore
-      return;
+      return false;
     }
 
     this.pickupLocks.add(lockKey);
+    let groundPickupLock: GroundItemSystem | null = null;
 
     try {
       // Get item entity data from entity manager
@@ -937,7 +2340,7 @@ export class InventorySystem extends SystemBase {
           "EntityManager system not found",
           new Error("EntityManager system not found"),
         );
-        return;
+        return false;
       }
 
       // Re-check entity exists AFTER acquiring lock
@@ -949,12 +2352,26 @@ export class InventorySystem extends SystemBase {
         // - Multiple players grabbing same item (race condition)
         // - Client sync delay (item removed server-side but client still shows it)
         // Silently ignore - not an error condition
-        return;
+        return false;
       }
 
       // Get itemId from event data or from entity properties
       const itemId = data.itemId || (entity.getProperty("itemId") as string);
       const quantity = (entity.getProperty("quantity") as number) || 1;
+      const rawCustodySourceId = entity.getProperty("custodySourceId");
+      const custodyPolicy = entity.getProperty("custodyPolicy");
+      if (custodyPolicy !== "durable_ground") {
+        Logger.systemError(
+          "InventorySystem",
+          `Cannot pickup item ${data.entityId} without durable ground custody`,
+          new Error("Ground-item custody policy rejects pickup"),
+        );
+        return false;
+      }
+      const custodySourceId =
+        typeof rawCustodySourceId === "string" && rawCustodySourceId.trim()
+          ? rawCustodySourceId.trim()
+          : data.entityId;
 
       if (!itemId) {
         Logger.systemError(
@@ -962,7 +2379,7 @@ export class InventorySystem extends SystemBase {
           `No itemId found for entity ${data.entityId}`,
           new Error(`No itemId found for entity ${data.entityId}`),
         );
-        return;
+        return false;
       }
 
       // Validate that the item exists in the item database
@@ -973,38 +2390,113 @@ export class InventorySystem extends SystemBase {
           `Item not found in database: ${itemId}`,
           new Error(`Item not found in database: ${itemId}`),
         );
-        return;
+        return false;
+      }
+
+      // Ground custody must not disappear before its destination is durable.
+      // Event-only/no-database runtimes cannot acknowledge a production
+      // pickup because a process failure would otherwise lose the item.
+      if (!this.getDatabase()) {
+        Logger.systemError(
+          "InventorySystem",
+          `Cannot pickup ${data.entityId}: database persistence unavailable`,
+          new Error("Ground-item pickup persistence unavailable"),
+        );
+        return false;
+      }
+      const coinSystem = itemId === "coins" ? this.getCoinPouchSystem() : null;
+      if (itemId === "coins" && !coinSystem) {
+        Logger.systemError(
+          "InventorySystem",
+          `Cannot pickup ${data.entityId}: coin persistence unavailable`,
+          new Error("Ground-coin pickup persistence unavailable"),
+        );
+        return false;
       }
 
       // Check loot protection (classic MMORPG: killer has 1 minute exclusivity on mob loot)
       const groundItems = this.world.getSystem("ground-items");
       if (groundItems) {
         const currentTick = this.world.currentTick ?? 0;
-        if (!groundItems.canPickup(data.entityId, data.playerId, currentTick)) {
+        if (
+          !groundItems.tryAcquirePickupLock(
+            data.entityId,
+            data.playerId,
+            currentTick,
+          )
+        ) {
           this.emitTypedEvent(EventType.UI_TOAST, {
             playerId: data.playerId,
             message: "This item belongs to another player.",
             type: "warning",
           });
-          return;
+          return false;
         }
+        groundPickupLock = groundItems;
       }
 
-      // PRE-CHECK: Verify inventory capacity BEFORE modifying anything
-      // This prevents wasted operations and provides better UX
+      if (data.operationId !== undefined) {
+        const atomic = await this.commitGroundItemPickupAtomic(
+          data.playerId,
+          data.operationId,
+          custodySourceId,
+          itemData.id,
+          quantity,
+        );
+        if (!atomic.ok) {
+          // A different authority already committed this source. Remove the
+          // stale local presentation so it cannot attract repeated actions.
+          if (atomic.reason === "source_unavailable") {
+            const groundItemsSystem =
+              this.world.getSystem<GroundItemSystem>("ground-items");
+            if (groundItemsSystem) {
+              groundItemsSystem.removeGroundItem(data.entityId);
+            } else {
+              entityManager.destroyEntity(data.entityId);
+            }
+          }
+          if (atomic.reason === "inventory_full") {
+            this.emitTypedEvent(EventType.UI_TOAST, {
+              playerId: data.playerId,
+              message: "Your inventory is full.",
+              type: "warning",
+            });
+          }
+          return false;
+        }
+
+        // The database receipt already transferred logical source custody.
+        // World removal is cleanup and must never roll that committed transfer
+        // back or falsify its result after a lost response.
+        const groundItemsSystem =
+          this.world.getSystem<GroundItemSystem>("ground-items");
+        const removed = groundItemsSystem
+          ? groundItemsSystem.removeGroundItem(data.entityId)
+          : entityManager.destroyEntity(data.entityId);
+        if (!removed) {
+          Logger.systemError(
+            "InventorySystem",
+            `Ground-item pickup ${data.operationId} committed but source presentation ${data.entityId} could not be removed`,
+            new Error("Ground-item pickup source cleanup failed"),
+          );
+        }
+        return true;
+      }
+
+      // PRE-CHECK: Verify inventory capacity BEFORE modifying a legacy/manual
+      // pickup. Attempt-bound pickups let the database decide so an exact
+      // receipt replay cannot be hidden by inventory changes after commit.
       if (!this.canAddItem(data.playerId, itemData.id, quantity)) {
         this.emitTypedEvent(EventType.UI_TOAST, {
           playerId: data.playerId,
           message: "Your inventory is full.",
           type: "warning",
         });
-        return;
+        return false;
       }
 
-      // RESPONSIVE PICKUP: Add to memory first (silent = skip DB persist + emit),
-      // remove ground entity and emit inventory update immediately so the player
-      // sees instant feedback, THEN await the DB persist (still guaranteed, just
-      // doesn't block the visible actions). Pickup lock is held throughout.
+      // Stage the addition in memory without exposing it. The pickup lock stays
+      // held until durable destination custody and source removal both finish.
       const added = await this.addItem({
         playerId: data.playerId,
         itemId: itemData.id,
@@ -1012,69 +2504,71 @@ export class InventorySystem extends SystemBase {
         silent: true, // We'll emit update + persist ourselves after world removal
       });
 
-      if (added) {
-        let worldRemovalSuccess = false;
-
-        // Use GroundItemSystem if available - it handles entity destruction AND pile updates
-        const groundItemsSystem = this.world.getSystem("ground-items");
-        if (groundItemsSystem) {
-          // removeGroundItem returns boolean indicating success
-          worldRemovalSuccess = groundItemsSystem.removeGroundItem(
-            data.entityId,
-          );
-        } else {
-          // Fallback: destroy entity directly if GroundItemSystem not available
-          worldRemovalSuccess = entityManager.destroyEntity(data.entityId);
-        }
-
-        // ROLLBACK: If world removal failed, remove item from inventory to prevent dupe
-        if (!worldRemovalSuccess) {
-          Logger.systemError(
-            "InventorySystem",
-            `Failed to remove item ${data.entityId} from world, rolling back inventory add`,
-            new Error(`Pickup rollback for entity ${data.entityId}`),
-          );
-
-          // Remove the item we just added
-          await this.removeItem({
-            playerId: data.playerId,
-            itemId: itemData.id,
-            quantity,
-          });
-
-          // Notify player
-          this.emitTypedEvent(EventType.UI_TOAST, {
-            playerId: data.playerId,
-            message: "Failed to pick up item. Please try again.",
-            type: "warning",
-          });
-        } else {
-          // Success: emit inventory update to client IMMEDIATELY (no DB wait)
-          const playerIdKey = toPlayerID(data.playerId);
-          if (playerIdKey) {
-            this.emitInventoryUpdate(playerIdKey);
-          }
-
-          // Await DB persist — item is already visible to client and ground entity
-          // is destroyed, but we still guarantee persistence before releasing the
-          // pickup lock to prevent any race conditions.
-          if (itemId === "coins") {
-            const coinSystem = this.getCoinPouchSystem();
-            if (coinSystem) {
-              await coinSystem.persistCoinsImmediate(data.playerId);
-            }
-          } else {
-            await this.persistInventoryImmediate(data.playerId);
-          }
-        }
-      } else {
+      if (!added) {
         // Could not add (should not happen after canAddItem check, but handle defensively)
         Logger.system(
           "InventorySystem",
           `Failed to add item ${itemId} to inventory for player ${data.playerId}`,
         );
+        return false;
       }
+
+      try {
+        if (itemId === "coins") {
+          await coinSystem!.persistCoinsImmediateStrict(data.playerId);
+        } else {
+          await this.persistInventoryImmediate(data.playerId);
+        }
+      } catch (error) {
+        // The source still exists. Restore live destination state before the
+        // caller retries, and preserve the persistence failure as ambiguous.
+        try {
+          await this.removeItem({
+            playerId: data.playerId,
+            itemId: itemData.id,
+            quantity,
+          });
+        } catch {
+          // The original persistence error remains the useful authority signal.
+        }
+        throw error;
+      }
+
+      // Use GroundItemSystem if available - it handles entity destruction AND pile updates.
+      const groundItemsSystem = this.world.getSystem("ground-items");
+      const worldRemovalSuccess = groundItemsSystem
+        ? groundItemsSystem.removeGroundItem(data.entityId)
+        : entityManager.destroyEntity(data.entityId);
+
+      // If source removal fails, restore and persist the old destination state
+      // before allowing the ground item to be retried.
+      if (!worldRemovalSuccess) {
+        Logger.systemError(
+          "InventorySystem",
+          `Failed to remove item ${data.entityId} from world, rolling back inventory add`,
+          new Error(`Pickup rollback for entity ${data.entityId}`),
+        );
+        await this.removeItem({
+          playerId: data.playerId,
+          itemId: itemData.id,
+          quantity,
+        });
+        if (itemId === "coins") {
+          await coinSystem!.persistCoinsImmediateStrict(data.playerId);
+        }
+        this.emitTypedEvent(EventType.UI_TOAST, {
+          playerId: data.playerId,
+          message: "Failed to pick up item. Please try again.",
+          type: "warning",
+        });
+        return false;
+      }
+
+      const playerIdKey = toPlayerID(data.playerId);
+      if (playerIdKey) this.emitInventoryUpdate(playerIdKey);
+      return true;
     } finally {
+      groundPickupLock?.releasePickupLock(data.entityId, data.playerId);
       // Always release lock
       this.pickupLocks.delete(lockKey);
     }
@@ -1109,6 +2603,13 @@ export class InventorySystem extends SystemBase {
         "InventorySystem",
         "Cannot move item: playerId is undefined",
         new Error("Cannot move item: playerId is undefined"),
+      );
+      return;
+    }
+    if (this.transactionLocks.has(data.playerId)) {
+      Logger.system(
+        "InventorySystem",
+        `Cannot move item during transaction lock: ${data.playerId}`,
       );
       return;
     }
@@ -1452,6 +2953,1736 @@ export class InventorySystem extends SystemBase {
   }
 
   /**
+   * Debit one food item and durably stage its matching health effect. The live
+   * inventory remains locked until it converges to the committed snapshot.
+   */
+  async commitFoodConsumptionAtomic(
+    playerId: string,
+    operationId: string,
+    itemId: string,
+    healAmount: number,
+    publicActionObservation?: StreamingDuelFoodObservationContext,
+  ): Promise<AtomicFoodConsumptionReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const normalizedItemId = String(itemId ?? "").trim();
+    const normalizedHealAmount = Number(healAmount);
+    const normalizedPublicActionObservation =
+      publicActionObservation === undefined
+        ? undefined
+        : parseStreamingDuelFoodObservationContext(publicActionObservation);
+    const failure = (
+      reason: AtomicFoodConsumptionFailureReason,
+    ): AtomicFoodConsumptionReceipt => ({
+      ok: false,
+      committed: false,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      itemId: normalizedItemId,
+      healAmount: Number.isFinite(normalizedHealAmount)
+        ? normalizedHealAmount
+        : 0,
+      reason,
+    });
+    const item = getItem(normalizedItemId);
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !/^[A-Za-z0-9:_-]{1,256}$/.test(normalizedOperationId) ||
+      !isValidItemID(normalizedItemId) ||
+      !item ||
+      (item.type !== "food" && item.type !== "consumable") ||
+      !Number.isSafeInteger(normalizedHealAmount) ||
+      normalizedHealAmount <= 0 ||
+      (publicActionObservation !== undefined &&
+        (!normalizedPublicActionObservation ||
+          normalizedPublicActionObservation.actorId !== normalizedPlayerId))
+    ) {
+      return failure("invalid_request");
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized");
+    }
+    const db = this.getDatabase();
+    if (!db?.commitFoodConsumptionOperationAsync) {
+      return failure("atomic_persistence_unavailable");
+    }
+
+    let result: AtomicFoodConsumptionReceipt = failure("persistence_failed");
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              itemId: normalizedItemId,
+              healAmount: normalizedHealAmount,
+              ...(normalizedPublicActionObservation
+                ? {
+                    publicActionObservation: normalizedPublicActionObservation,
+                  }
+                : {}),
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable");
+          return false;
+        }
+        const request: FoodConsumptionCommitRequest = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          itemId: normalizedItemId,
+          healAmount: normalizedHealAmount,
+          ...(normalizedPublicActionObservation
+            ? { publicActionObservation: normalizedPublicActionObservation }
+            : {}),
+        };
+        let receipt: FoodConsumptionCommitReceipt;
+        try {
+          receipt = await db.commitFoodConsumptionOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryFoodConsumption(firstError)) {
+            result = failure(foodConsumptionErrorReason(firstError));
+            return false;
+          }
+          try {
+            receipt = await db.commitFoodConsumptionOperationAsync(request);
+          } catch (retryError) {
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic food commit failed for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(foodConsumptionErrorReason(retryError));
+            return false;
+          }
+        }
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.itemId !== normalizedItemId ||
+          receipt.healAmount !== normalizedHealAmount ||
+          (receipt.status !== "pending" && receipt.status !== "completed")
+        ) {
+          result = failure("persistence_failed");
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Failed to converge inventory after committed food debit for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          receipt,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Consume every requested item quantity as one authoritative database
+   * operation. No live slot is mutated until the durable transaction and its
+   * idempotency receipt have committed. An ambiguous lost response is retried
+   * once with the exact same operation identity.
+   */
+  async debitItemsAtomic(
+    playerId: string,
+    operationId: string,
+    requestedRequirements: InventoryDebitRequirement[],
+  ): Promise<AtomicInventoryDebitReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const requirements =
+      normalizeDebitRequirements(requestedRequirements, this.MAX_QUANTITY) ??
+      [];
+    const failure = (
+      reason: AtomicInventoryDebitFailureReason,
+    ): AtomicInventoryDebitReceipt => ({
+      ok: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      changed: false,
+      replayed: false,
+      requirements,
+      reason,
+    });
+
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !normalizedOperationId ||
+      normalizedOperationId.length > 256 ||
+      requirements.length === 0
+    ) {
+      return failure("invalid_request");
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized");
+    }
+    const db = this.getDatabase();
+    if (!db?.commitInventoryDebitOperationAsync) {
+      return failure("atomic_persistence_unavailable");
+    }
+
+    let result: AtomicInventoryDebitReceipt = failure("persistence_failed");
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              requirements,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable");
+          return false;
+        }
+
+        const request = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          requirements,
+        };
+        let receipt;
+        try {
+          receipt = await db.commitInventoryDebitOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryInventoryDebit(firstError)) {
+            result = failure(inventoryDebitErrorReason(firstError));
+            return false;
+          }
+          try {
+            receipt = await db.commitInventoryDebitOperationAsync(request);
+          } catch (retryError) {
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic inventory debit failed for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(inventoryDebitErrorReason(retryError));
+            return false;
+          }
+        }
+
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          JSON.stringify(receipt.requirements) !== JSON.stringify(requirements)
+        ) {
+          result = failure("persistence_failed");
+          return false;
+        }
+        if (
+          !this.applyCommittedInventorySnapshot(
+            normalizedPlayerId,
+            receipt.committed,
+          )
+        ) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Failed to converge inventory after committed debit for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+          result = failure("committed_state_apply_failed");
+          return false;
+        }
+
+        result = {
+          ok: true,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          changed: true,
+          replayed: receipt.replayed,
+          requirements,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+
+    return result;
+  }
+
+  /** Stage one exact spell-rune cost before projectile admission. */
+  async stageProjectileRuneCostAtomic(
+    playerId: string,
+    operationId: string,
+    requestedRequirements: InventoryDebitRequirement[],
+  ): Promise<AtomicProjectileRuneCostReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const requirements =
+      normalizeDebitRequirements(requestedRequirements, this.MAX_QUANTITY) ??
+      [];
+    const failure = (
+      reason: AtomicInventoryDebitFailureReason,
+    ): AtomicProjectileRuneCostReceipt => ({
+      ok: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      changed: false,
+      replayed: false,
+      requirements,
+      reason,
+    });
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !/^spell-runes:[A-Za-z0-9]{20}$/.test(normalizedOperationId) ||
+      requirements.length === 0
+    ) {
+      return failure("invalid_request");
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized");
+    }
+    const db = this.getDatabase();
+    if (!db?.commitProjectileRuneCostOperationAsync) {
+      return failure("atomic_persistence_unavailable");
+    }
+    let result: AtomicProjectileRuneCostReceipt = failure("persistence_failed");
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              requirements,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable");
+          return false;
+        }
+        const request = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          requirements,
+        };
+        let receipt;
+        try {
+          receipt = await db.commitProjectileRuneCostOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryInventoryDebit(firstError)) {
+            result = failure(inventoryDebitErrorReason(firstError));
+            return false;
+          }
+          try {
+            receipt = await db.commitProjectileRuneCostOperationAsync(request);
+          } catch (retryError) {
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic projectile rune stage failed for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(inventoryDebitErrorReason(retryError));
+            return false;
+          }
+        }
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.status !== "pending" ||
+          receipt.refundDestination !== null ||
+          JSON.stringify(receipt.requirements) !== JSON.stringify(requirements)
+        ) {
+          result = failure("persistence_failed");
+          return false;
+        }
+        if (
+          !this.applyCommittedInventorySnapshot(
+            normalizedPlayerId,
+            receipt.committed,
+          )
+        ) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Failed to converge staged projectile rune cost for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+          result = failure("committed_state_apply_failed");
+          return false;
+        }
+        result = {
+          ok: true,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          changed: true,
+          replayed: receipt.replayed,
+          requestFingerprint,
+          requirements,
+          status: "pending",
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  async completeProjectileRuneCostAtomic(
+    staged: ProjectileRuneCostSettlementHandle,
+  ): Promise<AtomicProjectileRuneCostReceipt> {
+    return this.settleProjectileRuneCostAtomic(staged, "fired");
+  }
+
+  /** Refund a pending debit, or terminally resolve an already-fired spell. */
+  async cancelProjectileRuneCostAtomic(
+    staged: ProjectileRuneCostSettlementHandle,
+  ): Promise<AtomicProjectileRuneCostReceipt> {
+    return this.settleProjectileRuneCostAtomic(staged, "cancelled");
+  }
+
+  private async settleProjectileRuneCostAtomic(
+    staged: ProjectileRuneCostSettlementHandle,
+    requestedStatus: "fired" | "cancelled",
+  ): Promise<AtomicProjectileRuneCostReceipt> {
+    const requirements =
+      normalizeDebitRequirements(staged.requirements, this.MAX_QUANTITY) ?? [];
+    const failure = (
+      reason: AtomicInventoryDebitFailureReason,
+    ): AtomicProjectileRuneCostReceipt => ({
+      ok: false,
+      playerId: staged.playerId,
+      operationId: staged.operationId,
+      changed: false,
+      replayed: false,
+      requirements,
+      reason,
+    });
+    const db = this.getDatabase();
+    const settle =
+      requestedStatus === "fired"
+        ? db?.completeProjectileRuneCostOperationAsync
+        : db?.cancelProjectileRuneCostOperationAsync;
+    if (!settle || requirements.length === 0) {
+      return failure("atomic_persistence_unavailable");
+    }
+    let result: AtomicProjectileRuneCostReceipt = failure("persistence_failed");
+    await this.queueOperation(staged.playerId, async () => {
+      if (!this.lockForTransaction(staged.playerId)) {
+        result = failure("inventory_busy");
+        return false;
+      }
+      try {
+        let receipt;
+        const settlementRequest = {
+          operationId: staged.operationId,
+          playerId: staged.playerId,
+          requestFingerprint: staged.requestFingerprint,
+        };
+        try {
+          receipt = await settle.call(db, settlementRequest);
+        } catch (firstError) {
+          if (!shouldRetryInventoryDebit(firstError)) {
+            result = failure(inventoryDebitErrorReason(firstError));
+            return false;
+          }
+          try {
+            receipt = await settle.call(db, settlementRequest);
+          } catch (retryError) {
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic projectile rune settlement failed for ${staged.playerId}: ${String(retryError)}`,
+            );
+            result = failure(inventoryDebitErrorReason(retryError));
+            return false;
+          }
+        }
+        if (
+          receipt.operationId !== staged.operationId ||
+          receipt.playerId !== staged.playerId ||
+          receipt.requestFingerprint !== staged.requestFingerprint ||
+          (receipt.status !== "fired" &&
+            receipt.status !== "resolved" &&
+            receipt.status !== "cancelled") ||
+          (receipt.status === "cancelled") !==
+            (receipt.refundDestination !== null) ||
+          JSON.stringify(receipt.requirements) !== JSON.stringify(requirements)
+        ) {
+          result = failure("persistence_failed");
+          return false;
+        }
+        if (
+          !this.applyCommittedInventorySnapshot(
+            staged.playerId,
+            receipt.committed,
+          )
+        ) {
+          try {
+            await this.reloadFromDatabase(staged.playerId);
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Failed to converge projectile rune settlement for ${staged.playerId}: ${String(error)}`,
+            );
+          }
+          result = failure("committed_state_apply_failed");
+          return false;
+        }
+        result = {
+          ok: true,
+          playerId: staged.playerId,
+          operationId: staged.operationId,
+          changed: true,
+          replayed: receipt.replayed,
+          requestFingerprint: staged.requestFingerprint,
+          requirements,
+          status: receipt.status,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(staged.playerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Commit one bone debit and its exact Prayer progression through the
+   * database-owned custody boundary. A successful result may temporarily have
+   * liveInventoryApplied=false, but it is still durable and must only be
+   * retried with the same operation ID.
+   */
+  async commitBoneBurialAtomic(
+    playerId: string,
+    operationId: string,
+    itemId: string,
+    xpAmount: number,
+    levelRequired: number,
+  ): Promise<AtomicBoneBurialReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const normalizedItemId = String(itemId ?? "").trim();
+    const normalizedXpAmount = Number(xpAmount);
+    const normalizedLevelRequired = Number(levelRequired);
+    const itemData = getItem(normalizedItemId);
+    const failure = (
+      reason: AtomicBoneBurialFailureReason,
+      retryable: boolean,
+    ): AtomicBoneBurialReceipt => ({
+      ok: false,
+      committed: false,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      replayed: false,
+      itemId: normalizedItemId,
+      xpAmount: Number.isFinite(normalizedXpAmount) ? normalizedXpAmount : 0,
+      levelRequired: Number.isFinite(normalizedLevelRequired)
+        ? normalizedLevelRequired
+        : 0,
+      retryable,
+      reason,
+    });
+
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !BONE_BURIAL_OPERATION_ID_PATTERN.test(normalizedOperationId) ||
+      !isValidItemID(normalizedItemId) ||
+      !itemData ||
+      !Number.isSafeInteger(normalizedXpAmount) ||
+      normalizedXpAmount <= 0 ||
+      normalizedXpAmount > 1_000_000 ||
+      itemData.prayerXp !== normalizedXpAmount ||
+      !Number.isSafeInteger(normalizedLevelRequired) ||
+      normalizedLevelRequired < 1 ||
+      normalizedLevelRequired > 99 ||
+      (itemData.buryLevelRequired ?? 1) !== normalizedLevelRequired
+    ) {
+      return failure("invalid_request", false);
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized", true);
+    }
+    const db = this.getDatabase();
+    if (!db?.commitBoneBurialOperationAsync) {
+      return failure("atomic_persistence_unavailable", true);
+    }
+
+    let result: AtomicBoneBurialReceipt = failure(
+      "persistence_ambiguous",
+      true,
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy", true);
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              itemId: normalizedItemId,
+              xpAmount: normalizedXpAmount,
+              levelRequired: normalizedLevelRequired,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable", true);
+          return false;
+        }
+        const request: BoneBurialCommitRequest = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          itemId: normalizedItemId,
+          xpAmount: normalizedXpAmount,
+          levelRequired: normalizedLevelRequired,
+        };
+
+        let receipt;
+        try {
+          receipt = await db.commitBoneBurialOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryBoneBurial(firstError)) {
+            const reason = boneBurialErrorReason(firstError);
+            result = failure(reason, false);
+            return false;
+          }
+          try {
+            receipt = await db.commitBoneBurialOperationAsync(request);
+          } catch (retryError) {
+            const reason = boneBurialErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic bone burial is unresolved for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(reason, reason === "persistence_ambiguous");
+            return false;
+          }
+        }
+
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.itemId !== normalizedItemId ||
+          receipt.xpAmount !== normalizedXpAmount ||
+          receipt.levelRequired !== normalizedLevelRequired ||
+          !Number.isSafeInteger(receipt.awardedXp) ||
+          receipt.awardedXp < 0 ||
+          receipt.awardedXp > normalizedXpAmount ||
+          !Number.isSafeInteger(receipt.operationCommittedXp) ||
+          receipt.operationCommittedXp < 0 ||
+          receipt.operationCommittedXp > MAX_SKILL_XP ||
+          !Number.isSafeInteger(receipt.currentXp) ||
+          receipt.currentXp < receipt.operationCommittedXp ||
+          receipt.currentXp > MAX_SKILL_XP ||
+          !Number.isSafeInteger(receipt.currentLevel) ||
+          receipt.currentLevel !== exactSkillLevelForXp(receipt.currentXp)
+        ) {
+          result = failure("persistence_ambiguous", true);
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Bone burial committed but live inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          replayed: receipt.replayed,
+          itemId: normalizedItemId,
+          xpAmount: normalizedXpAmount,
+          levelRequired: normalizedLevelRequired,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Start one quest through the database-owned custody boundary. The progress
+   * row, every starter item, audit record, and replay receipt become visible as
+   * one transition. An ambiguous response is retried with byte-identical input.
+   */
+  async commitQuestStartAtomic(
+    playerId: string,
+    questId: string,
+    input: {
+      questStartedAt: number;
+      initialStage: string;
+      items: Array<{ itemId: string; quantity: number }>;
+    },
+  ): Promise<AtomicQuestStartReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedQuestId = String(questId ?? "").trim();
+    const questStartedAt = Number(input?.questStartedAt);
+    const initialStage = String(input?.initialStage ?? "").trim();
+    const items = normalizeQuestCompletionItems(
+      input?.items,
+      this.MAX_QUANTITY,
+    );
+    let operationId = "";
+    const failure = (
+      reason: AtomicQuestStartFailureReason,
+      retryable: boolean,
+      committed: false | "unknown" = false,
+    ): AtomicQuestStartReceipt => ({
+      ok: false,
+      committed,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId,
+      questId: normalizedQuestId,
+      retryable,
+      reason,
+    });
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !normalizedQuestId ||
+      normalizedQuestId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(normalizedQuestId) ||
+      !Number.isSafeInteger(questStartedAt) ||
+      questStartedAt <= 0 ||
+      !initialStage ||
+      initialStage.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(initialStage) ||
+      !items
+    ) {
+      return failure("invalid_request", false);
+    }
+    try {
+      const identityHash = await sha256Hex(
+        JSON.stringify({
+          version: 1,
+          playerId: normalizedPlayerId,
+          questId: normalizedQuestId,
+          questStartedAt,
+        }),
+      );
+      operationId = `quest-start:${identityHash}`;
+    } catch {
+      return failure("atomic_persistence_unavailable", true);
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized", true);
+    }
+    const db = this.getDatabase();
+    if (!db?.commitQuestStartOperationAsync) {
+      return failure("atomic_persistence_unavailable", true);
+    }
+
+    let result: AtomicQuestStartReceipt = failure(
+      "persistence_ambiguous",
+      true,
+      "unknown",
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy", true);
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              questId: normalizedQuestId,
+              questStartedAt,
+              initialStage,
+              items,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable", true);
+          return false;
+        }
+        const request: QuestStartCommitRequest = {
+          operationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          questId: normalizedQuestId,
+          questStartedAt,
+          initialStage,
+          items,
+        };
+        let receipt: QuestStartCommitReceipt;
+        try {
+          receipt = await db.commitQuestStartOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryQuestStart(firstError)) {
+            result = failure(questStartErrorReason(firstError), false);
+            return false;
+          }
+          try {
+            receipt = await db.commitQuestStartOperationAsync(request);
+          } catch (retryError) {
+            const reason = questStartErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic quest start is unresolved for ${normalizedPlayerId}/${normalizedQuestId}: ${String(retryError)}`,
+            );
+            result = failure(
+              reason,
+              reason === "persistence_ambiguous",
+              "unknown",
+            );
+            return false;
+          }
+        }
+
+        if (
+          receipt.operationId !== operationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.questId !== normalizedQuestId ||
+          receipt.questStartedAt !== questStartedAt ||
+          receipt.initialStage !== initialStage ||
+          typeof receipt.replayed !== "boolean" ||
+          JSON.stringify(receipt.items) !== JSON.stringify(items)
+        ) {
+          result = failure("persistence_ambiguous", true, "unknown");
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Quest start committed but live inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          receipt,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Complete one quest through the database-owned custody boundary. The
+   * deterministic operation identity is derived from the exact quest
+   * incarnation, so an ambiguous response can only replay the same rewards.
+   */
+  async commitQuestCompletionAtomic(
+    playerId: string,
+    questId: string,
+    input: {
+      questStartedAt: number;
+      expectedStage: string;
+      expectedProgress: Record<string, number>;
+      questPoints: number;
+      items: Array<{ itemId: string; quantity: number }>;
+      xp: Record<string, number>;
+    },
+  ): Promise<AtomicQuestCompletionReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedQuestId = String(questId ?? "").trim();
+    const questStartedAt = Number(input?.questStartedAt);
+    const expectedStage = String(input?.expectedStage ?? "").trim();
+    const questPoints = Number(input?.questPoints);
+    const expectedProgress = normalizeQuestCompletionProgress(
+      input?.expectedProgress,
+    );
+    const items = normalizeQuestCompletionItems(
+      input?.items,
+      this.MAX_QUANTITY,
+    );
+    const xp = normalizeQuestCompletionXp(input?.xp);
+    let operationId = "";
+    const failure = (
+      reason: AtomicQuestCompletionFailureReason,
+      retryable: boolean,
+      committed: false | "unknown" = false,
+    ): AtomicQuestCompletionReceipt => ({
+      ok: false,
+      committed,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId,
+      questId: normalizedQuestId,
+      retryable,
+      reason,
+    });
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !normalizedQuestId ||
+      normalizedQuestId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(normalizedQuestId) ||
+      !Number.isSafeInteger(questStartedAt) ||
+      questStartedAt <= 0 ||
+      !expectedStage ||
+      expectedStage.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(expectedStage) ||
+      !expectedProgress ||
+      !Number.isSafeInteger(questPoints) ||
+      questPoints < 0 ||
+      questPoints > 1_000_000 ||
+      !items ||
+      !xp
+    ) {
+      return failure("invalid_request", false);
+    }
+    try {
+      const identityHash = await sha256Hex(
+        JSON.stringify({
+          version: 1,
+          playerId: normalizedPlayerId,
+          questId: normalizedQuestId,
+          questStartedAt,
+        }),
+      );
+      operationId = `quest-completion:${identityHash}`;
+    } catch {
+      return failure("atomic_persistence_unavailable", true);
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized", true);
+    }
+    const db = this.getDatabase();
+    if (!db?.commitQuestCompletionOperationAsync) {
+      return failure("atomic_persistence_unavailable", true);
+    }
+
+    let result: AtomicQuestCompletionReceipt = failure(
+      "persistence_ambiguous",
+      true,
+      "unknown",
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy", true);
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 1,
+              playerId: normalizedPlayerId,
+              questId: normalizedQuestId,
+              questStartedAt,
+              expectedStage,
+              expectedProgress,
+              questPoints,
+              items,
+              xp,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable", true);
+          return false;
+        }
+        const request: QuestCompletionCommitRequest = {
+          operationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          questId: normalizedQuestId,
+          questStartedAt,
+          expectedStage,
+          expectedProgress,
+          questPoints,
+          items,
+          xp,
+        };
+        let receipt: QuestCompletionCommitReceipt;
+        try {
+          receipt = await db.commitQuestCompletionOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryQuestCompletion(firstError)) {
+            const reason = questCompletionErrorReason(firstError);
+            result = failure(reason, false);
+            return false;
+          }
+          try {
+            receipt = await db.commitQuestCompletionOperationAsync(request);
+          } catch (retryError) {
+            const reason = questCompletionErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic quest completion is unresolved for ${normalizedPlayerId}/${normalizedQuestId}: ${String(retryError)}`,
+            );
+            result = failure(
+              reason,
+              reason === "persistence_ambiguous",
+              "unknown",
+            );
+            return false;
+          }
+        }
+
+        const progress = Array.isArray(receipt.progress)
+          ? receipt.progress
+          : [];
+        const progressValid =
+          progress.length === xp.length &&
+          progress.every((entry, index) => {
+            const expected = xp[index];
+            return (
+              entry.skill === expected.skill &&
+              entry.xpAmount === expected.xpAmount &&
+              Number.isFinite(entry.awardedXp) &&
+              entry.awardedXp >= 0 &&
+              entry.awardedXp <= entry.xpAmount &&
+              Number.isFinite(entry.operationCommittedXp) &&
+              entry.operationCommittedXp >= entry.awardedXp &&
+              entry.operationCommittedXp <= MAX_SKILL_XP &&
+              Number.isFinite(entry.currentXp) &&
+              entry.currentXp >= entry.operationCommittedXp &&
+              entry.currentXp <= MAX_SKILL_XP &&
+              Number.isSafeInteger(entry.currentLevel) &&
+              entry.currentLevel === exactSkillLevelForXp(entry.currentXp)
+            );
+          });
+        const prayerProgress = progress.find(
+          (entry) => entry.skill === "prayer",
+        );
+        const prayer = receipt.prayer;
+        const prayerValid = prayerProgress
+          ? Boolean(
+              prayer &&
+              Number.isSafeInteger(prayer.pointUnits) &&
+              prayer.pointUnits >= 0 &&
+              Number.isSafeInteger(prayer.maxPoints) &&
+              prayer.maxPoints === prayerProgress.currentLevel &&
+              prayer.pointUnits <= prayer.maxPoints * 1_000_000 &&
+              Array.isArray(prayer.activePrayers) &&
+              prayer.activePrayers.length <= 32 &&
+              new Set(prayer.activePrayers).size ===
+                prayer.activePrayers.length &&
+              (prayer.pointUnits > 0 || prayer.activePrayers.length === 0),
+            )
+          : prayer === null;
+        if (
+          receipt.operationId !== operationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.questId !== normalizedQuestId ||
+          receipt.questStartedAt !== questStartedAt ||
+          receipt.expectedStage !== expectedStage ||
+          JSON.stringify(receipt.expectedProgress) !==
+            JSON.stringify(expectedProgress) ||
+          receipt.questPoints !== questPoints ||
+          JSON.stringify(receipt.items) !== JSON.stringify(items) ||
+          JSON.stringify(receipt.xp) !== JSON.stringify(xp) ||
+          !Number.isSafeInteger(receipt.completedAt) ||
+          receipt.completedAt <= 0 ||
+          !Number.isSafeInteger(receipt.operationCommittedQuestPoints) ||
+          receipt.operationCommittedQuestPoints < questPoints ||
+          !Number.isSafeInteger(receipt.currentQuestPoints) ||
+          receipt.currentQuestPoints < receipt.operationCommittedQuestPoints ||
+          !progressValid ||
+          !prayerValid
+        ) {
+          result = failure("persistence_ambiguous", true, "unknown");
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Quest completion committed but live inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          receipt: {
+            ...receipt,
+            progress: progress as QuestCompletionProgressReceipt[],
+          },
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Commit a successful gathering roll without exposing a partial result. The
+   * database owns slot allocation and commits any secondary-item debit, reward
+   * credit, skill XP/level, and idempotency receipt together.
+   */
+  async commitGatheringRewardAtomic(
+    playerId: string,
+    operationId: string,
+    input: {
+      resourceId: string;
+      depleteAfterCommit: boolean;
+      respawnTicks: number;
+      skill: GatheringRewardSkill;
+      xpAmount: number;
+      rewardItemId: string;
+      rewardQuantity: number;
+      secondaryItemId?: string | null;
+    },
+  ): Promise<AtomicGatheringRewardReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const resourceId = String(input?.resourceId ?? "").trim();
+    const depleteAfterCommit = input?.depleteAfterCommit === true;
+    const respawnTicks = Number(input?.respawnTicks);
+    const skill = String(input?.skill ?? "").trim() as GatheringRewardSkill;
+    const xpAmount = Number(input?.xpAmount);
+    const rewardItemId = String(input?.rewardItemId ?? "").trim();
+    const rewardQuantity = Number(input?.rewardQuantity);
+    const secondaryItemId = input?.secondaryItemId
+      ? String(input.secondaryItemId).trim()
+      : null;
+    const rewardData = getItem(rewardItemId);
+    const reward = rewardData
+      ? {
+          itemId: rewardItemId,
+          quantity: rewardQuantity,
+          stackable: rewardData.stackable === true,
+        }
+      : null;
+    const failure = (
+      reason: AtomicGatheringRewardFailureReason,
+      retryable: boolean,
+    ): AtomicGatheringRewardReceipt => ({
+      ok: false,
+      committed: false,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      replayed: false,
+      skill: GATHERING_REWARD_SKILLS.has(skill) ? skill : null,
+      xpAmount: Number.isFinite(xpAmount) ? xpAmount : 0,
+      reward,
+      secondaryItemId,
+      retryable,
+      reason,
+    });
+
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !normalizedOperationId ||
+      normalizedOperationId.length > 256 ||
+      !resourceId ||
+      resourceId.length > 256 ||
+      !Number.isSafeInteger(respawnTicks) ||
+      respawnTicks < 0 ||
+      respawnTicks > 10_000_000 ||
+      (depleteAfterCommit && respawnTicks <= 0) ||
+      !GATHERING_REWARD_SKILLS.has(skill) ||
+      !Number.isFinite(xpAmount) ||
+      xpAmount <= 0 ||
+      xpAmount > 1_000_000 ||
+      !reward ||
+      rewardItemId === "coins" ||
+      !Number.isSafeInteger(rewardQuantity) ||
+      rewardQuantity <= 0 ||
+      rewardQuantity > this.MAX_QUANTITY ||
+      (secondaryItemId !== null &&
+        (!isValidItemID(secondaryItemId) ||
+          !getItem(secondaryItemId) ||
+          secondaryItemId === "coins"))
+    ) {
+      return failure("invalid_request", false);
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized", true);
+    }
+    const db = this.getDatabase();
+    if (!db?.commitGatheringRewardOperationAsync) {
+      return failure("atomic_persistence_unavailable", true);
+    }
+
+    let result: AtomicGatheringRewardReceipt = failure(
+      "persistence_ambiguous",
+      true,
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy", true);
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          requestFingerprint = await sha256Hex(
+            JSON.stringify({
+              version: 2,
+              playerId: normalizedPlayerId,
+              resourceId,
+              depleteAfterCommit,
+              respawnTicks,
+              skill,
+              xpAmount,
+              reward,
+              secondaryItemId,
+            }),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable", true);
+          return false;
+        }
+
+        const request: GatheringRewardCommitRequest = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          resourceId,
+          depleteAfterCommit,
+          respawnTicks,
+          skill,
+          xpAmount,
+          reward,
+          secondaryItemId,
+        };
+        let receipt;
+        try {
+          receipt = await db.commitGatheringRewardOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryGatheringReward(firstError)) {
+            const reason = gatheringRewardErrorReason(firstError);
+            result = failure(reason, false);
+            return false;
+          }
+          try {
+            receipt = await db.commitGatheringRewardOperationAsync(request);
+          } catch (retryError) {
+            const reason = gatheringRewardErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic gathering reward is unresolved for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(reason, reason === "persistence_ambiguous");
+            return false;
+          }
+        }
+
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.resourceId !== resourceId ||
+          receipt.depleteAfterCommit !== depleteAfterCommit ||
+          receipt.respawnTicks !== respawnTicks ||
+          (receipt.depletedUntil !== null &&
+            (!Number.isSafeInteger(receipt.depletedUntil) ||
+              receipt.depletedUntil <= 0)) ||
+          depleteAfterCommit !== (receipt.depletedUntil !== null) ||
+          receipt.skill !== skill ||
+          receipt.xpAmount !== xpAmount ||
+          JSON.stringify(receipt.reward) !== JSON.stringify(reward) ||
+          receipt.secondaryItemId !== secondaryItemId ||
+          !Number.isFinite(receipt.operationCommittedXp) ||
+          receipt.operationCommittedXp < receipt.awardedXp ||
+          receipt.operationCommittedXp > MAX_SKILL_XP ||
+          !Number.isFinite(receipt.awardedXp) ||
+          receipt.awardedXp < 0 ||
+          receipt.awardedXp > xpAmount ||
+          !Number.isFinite(receipt.currentXp) ||
+          receipt.currentXp < receipt.operationCommittedXp ||
+          receipt.currentXp > MAX_SKILL_XP ||
+          !Number.isSafeInteger(receipt.currentLevel) ||
+          receipt.currentLevel !== exactSkillLevelForXp(receipt.currentXp)
+        ) {
+          result = failure("persistence_ambiguous", true);
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Gathering reward committed but live inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          replayed: receipt.replayed,
+          resourceId,
+          depleteAfterCommit,
+          respawnTicks,
+          depletedUntil: receipt.depletedUntil,
+          skill,
+          xpAmount,
+          reward,
+          secondaryItemId,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Commit one recipe action without exposing a partial material debit,
+   * product credit, or skill reward. A recipe may intentionally commit no
+   * output and no XP (for example, a failed smelting roll), but it must still
+   * consume at least one input. Item definitions loaded by DataManager remain
+   * authoritative for output stackability and slot allocation.
+   */
+  async commitProcessingActionAtomic(
+    playerId: string,
+    operationId: string,
+    input: {
+      skill: ProcessingActionSkill;
+      xpAmount: number;
+      inputs: InventoryDebitRequirement[];
+      requiredItems?: InventoryDebitRequirement[];
+      consumables?: ProcessingActionConsumable[];
+      outputs: Array<{ itemId: string; quantity: number }>;
+      coinCost?: number;
+      worldEffect?: ProcessingActionFireEffectRequest;
+    },
+  ): Promise<AtomicProcessingActionReceipt> {
+    const normalizedPlayerId = String(playerId ?? "").trim();
+    const normalizedOperationId = String(operationId ?? "").trim();
+    const skill = String(input?.skill ?? "").trim() as ProcessingActionSkill;
+    const xpAmount = Number(input?.xpAmount);
+    const coinCost = Number(input?.coinCost ?? 0);
+    const rawWorldEffect = input?.worldEffect;
+    const normalizedWorldEffect =
+      rawWorldEffect === undefined
+        ? undefined
+        : normalizeProcessingFireEffectRequest(rawWorldEffect, skill);
+    const worldEffectValid =
+      rawWorldEffect === undefined || normalizedWorldEffect !== null;
+    const worldEffect = normalizedWorldEffect ?? undefined;
+    const inputs =
+      normalizeDebitRequirements(input?.inputs ?? [], this.MAX_QUANTITY) ?? [];
+    const requiredItems = normalizeOptionalDebitRequirements(
+      input?.requiredItems ?? [],
+      this.MAX_QUANTITY,
+    );
+    const consumables = normalizeProcessingConsumables(
+      input?.consumables ?? [],
+    );
+    const outputTotals = new Map<string, number>();
+    let outputsValid =
+      Array.isArray(input?.outputs) && input.outputs.length <= 28;
+    for (const raw of input?.outputs ?? []) {
+      const itemId = String(raw?.itemId ?? "").trim();
+      const quantity = Number(raw?.quantity);
+      const item = getItem(itemId);
+      if (
+        !isValidItemID(itemId) ||
+        itemId.length > 256 ||
+        itemId === "coins" ||
+        !item ||
+        !Number.isSafeInteger(quantity) ||
+        quantity <= 0 ||
+        quantity > this.MAX_QUANTITY
+      ) {
+        outputsValid = false;
+        continue;
+      }
+      const combined = (outputTotals.get(itemId) ?? 0) + quantity;
+      if (!Number.isSafeInteger(combined) || combined > this.MAX_QUANTITY) {
+        outputsValid = false;
+        continue;
+      }
+      outputTotals.set(itemId, combined);
+    }
+    const outputs: ProcessingActionItem[] = [...outputTotals.entries()]
+      .map(([itemId, quantity]) => ({
+        itemId,
+        quantity,
+        stackable: getItem(itemId)?.stackable === true,
+      }))
+      .sort((left, right) => left.itemId.localeCompare(right.itemId));
+    const failure = (
+      reason: AtomicProcessingActionFailureReason,
+      retryable: boolean,
+    ): AtomicProcessingActionReceipt => ({
+      ok: false,
+      committed: false,
+      liveInventoryApplied: false,
+      playerId: normalizedPlayerId,
+      operationId: normalizedOperationId,
+      replayed: false,
+      skill: PROCESSING_ACTION_SKILLS.has(skill) ? skill : null,
+      xpAmount: Number.isFinite(xpAmount) ? xpAmount : 0,
+      inputs,
+      requiredItems: requiredItems ?? [],
+      consumables: consumables ?? [],
+      consumableStates: [],
+      outputs,
+      ...(Number.isSafeInteger(coinCost) && coinCost > 0 ? { coinCost } : {}),
+      ...(worldEffect ? { worldEffect } : {}),
+      retryable,
+      reason,
+    });
+
+    if (
+      !toPlayerID(normalizedPlayerId) ||
+      !normalizedOperationId ||
+      normalizedOperationId.length > 256 ||
+      !PROCESSING_ACTION_SKILLS.has(skill) ||
+      !Number.isFinite(xpAmount) ||
+      xpAmount < 0 ||
+      xpAmount > 1_000_000 ||
+      !Number.isSafeInteger(coinCost) ||
+      coinCost < 0 ||
+      coinCost > this.MAX_QUANTITY ||
+      !worldEffectValid ||
+      inputs.length === 0 ||
+      !requiredItems ||
+      !consumables ||
+      !outputsValid ||
+      outputs.length > 28
+    ) {
+      return failure("invalid_request", false);
+    }
+    if (!this.isInventoryReady(normalizedPlayerId)) {
+      return failure("inventory_not_initialized", true);
+    }
+    const db = this.getDatabase();
+    if (!db?.commitProcessingActionOperationAsync) {
+      return failure("atomic_persistence_unavailable", true);
+    }
+
+    let result: AtomicProcessingActionReceipt = failure(
+      "persistence_ambiguous",
+      true,
+    );
+    await this.queueOperation(normalizedPlayerId, async () => {
+      if (!this.lockForTransaction(normalizedPlayerId)) {
+        result = failure("inventory_busy", true);
+        return false;
+      }
+      try {
+        let requestFingerprint: string;
+        try {
+          const fingerprintPayload: Record<string, unknown> = {
+            version: 1,
+            playerId: normalizedPlayerId,
+            skill,
+            xpAmount,
+            inputs,
+            outputs,
+          };
+          if (requiredItems.length > 0) {
+            fingerprintPayload.requiredItems = requiredItems;
+          }
+          if (consumables.length > 0) {
+            fingerprintPayload.consumables = consumables;
+          }
+          if (coinCost > 0) {
+            fingerprintPayload.coinCost = coinCost;
+          }
+          if (worldEffect) {
+            fingerprintPayload.worldEffect = worldEffect;
+          }
+          requestFingerprint = await sha256Hex(
+            JSON.stringify(fingerprintPayload),
+          );
+        } catch {
+          result = failure("atomic_persistence_unavailable", true);
+          return false;
+        }
+
+        const request: ProcessingActionCommitRequest = {
+          operationId: normalizedOperationId,
+          playerId: normalizedPlayerId,
+          requestFingerprint,
+          skill,
+          xpAmount,
+          inputs,
+          requiredItems,
+          consumables,
+          outputs,
+          ...(coinCost > 0 ? { coinCost } : {}),
+          ...(worldEffect ? { worldEffect } : {}),
+        };
+        let receipt;
+        try {
+          receipt = await db.commitProcessingActionOperationAsync(request);
+        } catch (firstError) {
+          if (!shouldRetryProcessingAction(firstError)) {
+            result = failure(processingActionErrorReason(firstError), false);
+            return false;
+          }
+          try {
+            receipt = await db.commitProcessingActionOperationAsync(request);
+          } catch (retryError) {
+            const reason = processingActionErrorReason(retryError);
+            Logger.systemError(
+              "InventorySystem",
+              `Atomic processing action is unresolved for ${normalizedPlayerId}: ${String(retryError)}`,
+            );
+            result = failure(reason, reason === "persistence_ambiguous");
+            return false;
+          }
+        }
+
+        const consumableStates = normalizeProcessingConsumableStates(
+          receipt.consumableStates,
+          consumables,
+        );
+        const committedWorldEffect = normalizeCommittedProcessingFireEffect(
+          receipt.worldEffect,
+          worldEffect,
+        );
+        if (
+          receipt.operationId !== normalizedOperationId ||
+          receipt.playerId !== normalizedPlayerId ||
+          receipt.requestFingerprint !== requestFingerprint ||
+          receipt.skill !== skill ||
+          receipt.xpAmount !== xpAmount ||
+          JSON.stringify(receipt.inputs) !== JSON.stringify(inputs) ||
+          JSON.stringify(receipt.requiredItems) !==
+            JSON.stringify(requiredItems) ||
+          JSON.stringify(receipt.consumables) !== JSON.stringify(consumables) ||
+          !consumableStates ||
+          committedWorldEffect === null ||
+          JSON.stringify(receipt.outputs) !== JSON.stringify(outputs) ||
+          Number(receipt.coinCost ?? 0) !== coinCost ||
+          (coinCost > 0 &&
+            (!Number.isSafeInteger(receipt.currentCoins) ||
+              Number(receipt.currentCoins) < 0 ||
+              Number(receipt.currentCoins) > this.MAX_QUANTITY)) ||
+          !Number.isFinite(receipt.operationCommittedXp) ||
+          receipt.operationCommittedXp < 0 ||
+          receipt.operationCommittedXp > MAX_SKILL_XP ||
+          !Number.isFinite(receipt.awardedXp) ||
+          receipt.awardedXp < 0 ||
+          receipt.awardedXp > xpAmount ||
+          !Number.isFinite(receipt.currentXp) ||
+          receipt.currentXp < receipt.operationCommittedXp ||
+          receipt.currentXp > MAX_SKILL_XP ||
+          !Number.isSafeInteger(receipt.currentLevel) ||
+          receipt.currentLevel < 1 ||
+          receipt.currentLevel > 99 ||
+          receipt.currentLevel !== exactSkillLevelForXp(receipt.currentXp)
+        ) {
+          result = failure("persistence_ambiguous", true);
+          return false;
+        }
+
+        let liveInventoryApplied = this.applyCommittedInventorySnapshot(
+          normalizedPlayerId,
+          receipt.committed,
+        );
+        if (!liveInventoryApplied) {
+          try {
+            await this.reloadFromDatabase(normalizedPlayerId);
+            liveInventoryApplied = true;
+          } catch (error) {
+            Logger.systemError(
+              "InventorySystem",
+              `Processing action committed but live inventory convergence failed for ${normalizedPlayerId}: ${String(error)}`,
+            );
+          }
+        }
+        if (coinCost > 0) {
+          const coinPouch = this.getCoinPouchSystem();
+          const liveCoinsApplied =
+            coinPouch?.applyCommittedBalance(
+              normalizedPlayerId,
+              Number(receipt.currentCoins),
+            ) === true;
+          liveInventoryApplied = liveInventoryApplied && liveCoinsApplied;
+        }
+
+        result = {
+          ok: true,
+          committed: true,
+          liveInventoryApplied,
+          playerId: normalizedPlayerId,
+          operationId: normalizedOperationId,
+          replayed: receipt.replayed,
+          skill,
+          xpAmount,
+          inputs,
+          requiredItems,
+          consumables,
+          consumableStates,
+          outputs,
+          ...(coinCost > 0
+            ? {
+                coinCost,
+                currentCoins: Number(receipt.currentCoins),
+              }
+            : {}),
+          ...(committedWorldEffect
+            ? { worldEffect: committedWorldEffect }
+            : {}),
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        };
+        return true;
+      } finally {
+        this.unlockTransaction(normalizedPlayerId);
+      }
+    });
+    return result;
+  }
+
+  /**
+   * Apply inventory rows that were already committed by the database's atomic
+   * combat-loadout transaction. This never persists independently: doing so
+   * would split inventory from equipment/autocast again. The caller must hold
+   * this player's transaction lock for the complete commit-and-apply window.
+   */
+  applyCommittedCombatLoadoutInventory(
+    playerId: string,
+    rows: InventorySaveItem[],
+  ): boolean {
+    return this.applyCommittedInventorySnapshot(playerId, rows);
+  }
+
+  /** Apply an already committed inventory snapshot while its lock is held. */
+  applyCommittedInventorySnapshot(
+    playerId: string,
+    rows: InventorySaveItem[],
+  ): boolean {
+    if (!this.isLockedForTransaction(playerId)) return false;
+    const playerIdKey = toPlayerID(playerId);
+    if (!playerIdKey) return false;
+
+    const seenSlots = new Set<number>();
+    const items: PlayerInventory["items"] = [];
+    for (const row of rows) {
+      const slot = Number(row.slotIndex);
+      const quantity = Number(row.quantity);
+      const itemId = String(row.itemId ?? "").trim();
+      const item = getItem(itemId);
+      if (
+        !Number.isSafeInteger(slot) ||
+        slot < 0 ||
+        slot >= this.MAX_INVENTORY_SLOTS ||
+        seenSlots.has(slot) ||
+        !itemId ||
+        !item ||
+        !Number.isSafeInteger(quantity) ||
+        quantity <= 0 ||
+        quantity > this.MAX_QUANTITY
+      ) {
+        return false;
+      }
+      seenSlots.add(slot);
+      items.push({ slot, itemId, quantity, item });
+    }
+    items.sort((a, b) => a.slot - b.slot);
+
+    const inventory = this.getOrCreateInventory(playerIdKey);
+    inventory.items = items;
+    this.initializedInventories.add(playerId);
+    this.emitInventoryUpdate(playerIdKey);
+    return true;
+  }
+
+  /**
    * Check if a player's inventory is fully initialized and ready to use.
    * Returns false if the inventory is currently being loaded from the database.
    * Use this before responding to INVENTORY_REQUEST to avoid race conditions.
@@ -1742,13 +4973,17 @@ export class InventorySystem extends SystemBase {
   async removeItemDirect(
     playerId: string,
     params: { itemId: string; quantity: number; slot?: number },
+    allowWhileTransactionLocked = false,
   ): Promise<boolean> {
-    return this.removeItem({
-      playerId,
-      itemId: params.itemId,
-      quantity: params.quantity,
-      slot: params.slot,
-    });
+    return this.removeItem(
+      {
+        playerId,
+        itemId: params.itemId,
+        quantity: params.quantity,
+        slot: params.slot,
+      },
+      allowWhileTransactionLocked,
+    );
   }
 
   /**
@@ -1762,7 +4997,11 @@ export class InventorySystem extends SystemBase {
   async addItemDirect(
     playerId: string,
     params: { itemId: string; quantity: number },
+    allowWhileTransactionLocked = false,
   ): Promise<boolean> {
+    if (this.transactionLocks.has(playerId) && !allowWhileTransactionLocked) {
+      return false;
+    }
     // Check if we can add
     if (!this.canAddItem(playerId, params.itemId, params.quantity)) {
       return false;
@@ -2339,6 +5578,7 @@ export class InventorySystem extends SystemBase {
    * Call this for graceful shutdown to prevent data loss.
    */
   async destroyAsync(): Promise<void> {
+    this.isDestroying = true;
     // Final save pass for all connected players before shutdown
     if (this.world.isServer) {
       const db = this.getDatabase();

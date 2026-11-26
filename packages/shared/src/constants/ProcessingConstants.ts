@@ -51,9 +51,9 @@ export const PROCESSING_CONSTANTS = {
 
   // === Fire Properties ===
   FIRE: {
-    /** Minimum fire duration in ticks (60 seconds) - classic MMORPG per Mod Ash */
+    /** Minimum fire duration in ticks (60 seconds). */
     minDurationTicks: 100,
-    /** Maximum fire duration in ticks (119 seconds) - classic MMORPG per Mod Ash */
+    /** Maximum fire duration in ticks (119 seconds). */
     maxDurationTicks: 198,
     /** Maximum fires per player */
     maxFiresPerPlayer: 3,

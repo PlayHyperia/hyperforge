@@ -22,6 +22,7 @@ import { System } from "../shared/infrastructure/System";
 import { EventType } from "../../types/events";
 import type { World } from "../../core/World";
 import type { WorldOptions } from "../../types/index";
+import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
 
 interface CountdownSplat {
   poolItem: SplatPoolItem;
@@ -87,6 +88,36 @@ export class DuelCountdownSplatSystem extends System {
       this.boundCountdownHandler,
       this,
     );
+  }
+
+  async start(): Promise<void> {
+    super.start();
+    if (this.world.isClient && isStreamingLikeViewport()) {
+      await this.prewarmStreamingCountdownPool();
+    }
+  }
+
+  /**
+   * The stream uses only two simultaneous countdown sprites, but every first
+   * cycle rotates them through four canvas textures. Compile those exact pool
+   * objects and upload every texture before renderer readiness can be exposed.
+   */
+  private async prewarmStreamingCountdownPool(): Promise<void> {
+    this.initPool();
+    const precompileObject = this.world.graphics?.precompileObject;
+    if (!precompileObject) return;
+
+    const activePoolSize = Math.min(2, this.splatPool.length);
+    for (let poolIndex = 0; poolIndex < activePoolSize; poolIndex++) {
+      const item = this.splatPool[poolIndex];
+      for (const count of [3, 2, 1, 0]) {
+        const texture = this.countTextures.get(count);
+        if (!texture) continue;
+        item.material.map = texture;
+        item.material.needsUpdate = true;
+        await precompileObject.call(this.world.graphics, item.sprite);
+      }
+    }
   }
 
   private initPool(): void {

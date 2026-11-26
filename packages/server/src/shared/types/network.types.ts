@@ -57,12 +57,20 @@ export interface ServerSocket extends Socket {
 
   // Server-specific extensions
   accountId?: string;
+  /** Database-backed agent credential session bound during JWT verification. */
+  agentCredentialSessionId?: string;
+  /** Exact character authorized by the database-backed agent credential. */
+  agentCredentialCharacterId?: string;
+  agentCredentialExpiryTimeoutId?: NodeJS.Timeout;
   selectedCharacterId?: string;
   characterId?: string; // Track active character immediately for duplicate detection
   pendingClientReady?: boolean; // Buffer clientReady packets that arrive before player attach
   createdAt?: number; // Timestamp when socket was created (for reconnection grace period)
+  isLoadTestBot?: boolean; // Server-approved local test bypass; never trusted from packets
   clientReadyTimeoutId?: NodeJS.Timeout; // Force-ready timeout for spawned players
   isSpectator?: boolean;
+  /** Canonical arena stream viewer; unlike a pinned spectator, follows matchup changes. */
+  isStreamingViewer?: boolean;
   spectatingCharacterId?: string;
   spectatingDuelParticipantIds?: string[];
 }

@@ -63,4 +63,63 @@ describe("alive validation handling", () => {
 
     expect(valid).toBe(true);
   });
+
+  it("does not trust a cooking-source display-name lookalike", async () => {
+    const runtime = createRuntime({
+      inCombat: false,
+      alive: true,
+      items: [{ id: "1", name: "Raw Shrimp", quantity: 1 }],
+    });
+    runtime
+      .getService()
+      .getNearbyEntities.mockReturnValue([
+        { id: "spoof", name: "Cooking Fire", type: "decoration" },
+      ]);
+
+    expect(await cookFoodAction.validate(runtime as never)).toBe(false);
+  });
+
+  it("does not report cooking success without authoritative completion", async () => {
+    const service = {
+      isConnected: vi.fn().mockReturnValue(true),
+      getPlayerEntity: vi.fn().mockReturnValue({
+        inCombat: false,
+        alive: true,
+        items: [{ id: "1", name: "Raw Shrimp", quantity: 1 }],
+      }),
+      getNearbyEntities: vi
+        .fn()
+        .mockReturnValue([{ id: "fire-1", name: "Fire", type: "fire" }]),
+      executeCooking: vi.fn().mockResolvedValue(false),
+    };
+    const runtime = { getService: vi.fn().mockReturnValue(service) };
+
+    const result = await cookFoodAction.handler(
+      runtime as never,
+      { content: { text: "cook" } } as never,
+    );
+    expect(result).toMatchObject({ success: false });
+  });
+
+  it("does not report firemaking success without authoritative completion", async () => {
+    const service = {
+      isConnected: vi.fn().mockReturnValue(true),
+      getPlayerEntity: vi.fn().mockReturnValue({
+        inCombat: false,
+        alive: true,
+        items: [
+          { id: "1", name: "Tinderbox", quantity: 1 },
+          { id: "2", name: "Logs", quantity: 1 },
+        ],
+      }),
+      executeFiremaking: vi.fn().mockResolvedValue(false),
+    };
+    const runtime = { getService: vi.fn().mockReturnValue(service) };
+
+    const result = await lightFireAction.handler(
+      runtime as never,
+      { content: { text: "light fire" } } as never,
+    );
+    expect(result).toMatchObject({ success: false });
+  });
 });

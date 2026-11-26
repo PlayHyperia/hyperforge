@@ -9,6 +9,7 @@
  * @see HealthBarRenderer for the drawing logic
  */
 
+import type { Node } from "three/webgpu";
 import * as THREE from "../../extras/three/three";
 import {
   MeshBasicNodeMaterial,
@@ -150,13 +151,11 @@ export class HealthBars extends SystemBase {
     const atlasTexture = this.texture;
 
     // Helper function to apply quaternion to position
-    const applyQuaternion = Fn(
-      ([pos, quat]: [ReturnType<typeof vec3>, ReturnType<typeof vec4>]) => {
-        const qv = vec3(quat.x, quat.y, quat.z);
-        const t = mul(cross(qv, pos), float(2.0));
-        return add(add(pos, mul(t, quat.w)), cross(qv, t));
-      },
-    );
+    const applyQuaternion = Fn(([pos, quat]: [Node<"vec3">, Node<"vec4">]) => {
+      const qv = vec3(quat.x, quat.y, quat.z);
+      const t = mul(cross(qv, pos), float(2.0));
+      return add(add(pos, mul(t, quat.w)), cross(qv, t));
+    });
 
     // Position node with billboard orientation
     const positionNode = Fn(() => {

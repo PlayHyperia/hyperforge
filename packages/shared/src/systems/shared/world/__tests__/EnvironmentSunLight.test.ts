@@ -1,0 +1,796 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import { uniform } from "three/tsl";
+import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
+import THREE from "../../../../extras/three/three";
+import {
+  UniformDirectionalShadowNode,
+  isOwnedUniformDirectionalShadowNode,
+} from "../../../../extras/three/UniformDirectionalShadow";
+import type { WorldConfigManifest } from "../../../../types/world/world-types";
+import { ClientInterface } from "../../../client/ClientInterface";
+import { ClientGraphics } from "../../../client/ClientGraphics";
+import { ClientLoader } from "../../../client/ClientLoader";
+import { csmLevels, Environment } from "../Environment";
+import { worldTerrainProfileIdentity } from "../WorldTerrainProfile";
+
+function admitCompactProfile(): void {
+  const config = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../../../server/world/assets/manifests/world-config.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as WorldConfigManifest;
+  DataManager.setWorldConfig(config);
+}
+
+// Real World/Stage, preferences, Environment and Three lights. No renderer or
+// full-world start: this suite checks construction/ownership, not GPU shading.
+describe("directional illumination independent of shadow quality", () => {
+  const environments: Environment[] = [];
+  beforeEach(() => {
+    vi.stubGlobal("window", {});
+    vi.stubEnv("ENABLE_CSM", "false");
+    admitCompactProfile();
+  });
+  afterEach(() => {
+    for (const environment of environments.splice(0)) environment.destroy();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+  async function create(shadows = "none") {
+    const world = new World();
+    const prefs = new ClientInterface(world);
+    world.addSystem("prefs", prefs);
+    prefs.shadows = shadows;
+    const environment = new Environment(world);
+    environments.push(environment);
+    await environment.init({});
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    return { world, prefs, environment, scene: world.stage.scene };
+  }
+
+  function selectUniformCandidate(): void {
+    vi.stubGlobal("window", {
+      location: {
+        pathname: "/stream.html",
+        search: "?streamRenderProfile=island-720p60-v1&shadowFlow=uniform-v1",
+      },
+    });
+  }
+
+  it.each(["low", "med", "high"])(
+    "attaches the explicit uniform %s owner without changing sun or projection settings",
+    async (level) => {
+      const control = await create(level);
+      control.environment.buildSunLight();
+      const original = control.environment.sunLight!;
+      selectUniformCandidate();
+      const { environment } = await create(level);
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      expect(
+        isOwnedUniformDirectionalShadowNode(light.shadow.shadowNode, light),
+      ).toBe(true);
+      expect(original.shadow.shadowNode).toBeUndefined();
+      expect(light.color.toArray()).toEqual(original.color.toArray());
+      expect(light.intensity).toBe(original.intensity);
+      expect(light.position.toArray()).toEqual(original.position.toArray());
+      expect(light.target.position.toArray()).toEqual(
+        original.target.position.toArray(),
+      );
+      expect(light.shadow.mapSize.toArray()).toEqual(
+        original.shadow.mapSize.toArray(),
+      );
+      expect(light.shadow.bias).toBe(original.shadow.bias);
+      expect(light.shadow.normalBias).toBe(original.shadow.normalBias);
+      expect(light.shadow.camera.projectionMatrix.elements).toEqual(
+        original.shadow.camera.projectionMatrix.elements,
+      );
+      expect(light.shadow.map).toBeNull();
+    },
+  );
+
+  it("captures selection once, honors no-shadows and emits disposal for each replaced CPU-only owner", async () => {
+    selectUniformCandidate();
+    const { environment, prefs, scene } = await create("med");
+    const nodes: UniformDirectionalShadowNode[] = [];
+    const disposed: UniformDirectionalShadowNode[] = [];
+    for (const level of ["med", "none", "high", "low"]) {
+      prefs.shadows = level;
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      const node = light.shadow.shadowNode;
+      if (level === "none") {
+        expect(node).toBeUndefined();
+        expect(light.castShadow).toBe(false);
+      } else {
+        expect(node).toBeInstanceOf(UniformDirectionalShadowNode);
+        const owned = node as UniformDirectionalShadowNode;
+        owned.addEventListener("dispose", () => disposed.push(owned));
+        nodes.push(owned);
+      }
+      expect(scene.children).toEqual([light, light.target]);
+      expect(disposed).toEqual(level === "none" ? nodes : nodes.slice(0, -1));
+      // A changing URL cannot silently change an already admitted owner.
+      vi.stubGlobal("window", {});
+    }
+    environment.destroy();
+    expect(disposed).toEqual(nodes);
+    expect(scene.children).toEqual([]);
+    environment.destroy();
+    expect(disposed).toEqual(nodes);
+  });
+
+  it("rejects incompatible CSM selection before replacing the existing light", async () => {
+    selectUniformCandidate();
+    const { environment, scene } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode;
+    const identity = environment.getSunLightTerrainProfileIdentity();
+    vi.stubEnv("ENABLE_CSM", "true");
+    expect(() => environment.buildSunLight()).toThrow(
+      "compact single-map shadows",
+    );
+    expect(environment.sunLight).toBe(light);
+    expect(light.shadow.shadowNode).toBe(node);
+    expect(scene.children).toEqual([light, light.target]);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+  });
+
+  it("rejects an explicitly non-WebGPU graphics owner without mutating or disposing the existing sun", async () => {
+    selectUniformCandidate();
+    const { environment, world, scene } = await create("med");
+    // Actual graphics owner, deliberately never initialized/rendered. This tests
+    // the negative capability gate, not a supplied GPU/renderer substitute.
+    const graphics = new ClientGraphics(world);
+    world.addSystem("graphics", graphics);
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode as UniformDirectionalShadowNode;
+    const identity = environment.getSunLightTerrainProfileIdentity();
+    const before = light.toJSON();
+    let lightDisposals = 0;
+    let nodeDisposals = 0;
+    light.addEventListener("dispose", () => lightDisposals++);
+    node.addEventListener("dispose", () => nodeDisposals++);
+    try {
+      graphics.isWebGPU = false;
+      expect(() => environment.buildSunLight()).toThrow(
+        "compact single-map shadows",
+      );
+      expect(environment.sunLight).toBe(light);
+      expect(light.shadow.shadowNode).toBe(node);
+      expect(light.toJSON()).toEqual(before);
+      expect(scene.children).toEqual([light, light.target]);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+      expect(isOwnedUniformDirectionalShadowNode(node, light)).toBe(true);
+      expect([lightDisposals, nodeDisposals]).toEqual([0, 0]);
+    } finally {
+      graphics.isWebGPU = true;
+      graphics.destroy();
+    }
+  });
+
+  it("disposes the actual owned Three target once when replacing its light", async () => {
+    selectUniformCandidate();
+    const { environment } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const node = light.shadow.shadowNode as UniformDirectionalShadowNode;
+    // Real Three resources with the same aliasing as ShadowNode.setupShadow.
+    // This verifies teardown ownership, not GPU allocation or rendering.
+    const target = new THREE.RenderTarget(64, 64);
+    Reflect.set(node, "shadowMap", target);
+    light.shadow.map = target;
+    let disposals = 0;
+    target.addEventListener("dispose", () => disposals++);
+    environment.buildSunLight();
+    expect(disposals).toBe(1);
+    expect(node.shadowMap).toBeNull();
+    expect(light.shadow.map).toBeNull();
+    expect(light.shadow.shadowNode).toBeUndefined();
+    expect(light.parent).toBeNull();
+    expect(environment.sunLight).not.toBe(light);
+  });
+
+  it("none retains a direct sun and target without a shadow map or scene changes", async () => {
+    const { environment, scene, world } = await create();
+    const neighbor = new THREE.Object3D();
+    scene.add(neighbor);
+    const fog = new THREE.Fog(0x223344, 10, 100);
+    scene.fog = fog;
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    expect(light).toBeInstanceOf(THREE.DirectionalLight);
+    expect(light.name).toBe("SunLight_NoShadows");
+    expect(light.castShadow).toBe(false);
+    expect(light.shadow.map).toBeNull();
+    expect(light.shadow.mapPass).toBeNull();
+    expect(light.intensity).toBe(1.8);
+    expect(light.color.toArray()).toEqual([1, 1, 1]);
+    expect(light.position).toEqual(
+      world.camera.position.clone().add(new THREE.Vector3(0, 400, 0)),
+    );
+    expect(light.target.position).toEqual(world.camera.position);
+    expect(scene.children).toEqual([neighbor, light, light.target]);
+    expect(scene.fog).toBe(fog);
+    expect(scene.environment).toBeNull();
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+  });
+
+  it("none still disables CSM when its feature flag is enabled", async () => {
+    vi.stubEnv("ENABLE_CSM", "true");
+    const { environment, scene } = await create();
+    environment.buildSunLight();
+    expect(environment.sunLight?.castShadow).toBe(false);
+    expect(environment.sunLight?.shadow.map).toBeNull();
+    expect(
+      (environment as unknown as { csmShadowNode: unknown }).csmShadowNode,
+    ).toBeNull();
+    expect(scene.children).toHaveLength(2);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+  });
+
+  it("keeps missing legacy sky URLs as metadata without fetching them during procedural sky refresh", async () => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url ?? "");
+      response.writeHead(404, { "Content-Type": "text/plain" });
+      response.end("Missing legacy sky asset");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { world, environment, prefs, scene } = await create();
+    const loader = new ClientLoader(world);
+    world.addSystem("loader", loader);
+    const ibl = new THREE.Texture();
+    const iblNode = uniform(new THREE.Color(0.1, 0.2, 0.3));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected a real local HTTP listener");
+      }
+      const origin = `http://127.0.0.1:${address.port}`;
+      const base = {
+        bg: `${origin}/world/day2-2k.jpg`,
+        hdr: `${origin}/world/day2.hdr`,
+        sunDirection: new THREE.Vector3(-1, -2, -2).normalize(),
+        sunIntensity: 1.25,
+        sunColor: 0xffeed0,
+        fogNear: 12,
+        fogFar: 240,
+        fogColor: "#90a0b0",
+      };
+
+      // Actual HTTP and loader negative controls: these URLs fail, and no
+      // cached successful resource can make the following refresh pass.
+      for (const url of [base.bg, base.hdr]) {
+        await expect(loader.loadFile(url)).rejects.toThrow(
+          "HTTP error! status: 404",
+        );
+        expect(loader.getFile(url)).toBeUndefined();
+      }
+      expect(requests).toEqual(["/world/day2-2k.jpg", "/world/day2.hdr"]);
+      requests.length = 0;
+      await environment.init({ baseEnvironment: base });
+      scene.environment = ibl;
+      scene.environmentNode = iblNode;
+      scene.environmentIntensity = 0.75;
+      for (const shadows of ["none", "med", "none"]) {
+        prefs.shadows = shadows;
+        environment.buildSunLight();
+        await expect(environment.updateSky()).resolves.toBeUndefined();
+        expect(environment.skyInfo).toEqual({
+          bgUrl: base.bg,
+          hdrUrl: base.hdr,
+          sunDirection: base.sunDirection,
+          sunIntensity: base.sunIntensity,
+          sunColor: base.sunColor,
+          fogNear: base.fogNear,
+          fogFar: base.fogFar,
+          fogColor: base.fogColor,
+        });
+        expect(environment.lightDirection).toEqual(base.sunDirection);
+        expect(environment.sunLight?.intensity).toBe(base.sunIntensity);
+        expect(environment.sunLight?.color).toEqual(
+          new THREE.Color(base.sunColor),
+        );
+        expect(scene.fog).toEqual(
+          new THREE.Fog(base.fogColor, base.fogNear, base.fogFar),
+        );
+        expect(scene.background).toBeNull();
+        expect(scene.environment).toBe(ibl);
+        expect(scene.environmentNode).toBe(iblNode);
+        expect(scene.environmentIntensity).toBe(0.75);
+        expect(requests).toEqual([]);
+      }
+      // CPU resource ownership only; actual sky/IBL rendering remains a
+      // separate native WebGPU integration gate.
+    } finally {
+      environment.destroy();
+      world.destroy();
+      ibl.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it.each(["low", "med", "high"])(
+    "uses zero bias for admitted compact %s single shadows, preserving the map and normal offset",
+    async (level) => {
+      const { environment } = await create(level);
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      expect(light.name).toBe("SunLight_Single");
+      expect(light.castShadow).toBe(true);
+      expect(light.shadow.mapSize.toArray()).toEqual([4096, 4096]);
+      expect(light.shadow.bias).toBe(0);
+      expect(light.shadow.normalBias).toBe(0.01);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBe(
+        worldTerrainProfileIdentity(DataManager.getWorldTerrainProfile()),
+      );
+      expect(light.shadow.camera).toMatchObject({
+        near: 0.5,
+        far: 600,
+        left: -200,
+        right: 200,
+        top: 200,
+        bottom: -200,
+      });
+    },
+  );
+
+  it.each(["low", "med", "high"] as const)(
+    "keeps actual %s CSM construction and bias independent of the compact single-map candidate",
+    async (level) => {
+      vi.stubEnv("ENABLE_CSM", "true");
+      const { environment } = await create(level);
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      const config = csmLevels[level];
+      expect(light.name).toBe("SunLight_CSM");
+      expect(light.castShadow).toBe(true);
+      expect(light.shadow.mapSize.toArray()).toEqual([
+        config.shadowMapSize,
+        config.shadowMapSize,
+      ]);
+      expect(light.shadow.bias).toBe(config.shadowBias);
+      expect(light.shadow.normalBias).toBe(config.shadowNormalBias);
+      expect(light.shadow.camera).toMatchObject({
+        near: 0.5,
+        far: 600,
+        left: -100,
+        right: 100,
+        top: 100,
+        bottom: -100,
+      });
+      expect(light.shadow.map).toBeNull();
+      expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    },
+  );
+
+  it("none -> med -> none replaces and destroys each owned light/target cleanly", async () => {
+    const { environment, prefs, scene } = await create();
+    const created: THREE.DirectionalLight[] = [];
+    const disposed: THREE.DirectionalLight[] = [];
+    for (const level of ["none", "med", "none"]) {
+      prefs.shadows = level;
+      environment.buildSunLight();
+      const light = environment.sunLight!;
+      expect(light).toBeInstanceOf(THREE.DirectionalLight);
+      light.addEventListener("dispose", () => disposed.push(light));
+      created.push(light);
+      expect(scene.children).toEqual([light, light.target]);
+      for (const previous of created.slice(0, -1)) {
+        expect(previous.parent).toBeNull();
+        expect(previous.target.parent).toBeNull();
+      }
+    }
+    expect(disposed).toEqual(created.slice(0, -1));
+    environment.destroy();
+    expect(disposed).toEqual(created);
+    expect(scene.children).toEqual([]);
+    expect(environment.sunLight).toBeNull();
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+  });
+
+  it("reports compact provenance only for the current scene-owned light and target", async () => {
+    const { environment, prefs, scene } = await create("med");
+    environment.buildSunLight();
+    const first = environment.sunLight!;
+    const identity = worldTerrainProfileIdentity(
+      DataManager.getWorldTerrainProfile(),
+    );
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+
+    const unrelated = new THREE.DirectionalLight();
+    try {
+      scene.add(unrelated, unrelated.target);
+      environment.sunLight = unrelated;
+      expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+      environment.sunLight = first;
+      scene.remove(first);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+      scene.add(first);
+      scene.remove(first.target);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+      scene.add(first.target);
+      expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+    } finally {
+      environment.sunLight = first;
+      scene.add(first, first.target);
+      scene.remove(unrelated, unrelated.target);
+      unrelated.dispose();
+    }
+
+    const disposalIdentities: (string | null)[] = [];
+    first.addEventListener("dispose", () => {
+      disposalIdentities.push(environment.getSunLightTerrainProfileIdentity());
+    });
+    environment.buildSunLight();
+    const replacement = environment.sunLight!;
+    expect(replacement).not.toBe(first);
+    expect(first.parent).toBeNull();
+    expect(first.target.parent).toBeNull();
+    expect(disposalIdentities).toEqual([null]);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+    replacement.addEventListener("dispose", () => {
+      disposalIdentities.push(environment.getSunLightTerrainProfileIdentity());
+    });
+    prefs.shadows = "none";
+    environment.buildSunLight();
+    expect(disposalIdentities).toEqual([null, null]);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    prefs.shadows = "med";
+    environment.buildSunLight();
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(identity);
+    environment.destroy();
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    expect(scene.children).toEqual([]);
+  });
+
+  it("keeps the non-graphics guard", async () => {
+    const world = new World();
+    const environment = new Environment(world);
+    environments.push(environment);
+    environment.buildSunLight();
+    expect(environment.sunLight).toBeNull();
+    expect(world.stage.scene.children).toEqual([]);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+  });
+
+  it("retains legacy bias/provenance and rejects a selected uniform shadow under non-sculpt terrain without replacing its owner", () => {
+    // Vitest's real manifest setup already identifies its world. A fresh actual
+    // source process tests pre-admission behavior without resetting that owner.
+    const source = (path: string) =>
+      JSON.stringify(new URL(path, import.meta.url).href);
+    const child = spawnSync(
+      process.env.DUEL_HYPERIA_BUN_PATH || "bun",
+      [
+        "--eval",
+        `
+      import assert from "node:assert/strict";
+      import {readFileSync} from "node:fs";
+      import {World} from ${source("../../../../core/World.ts")};
+      import {DataManager} from ${source("../../../../data/DataManager.ts")};
+      import {Environment} from ${source("../Environment.ts")};
+      import {ClientInterface} from ${source("../../../client/ClientInterface.ts")};
+      import {isOwnedUniformDirectionalShadowNode} from ${source("../../../../extras/three/UniformDirectionalShadow.ts")};
+      import {
+        COMPACT_WORLD_TERRAIN_PROFILE,
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+        HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE,
+        worldTerrainProfileIdentity,
+      } from ${source("../WorldTerrainProfile.ts")};
+      const config = JSON.parse(readFileSync(new URL(${source("../../../../../../server/world/assets/manifests/world-config.json")}), "utf8"));
+      function admit(profile) {
+        DataManager.setWorldConfig({
+          // Version 1 admits a terrain-only CPU fixture without authored groves.
+          version: 1,
+          seed: profile.seed,
+          terrainProfile: profile,
+          terrain: {
+            ...config.terrain,
+            worldSize: (profile.bounds.maxX-profile.bounds.minX)/profile.terrainTileSize,
+            tileSize: profile.terrainTileSize,
+            maxHeight: profile.height.maxHeightParameter,
+            waterThreshold: profile.water.threshold,
+          },
+          towns: config.towns,
+          roads: config.roads,
+        });
+      }
+      assert.equal(DataManager.getWorldConfig(), null);
+      globalThis.window = {};
+      const world = new World(), prefs = new ClientInterface(world);
+      world.addSystem("prefs", prefs); prefs.shadows = "med";
+      const environment = new Environment(world);
+      try {
+        await environment.init({});
+        world.camera.position.set(350,335,433);
+        for (const admitNonSculpt of [false, true]) {
+          if (admitNonSculpt) admit(COMPACT_WORLD_TERRAIN_PROFILE);
+          for (const level of ["low", "med", "high"]) {
+            prefs.shadows = level;
+            environment.buildSunLight();
+            environment.updateSunLightPosition();
+            assert.deepEqual(environment.sunLight.target.position.toArray(), [350,335,433]);
+            assert.deepEqual(environment.sunLight.position.toArray(), [350,735,433]);
+            assert.equal(environment.sunLight.shadow.bias, .0002);
+            assert.equal(environment.getSunLightTerrainProfileIdentity(), null);
+          }
+        }
+        admit(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
+        environment.buildSunLight();
+        const first = environment.sunLight;
+        const firstIdentity = worldTerrainProfileIdentity(DataManager.getWorldTerrainProfile());
+        assert.equal(first.shadow.bias, 0);
+        assert.equal(environment.getSunLightTerrainProfileIdentity(), firstIdentity);
+        admit(HAVEN_SHOULDER_COMPACT_WORLD_TERRAIN_PROFILE);
+        const nextIdentity = worldTerrainProfileIdentity(DataManager.getWorldTerrainProfile());
+        assert.notEqual(firstIdentity, nextIdentity);
+        // Construction provenance must not silently follow a global profile change.
+        assert.equal(environment.getSunLightTerrainProfileIdentity(), firstIdentity);
+        environment.buildSunLight();
+        assert.notEqual(environment.sunLight, first);
+        assert.equal(environment.sunLight.shadow.bias, 0);
+        assert.equal(environment.getSunLightTerrainProfileIdentity(), nextIdentity);
+        admit(COMPACT_WORLD_TERRAIN_PROFILE);
+        environment.buildSunLight();
+        assert.equal(environment.sunLight.shadow.bias, .0002);
+        assert.equal(environment.getSunLightTerrainProfileIdentity(), null);
+
+        // Keep manifest/global identity changes inside this fresh source process.
+        // The historical large-world fixture cannot be runtime-admitted, so use
+        // the actual supported non-sculpt compact profile to hit this rejection.
+        admit(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
+        globalThis.window = {location:{pathname:"/stream.html",
+          search:"?streamRenderProfile=island-720p60-v1&shadowFlow=uniform-v1"}};
+        const selected = new Environment(world);
+        try {
+          await selected.init({});
+          selected.buildSunLight();
+          const light = selected.sunLight, node = light.shadow.shadowNode;
+          const identity = selected.getSunLightTerrainProfileIdentity();
+          const children = [...world.stage.scene.children], before = light.toJSON();
+          let lightDisposals = 0, nodeDisposals = 0;
+          light.addEventListener("dispose", () => lightDisposals++);
+          node.addEventListener("dispose", () => nodeDisposals++);
+          assert.ok(isOwnedUniformDirectionalShadowNode(node,light));
+          admit(COMPACT_WORLD_TERRAIN_PROFILE);
+          assert.throws(() => selected.buildSunLight(), /compact single-map shadows/);
+          assert.equal(selected.sunLight,light);
+          assert.equal(light.shadow.shadowNode,node);
+          assert.deepEqual(light.toJSON(),before);
+          assert.deepEqual(world.stage.scene.children,children);
+          assert.equal(selected.getSunLightTerrainProfileIdentity(),identity);
+          assert.ok(isOwnedUniformDirectionalShadowNode(node,light));
+          assert.deepEqual([lightDisposals,nodeDisposals],[0,0]);
+          console.log("UNIFORM_SHADOW_NONSCULPT_REJECTION_OK");
+        } finally {selected.destroy();}
+        console.log("SUN_ADMISSION_AND_PROVENANCE_OK");
+      } finally { environment.destroy(); world.destroy(); }
+    `,
+      ],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+        maxBuffer: 65536,
+        env: { ...process.env, ENABLE_CSM: "false" },
+      },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toContain("SUN_ADMISSION_AND_PROVENANCE_OK");
+    expect(child.stdout).toContain("UNIFORM_SHADOW_NONSCULPT_REJECTION_OK");
+  });
+
+  it("keeps compact shadow matrices fixed across camera cuts along the intended unit ray without changing the budget", async () => {
+    // Actual canonical startup admission, not a fabricated terrain/renderer.
+    const { environment, world } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const profile = DataManager.getWorldTerrainProfile();
+    const anchor = new THREE.Vector3(
+      profile.island.centerX,
+      profile.height.baseOffset,
+      profile.island.centerZ,
+    );
+    expect(light.target.position).toEqual(anchor); // Correct before first render.
+    const projection = light.shadow.camera.projectionMatrix.clone();
+    const color = light.color.clone(),
+      intensity = light.intensity;
+    for (const direction of [
+      [0, -1, 0],
+      [0.6, -0.8, 0],
+      [-0.4, -0.3, 0.2],
+      [0.23, 0, 0],
+    ]) {
+      environment.lightDirection.fromArray(direction);
+      let first: number[] | undefined;
+      for (const camera of [
+        [354, 33.5, 324],
+        [350, 335.0693015230977, 433],
+        [-80, 900, 750],
+      ]) {
+        world.camera.position.fromArray(camera);
+        environment["updateSunLightPosition"]();
+        expect(light.target.position).toEqual(anchor);
+        const unitRay = new THREE.Vector3().fromArray(direction).normalize();
+        expect(
+          light.position.distanceTo(
+            anchor.clone().addScaledVector(unitRay, -400),
+          ),
+        ).toBeLessThan(1e-10);
+        expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+          400,
+          10,
+        );
+        expect(environment.lightDirection.toArray()).toEqual(direction);
+        // Actual Three update performed by a renderer; this test is CPU-only.
+        light.updateMatrixWorld(true);
+        light.shadow.camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+        light.shadow.camera.updateProjectionMatrix();
+        light.shadow.updateMatrices(light);
+        const matrix = [...light.shadow.camera.matrixWorldInverse.elements];
+        if (first) expect(matrix).toEqual(first);
+        first = matrix;
+        const centerClip = anchor
+          .clone()
+          .applyMatrix4(light.shadow.camera.matrixWorldInverse)
+          .applyMatrix4(light.shadow.camera.projectionMatrix);
+        expect(Math.abs(centerClip.x)).toBeLessThan(1);
+        expect(Math.abs(centerClip.y)).toBeLessThan(1);
+        expect(centerClip.z).toBeGreaterThan(0);
+        expect(centerClip.z).toBeLessThan(1);
+      }
+    }
+    expect(light.shadow.mapSize.toArray()).toEqual([4096, 4096]);
+    expect(light.shadow.camera).toMatchObject({
+      near: 0.5,
+      far: 600,
+      left: -200,
+      right: 200,
+      top: 200,
+      bottom: -200,
+    });
+    expect(light.shadow.bias).toBe(0);
+    expect(light.shadow.normalBias).toBe(0.01);
+    expect(light.color).toEqual(color);
+    expect(light.intensity).toBe(intensity);
+    // Coordinate-system change above is test-only; the constructor's projection
+    // uses the same finite extents, not an adaptive resize/fitting path.
+    expect(projection.elements.every(Number.isFinite)).toBe(true);
+    expect(light.shadow.map).toBeNull();
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(
+      worldTerrainProfileIdentity(profile),
+    );
+  });
+
+  it.each([false, true])(
+    "keeps the same illumination ray through quality rebuilds with CSM=%s",
+    async (csm) => {
+      const { environment, prefs, world } = await create();
+      vi.stubEnv("ENABLE_CSM", String(csm));
+      world.camera.position.set(354, 33.5, 324);
+      // A low sun and a non-unit interpolation state: normalize for placement,
+      // not for the next interpolation step or the water's direction input.
+      const direction = new THREE.Vector3(-0.62, -0.09, 0.31);
+      const unitRay = direction.clone().normalize();
+      environment.lightDirection.copy(direction);
+      for (const level of ["none", "low", "med", "high", "none"]) {
+        prefs.shadows = level;
+        environment.buildSunLight();
+        const light = environment.sunLight!;
+        const actualRay = light.target.position
+          .clone()
+          .sub(light.position)
+          .normalize();
+        expect(actualRay.distanceTo(unitRay)).toBeLessThan(1e-12);
+        expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+          400,
+          10,
+        );
+        expect(environment.lightDirection).toEqual(direction);
+        if (csm || level === "none") {
+          expect(light.target.position).toEqual(world.camera.position);
+        }
+      }
+    },
+  );
+
+  it("keeps a finite fixed-distance ray across zero-length sun/moon interpolation", async () => {
+    const { environment } = await create("med");
+    environment.buildSunLight();
+    const light = environment.sunLight!;
+    const scratch = environment["lightPlacementDirection"];
+    const initialTarget = light.target.position.clone();
+    let lastValid = new THREE.Vector3(0, -1, 0);
+    // Cancellation has no direction. Keep the last valid placement through it,
+    // then resume the unchanged interpolation state when it has a valid ray.
+    for (const direction of [
+      new THREE.Vector3(),
+      new THREE.Vector3(0.2, -0.03, 0.1),
+      new THREE.Vector3(1e-8, -1e-8, 0),
+      new THREE.Vector3(1e-6, 0, 0),
+      new THREE.Vector3(Number.NaN, 0, 0),
+      new THREE.Vector3(0, Number.POSITIVE_INFINITY, 0),
+      new THREE.Vector3(),
+      new THREE.Vector3(-0.001, 0.00015, -0.0005),
+      new THREE.Vector3(-0.2, 0.03, -0.1),
+    ]) {
+      environment.lightDirection.copy(direction);
+      if (
+        direction.toArray().every(Number.isFinite) &&
+        direction.lengthSq() > 1e-12
+      )
+        lastValid = direction.clone().normalize();
+      environment["updateSunLightPosition"]();
+      const actualRay = light.target.position
+        .clone()
+        .sub(light.position)
+        .normalize();
+      expect(actualRay.distanceTo(lastValid)).toBeLessThan(1e-12);
+      expect(light.position.distanceTo(light.target.position)).toBeCloseTo(
+        400,
+        10,
+      );
+      expect(light.target.position).toEqual(initialTarget);
+      expect(environment.lightDirection).toEqual(direction);
+      expect(environment["lightPlacementDirection"]).toBe(scratch);
+      light.updateMatrixWorld(true);
+      light.shadow.camera.coordinateSystem = THREE.WebGPUCoordinateSystem;
+      light.shadow.camera.updateProjectionMatrix();
+      light.shadow.updateMatrices(light);
+      expect(
+        light.shadow.camera.matrixWorldInverse.elements.every(Number.isFinite),
+      ).toBe(true);
+      expect(light.shadow.matrix.elements.every(Number.isFinite)).toBe(true);
+    }
+  });
+
+  it("retains camera following for compact CSM and reselects fixed anchoring after a quality rebuild", async () => {
+    const { environment, prefs, world } = await create("med");
+    vi.stubEnv("ENABLE_CSM", "true");
+    environment.buildSunLight();
+    world.camera.position.set(354, 33.5, 324);
+    environment["updateSunLightPosition"]();
+    expect(environment.sunLight!.name).toBe("SunLight_CSM");
+    expect(environment.sunLight!.shadow.bias).toBe(csmLevels.med.shadowBias);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    expect(environment.sunLight!.target.position).toEqual(
+      world.camera.position,
+    );
+    vi.stubEnv("ENABLE_CSM", "false");
+    prefs.shadows = "high";
+    environment.buildSunLight();
+    expect(environment.sunLight!.name).toBe("SunLight_Single");
+    expect(environment.sunLight!.shadow.bias).toBe(0);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBe(
+      worldTerrainProfileIdentity(DataManager.getWorldTerrainProfile()),
+    );
+    expect(environment.sunLight!.target.position.toArray()).toEqual([
+      350, 28.15, 400,
+    ]);
+    prefs.shadows = "none";
+    environment.buildSunLight();
+    environment["updateSunLightPosition"]();
+    expect(environment.sunLight!.castShadow).toBe(false);
+    expect(environment.getSunLightTerrainProfileIdentity()).toBeNull();
+    expect(environment.sunLight!.target.position).toEqual(
+      world.camera.position,
+    );
+  });
+});

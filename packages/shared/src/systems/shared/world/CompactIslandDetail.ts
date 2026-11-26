@@ -1,0 +1,122 @@
+import type { WorldArea } from "../../../types/world/world-types";
+import {
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
+import type { TerrainDetailRegion } from "./TerrainQuadTree";
+
+/**
+ * The broadcast's coarse terrain cannot describe a 15 m pond with 6.67 m cells.
+ * Retain gameplay density at the hub and a finer grid at the irregular pond
+ * bank, not every ocean/root chunk. The two intersecting pond leaves cost
+ * 49,664 more triangles and 2,000,896 more geometry bytes than their 64 grid.
+ * This changes visual sampling, not authoritative height or collision rules.
+ */
+export function createCompactPreparationDetailRegions(
+  profile: WorldTerrainProfile,
+  areas: Readonly<Record<string, WorldArea>>,
+  gameplayResolution: number,
+): readonly TerrainDetailRegion[] {
+  if (!isCompactSculptProfile(profile)) return [];
+  if (
+    !Number.isInteger(gameplayResolution) ||
+    gameplayResolution < 2 ||
+    gameplayResolution > 128
+  ) {
+    throw new Error("Invalid compact preparation terrain resolution");
+  }
+  const preparation = ["central_haven", "haven_pond"].map((id) => {
+    const area = areas[id];
+    if (!area) throw new Error(`Missing compact preparation area: ${id}`);
+    return {
+      ...area.bounds,
+      resolution: id === "haven_pond" ? 128 : gameplayResolution,
+      // Candidate annular bank geometry belongs to these minimum-size leaves.
+      // A distant coarse parent must not replace it while this root is active.
+      // Reuse the existing 128 grid; no new region or global resolution change.
+      ...(id === "haven_pond" && profile.southernMeadow !== undefined
+        ? { keepMinSize: true }
+        : {}),
+    };
+  });
+  if (
+    profile.algorithm !== "compact-island-sculpt-v2" &&
+    profile.algorithm !== "compact-island-sculpt-v3" &&
+    profile.algorithm !== "compact-island-sculpt-v4" &&
+    profile.algorithm !== "compact-island-sculpt-v5"
+  )
+    return preparation;
+  const shape = profile.landform;
+  if (!shape)
+    throw new Error("Authored sculpt detail requires admitted landform");
+  const { centerX, centerZ, radius, maxCoastVariation } = profile.island;
+  const scale = radius / 165;
+  const c = Math.cos(shape.inletBearing),
+    s = Math.sin(shape.inletBearing);
+  const corners = [
+    shape.inletTipDistance,
+    165 * (1 + maxCoastVariation),
+  ].flatMap((along) =>
+    [-shape.inletHalfWidth, shape.inletHalfWidth].map((across) => ({
+      x: centerX + (along * c - across * s) * scale,
+      z: centerZ + (along * s + across * c) * scale,
+    })),
+  );
+  // Actual v3 support: four western headland/ridge leaves and six bounding
+  // the rotated southeast bay. The shallow eastern ridge tail remains coarse.
+  // Ten64 leaves add 78,720 triangles / 3,202,560 geometry bytes over16;
+  // this is a declared local geometry cost, not a frame-time qualification.
+  return [
+    ...preparation,
+    {
+      minX: centerX - radius * (1 + maxCoastVariation),
+      maxX: centerX + (shape.ridgeBaseX + shape.ridgeEastWidth / 2) * scale,
+      minZ: centerZ + shape.ridgeStartZ * scale,
+      maxZ: centerZ + shape.ridgeEndZ * scale,
+      resolution: 64,
+      keepMinSize: true,
+    },
+    {
+      minX: Math.min(...corners.map((p) => p.x)),
+      maxX: Math.max(...corners.map((p) => p.x)),
+      minZ: Math.min(...corners.map((p) => p.z)),
+      maxZ: Math.max(...corners.map((p) => p.z)),
+      resolution: 64,
+      keepMinSize: true,
+    },
+    // The authored shoulder contains a narrow notch and short rock faces that
+    // cannot be represented accurately at the existing western 64 grid. Refine
+    // only its admitted bounds; the adjacent Haven leaf is already 128. The
+    // current compact layout adds 24,832 triangles / 1,000,448 geometry bytes,
+    // with no new leaf/draw at the retained preparation viewpoints. This is a
+    // measured allocation delta, not a native frame-time qualification.
+    ...(profile.havenShoulder
+      ? [
+          {
+            minX: profile.havenShoulder.minX,
+            maxX: profile.havenShoulder.maxX,
+            minZ: profile.havenShoulder.minZ,
+            maxZ: profile.havenShoulder.maxZ,
+            resolution: 128,
+            keepMinSize: true,
+          },
+        ]
+      : []),
+    // A selected dry cove-head notch needs sub-metre sampling too. Retain only
+    // the leaves intersecting its admitted support; omitted options preserve
+    // the existing planner exactly. This is local geometry detail, not a global
+    // density increase or a change to authoritative terrain/grass placement.
+    ...(profile.coastalApron?.headShoulder
+      ? [
+          {
+            minX: profile.coastalApron.headShoulder.minX,
+            maxX: profile.coastalApron.headShoulder.maxX,
+            minZ: profile.coastalApron.headShoulder.minZ,
+            maxZ: profile.coastalApron.headShoulder.maxZ,
+            resolution: 128,
+            keepMinSize: true,
+          },
+        ]
+      : []),
+  ];
+}

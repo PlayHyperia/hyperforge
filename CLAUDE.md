@@ -534,7 +534,7 @@ A dedicated tick-based combat controller used only during streaming duels. Creat
 | `aggressiveThresholdPct` | `70` | Switch to aggressive style above this HP% |
 | `defensiveThresholdPct` | `30` | Enter "desperate" phase below this HP% |
 | `noFood` | `false` | Skip all food use (for no-food duel rules) |
-| `useLlmTactics` | `false` | Use LLM for strategy planning when an ElizaOS runtime is available |
+| `tacticalStrategy` | `undefined` | Strict strategy committed during private preparation; required by current competitive snapshots |
 | `movementClampBounds` | `undefined` | Legacy arena bounds clamp (superseded by `setArenaBounds` on the service) |
 | `initialStrafeSign` | random | `+1 \| -1` — initial lateral strafe direction; set opposite for each fighter |
 

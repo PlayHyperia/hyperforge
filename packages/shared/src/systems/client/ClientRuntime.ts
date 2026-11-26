@@ -4,7 +4,12 @@ import { initYoga } from "../../extras/ui/yoga";
 import type { World, WorldOptions } from "../../types";
 import type { Entity } from "../../entities/Entity";
 import type { Entities } from "../shared";
-import { isStreamPageRoute } from "../../runtime/clientViewportMode";
+import {
+  isStreamPageRoute,
+  isStreamingLikeViewport,
+  resolveStreamingRenderFrameRate,
+} from "../../runtime/clientViewportMode";
+import { StreamRenderFramePacer } from "./StreamRenderFramePacer";
 
 // Pre-allocated temp objects to avoid allocations
 const _diagnosticPos = new THREE.Vector3();
@@ -59,6 +64,7 @@ export class ClientRuntime extends System {
   private disableVisibilityThrottle = false;
   private forcedTickInterval: ReturnType<typeof setInterval> | null = null;
   private readonly FORCED_TICK_INTERVAL_MS = 33; // ~30 FPS fallback for stream capture
+  private streamRenderFramePacer: StreamRenderFramePacer | null = null;
 
   constructor(world: World) {
     super(world);
@@ -89,15 +95,16 @@ export class ClientRuntime extends System {
   }
 
   start() {
+    this.streamRenderFramePacer = isStreamingLikeViewport()
+      ? new StreamRenderFramePacer(resolveStreamingRenderFrameRate())
+      : null;
     // Start render loop
     if (this.world.graphics?.renderer) {
       (
         this.world.graphics.renderer as {
           setAnimationLoop: (fn: (time?: number) => void | null) => void;
         }
-      ).setAnimationLoop((time?: number) =>
-        this.world.tick(time ?? performance.now()),
-      );
+      ).setAnimationLoop(this.onAnimationFrame);
     }
 
     this.disableVisibilityThrottle = this.shouldDisableVisibilityThrottle();
@@ -201,6 +208,17 @@ export class ClientRuntime extends System {
     }
   };
 
+  private onAnimationFrame = (time?: number) => {
+    const now = time ?? performance.now();
+    if (
+      this.streamRenderFramePacer &&
+      !this.streamRenderFramePacer.shouldRun(now)
+    ) {
+      return;
+    }
+    this.world.tick(now);
+  };
+
   private onVisibilityChange = () => {
     if (this.disableVisibilityThrottle) {
       // In capture sessions Chromium may treat the page as hidden/occluded and
@@ -221,9 +239,7 @@ export class ClientRuntime extends System {
             this.world.graphics.renderer as {
               setAnimationLoop: (fn: (time?: number) => void) => void;
             }
-          ).setAnimationLoop((time?: number) =>
-            this.world.tick(time ?? performance.now()),
-          );
+          ).setAnimationLoop(this.onAnimationFrame);
         }
       }
       return;
@@ -271,14 +287,13 @@ export class ClientRuntime extends System {
       // Stop worker
       sharedWorker.postMessage("stop");
       // Resume rAF
+      this.streamRenderFramePacer?.reset();
       if (this.world.graphics?.renderer) {
         (
           this.world.graphics.renderer as {
             setAnimationLoop: (fn: (time?: number) => void) => void;
           }
-        ).setAnimationLoop((time?: number) =>
-          this.world.tick(time ?? performance.now()),
-        );
+        ).setAnimationLoop(this.onAnimationFrame);
       }
     }
   };
@@ -354,6 +369,7 @@ export class ClientRuntime extends System {
       document.removeEventListener("visibilitychange", this.onVisibilityChange);
     }
     this.stopForcedTickLoop();
+    this.streamRenderFramePacer = null;
     this.localPlayer = null;
   }
 }

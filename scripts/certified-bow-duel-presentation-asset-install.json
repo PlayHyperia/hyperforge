@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "activationId": "steve-bow-duel-natural-v1",
+  "avatarId": "steve",
+  "candidateId": "natural",
+  "weaponItemIds": ["shortbow", "magic_shortbow"],
+  "candidateReport": {
+    "path": "artifacts/duel-avatar-candidates/bow-carry-locomotion-candidate-build-report.json",
+    "sha256": "f2344c8ec388a3f2322b3ac04f2aaf06226c0acd16fec15a9d632e8354e3b388"
+  },
+  "motions": [
+    {
+      "id": "idle",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/bow-carry-natural-idle-steve.glb",
+      "sourceAssetPath": "emotes/candidates/bow-carry-natural-idle-steve.glb",
+      "sha256": "ca97587fb8b4c904df303b42d0c8c3991b82c08cbb32a4852d2eb58acfd381f3",
+      "destinationPath": "emotes/emote-bow-duel-idle-steve.glb",
+      "assetUrl": "asset://emotes/emote-bow-duel-idle-steve.glb",
+      "playbackSpeed": 1
+    },
+    {
+      "id": "walk",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/bow-carry-natural-walk-steve.glb",
+      "sourceAssetPath": "emotes/candidates/bow-carry-natural-walk-steve.glb",
+      "sha256": "b102e3fc4230fe738289b7ac9a2f83e0e925001a76d6236e003d3d8f8a257541",
+      "destinationPath": "emotes/emote-bow-duel-walk-steve.glb",
+      "assetUrl": "asset://emotes/emote-bow-duel-walk-steve.glb?s=1.3",
+      "playbackSpeed": 1.3
+    },
+    {
+      "id": "run",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/bow-carry-natural-run-steve.glb",
+      "sourceAssetPath": "emotes/candidates/bow-carry-natural-run-steve.glb",
+      "sha256": "6bcd6981059edcd9b4a5cc4a185f892ac52a6285bb75661e2a9b1fe4a9f64c39",
+      "destinationPath": "emotes/emote-bow-duel-run-steve.glb",
+      "assetUrl": "asset://emotes/emote-bow-duel-run-steve.glb?s=1.4",
+      "playbackSpeed": 1.4
+    }
+  ],
+  "equipment": [
+    {
+      "itemId": "shortbow",
+      "reviewPath": "models/bows/bow-wood/candidates/shortbow-stable-hand-anchor-candidate.glb",
+      "reviewSha256": "02a30bac435aa146d5fba6980e2e36c657b294881d179ff5fb84263cfac52f38",
+      "activePath": "models/bows/bow-wood/shortbow-steve-fitted.glb",
+      "activeSha256": "899ad277c4e45bc1339d529bf97efa729aea5f7aaee13771159a6ce1b7647ca7",
+      "geometrySha256": "78684d152d996ec2e7019cbc5824fdb361bdd0223e4f849308c6e235132658ec"
+    },
+    {
+      "itemId": "magic_shortbow",
+      "reviewPath": "models/bows/bow-wood/candidates/magic-shortbow-stable-hand-anchor-candidate.glb",
+      "reviewSha256": "fe327c26aae0f76528224ec64ff22e5f43e6bc38f92dd8c5bd8b7adfa597b3fc",
+      "activePath": "models/bows/bow-wood/magic-shortbow-steve-fitted.glb",
+      "activeSha256": "c3501d2302f922e04539c88f9c9898ba153c6493865bc5a9c4e1baed5162e837",
+      "geometrySha256": "78684d152d996ec2e7019cbc5824fdb361bdd0223e4f849308c6e235132658ec"
+    }
+  ],
+  "evidence": {
+    "fitReport": {
+      "path": "artifacts/duel-avatar-candidates/stable-bows-fit-report.json",
+      "sha256": "02506aeddfa371955756149f419944d62eca52c0c59e582318a81997b54a29cb"
+    },
+    "browserReviews": [
+      {
+        "id": "shortbow-phase-sweep",
+        "itemId": "shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-bow-natural-phase-sweep-report.json",
+        "reportSha256": "b346020937363213684460e3666edb66d6798104e9fa2c2c41c14cd40db17e41",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-bow-natural-phase-sweep.png",
+        "contactSheetSha256": "b0ab9ee9bd419bf993f8efc45ebffcf22af5835bc517c4efa146bf1596ad5686",
+        "sampleCount": 11
+      },
+      {
+        "id": "shortbow-multiview",
+        "itemId": "shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-bow-natural-multiview-report.json",
+        "reportSha256": "9d0d8ef2e8c52adcb396dd4c1e604913291c8750cc9fa09fb50b64a7ee3635c5",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-bow-natural-multiview.png",
+        "contactSheetSha256": "5ede164ea757ca58ab3a2376a468fe3707d68b9aa201223beee466064097f88b",
+        "sampleCount": 16
+      },
+      {
+        "id": "shortbow-combat-sequence",
+        "itemId": "shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-bow-natural-combat-sequence-report.json",
+        "reportSha256": "910e8c8150bb1657a4752351d1310f447e1c3c1eaca22b6c7cdc829cbb21579f",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-bow-natural-combat-sequence.png",
+        "contactSheetSha256": "2102aa1d1ed71d971f613d3ca002718e37084741642544118a5824aff59117c3",
+        "sampleCount": 15
+      },
+      {
+        "id": "shortbow-combat-multiview",
+        "itemId": "shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-bow-natural-combat-multiview-report.json",
+        "reportSha256": "ad76b23e11bdc21f70948fda2161ddd337f4f5c02f951ee023c6517ea423794a",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-bow-natural-combat-multiview.png",
+        "contactSheetSha256": "556ac6ffde9e900d0a77ddf52406ea477809fd14f1dbca9488181cb2d42f3852",
+        "sampleCount": 44,
+        "requiredMotionIds": ["idle"],
+        "attackSampleCount": 28,
+        "hitReactionSampleCount": 16
+      },
+      {
+        "id": "magic-shortbow-phase-sweep",
+        "itemId": "magic_shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-phase-sweep-report.json",
+        "reportSha256": "bd0de904d8684668bd5254b6745cae05c52c5a6ceb2560e6f2d06e6c34a4f17d",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-phase-sweep.png",
+        "contactSheetSha256": "e515e84170a0f0179917a8ea49f5cd43efc69e7a1fb24e743e2f515c4f25c5e2",
+        "sampleCount": 11
+      },
+      {
+        "id": "magic-shortbow-combat-sequence",
+        "itemId": "magic_shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-combat-sequence-report.json",
+        "reportSha256": "db7cc021d7b382b13a028e3705f1b69947d3bde3e17ef98171d5af8646ab79c8",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-combat-sequence.png",
+        "contactSheetSha256": "1a5c5d8ca951cff528ba3da713d85107981c7b9b713ddc250619d9a0f56af0fa",
+        "sampleCount": 15
+      },
+      {
+        "id": "magic-shortbow-combat-multiview",
+        "itemId": "magic_shortbow",
+        "reportPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-combat-multiview-report.json",
+        "reportSha256": "337c5d2e8b97bf767f6ce3245348ab0da5088862e498b5b3ebada98137d04ed4",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/stable-magic-bow-natural-combat-multiview.png",
+        "contactSheetSha256": "25f1393a2554e5ac350d3a041d9d73ebb84574341ec98fad184db93ef8a3d648",
+        "sampleCount": 44,
+        "requiredMotionIds": ["idle"],
+        "attackSampleCount": 28,
+        "hitReactionSampleCount": 16
+      }
+    ],
+    "liveStream": {
+      "videoPath": "artifacts/duel-live-bow-natural-review-2026-08-20/live-duel-natural-candidate.mp4",
+      "videoSha256": "9c60f866275f7a51e98a62175c35d29bd3066b14b22aa04670c445f25629963f",
+      "statePath": "artifacts/duel-live-bow-natural-review-2026-08-20/final-streaming-state.json",
+      "stateSha256": "43799b36a3925aa0a220b4b32624bdf31ee7f5481c7bf26ae7ebf42d39573859",
+      "captureStatusPath": "artifacts/duel-live-bow-natural-review-2026-08-20/final-streaming-capture-status.json",
+      "captureStatusSha256": "42a0b899ab40ba7ce09d1157a92176cfc176c7500b00615128aea673e630e66f",
+      "minimumUptimeMs": 590000,
+      "minimumFrames": 29000,
+      "maximumFightingFrameIntervalP95Ms": 26,
+      "maximumFightingFrameWorkP95Ms": 4
+    }
+  }
+}

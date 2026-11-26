@@ -28,6 +28,11 @@ export * from "./ProcgenPlantCache";
 export * from "./ProcgenPlantInstancer";
 export * from "./ProcgenTreeCache";
 export * from "./ProcgenTreeInstancer";
+export {
+  getGLBTreeRenderOwnership,
+  type GLBTreeRenderOwnership,
+} from "./GLBTreeInstancer";
+export { getGLBTreeBatchedRenderOwnership } from "./GLBTreeBatchedInstancer";
 export * from "./AtlasedTreeImpostors";
 
 // Tree LOD System (consolidated tree baking and rendering)

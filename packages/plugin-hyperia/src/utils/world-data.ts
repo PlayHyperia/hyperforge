@@ -47,6 +47,15 @@ export interface PrayerEntry {
   name: string;
   level: number;
   category: string;
+  bonuses: {
+    attackMultiplier?: number;
+    strengthMultiplier?: number;
+    defenseMultiplier?: number;
+    rangedAttackMultiplier?: number;
+    rangedStrengthMultiplier?: number;
+    magicAttackMultiplier?: number;
+    magicDefenseMultiplier?: number;
+  };
 }
 
 export interface RuneEntry {
@@ -62,6 +71,16 @@ export interface ToolEntry {
   levelRequired: number;
 }
 
+export interface ItemEntry {
+  id: string;
+  name: string;
+  type: string;
+  equipSlot: string | null;
+  attackType: string | null;
+  healAmount: number;
+  tool: { skill: string; priority: number } | null;
+}
+
 interface ManifestCache {
   woodcutting: ResourceEntry[] | null;
   mining: ResourceEntry[] | null;
@@ -72,6 +91,7 @@ interface ManifestCache {
   prayers: PrayerEntry[] | null;
   runes: RuneEntry[] | null;
   tools: ToolEntry[] | null;
+  items: ItemEntry[] | null;
   loaded: boolean;
 }
 
@@ -89,6 +109,7 @@ const cache: ManifestCache = {
   prayers: null,
   runes: null,
   tools: null,
+  items: null,
   loaded: false,
 };
 
@@ -99,9 +120,10 @@ const cache: ManifestCache = {
 function resolveManifestsDir(): string | null {
   const candidates = [
     path.resolve(process.cwd(), "packages/server/world/assets/manifests"),
+    path.resolve(process.cwd(), "../server/world/assets/manifests"),
     path.resolve(
       import.meta.dirname ?? process.cwd(),
-      "../../../../server/world/assets/manifests",
+      "../../../server/world/assets/manifests",
     ),
   ];
 
@@ -188,6 +210,55 @@ function ensureLoaded(): void {
       }));
     }
 
+    const itemFiles = [
+      "ammunition.json",
+      "armor.json",
+      "food.json",
+      "misc.json",
+      "resources.json",
+      "runes.json",
+      "tools.json",
+      "weapons.json",
+    ];
+    const items: ItemEntry[] = [];
+    const itemIds = new Set<string>();
+    for (const filename of itemFiles) {
+      const authored = readJSON(path.join(dir, "items", filename));
+      if (!Array.isArray(authored)) continue;
+      for (const raw of authored as Array<Record<string, unknown>>) {
+        const id = typeof raw.id === "string" ? raw.id : "";
+        const name = typeof raw.name === "string" ? raw.name : "";
+        const type = typeof raw.type === "string" ? raw.type : "";
+        if (!id || !name || !type || itemIds.has(id)) continue;
+        const toolRaw =
+          raw.tool && typeof raw.tool === "object" && !Array.isArray(raw.tool)
+            ? (raw.tool as Record<string, unknown>)
+            : null;
+        const toolSkill =
+          typeof toolRaw?.skill === "string" ? toolRaw.skill : "";
+        const toolPriority = Number(toolRaw?.priority);
+        itemIds.add(id);
+        items.push({
+          id,
+          name,
+          type,
+          equipSlot: typeof raw.equipSlot === "string" ? raw.equipSlot : null,
+          attackType:
+            typeof raw.attackType === "string" ? raw.attackType : null,
+          healAmount:
+            Number.isFinite(Number(raw.healAmount)) &&
+            Number(raw.healAmount) > 0
+              ? Number(raw.healAmount)
+              : 0,
+          tool:
+            toolSkill && Number.isFinite(toolPriority)
+              ? { skill: toolSkill, priority: toolPriority }
+              : null,
+        });
+      }
+    }
+    cache.items = items;
+
     // World areas — used for bank position + mob spawn locations
     interface WorldArea {
       npcs?: Array<{
@@ -265,6 +336,7 @@ function ensureLoaded(): void {
         name: string;
         level: number;
         category: string;
+        bonuses?: PrayerEntry["bonuses"];
       }>;
     } | null;
     if (pr?.prayers) {
@@ -273,6 +345,7 @@ function ensureLoaded(): void {
         name: p.name,
         level: p.level ?? 1,
         category: p.category ?? "offensive",
+        bonuses: p.bonuses ?? {},
       }));
     }
 
@@ -409,6 +482,17 @@ export function getPrayerIds(): string[] {
 }
 
 /**
+ * Get manifest-authored prayers whose level requirement is satisfied.
+ * Returns an empty array when the manifest is unavailable or the level is
+ * malformed so autonomous callers fail closed rather than guessing content.
+ */
+export function getPrayersAtLevel(level: number): PrayerEntry[] {
+  ensureLoaded();
+  if (!Number.isSafeInteger(level) || level < 1 || !cache.prayers) return [];
+  return cache.prayers.filter((prayer) => prayer.level <= level);
+}
+
+/**
  * Get rune element types from manifest (unique, non-null elements).
  * Returns empty array if manifests not loaded.
  */
@@ -435,6 +519,11 @@ export function getToolIds(): string[] {
 export function getToolsForSkill(skill: string): ToolEntry[] {
   ensureLoaded();
   return cache.tools?.filter((t) => t.skill === skill) ?? [];
+}
+
+export function getItemEntry(itemId: string): ItemEntry | null {
+  ensureLoaded();
+  return cache.items?.find((item) => item.id === itemId) ?? null;
 }
 
 // ---------------------------------------------------------------------------

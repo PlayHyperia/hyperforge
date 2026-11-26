@@ -19,6 +19,11 @@ import {
   LineBasicNodeMaterial,
 } from "three/webgpu";
 
+import {
+  createCompetitiveRigidEquipmentMetadata,
+  getCompetitiveRigidEquipmentSlot,
+} from "../../services/equipment/CompetitiveEquipmentMetadata";
+
 export interface Transform {
   position: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number };
@@ -44,7 +49,10 @@ interface EquipmentViewerProps {
 
 export interface EquipmentViewerRef {
   exportEquippedModel: () => Promise<ArrayBuffer>;
-  exportAlignedEquipment: () => Promise<ArrayBuffer>;
+  exportAlignedEquipment: (options: {
+    itemId: string;
+    avatarId: string;
+  }) => Promise<ArrayBuffer>;
   reattachEquipment: () => void;
   resetCamera?: () => void;
   takeScreenshot?: () => string;
@@ -1990,7 +1998,7 @@ const EquipmentViewer = forwardRef<EquipmentViewerRef, EquipmentViewerProps>(
         return gltf as ArrayBuffer;
       },
 
-      exportAlignedEquipment: async () => {
+      exportAlignedEquipment: async (options) => {
         if (!equipmentRef.current) return new ArrayBuffer(0);
 
         // Get the EquipmentWrapper (which contains all the positioning data)
@@ -2070,39 +2078,27 @@ const EquipmentViewer = forwardRef<EquipmentViewerRef, EquipmentViewerProps>(
           currentAvatarHeight = calculateAvatarHeight(avatarRef.current);
         }
 
-        // Embed V2 attachment metadata for Hyperia
-        exportRoot.userData.hyperia = {
-          // Version 2 format - uses relative matrix approach
-          version: 2,
-
-          // VRM bone name to attach to
-          vrmBoneName: vrmBoneName,
-
-          // The relative matrix as a 16-element array
-          // Hyperia can apply this directly to get exact same positioning
+        const hyperiaMetadata = createCompetitiveRigidEquipmentMetadata({
+          itemId: options.itemId,
+          avatarId: options.avatarId,
+          slot: getCompetitiveRigidEquipmentSlot(weaponType),
+          vrmBoneName,
           relativeMatrix: relativeMatrix.toArray(),
-
-          // Original slot from Asset Forge (for reference)
-          originalSlot: equipmentSlot,
-
-          // Avatar info for validation/debugging
-          avatarId: avatarUrl || "unknown",
           avatarHeight: currentAvatarHeight,
-
-          // Metadata
           weaponType: weaponType || "weapon",
-          exportedFrom: "asset-forge-equipment-fitting-v2",
-          exportedAt: new Date().toISOString(),
+        });
+        exportRoot.userData.hyperia = hyperiaMetadata;
 
-          // Instructions for Hyperia
-          usage:
-            "V2 format: Apply relativeMatrix directly to weapon, then attach to raw bone. No scale hacks needed.",
-        };
+        // Put identical authority on the scene and first root node. Loader
+        // behavior cannot then select two competitive identities from one GLB.
+        const exportScene = new THREE.Scene();
+        exportScene.userData.hyperia = hyperiaMetadata;
+        exportScene.add(exportRoot);
 
         console.log("✅ V2 Export complete");
 
         const _exporter = new GLTFExporter();
-        const gltf = await _exporter.parseAsync(exportRoot, {
+        const gltf = await _exporter.parseAsync(exportScene, {
           binary: true,
           includeCustomExtensions: true,
         });

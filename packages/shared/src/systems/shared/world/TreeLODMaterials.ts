@@ -11,6 +11,7 @@
  * @module TreeLODMaterials
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -44,6 +45,7 @@ import THREE, {
   MeshStandardNodeMaterial,
   MeshBasicNodeMaterial,
 } from "../../../extras/three/three";
+import type { TextureNode, UniformNode } from "three/webgpu";
 
 import { applySkyFog } from "./FogConfig";
 
@@ -56,17 +58,17 @@ import { applySkyFog } from "./FogConfig";
  */
 export interface BranchCardUniforms {
   /** Wind time accumulator */
-  time: ReturnType<typeof uniform<number>>;
+  time: UniformNode<"float", number>;
   /** Wind strength (0-1) */
-  windStrength: ReturnType<typeof uniform<number>>;
+  windStrength: UniformNode<"float", number>;
   /** Wind direction (normalized) */
-  windDirection: ReturnType<typeof uniform<THREE.Vector3>>;
+  windDirection: UniformNode<"vec3", THREE.Vector3>;
   /** Card atlas texture */
-  cardAtlas: ReturnType<typeof uniform<THREE.Texture>>;
+  cardAtlas: TextureNode<"vec4">;
   /** LOD fade factor (0 = invisible, 1 = opaque) */
-  lodFade: ReturnType<typeof uniform<number>>;
+  lodFade: UniformNode<"float", number>;
   /** Camera position for billboard orientation */
-  cameraPos: ReturnType<typeof uniform<THREE.Vector3>>;
+  cameraPos: UniformNode<"vec3", THREE.Vector3>;
 }
 
 /**
@@ -74,23 +76,23 @@ export interface BranchCardUniforms {
  */
 export interface InstancedLeafUniforms {
   /** Wind time accumulator */
-  time: ReturnType<typeof uniform<number>>;
+  time: UniformNode<"float", number>;
   /** Wind strength (0-1) */
-  windStrength: ReturnType<typeof uniform<number>>;
+  windStrength: UniformNode<"float", number>;
   /** Wind direction (normalized) */
-  windDirection: ReturnType<typeof uniform<THREE.Vector3>>;
+  windDirection: UniformNode<"vec3", THREE.Vector3>;
   /** Base leaf color */
-  baseColor: ReturnType<typeof uniform<THREE.Color>>;
+  baseColor: UniformNode<"color", THREE.Color>;
   /** Secondary color for variation */
-  secondaryColor: ReturnType<typeof uniform<THREE.Color>>;
+  secondaryColor: UniformNode<"color", THREE.Color>;
   /** Subsurface scattering color (backlit leaves) */
-  subsurfaceColor: ReturnType<typeof uniform<THREE.Color>>;
+  subsurfaceColor: UniformNode<"color", THREE.Color>;
   /** Sun direction for SSS */
-  sunDirection: ReturnType<typeof uniform<THREE.Vector3>>;
+  sunDirection: UniformNode<"vec3", THREE.Vector3>;
   /** LOD fade multiplier */
-  lodFade: ReturnType<typeof uniform<number>>;
+  lodFade: UniformNode<"float", number>;
   /** Day/night mix (0 = night, 1 = day) - affects SSS intensity */
-  dayNightMix: ReturnType<typeof uniform<number>>;
+  dayNightMix: UniformNode<"float", number>;
 }
 
 /**
@@ -121,9 +123,9 @@ export interface InstancedLeafMaterial extends THREE.MeshStandardNodeMaterial {
  * Simulates natural wind sway with main wave + gusts.
  */
 function createWindDisplacement(
-  uTime: ReturnType<typeof uniform<number>>,
-  uStrength: ReturnType<typeof uniform<number>>,
-  uDirection: ReturnType<typeof uniform<THREE.Vector3>>,
+  uTime: UniformNode<"float", number>,
+  uStrength: UniformNode<"float", number>,
+  uDirection: UniformNode<"vec3", THREE.Vector3>,
 ) {
   // Wind constants
   const MAIN_SPEED = 2.0;
@@ -133,43 +135,38 @@ function createWindDisplacement(
   const MICRO_SPEED = 5.0;
   const MICRO_AMP = 0.01;
 
-  return Fn(
-    ([pos, heightFactor]: [
-      ReturnType<typeof vec3>,
-      ReturnType<typeof float>,
-    ]) => {
-      // Spatial phase based on position
-      const phase = add(mul(pos.x, float(0.5)), mul(pos.z, float(0.7)));
+  return Fn(([pos, heightFactor]: [Node<"vec3">, Node<"float">]) => {
+    // Spatial phase based on position
+    const phase = add(mul(pos.x, float(0.5)), mul(pos.z, float(0.7)));
 
-      // Main wind wave (slow, large sway)
-      const mainWave = sin(add(mul(uTime, float(MAIN_SPEED)), phase));
+    // Main wind wave (slow, large sway)
+    const mainWave = sin(add(mul(uTime, float(MAIN_SPEED)), phase));
 
-      // Gust wave (medium speed, adds variation)
-      const gustPhase = mul(phase, float(1.3));
-      const gustWave = sin(add(mul(uTime, float(GUST_SPEED)), gustPhase));
+    // Gust wave (medium speed, adds variation)
+    const gustPhase = mul(phase, float(1.3));
+    const gustWave = sin(add(mul(uTime, float(GUST_SPEED)), gustPhase));
 
-      // Micro flutter (fast, small, per-leaf variation)
-      const microPhase = add(phase, mul(float(instanceIndex), float(0.1)));
-      const microWave = sin(add(mul(uTime, float(MICRO_SPEED)), microPhase));
+    // Micro flutter (fast, small, per-leaf variation)
+    const microPhase = add(phase, mul(float(instanceIndex), float(0.1)));
+    const microWave = sin(add(mul(uTime, float(MICRO_SPEED)), microPhase));
 
-      // Combine waves
-      const totalWave = add(
-        add(mul(mainWave, float(MAIN_AMP)), mul(gustWave, float(GUST_AMP))),
-        mul(microWave, float(MICRO_AMP)),
-      );
+    // Combine waves
+    const totalWave = add(
+      add(mul(mainWave, float(MAIN_AMP)), mul(gustWave, float(GUST_AMP))),
+      mul(microWave, float(MICRO_AMP)),
+    );
 
-      // Apply height factor and wind strength
-      const displacement = mul(mul(totalWave, heightFactor), uStrength);
+    // Apply height factor and wind strength
+    const displacement = mul(mul(totalWave, heightFactor), uStrength);
 
-      // Displacement along wind direction
-      const offsetX = mul(displacement, uDirection.x);
-      const offsetZ = mul(displacement, uDirection.z);
-      // Slight vertical bob
-      const offsetY = mul(mul(mainWave, float(0.02)), heightFactor);
+    // Displacement along wind direction
+    const offsetX = mul(displacement, uDirection.x);
+    const offsetZ = mul(displacement, uDirection.z);
+    // Slight vertical bob
+    const offsetY = mul(mul(mainWave, float(0.02)), heightFactor);
 
-      return vec3(offsetX, offsetY, offsetZ);
-    },
-  );
+    return vec3(offsetX, offsetY, offsetZ);
+  });
 }
 
 /**
@@ -177,7 +174,7 @@ function createWindDisplacement(
  * Returns opacity value (0-1).
  */
 function createLeafShapeSDF() {
-  return Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  return Fn(([uvCoord]: [Node<"vec2">]) => {
     // Centered coordinates
     const px = sub(uvCoord.x, float(0.5));
     const py = sub(uvCoord.y, float(0.35));
@@ -234,7 +231,7 @@ function createLeafShapeSDF() {
  * Returns darkening factor for veins (0 = dark vein, 1 = no vein).
  */
 function createLeafVeins() {
-  return Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+  return Fn(([uvCoord]: [Node<"vec2">]) => {
     const px = sub(uvCoord.x, float(0.5));
     const py = sub(uvCoord.y, float(0.35));
     const normalizedY = add(mul(py, float(1.3)), float(0.5));
@@ -300,7 +297,7 @@ export function createBranchCardMaterial(
     time: uTime,
     windStrength: uWindStrength,
     windDirection: uWindDirection,
-    cardAtlas: uniform(cardAtlas), // For external access
+    cardAtlas: texture(cardAtlas),
     lodFade: uLodFade,
     cameraPos: uCameraPos,
   };
@@ -505,7 +502,7 @@ export function createInstancedLeafMaterial(): InstancedLeafMaterial {
       uDayNightMix,
     );
 
-    return mul(uSubsurfaceColor, sssIntensity);
+    return mul(uSubsurfaceColor.rgb, sssIntensity);
   })();
 
   // Alpha test node - required for TSL materials to enable alpha cutoff
@@ -556,7 +553,7 @@ export function createInstancedLeafMaterial(): InstancedLeafMaterial {
  */
 export function addLODCrossFade(
   material: THREE.MeshStandardNodeMaterial,
-  fadeUniform: ReturnType<typeof uniform<number>>,
+  fadeUniform: UniformNode<"float", number>,
 ): void {
   // Create dithered fade opacity node
   const fadeOpacityNode = Fn(() => {

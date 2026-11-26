@@ -1,4 +1,4 @@
-import * as bufferModule from "buffer/index.js";
+import * as bufferModule from "buffer";
 
 type BufferModuleLike = {
   Buffer?: typeof globalThis.Buffer;

@@ -6,12 +6,14 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(projectRoot, "../..");
 
 const config: NextConfig = {
+  agentRules: false,
   output: "export",
   turbopack: {
     root: workspaceRoot,
   },
   images: {
     unoptimized: true,
+    qualities: [75, 90],
   },
   trailingSlash: true,
   transpilePackages: [

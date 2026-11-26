@@ -37,7 +37,7 @@ export function LeaderboardPanel({ leaderboard }: LeaderboardPanelProps) {
               </div>
               <div style={styles.entryStats}>
                 <div style={styles.record}>
-                  {entry.wins}-{entry.losses}
+                  {entry.wins}-{entry.draws ?? 0}-{entry.losses}
                 </div>
                 <div style={styles.winRate}>
                   {Math.round(entry.winRate * 100)}%

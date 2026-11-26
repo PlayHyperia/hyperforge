@@ -1,5 +1,6 @@
 import type { ActionContext, ActionDefinition, World } from "../../../types";
 import { EventType } from "../../../types/events";
+import { generateGroundItemDropOperationId } from "../../../utils/game/GroundItemSourceIdentity";
 import { SystemBase } from "../infrastructure/SystemBase";
 
 /**
@@ -232,18 +233,84 @@ export class ActionRegistry extends SystemBase {
           required: false,
           description: "Amount to drop",
         },
+        {
+          name: "operationId",
+          type: "string",
+          required: false,
+          description: "Stable retry identity for this exact drop intent",
+        },
       ],
       execute: async (
         context: ActionContext,
         params: Record<string, unknown>,
       ) => {
         const playerId = context.playerId || context.world.network.id;
-        this.emitTypedEvent(EventType.ITEM_DROP, {
+        const itemId = params.itemId;
+        const quantity = params.quantity === undefined ? 1 : params.quantity;
+        if (!playerId) {
+          return { success: false, message: "Player identity unavailable" };
+        }
+        if (typeof itemId !== "string" || typeof quantity !== "number") {
+          return { success: false, message: "Invalid item-drop request" };
+        }
+        const inventorySystem = context.world.getSystem("inventory") as
+          | {
+              dropOwnedItemAtomic?: (
+                requestedPlayerId: string,
+                operationId: string,
+                requestedItemId: string,
+                requestedQuantity: number,
+              ) => Promise<{
+                ok: boolean;
+                committed: boolean | "unknown";
+                reason?: string;
+              }>;
+            }
+          | undefined;
+        if (!context.world.isServer || !inventorySystem?.dropOwnedItemAtomic) {
+          return {
+            success: false,
+            message: "Authoritative item-drop service unavailable",
+          };
+        }
+        const suppliedOperationId = params.operationId;
+        if (
+          suppliedOperationId !== undefined &&
+          typeof suppliedOperationId !== "string"
+        ) {
+          return {
+            success: false,
+            message: "Invalid item-drop operation identity",
+          };
+        }
+        let operationId = suppliedOperationId?.trim() ?? "";
+        try {
+          if (!operationId) operationId = generateGroundItemDropOperationId();
+        } catch {
+          return {
+            success: false,
+            message: "Secure item-drop identity unavailable",
+          };
+        }
+        const result = await inventorySystem.dropOwnedItemAtomic(
           playerId,
-          itemId: params.itemId as string,
-          quantity: (params.quantity as number) || 1,
-        });
-        return { success: true, message: `Dropped item ${params.itemId}` };
+          operationId,
+          itemId,
+          quantity,
+        );
+        return result.ok
+          ? {
+              success: true,
+              committed: true,
+              operationId,
+              message: `Dropped item ${itemId}`,
+            }
+          : {
+              success: false,
+              committed: result.committed,
+              operationId,
+              message: `Item drop rejected: ${result.reason ?? "unknown"}`,
+            };
       },
     });
 

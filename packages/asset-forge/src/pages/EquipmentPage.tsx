@@ -173,10 +173,13 @@ export const EquipmentPage: React.FC = () => {
   };
 
   const handleExportAlignedModel = async () => {
-    if (!selectedEquipment || !viewerRef.current) return;
+    if (!selectedAvatar || !selectedEquipment || !viewerRef.current) return;
 
     try {
-      const alignedModel = await viewerRef.current.exportAlignedEquipment();
+      const alignedModel = await viewerRef.current.exportAlignedEquipment({
+        itemId: selectedEquipment.id,
+        avatarId: selectedAvatar.id,
+      });
 
       // Create download link
       const blob = new Blob([alignedModel], { type: "model/gltf-binary" });
@@ -357,7 +360,14 @@ export const EquipmentPage: React.FC = () => {
     setBatchReview((prev) => (prev ? { ...prev, isExporting: true } : null));
 
     try {
-      const alignedModel = await viewerRef.current.exportAlignedEquipment();
+      if (!selectedAvatar) {
+        notify.error("Select the fitted avatar before exporting");
+        return false;
+      }
+      const alignedModel = await viewerRef.current.exportAlignedEquipment({
+        itemId: weapon.id,
+        avatarId: selectedAvatar.id,
+      });
       if (alignedModel.byteLength === 0) {
         notify.error(`Empty export for ${weapon.name}`);
         return false;

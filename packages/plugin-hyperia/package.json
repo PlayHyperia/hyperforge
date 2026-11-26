@@ -22,7 +22,7 @@
     }
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })\" && (tsc || echo '⚠️ tsc had errors (likely circular dep), continuing...')",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })\" && tsc && node scripts/build-executable-manifest.mjs",
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -32,7 +32,10 @@
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",
-    "@elizaos/core": "alpha",
+    "@elizaos/core": "2.0.0-alpha.537",
+    "@elizaos/plugin-anthropic": "2.0.0-alpha.537",
+    "@elizaos/plugin-openai": "2.0.0-alpha.537",
+    "@elizaos/plugin-sql": "2.0.0-alpha.20",
     "@livekit/rtc-node": "^0.13.24",
     "ethers": "^6.16.0",
     "msgpackr": "^2.0.2",
@@ -40,10 +43,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/three": "0.184.1",
+    "@types/three": "0.185.4",
     "@types/ws": "^8.5.14",
     "eslint": "^10.0.2",
-    "three": "^0.184.0",
+    "three": "0.186.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },
@@ -82,7 +85,13 @@
       },
       "session": {
         "mode": "spectate-and-steer",
-        "features": ["commands", "telemetry", "pause", "resume", "suggestions"]
+        "features": [
+          "commands",
+          "telemetry",
+          "pause",
+          "resume",
+          "suggestions"
+        ]
       }
     }
   }

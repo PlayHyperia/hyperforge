@@ -7,7 +7,7 @@
  * Shutdown sequence:
  * 1. Close HTTP server (stop accepting new connections)
  * 2. Shutdown embedded agents
- * 3. Force-save all player data (inventory, equipment, coins)
+ * 3. Force-save all player data (health, position, inventory, equipment, coins)
  * 4. Wait for pending database operations
  * 5. Destroy world and all systems
  * 6. Close database connections
@@ -37,11 +37,18 @@ import { getAgentManager } from "../eliza/index.js";
 import { stopAllModelAgents } from "../eliza/ModelAgentSpawner.js";
 import { getStreamCapture } from "../streaming/stream-capture.js";
 import { errMsg } from "../shared/errMsg.js";
-import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
+import { destroyStreamingDuelAuthority } from "../systems/StreamingDuelScheduler/authority.js";
 import { destroyAllRateLimiters } from "../systems/ServerNetwork/services/SlidingWindowRateLimiter.js";
 import { destroyIdempotencyService } from "../systems/ServerNetwork/services/IdempotencyService.js";
 import { stopMemoryMonitor } from "../infrastructure/memory-monitor.js";
 import { getDuelArenaOraclePublisher } from "../oracle/DuelArenaOraclePublisher.js";
+import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
+import type { StreamingRoutesRuntime } from "../routes/streaming.js";
+import { createShutdownDiagnostics } from "./shutdown-diagnostics.js";
+import {
+  resolveStreamingDuelShutdownAckConfig,
+  waitForStreamingDuelShutdownAcknowledgement,
+} from "./streaming-shutdown-contract.js";
 
 /**
  * Web3 context for chain writer shutdown
@@ -110,6 +117,7 @@ export function registerShutdownHandlers(
   world: World,
   dbContext: DatabaseContext,
   web3Context: Web3Context | null = null,
+  streamingRoutes: StreamingRoutesRuntime | null = null,
 ): void {
   const dbWriteErrorsNonFatal = /^(1|true|yes|on)$/i.test(
     process.env.DB_WRITE_ERRORS_NON_FATAL || "",
@@ -139,6 +147,11 @@ export function registerShutdownHandlers(
   }
 
   const context: ShutdownContext = { fastify, world, dbContext, web3Context };
+  // Resolve at startup so an unsafe or malformed acknowledgement target can
+  // never remain latent until the process is already trying to terminate.
+  const streamingShutdownAckConfig = resolveStreamingDuelShutdownAckConfig(
+    process.env,
+  );
 
   // Track if we're shutting down (prevent duplicate shutdowns)
   let isShuttingDown = false;
@@ -156,6 +169,7 @@ export function registerShutdownHandlers(
       return;
     }
     isShuttingDown = true;
+    const diagnostics = createShutdownDiagnostics();
     if (signal !== "SIGUSR2") {
       const details: Record<string, string> = {
         signal,
@@ -166,100 +180,181 @@ export function registerShutdownHandlers(
           details[key] = value;
         }
       }
-      await sendAlert("Hyperia server shutting down", details);
+      await diagnostics.run("alert", async () => {
+        await sendAlert("Hyperia server shutting down", details);
+      });
     }
 
-    // Step 1: Stop stream capture (headless browser + FFmpeg)
-    try {
-      const capture = getStreamCapture();
-      if (capture.isRunning()) {
-        await capture.stop();
+    // Step 1: Close game WebSocket ingress. Keep Fastify and its authenticated
+    // betting feed alive until the exact terminal cancellation is delivered.
+    await diagnostics.run("websocket-ingress", async () => {
+      try {
+        const { closeUwsServer } = await import("./uws-server.js");
+        closeUwsServer();
+      } catch {
+        // uWS may not have been started (UWS_ENABLED=false)
       }
-    } catch {
-      // Stream capture may not have been initialized
-    }
+    });
 
-    // Step 2: Close HTTP server
-    await closeHttpServer(context);
-
-    // Step 2a: Close uWS game WebSocket server (stop accepting new WS connections)
-    try {
-      const { closeUwsServer } = await import("./uws-server.js");
-      closeUwsServer();
-    } catch {
-      // uWS may not have been started (UWS_ENABLED=false)
-    }
-
-    // Step 3: Shutdown embedded agents
-    await shutdownAgents();
-
-    // Step 3a: Flush agent thoughts to database
-    try {
-      const { flushAgentThoughtsToDb } =
-        await import("../eliza/dashboardInterop.js");
-      await flushAgentThoughtsToDb();
-    } catch {
-      // Thoughts module may not have been loaded
-    }
-
-    // Step 2b: Shutdown Web3 chain writer (flush pending writes)
-    await shutdownWeb3(context);
-
-    // Step 2c: Shutdown StreamingDuelScheduler (stop duel cycle timers)
-    try {
-      const scheduler = getStreamingDuelScheduler();
-      if (scheduler) {
-        scheduler.destroy();
+    // Step 2: Stop the scheduler while the world, database, HTTP server, and
+    // authenticated betting SSE clients are still alive. A nonterminal cycle
+    // must persist and publish its exact cancellation before any feed teardown.
+    const cycleAtShutdown =
+      getStreamingDuelScheduler()?.getCurrentCycle() ?? null;
+    const expectsCancellation = Boolean(
+      cycleAtShutdown && cycleAtShutdown.phase !== "RESOLUTION",
+    );
+    let streamingShutdownExitCode = 0;
+    await diagnostics.run("duel-terminal-barrier", async () => {
+      try {
+        await destroyStreamingDuelAuthority();
+        let terminalFrame: Awaited<
+          ReturnType<StreamingRoutesRuntime["waitForBettingTerminalFrame"]>
+        > | null = null;
+        let downstreamAcknowledged = false;
+        if (expectsCancellation && cycleAtShutdown?.duelId) {
+          if (!streamingRoutes) {
+            throw new Error(
+              "streaming route runtime is unavailable during active-duel shutdown",
+            );
+          }
+          terminalFrame = await streamingRoutes.waitForBettingTerminalFrame({
+            duelId: cycleAtShutdown.duelId,
+            cancellationReason: "scheduler_shutdown",
+            timeoutMs: 5_000,
+          });
+          downstreamAcknowledged =
+            await waitForStreamingDuelShutdownAcknowledgement({
+              config: streamingShutdownAckConfig,
+              duelId: terminalFrame.duelId,
+            });
+        }
+        process.stdout.write(
+          `${JSON.stringify({
+            event: "shutdown-complete",
+            sourceEpoch: terminalFrame?.sourceEpoch ?? null,
+            terminalFrameSeq: terminalFrame?.terminalFrameSeq ?? null,
+            duelId: terminalFrame?.duelId ?? null,
+            duelKeyHex: terminalFrame?.duelKeyHex ?? null,
+            competitiveSnapshotDigest:
+              terminalFrame?.competitiveSnapshotDigest ?? null,
+            outcome: terminalFrame?.outcome ?? null,
+            cancellationReason: terminalFrame?.cancellationReason ?? null,
+            downstreamAcknowledged,
+          })}\n`,
+        );
+      } catch (err) {
+        streamingShutdownExitCode = 1;
+        console.error(
+          `${JSON.stringify({
+            event: "shutdown-failed",
+            signal,
+            reason: errMsg(err),
+          })}`,
+        );
       }
-    } catch (err) {
-      console.error(
-        "[Shutdown] Failed to destroy StreamingDuelScheduler:",
-        err,
-      );
-    }
+    });
 
-    // Step 2d: Shutdown DuelArenaOraclePublisher
-    try {
-      const oraclePublisher = getDuelArenaOraclePublisher(context.world);
-      if (oraclePublisher) {
-        oraclePublisher.destroy();
+    // Step 3: Stop stream capture only after the terminal market frame has been
+    // acknowledged. This preserves visual/feed continuity through cancellation.
+    await diagnostics.run("stream-capture", async () => {
+      try {
+        const capture = getStreamCapture();
+        if (capture.isRunning()) {
+          await capture.stop();
+        }
+      } catch {
+        // Stream capture may not have been initialized
       }
-    } catch (err) {
-      console.error(
-        "[Shutdown] Failed to destroy DuelArenaOraclePublisher:",
-        err,
-      );
-    }
+    });
 
-    // Step 3: Force-save all player data (inventory, equipment, coins)
+    // Step 4: Close HTTP only after the terminal betting barrier is complete.
+    await diagnostics.run("http-close", async () => {
+      await closeHttpServer(context);
+    });
+
+    // Step 5: Shutdown embedded agents after duel cleanup has settled.
+    await diagnostics.run("agents", async () => {
+      await shutdownAgents();
+    });
+
+    // Step 5a: Flush agent thoughts to database
+    await diagnostics.run("agent-thoughts", async () => {
+      try {
+        const { flushAgentThoughtsToDb } =
+          await import("../eliza/dashboardInterop.js");
+        await flushAgentThoughtsToDb();
+      } catch {
+        // Thoughts module may not have been loaded
+      }
+    });
+
+    // Step 5b: Shutdown Web3 chain writer (flush pending writes)
+    await diagnostics.run("web3", async () => {
+      await shutdownWeb3(context);
+    });
+
+    // Step 5c: Shutdown DuelArenaOraclePublisher
+    await diagnostics.run("oracle", () => {
+      try {
+        const oraclePublisher = getDuelArenaOraclePublisher(context.world);
+        if (oraclePublisher) {
+          oraclePublisher.destroy();
+        }
+      } catch (err) {
+        console.error(
+          "[Shutdown] Failed to destroy DuelArenaOraclePublisher:",
+          err,
+        );
+      }
+    });
+
+    // Step 5: Force-save all remaining player data (health, position,
+    // inventory, equipment, coins)
     // Must happen BEFORE waitForDatabaseOperations() which sets isDestroying=true,
     // and BEFORE world.destroy() which calls system.destroy() fire-and-forget.
-    await forcePlayerDataSave(context);
+    await diagnostics.run("player-persistence", async () => {
+      await forcePlayerDataSave(context);
+    });
 
-    // Step 4: Wait for pending database operations
-    await waitForDatabaseOperations(context);
+    // Step 6: Wait for pending database operations
+    await diagnostics.run("database-pending", async () => {
+      await waitForDatabaseOperations(context);
+    });
 
-    // Step 4.5: Cleanup global singletons with timers (prevents memory leaks)
-    await cleanupGlobalServices();
+    // Step 6.5: Cleanup global singletons with timers (prevents memory leaks)
+    await diagnostics.run("global-services", async () => {
+      await cleanupGlobalServices();
+    });
 
-    // Step 5: Destroy world and systems
-    await destroyWorld(context);
+    // Step 7: Destroy world and systems
+    await diagnostics.run("world", async () => {
+      await destroyWorld(context);
+    });
 
-    // Step 6: Close database connections
-    await closeDatabaseConnections(context);
+    // Step 8: Close database connections
+    await diagnostics.run("database-close", async () => {
+      await closeDatabaseConnections(context);
+    });
 
-    // Step 7: Stop Docker containers
-    await stopDocker(context);
+    // Step 9: Stop Docker containers
+    await diagnostics.run("postgres-stop", async () => {
+      await stopDocker(context);
+    });
 
-    // Step 8: Stop memory monitor
-    try {
-      stopMemoryMonitor();
-    } catch {
-      // Memory monitor may not have been started
-    }
+    // Step 10: Stop memory monitor
+    await diagnostics.run("memory-monitor", () => {
+      try {
+        stopMemoryMonitor();
+      } catch {
+        // Memory monitor may not have been started
+      }
+    });
 
-    // Step 9: Clear startup flag
-    clearStartupFlag();
+    // Step 11: Clear startup flag
+    await diagnostics.run("startup-flag", () => {
+      clearStartupFlag();
+    });
 
     // For hot reload (SIGUSR2), don't exit process
     if (signal === "SIGUSR2") {
@@ -268,8 +363,10 @@ export function registerShutdownHandlers(
     }
 
     // For termination signals, exit after short delay
+    diagnostics.record("exit-timer", "scheduled");
     setTimeout(() => {
-      process.exit(0);
+      diagnostics.record("exit-timer", "fired");
+      process.exit(streamingShutdownExitCode);
     }, 100);
   };
 
@@ -416,9 +513,10 @@ async function shutdownWeb3(context: ShutdownContext): Promise<void> {
 /**
  * Force-save all player data before shutdown
  *
- * Directly calls destroyAsync() on inventory, equipment, and coin pouch systems
- * and awaits their completion. This ensures all player data is persisted BEFORE
- * the database system marks itself as destroying (which rejects new operations).
+ * Directly awaits the player snapshot plus destroyAsync() on inventory,
+ * equipment, and coin pouch systems. This ensures all player data is persisted
+ * BEFORE the database system marks itself as destroying (which rejects new
+ * operations).
  *
  * After this runs, the systems' data maps are cleared, so when world.destroy()
  * later calls their destroy() → destroyAsync() again, the saves are no-ops.
@@ -426,14 +524,25 @@ async function shutdownWeb3(context: ShutdownContext): Promise<void> {
  * @param context - Shutdown context
  * @private
  */
-async function forcePlayerDataSave(context: ShutdownContext): Promise<void> {
+export async function forcePlayerDataSave(
+  context: Pick<ShutdownContext, "world">,
+): Promise<void> {
   try {
     const savePromises: Promise<void>[] = [];
 
     // Get each critical system and call destroyAsync() directly
+    const playerSystem = context.world.getSystem("player") as
+      { saveAllPlayersToDatabase(): Promise<void> } | undefined;
+    if (playerSystem?.saveAllPlayersToDatabase) {
+      savePromises.push(
+        playerSystem.saveAllPlayersToDatabase().catch((err) => {
+          console.error("[Shutdown] Player state save error:", err);
+        }),
+      );
+    }
+
     const inventorySystem = context.world.getSystem("inventory") as
-      | { destroyAsync(): Promise<void> }
-      | undefined;
+      { destroyAsync(): Promise<void> } | undefined;
     if (inventorySystem?.destroyAsync) {
       savePromises.push(
         inventorySystem.destroyAsync().catch((err) => {
@@ -443,8 +552,7 @@ async function forcePlayerDataSave(context: ShutdownContext): Promise<void> {
     }
 
     const equipmentSystem = context.world.getSystem("equipment") as
-      | { destroyAsync(): Promise<void> }
-      | undefined;
+      { destroyAsync(): Promise<void> } | undefined;
     if (equipmentSystem?.destroyAsync) {
       savePromises.push(
         equipmentSystem.destroyAsync().catch((err) => {
@@ -454,8 +562,7 @@ async function forcePlayerDataSave(context: ShutdownContext): Promise<void> {
     }
 
     const coinPouchSystem = context.world.getSystem("coin-pouch") as
-      | { destroyAsync(): Promise<void> }
-      | undefined;
+      { destroyAsync(): Promise<void> } | undefined;
     if (coinPouchSystem?.destroyAsync) {
       savePromises.push(
         coinPouchSystem.destroyAsync().catch((err) => {
@@ -500,8 +607,7 @@ async function waitForDatabaseOperations(
 ): Promise<void> {
   try {
     const databaseSystem = context.world.getSystem("database") as
-      | DatabaseSystem
-      | undefined;
+      DatabaseSystem | undefined;
 
     if (databaseSystem) {
       await databaseSystem.waitForPendingOperations();

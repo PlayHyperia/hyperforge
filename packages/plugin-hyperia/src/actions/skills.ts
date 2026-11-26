@@ -23,8 +23,7 @@ import {
 } from "../utils/item-detection.js";
 
 type HandlerOptionsParam =
-  | HandlerOptions
-  | Record<string, JsonValue | undefined>;
+  HandlerOptions | Record<string, JsonValue | undefined>;
 
 type Position3 = [number, number, number];
 type PositionLike = Position3 | { x: number; y?: number; z: number };
@@ -940,7 +939,19 @@ export const lightFireAction: Action = {
           error: new Error("Hyperia service not available"),
         };
       }
-      await service.executeFiremaking();
+      const completed = await service.executeFiremaking();
+      if (!completed) {
+        await callback?.({
+          text: "Firemaking did not complete; I will reassess before trying again.",
+          action: "LIGHT_FIRE",
+        });
+        return {
+          success: false,
+          error: new Error(
+            "Authoritative firemaking completion was not received",
+          ),
+        };
+      }
 
       await callback?.({ text: "Lighting a fire...", action: "LIGHT_FIRE" });
 
@@ -990,14 +1001,13 @@ export const cookFoodAction: Action = {
     // Must have a fire or cooking range nearby
     const nearby = service.getNearbyEntities?.() ?? [];
     const hasFireNearby = nearby.some((e) => {
-      const name = (e.name || "").toLowerCase();
       const type = (e.type || "").toLowerCase();
+      const entityType = (e.entityType || "").toLowerCase();
       return (
-        name.includes("fire") ||
-        name.includes("range") ||
-        name.includes("cooking") ||
-        type.includes("fire") ||
-        type.includes("range")
+        type === "fire" ||
+        type === "range" ||
+        entityType === "fire" ||
+        entityType === "range"
       );
     });
 
@@ -1038,7 +1048,17 @@ export const cookFoodAction: Action = {
         return { success: false };
       }
 
-      await service.executeCooking();
+      const completed = await service.executeCooking();
+      if (!completed) {
+        await callback?.({
+          text: "Cooking did not complete; I will reassess before trying again.",
+          action: "COOK_FOOD",
+        });
+        return {
+          success: false,
+          error: new Error("Authoritative cooking completion was not received"),
+        };
+      }
 
       await callback?.({
         text: `Cooking ${rawFood.name}...`,

@@ -24,6 +24,7 @@
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type pg from "pg";
 import type * as schema from "../schema";
+import { runInPostgresTransaction } from "../postgres-transaction";
 
 /**
  * Error codes that indicate a transient/recoverable connection issue
@@ -175,9 +176,7 @@ export abstract class BaseRepository {
     this.ensureDatabase();
 
     try {
-      return await this.db.transaction(async (tx) => {
-        return await operation(tx);
-      });
+      return await runInPostgresTransaction(this.pool, operation);
     } catch (error) {
       console.error(
         `[${this.constructor.name}] Transaction failed${operationName ? ` (${operationName})` : ""}:`,

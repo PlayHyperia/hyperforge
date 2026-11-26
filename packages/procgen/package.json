@@ -31,10 +31,6 @@
       "types": "./dist/building/town/index.d.ts",
       "import": "./dist/building/town/index.js"
     },
-    "./building/viewer": {
-      "types": "./dist/building/viewer/index.d.ts",
-      "import": "./dist/building/viewer/index.js"
-    },
     "./terrain": {
       "types": "./dist/terrain/index.d.ts",
       "import": "./dist/terrain/index.js"
@@ -62,8 +58,9 @@
   ],
   "scripts": {
     "dev": "tsc --watch",
-    "build": "tsc || echo '⚠️ tsc had errors (likely circular dep), continuing...'",
-    "test": "bun run --cwd ../impostors build && vitest run --passWithNoTests",
+    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
+    "test": "bun run test:sourcemaps && bun run --cwd ../impostors build && vitest run --passWithNoTests",
+    "test:sourcemaps": "node --test tests/integration/source-map-packaging.test.mjs",
     "test:watch": "vitest",
     "lint": "eslint src --max-warnings 50",
     "typecheck": "tsc --noEmit",
@@ -80,11 +77,11 @@
     "delaunator": "^5.0.1"
   },
   "devDependencies": {
-    "@types/node": "^25.3.0",
+    "@types/node": "22.20.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@types/three": "0.183.1",
-    "three": "0.183.2",
+    "@types/three": "0.185.4",
+    "three": "0.186.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.8",
     "vite": "^8.0.0"

@@ -95,12 +95,26 @@ export class InteractionSessionManager implements ISessionReader {
       if (data.playerId && data.npcEntityId) {
         const socket = this.broadcast.getPlayerSocket(data.playerId);
         if (socket) {
+          const targetEntity = this.world.entities?.get?.(
+            data.npcEntityId,
+          ) as unknown as
+            | {
+                data?: { storeId?: unknown };
+                config?: { storeId?: unknown };
+              }
+            | undefined;
+          const runtimeStoreId =
+            typeof targetEntity?.data?.storeId === "string"
+              ? targetEntity.data.storeId
+              : typeof targetEntity?.config?.storeId === "string"
+                ? targetEntity.config.storeId
+                : undefined;
           this.openSession({
             playerId: data.playerId,
             socketId: socket.id,
             sessionType: "store",
             targetEntityId: data.npcEntityId,
-            targetStoreId: data.storeId,
+            targetStoreId: data.storeId ?? runtimeStoreId,
           });
         }
       }

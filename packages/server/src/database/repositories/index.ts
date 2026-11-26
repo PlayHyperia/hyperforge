@@ -26,6 +26,15 @@ export type {
   QuestDbStatus,
   StageProgress,
   QuestProgressRow,
+  QuestGatheringProgressReceiptRow,
+  ApplyQuestGatheringProgressReceiptRequest,
+  ApplyQuestGatheringProgressReceiptResult,
+  RetireQuestGatheringProgressReceiptResult,
+  IgnoreQuestProgressReceiptResult,
+  QuestProcessingProgressReceiptRow,
+  ApplyQuestProcessingProgressReceiptRequest,
+  ApplyQuestProcessingProgressReceiptResult,
+  RetireQuestProcessingProgressReceiptResult,
 } from "./QuestRepository";
 export { ActivityLogRepository } from "./ActivityLogRepository";
 export { BankRepository } from "./BankRepository";

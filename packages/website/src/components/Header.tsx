@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import Image from "next/image";
 import { links } from "@/lib/links";
+import { m, AnimatePresence } from "@/lib/motion";
 import { Button } from "./ui/Button";
 
 // Social icons as inline SVGs for performance
@@ -56,10 +56,10 @@ export function Header() {
           {/* Logo */}
           <a href="/" className="flex items-center gap-2">
             <Image
-              src="/images/wordmark.png"
+              src="/images/hyperia-wordmark.svg"
               alt="Hyperia"
               width={160}
-              height={32}
+              height={30}
               className="h-6 md:h-8 w-auto"
               priority
             />
@@ -68,18 +68,14 @@ export function Header() {
           {/* Desktop Navigation */}
           <nav className="hidden md:flex items-center gap-8">
             <a
-              href="/gold"
-              className="hover:text-[var(--gold-essence)] transition-colors font-body text-sm"
-              style={{ color: "var(--gold-essence)" }}
-            >
-              $GOLD
-            </a>
-            <a
-              href="/arena"
+              href={links.hyperbet}
+              target="_blank"
+              rel="noopener noreferrer"
               className="hover:text-[var(--gold-essence)] transition-colors font-body text-sm"
               style={{ color: "var(--text-secondary)" }}
+              aria-label="Duel Arena (opens in new tab)"
             >
-              Arena
+              Duel Arena
             </a>
             <a
               href={links.docs}
@@ -163,7 +159,7 @@ export function Header() {
       {/* Mobile Menu */}
       <AnimatePresence>
         {mobileMenuOpen && (
-          <motion.div
+          <m.div
             className="md:hidden glass"
             style={{ borderTop: "1px solid var(--border-subtle)" }}
             initial={{ opacity: 0, height: 0 }}
@@ -173,17 +169,13 @@ export function Header() {
           >
             <div className="px-4 py-4 space-y-4">
               <a
-                href="/gold"
-                className="block font-body"
-                style={{ color: "var(--gold-essence)" }}
-              >
-                $GOLD
-              </a>
-              <a
-                href="/arena"
+                href={links.hyperbet}
+                target="_blank"
+                rel="noopener noreferrer"
                 className="block text-text-secondary hover:text-gold transition-colors font-body"
+                aria-label="Duel Arena (opens in new tab)"
               >
-                Arena
+                Duel Arena
               </a>
               <a
                 href={links.docs}
@@ -231,7 +223,7 @@ export function Header() {
                 Play Now
               </Button>
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
     </header>

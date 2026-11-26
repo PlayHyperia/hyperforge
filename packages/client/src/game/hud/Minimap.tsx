@@ -19,6 +19,8 @@ import {
   THREE,
   TERRAIN_CONSTANTS,
   INPUT,
+  ALL_WORLD_AREAS,
+  resolveZoneNavigationMode,
 } from "@hyperforge/shared";
 import type { ClientWorld } from "../../types";
 import { type EntityPip, useMinimapEntityPips } from "./useMinimapEntityPips";
@@ -33,6 +35,11 @@ import {
   MINIMAP_TERRAIN_OVERSHOOT,
   useMinimapTerrainCache,
 } from "./useMinimapTerrainCache";
+import {
+  MinimapViewportMetrics,
+  MinimapZoneNavigationState,
+  updateMinimapZoneNavigation,
+} from "./minimapZoneNavigation";
 // Shared with terrain-cache generation so draw-time coverage matches the
 // cached snapshot's real world footprint.
 const TERRAIN_OVERSHOOT = MINIMAP_TERRAIN_OVERSHOOT;
@@ -47,7 +54,7 @@ const MAX_EXTENT = 1000;
 const STEP_EXTENT = 10;
 
 // Reference minimap pixel size at which the initial zoom level is 1:1.
-// sizeBasedExtent = zoom × (avgSize / MINIMAP_BASE_SIZE_PX)
+// sizeBasedExtent = zoom × (majorSize / MINIMAP_BASE_SIZE_PX)
 const MINIMAP_BASE_SIZE_PX = 200;
 
 // Fixed road/building pixel widths — do NOT scale with zoom
@@ -336,6 +343,10 @@ function drawRoadsAndBuildingsOverlay(
  * component instance now gets its own isolated set via renderStateRef.
  */
 interface MinimapRenderState {
+  /** Shared isotropic camera/terrain scale, reused without frame allocations. */
+  viewport: MinimapViewportMetrics;
+  /** Reusable zone POI and edge-cue layout storage. */
+  zoneNavigation: MinimapZoneNavigationState;
   /** Camera forward direction (XZ) */
   forwardVec: THREE.Vector3;
   /** Pip world→screen projection scratch */
@@ -354,6 +365,8 @@ interface MinimapRenderState {
 
 function createRenderState(): MinimapRenderState {
   return {
+    viewport: new MinimapViewportMetrics(),
+    zoneNavigation: new MinimapZoneNavigationState(),
     forwardVec: new THREE.Vector3(),
     projectVec: new THREE.Vector3(),
     destVec: new THREE.Vector3(),
@@ -541,12 +554,7 @@ function _drawIconGlyph(
     font: string;
     textAlign: "left" | "right" | "center" | "start" | "end";
     textBaseline:
-      | "top"
-      | "hanging"
-      | "middle"
-      | "alphabetic"
-      | "ideographic"
-      | "bottom";
+      "top" | "hanging" | "middle" | "alphabetic" | "ideographic" | "bottom";
     fillText(text: string, x: number, y: number): void;
     fillRect(x: number, y: number, w: number, h: number): void;
     strokeRect(x: number, y: number, w: number, h: number): void;
@@ -571,6 +579,42 @@ function _drawIconGlyph(
   ctx.strokeStyle = "#000000";
 
   switch (subType) {
+    // Zone safety does not imply a town/building: use a shield, not a house.
+    case "zone_safe":
+      ctx.fillStyle = "#82b8a0";
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy - 5);
+      ctx.lineTo(cx + 5, cy - 5);
+      ctx.lineTo(cx + 4, cy + 2);
+      ctx.lineTo(cx, cy + 6);
+      ctx.lineTo(cx - 4, cy + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      break;
+
+    case "zone_arena":
+      // Crisp, cached crossed blades; no platform emoji or baked glow.
+      ctx.lineCap = "round";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy + 5);
+      ctx.lineTo(cx + 5, cy - 5);
+      ctx.moveTo(cx + 5, cy + 5);
+      ctx.lineTo(cx - 5, cy - 5);
+      ctx.stroke();
+      ctx.strokeStyle = "#d9dfdf";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.strokeStyle = "#b39b67";
+      ctx.beginPath();
+      ctx.moveTo(cx - 6, cy + 1);
+      ctx.lineTo(cx - 1, cy + 6);
+      ctx.moveTo(cx + 1, cy + 6);
+      ctx.lineTo(cx + 6, cy + 1);
+      ctx.stroke();
+      break;
+
     // --- Bank: gold coin ($) ---
     case "bank":
       ctx.fillStyle = "#daa520";
@@ -919,11 +963,9 @@ function MinimapInner({
   // not the stale closure-captured size from when the pointerdown fired.
   const latestSizeRef = useRef({ w: initialWidth, h: initialHeight });
 
-  // Calculate extent based on size - larger size = more visible area (not scaled)
-  // Use the average of width/height to determine extent
+  // Preserve the prior square cover's world scale while fitting the real panel.
   const sizeBasedExtent = useMemo(() => {
-    const avgSize = (width + height) / 2;
-    return zoom * (avgSize / MINIMAP_BASE_SIZE_PX);
+    return zoom * (Math.max(width, height) / MINIMAP_BASE_SIZE_PX);
   }, [width, height, zoom]);
 
   // Minimap zoom state (orthographic half-extent in world units)
@@ -954,12 +996,14 @@ function MinimapInner({
     const overlayCanvas = overlayCanvasRef.current;
     if (!canvas || !overlayCanvas) return;
 
-    // Create orthographic camera for overhead view
+    const viewport = renderStateRef.current.viewport;
+    viewport.update(width, height, targetExtentRef.current);
+    // Camera and square terrain cache share the same pixels-per-world scale.
     const camera = new THREE.OrthographicCamera(
-      -targetExtentRef.current,
-      targetExtentRef.current,
-      targetExtentRef.current,
-      -targetExtentRef.current,
+      -viewport.halfWidth,
+      viewport.halfWidth,
+      viewport.halfHeight,
+      -viewport.halfHeight,
       0.1,
       2000,
     );
@@ -1052,6 +1096,9 @@ function MinimapInner({
 
     let rafId: number | null = null;
     let frameCount = 0;
+    // Candidate-only, matching the world-marker policy at session startup.
+    // Broadcast/embedded spectator viewports resolve to "none".
+    const showZoneNavigation = resolveZoneNavigationMode() === "minimap-v1";
 
     const render = () => {
       frameCount++;
@@ -1151,11 +1198,15 @@ function MinimapInner({
           extentRef.current = nextExtent;
         }
         const liveExtent = extentRef.current;
-        if (cam.right !== liveExtent) {
-          cam.left = -liveExtent;
-          cam.right = liveExtent;
-          cam.top = liveExtent;
-          cam.bottom = -liveExtent;
+        rs.viewport.update(widthRef.current, heightRef.current, liveExtent);
+        if (
+          cam.right !== rs.viewport.halfWidth ||
+          cam.top !== rs.viewport.halfHeight
+        ) {
+          cam.left = -rs.viewport.halfWidth;
+          cam.right = rs.viewport.halfWidth;
+          cam.top = rs.viewport.halfHeight;
+          cam.bottom = -rs.viewport.halfHeight;
           cam.updateProjectionMatrix();
         }
       }
@@ -1236,8 +1287,8 @@ function MinimapInner({
               // zooming out, keep at least viewport coverage so we never expose
               // a hard black box while the replacement cache is generated.
               const drawScale = Math.max(1 / TERRAIN_OVERSHOOT, extentScale);
-              const drawW = cw * TERRAIN_OVERSHOOT * drawScale;
-              const drawH = ch * TERRAIN_OVERSHOOT * drawScale;
+              const drawSize =
+                rs.viewport.majorPixels * TERRAIN_OVERSHOOT * drawScale;
               const cachedUpX = terrainCacheUpRef.current.x;
               const cachedUpZ = terrainCacheUpRef.current.z;
               const cachedRightX = -cachedUpZ;
@@ -1253,18 +1304,16 @@ function MinimapInner({
                 centerDeltaX * cachedRightX + centerDeltaZ * cachedRightZ;
               const offsetUp =
                 centerDeltaX * cachedUpX + centerDeltaZ * cachedUpZ;
-              const pixelsPerWorldX = cw / (2 * currentExtent);
-              const pixelsPerWorldY = ch / (2 * currentExtent);
-              const offsetX = -offsetRight * pixelsPerWorldX;
-              const offsetY = offsetUp * pixelsPerWorldY;
+              const offsetX = -offsetRight * rs.viewport.pixelsPerWorld;
+              const offsetY = offsetUp * rs.viewport.pixelsPerWorld;
               mainCtx.fillStyle = "#11161c";
               mainCtx.fillRect(0, 0, cw, ch);
               mainCtx.drawImage(
                 terrainOffscreenRef.current,
-                cw / 2 - drawW / 2 + offsetX,
-                ch / 2 - drawH / 2 + offsetY,
-                drawW,
-                drawH,
+                cw / 2 - drawSize / 2 + offsetX,
+                ch / 2 - drawSize / 2 + offsetY,
+                drawSize,
+                drawSize,
               );
             } else {
               // Fallback: dark background until terrain system is ready
@@ -1278,7 +1327,7 @@ function MinimapInner({
         }
       }
 
-      // Draw 2D overlay (roads → buildings → pips → flag) every frame
+      // Draw 2D overlay (roads → buildings → zone POIs → pips → flag) every frame
       const ctx = overlayCtxRef.current;
       if (ctx) {
         const cw = overlayCanvas.width;
@@ -1303,11 +1352,59 @@ function MinimapInner({
             cam.position.x,
             cam.position.z,
             currentExtent * 2,
-            // pixels per world unit — drives road width scaling with zoom
-            cw / (2 * currentExtent),
+            // Same isotropic scale as camera projection and terrain pixels.
+            rs.viewport.pixelsPerWorld,
             cw,
             ch,
           );
+        }
+
+        if (showZoneNavigation && rs.hasCachedMatrix && cam && hasTarget) {
+          const navigation = rs.zoneNavigation;
+          updateMinimapZoneNavigation(
+            navigation,
+            ALL_WORLD_AREAS,
+            _cachedProjectionViewMatrix.elements,
+            _tempTargetPos.x,
+            _tempTargetPos.z,
+            cw,
+            ch,
+          );
+          ctx.save();
+          // Keep this overlay's drawing inside its canvas viewport.
+          ctx.beginPath();
+          ctx.rect(0, 0, cw, ch);
+          ctx.clip();
+          for (let index = 0; index < navigation.count; index++) {
+            const marker = navigation.markers[index];
+            drawMinimapIcon(
+              ctx,
+              marker.x,
+              marker.y,
+              marker.kind === "safe" ? "zone_safe" : "zone_arena",
+            );
+            if (marker.offMap) {
+              const ux = marker.directionX;
+              const uy = marker.directionY;
+              ctx.beginPath();
+              ctx.moveTo(
+                marker.x + ux * 8 - uy * 3,
+                marker.y + uy * 8 + ux * 3,
+              );
+              ctx.lineTo(marker.x + ux * 11, marker.y + uy * 11);
+              ctx.lineTo(
+                marker.x + ux * 8 + uy * 3,
+                marker.y + uy * 8 - ux * 3,
+              );
+              ctx.strokeStyle = "#172321";
+              ctx.lineWidth = 3;
+              ctx.stroke();
+              ctx.strokeStyle = "#e0e8e2";
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
         }
 
         // ── Entity pips ───────────────────────────────────────────────────────
@@ -1490,8 +1587,7 @@ function MinimapInner({
       if (!worldPos) return;
 
       const player = world.entities?.player as
-        | { position?: { x: number; z: number }; runMode?: boolean }
-        | undefined;
+        { position?: { x: number; z: number }; runMode?: boolean } | undefined;
       if (!player?.position) return;
       const dx = worldPos.x - player.position.x;
       const dz = worldPos.z - player.position.z;
@@ -1505,9 +1601,7 @@ function MinimapInner({
       }
 
       const terrainSystem = world.getSystem("terrain") as unknown as
-        | TerrainSystemLike
-        | null
-        | undefined;
+        TerrainSystemLike | null | undefined;
       let targetY = 0;
       if (terrainSystem?.getHeightAt) {
         const h = terrainSystem.getHeightAt(targetX, targetZ);

@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { THREE } from "@hyperforge/shared";
+import { ThreeResourceManager } from "../../../src/lib/ThreeResourceManager";
 
 // Create minimal mock types for Three.js objects
 // These test the disposal logic without requiring actual Three.js
@@ -40,6 +42,26 @@ interface MockRenderer {
 }
 
 describe("ThreeResourceManager", () => {
+  describe("real Three.js resource lifecycle", () => {
+    it("disposes every shadow-map target owned by a shadow-casting light", () => {
+      const light = new THREE.DirectionalLight();
+      const shadowMap = new THREE.RenderTarget(16, 16);
+      const shadowMapPass = new THREE.RenderTarget(16, 16);
+      const shadowMapDispose = vi.spyOn(shadowMap, "dispose");
+      const shadowMapPassDispose = vi.spyOn(shadowMapPass, "dispose");
+
+      light.shadow.map = shadowMap;
+      light.shadow.mapPass = shadowMapPass;
+
+      ThreeResourceManager.disposeObject(light, {
+        removeFromParent: false,
+      });
+
+      expect(shadowMapDispose).toHaveBeenCalledOnce();
+      expect(shadowMapPassDispose).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("disposal tracking", () => {
     it("should prevent double disposal with WeakSet", () => {
       // Simulate the WeakSet-based tracking

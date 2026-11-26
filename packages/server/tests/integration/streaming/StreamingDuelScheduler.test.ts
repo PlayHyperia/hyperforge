@@ -70,6 +70,41 @@ function createMockAgent(id: string, name: string, level: number): MockAgent {
 
 function createMockWorld(): MockWorld {
   const players = new Map<string, MockAgent>();
+  const inventories = new Map<
+    string,
+    Array<{ slot: number; itemId: string; quantity: number }>
+  >();
+  const equipment = new Map<
+    string,
+    Record<
+      "weapon" | "arrows" | "shield",
+      { itemId: string | null; item: { id: string } | null; quantity: number }
+    >
+  >();
+  const getInventory = (playerId: string) => {
+    let items = inventories.get(playerId);
+    if (!items) {
+      items = [];
+      inventories.set(playerId, items);
+    }
+    return items;
+  };
+  const getEquipment = (playerId: string) => {
+    let state = equipment.get(playerId);
+    if (!state) {
+      state = {
+        weapon: {
+          itemId: "bronze_shortsword",
+          item: { id: "bronze_shortsword" },
+          quantity: 1,
+        },
+        arrows: { itemId: null, item: null, quantity: 0 },
+        shield: { itemId: null, item: null, quantity: 0 },
+      };
+      equipment.set(playerId, state);
+    }
+    return state;
+  };
 
   return {
     entities: {
@@ -85,11 +120,23 @@ function createMockWorld(): MockWorld {
       if (name === "database") {
         return {
           getDb: vi.fn().mockReturnValue({
-            select: vi.fn().mockReturnValue({
-              from: vi.fn().mockReturnValue({
-                where: vi.fn().mockReturnValue([]),
-              }),
-            }),
+            select: vi
+              .fn()
+              .mockImplementation((selection?: Record<string, unknown>) => ({
+                from: vi.fn().mockReturnValue({
+                  where: vi.fn().mockReturnValue(
+                    selection && "streamingDuelEnabled" in selection
+                      ? {
+                          limit: vi.fn().mockResolvedValue([
+                            {
+                              streamingDuelEnabled: true,
+                            },
+                          ]),
+                        }
+                      : [],
+                  ),
+                }),
+              })),
             insert: vi.fn().mockReturnValue({
               values: vi.fn().mockResolvedValue(undefined),
               onConflictDoUpdate: vi.fn().mockReturnValue({
@@ -107,7 +154,98 @@ function createMockWorld(): MockWorld {
       if (name === "inventory") {
         return {
           addItem: vi.fn().mockResolvedValue(true),
-          removeItem: vi.fn().mockResolvedValue(true),
+          addItemDirect: vi.fn(
+            async (
+              playerId: string,
+              item: { itemId: string; quantity: number; slot?: number },
+            ) => {
+              const items = getInventory(playerId);
+              const slot =
+                item.slot ??
+                Array.from({ length: 28 }, (_, index) => index).find(
+                  (candidate) =>
+                    !items.some((entry) => entry.slot === candidate),
+                );
+              if (slot === undefined) return false;
+              items.push({
+                slot,
+                itemId: item.itemId,
+                quantity: item.quantity,
+              });
+              return true;
+            },
+          ),
+          removeItem: vi.fn(
+            async (request: {
+              playerId: string;
+              itemId: string;
+              quantity: number;
+              slot?: number;
+            }) => {
+              const items = getInventory(request.playerId);
+              const index = items.findIndex(
+                (entry) =>
+                  entry.itemId === request.itemId &&
+                  (request.slot === undefined || entry.slot === request.slot),
+              );
+              if (index < 0) return false;
+              if (items[index].quantity <= request.quantity) {
+                items.splice(index, 1);
+              } else {
+                items[index].quantity -= request.quantity;
+              }
+              return true;
+            },
+          ),
+          getInventory: (playerId: string) => ({
+            playerId,
+            items: getInventory(playerId),
+            coins: 0,
+          }),
+          isInventoryReady: () => true,
+        };
+      }
+      if (name === "equipment") {
+        return {
+          getPlayerEquipment: getEquipment,
+          canPlayerEquipItem: () => true,
+          equipItemDirect: vi.fn(
+            async (playerId: string, itemId: string | number) => {
+              const normalizedItemId = String(itemId);
+              const state = getEquipment(playerId);
+              const slot = normalizedItemId.includes("arrow")
+                ? "arrows"
+                : normalizedItemId.includes("shield")
+                  ? "shield"
+                  : "weapon";
+              const displacedItems = state[slot].itemId
+                ? [
+                    {
+                      itemId: state[slot].itemId,
+                      slot,
+                      quantity: state[slot].quantity,
+                    },
+                  ]
+                : [];
+              state[slot] = {
+                itemId: normalizedItemId,
+                item: { id: normalizedItemId },
+                quantity: 1,
+              };
+              return { success: true, displacedItems };
+            },
+          ),
+          unequipItemDirect: vi.fn(async (playerId: string, slot: string) => {
+            const state = getEquipment(playerId);
+            const equipmentSlot = slot as "weapon" | "arrows" | "shield";
+            const prior = state[equipmentSlot];
+            state[equipmentSlot] = { itemId: null, item: null, quantity: 0 };
+            return {
+              success: true,
+              itemId: prior.itemId,
+              quantity: prior.quantity,
+            };
+          }),
         };
       }
       if (name === "network") {

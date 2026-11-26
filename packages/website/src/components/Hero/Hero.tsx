@@ -47,10 +47,10 @@ export function Hero() {
           <FadeIn onScroll={false} delay={0.1}>
             <div className="flex flex-col items-center md:items-start gap-6 md:gap-8 text-center md:text-left max-w-2xl hero-content-pedestal">
               <Image
-                src="/images/wordmark.png"
+                src="/images/hyperia-wordmark.svg"
                 alt="Hyperia"
-                width={1000}
-                height={200}
+                width={960}
+                height={180}
                 className="w-64 sm:w-80 md:w-96 lg:w-[32rem] h-auto drop-shadow-[0_0_40px_var(--gold-glow-alt)]"
                 priority
               />

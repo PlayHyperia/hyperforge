@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuelArenaOracleConfig } from "../../../src/oracle/config.js";
 
-const ORIGINAL_ENV = { ...process.env };
-
 function clearOracleEnv() {
   for (const key in process.env) {
     if (key.startsWith("DUEL_ARENA_ORACLE_")) {
       vi.stubEnv(key, "");
     }
   }
+  vi.stubEnv("ORACLE_SETTLEMENT_DELAY_MS", "");
 }
 
 afterEach(() => {
@@ -20,7 +19,7 @@ beforeEach(() => {
 });
 
 describe("getDuelArenaOracleConfig", () => {
-  it("builds local Anvil and Solana localnet targets for the local profile", () => {
+  it("builds only a Solana localnet target for the local profile", () => {
     process.env.DUEL_ARENA_ORACLE_ENABLED = "true";
     process.env.DUEL_ARENA_ORACLE_PROFILE = "local";
     process.env.DUEL_ARENA_ORACLE_ANVIL_CONTRACT_ADDRESS =
@@ -36,26 +35,23 @@ describe("getDuelArenaOracleConfig", () => {
 
     expect(config.enabled).toBe(true);
     expect(config.profile).toBe("local");
-    expect(config.evmTargets).toHaveLength(1);
-    expect(config.evmTargets[0]?.key).toBe("anvil");
-    expect(config.evmTargets[0]?.rpcUrl).toBe("http://127.0.0.1:8545");
+    expect(config).not.toHaveProperty("evmTargets");
     expect(config.solanaTargets).toHaveLength(1);
     expect(config.solanaTargets[0]?.key).toBe("solanaLocalnet");
     expect(config.solanaTargets[0]?.rpcUrl).toBe("http://127.0.0.1:8899");
     expect(config.solanaTargets[0]?.wsUrl).toBe("ws://127.0.0.1:8900");
   });
 
-  it("does not activate local targets without the required credentials", () => {
+  it("fails closed when enabled without a Solana signer", () => {
     process.env.DUEL_ARENA_ORACLE_ENABLED = "true";
     process.env.DUEL_ARENA_ORACLE_PROFILE = "local";
 
-    const config = getDuelArenaOracleConfig();
-
-    expect(config.evmTargets).toHaveLength(0);
-    expect(config.solanaTargets).toHaveLength(0);
+    expect(() => getDuelArenaOracleConfig()).toThrow(
+      "no Solana authority or reporter secret",
+    );
   });
 
-  it("uses shared EVM and Solana secrets when target-specific ones are unset", () => {
+  it("uses the shared Solana secret and ignores legacy chain configuration", () => {
     process.env.DUEL_ARENA_ORACLE_ENABLED = "true";
     process.env.DUEL_ARENA_ORACLE_PROFILE = "testnet";
     process.env.DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY =
@@ -71,16 +67,41 @@ describe("getDuelArenaOracleConfig", () => {
 
     const config = getDuelArenaOracleConfig();
 
-    expect(config.evmTargets).toHaveLength(3);
-    expect(config.evmTargets.map((target) => target.privateKey)).toEqual([
-      process.env.DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY,
-      process.env.DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY,
-      process.env.DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY,
-    ]);
+    expect(config).not.toHaveProperty("evmTargets");
     expect(config.solanaTargets).toHaveLength(1);
     expect(config.solanaTargets[0]?.authoritySecret).toBe(
       process.env.DUEL_ARENA_ORACLE_SOLANA_AUTHORITY_SECRET,
     );
     expect(config.solanaTargets[0]?.reporterSecret).toBeNull();
   });
+
+  it("keeps the disabled default side-effect free without credentials", () => {
+    const config = getDuelArenaOracleConfig();
+
+    expect(config.enabled).toBe(false);
+    expect(config.profile).toBe("testnet");
+    expect(config.solanaTargets).toEqual([]);
+  });
+
+  it.each(["AVAX", "bsc", "base-sepolia"])(
+    "rejects the legacy non-Solana profile %s",
+    (profile) => {
+      process.env.DUEL_ARENA_ORACLE_PROFILE = profile;
+
+      expect(() => getDuelArenaOracleConfig()).toThrow(
+        "DUEL_ARENA_ORACLE_PROFILE must be local, testnet, mainnet, or all",
+      );
+    },
+  );
+
+  it.each(["-1", "1.5", "7000ms", "9007199254740992"])(
+    "rejects an unsafe settlement delay %s",
+    (delay) => {
+      process.env.ORACLE_SETTLEMENT_DELAY_MS = delay;
+
+      expect(() => getDuelArenaOracleConfig()).toThrow(
+        "ORACLE_SETTLEMENT_DELAY_MS must be a non-negative",
+      );
+    },
+  );
 });

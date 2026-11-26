@@ -15,6 +15,8 @@ import { useThemeStore } from "@/ui";
  */
 const kickMessages: Record<string, string> = {
   duplicate_user: "Player already active on another device or window.",
+  state_unavailable:
+    "Your character state could not be loaded safely. Reload to reconnect and try again.",
   player_limit: "Player limit reached.",
   unknown: "You were kicked.",
 };

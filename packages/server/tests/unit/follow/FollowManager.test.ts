@@ -12,7 +12,6 @@
  * - Mutual following ("dancing" pattern)
  *
  * @see https://classic.wiki/w/Follow
- * @see https://rune-server.org/threads/help-with-player-dancing-spinning-when-following-each-other.706121/
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";

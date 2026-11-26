@@ -81,7 +81,7 @@ function createMockGravestone(
   options: { canLoot?: boolean; zoneType?: string } = {},
 ): MockGravestone {
   const lootItems = [...items];
-  const { canLoot = true, zoneType = "safe_area" } = options;
+  const { canLoot = true, zoneType = "wilderness" } = options;
 
   return {
     id,
@@ -474,7 +474,7 @@ describe("GravestoneLootSystem", () => {
       );
     });
 
-    it("nonexistent gravestone silently fails", async () => {
+    it("returns a terminal rejection when the gravestone no longer exists", async () => {
       world.emit(EventType.CORPSE_LOOT_REQUEST, {
         corpseId: "nonexistent",
         playerId: "player_1",
@@ -483,8 +483,14 @@ describe("GravestoneLootSystem", () => {
       });
       await tick();
 
-      // No crash, no network result (entity not found = null context)
-      expect(world.network.sendTo).not.toHaveBeenCalled();
+      expect(world.network.sendTo).toHaveBeenCalledWith(
+        "player_1",
+        "lootResult",
+        expect.objectContaining({
+          success: false,
+          reason: "INVALID_REQUEST",
+        }),
+      );
     });
   });
 
@@ -600,6 +606,184 @@ describe("GravestoneLootSystem", () => {
         expect.objectContaining({ success: true }),
       );
       expect(grave.removeItem).not.toHaveBeenCalled();
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Durable safe-area custody
+  // --------------------------------------------------------------------------
+
+  describe("durable safe-area custody", () => {
+    it("commits inventory custody before reloading inventory and removing visible loot", async () => {
+      const order: string[] = [];
+      const grave = createMockGravestone(
+        "grave_atomic",
+        "player_1",
+        [createTestItem("grave_bronze_shortsword", 1)],
+        { zoneType: "safe_area" },
+      );
+      grave.removeItem.mockImplementation(() => {
+        order.push("remove-visible");
+        return true;
+      });
+      world.entities.set(grave.id, grave);
+
+      const inventory = {
+        getInventory: vi.fn(() => ({ items: [] })),
+        reloadFromDatabase: vi.fn(async () => {
+          order.push("reload-inventory");
+        }),
+      };
+      const database = {
+        getDeathLockAsync: vi.fn(async () => ({
+          playerId: "player_1",
+          gravestoneId: grave.id,
+          deathOperationId: "death-operation-1",
+        })),
+        commitSafeAreaDeathGravestoneLootAsync: vi.fn(async () => {
+          order.push("commit-custody");
+          return {
+            replayed: false,
+            transferred: [{ itemId: "grave_bronze_shortsword", quantity: 1 }],
+            remaining: [],
+          };
+        }),
+      };
+      world.getSystem.mockImplementation((name: string) =>
+        name === "inventory"
+          ? inventory
+          : name === "database"
+            ? database
+            : null,
+      );
+
+      world.emit(EventType.CORPSE_LOOT_ALL_REQUEST, {
+        corpseId: grave.id,
+        playerId: "player_1",
+        transactionId: "loot-atomic-1",
+      });
+      await tick();
+
+      expect(order).toEqual([
+        "commit-custody",
+        "reload-inventory",
+        "remove-visible",
+      ]);
+      expect(
+        database.commitSafeAreaDeathGravestoneLootAsync,
+      ).toHaveBeenCalledWith({
+        operationId: "loot-atomic-1",
+        playerId: "player_1",
+        deathOperationId: "death-operation-1",
+        gravestoneId: grave.id,
+      });
+      expect(world.emit).not.toHaveBeenCalledWith(
+        EventType.INVENTORY_ITEM_ADDED,
+        expect.anything(),
+      );
+      expect(world.network.sendTo).toHaveBeenCalledWith(
+        "player_1",
+        "lootResult",
+        expect.objectContaining({ success: true }),
+      );
+    });
+
+    it("leaves visible custody untouched when the database rejects the transfer", async () => {
+      const grave = createMockGravestone(
+        "grave_atomic",
+        "player_1",
+        [createTestItem("grave_bronze_shortsword", 1)],
+        { zoneType: "safe_area" },
+      );
+      world.entities.set(grave.id, grave);
+      const inventory = {
+        getInventory: vi.fn(() => ({ items: [] })),
+        reloadFromDatabase: vi.fn(),
+      };
+      const database = {
+        getDeathLockAsync: vi.fn(async () => ({
+          playerId: "player_1",
+          gravestoneId: grave.id,
+          deathOperationId: "death-operation-1",
+        })),
+        commitSafeAreaDeathGravestoneLootAsync: vi
+          .fn()
+          .mockRejectedValue(new Error("database unavailable")),
+      };
+      world.getSystem.mockImplementation((name: string) =>
+        name === "inventory"
+          ? inventory
+          : name === "database"
+            ? database
+            : null,
+      );
+
+      world.emit(EventType.CORPSE_LOOT_ALL_REQUEST, {
+        corpseId: grave.id,
+        playerId: "player_1",
+        transactionId: "loot-atomic-rejected",
+      });
+      await tick();
+
+      expect(grave.removeItem).not.toHaveBeenCalled();
+      expect(inventory.reloadFromDatabase).not.toHaveBeenCalled();
+      expect(world.network.sendTo).toHaveBeenCalledWith(
+        "player_1",
+        "lootResult",
+        expect.objectContaining({ success: false }),
+      );
+    });
+
+    it("passes an exact item request to durable custody for single-item loot", async () => {
+      const grave = createMockGravestone(
+        "grave_atomic",
+        "player_1",
+        [createTestItem("grave_lobster", 5)],
+        { zoneType: "safe_area" },
+      );
+      world.entities.set(grave.id, grave);
+      const inventory = {
+        getInventory: vi.fn(() => ({ items: [] })),
+        reloadFromDatabase: vi.fn(async () => undefined),
+      };
+      const database = {
+        getDeathLockAsync: vi.fn(async () => ({
+          playerId: "player_1",
+          gravestoneId: grave.id,
+          deathOperationId: "death-operation-1",
+        })),
+        commitSafeAreaDeathGravestoneLootAsync: vi.fn(async () => ({
+          replayed: false,
+          transferred: [{ itemId: "grave_lobster", quantity: 3 }],
+          remaining: [{ itemId: "grave_lobster", quantity: 2 }],
+        })),
+      };
+      world.getSystem.mockImplementation((name: string) =>
+        name === "inventory"
+          ? inventory
+          : name === "database"
+            ? database
+            : null,
+      );
+
+      world.emit(EventType.CORPSE_LOOT_REQUEST, {
+        corpseId: grave.id,
+        playerId: "player_1",
+        itemId: "grave_lobster",
+        quantity: 3,
+        transactionId: "loot-atomic-single",
+      });
+      await tick();
+
+      expect(
+        database.commitSafeAreaDeathGravestoneLootAsync,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: "loot-atomic-single",
+          items: [{ itemId: "grave_lobster", quantity: 3 }],
+        }),
+      );
+      expect(grave.removeItem).toHaveBeenCalledWith("grave_lobster", 3);
     });
   });
 

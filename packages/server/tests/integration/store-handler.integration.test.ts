@@ -231,7 +231,7 @@ describe("Store Handler Integration - Input Validation", () => {
 
   describe("isValidStoreId", () => {
     it("accepts valid store IDs", () => {
-      expect(isValidStoreId("lumbridge_general_store")).toBe(true);
+      expect(isValidStoreId("town_general_store")).toBe(true);
       expect(isValidStoreId("varrock_sword_shop")).toBe(true);
     });
 

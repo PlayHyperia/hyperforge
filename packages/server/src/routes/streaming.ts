@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { RateLimitOptions } from "@fastify/rate-limit";
 import type { World } from "@hyperforge/shared";
 import { getStreamingDuelScheduler } from "../systems/StreamingDuelScheduler/index.js";
+import { getStreamingDuelAuthoritySnapshot } from "../systems/StreamingDuelScheduler/authority.js";
 import {
   STREAMING_TIMING,
   type StreamingPhase,
@@ -20,6 +21,7 @@ import { peekRTMPBridge } from "../streaming/index.js";
 import { getStreamCapture } from "../streaming/stream-capture.js";
 import {
   STREAMING_CANONICAL_PLATFORM,
+  STREAMING_CANONICAL_SOURCE_URL,
   STREAMING_PUBLIC_DELAY_DEFAULT_MS,
   STREAMING_PUBLIC_DELAY_MS,
   STREAMING_PUBLIC_DELAY_OVERRIDDEN,
@@ -28,9 +30,31 @@ import {
   deriveBettingRendererHealth,
   loadExternalRtmpStatusSnapshot,
   registerStreamingBettingRoutes,
+  type StreamingBettingAuthorityHealth,
+  type StreamingBettingTerminalFrame,
 } from "./streaming-betting-routes.js";
-import { trimReplayFrames } from "./streaming-sse-buffer.js";
+import {
+  shouldDeliverSseFrame,
+  trimReplayFrames,
+} from "./streaming-sse-buffer.js";
 import { getDefaultPublicWsUrl } from "../shared/public-ws-url.js";
+import {
+  evaluateStreamingRuntimeHealth,
+  loadKeeperRuntimeObservation,
+  resolveStreamingLiveAudioRequired,
+} from "./streaming-runtime-health.js";
+import { StreamingRuntimeAlertDispatcher } from "./streaming-runtime-alerts.js";
+import { resolveStreamingRuntimeAlertConfig } from "./streaming-runtime-alert-config.js";
+import { buildStreamingOperatorMetrics } from "./streaming-operator-metrics.js";
+import {
+  derivePublicBettingAvailability,
+  sanitizePublicRecentDuel,
+  sanitizePublicOperationalMetrics,
+  sanitizePublicStreamingState,
+} from "./streaming-public-presentation.js";
+import { hasValidStreamingViewerAccessToken } from "../streaming/stream-viewer-access-token.js";
+import type { DatabaseSystem } from "../systems/DatabaseSystem/index.js";
+import { checkProjectileCostCustodyHealth } from "../startup/routes/health-routes.js";
 type InventorySnapshotItem = {
   slot: number;
   itemId: string;
@@ -58,6 +82,66 @@ type SseDropReason =
   | "slow-consumer"
   | "write-failed"
   | "closed-socket";
+type StreamingSseAudience = "all" | "authoritative" | "public";
+
+export function shouldDeliverStreamingFrameToClient(
+  audience: StreamingSseAudience,
+  allowAuthoritativeState: boolean,
+): boolean {
+  if (audience === "all") return true;
+  return audience === "authoritative"
+    ? allowAuthoritativeState
+    : !allowAuthoritativeState;
+}
+
+export function parseStreamingReplayFrameState(
+  frame: Pick<StreamingSseFrame, "payload"> | null,
+): {
+  cycle: unknown;
+  leaderboard: unknown;
+  terminalNotice: unknown;
+  cameraTarget: unknown;
+} | null {
+  if (!frame) return null;
+  try {
+    const parsed = JSON.parse(frame.payload) as {
+      cycle?: unknown;
+      leaderboard?: unknown;
+      terminalNotice?: unknown;
+      cameraTarget?: unknown;
+    };
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.cycle || !Array.isArray(parsed.leaderboard)) return null;
+    return {
+      cycle: parsed.cycle,
+      leaderboard: parsed.leaderboard,
+      terminalNotice: parsed.terminalNotice ?? null,
+      cameraTarget: parsed.cameraTarget ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function parseStreamingReplayFramePayload(
+  frame: StreamingSseFrame | null,
+): Record<string, unknown> | null {
+  if (!frame) return null;
+  try {
+    const parsed = JSON.parse(frame.payload) as Record<string, unknown>;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      parsed.seq !== frame.seq ||
+      parsed.emittedAt !== frame.emittedAt
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 const STREAMING_SSE_REPLAY_BUFFER = Math.max(
   128,
@@ -68,7 +152,7 @@ const STREAMING_SSE_REPLAY_BUFFER = Math.max(
 );
 const STREAMING_SSE_PUSH_INTERVAL_MS = Math.max(
   250,
-  Number.parseInt(process.env.STREAMING_SSE_PUSH_INTERVAL_MS || "500", 10),
+  Number.parseInt(process.env.STREAMING_SSE_PUSH_INTERVAL_MS || "250", 10),
 );
 const STREAMING_SSE_HEARTBEAT_MS = Math.max(
   5000,
@@ -106,6 +190,28 @@ const EXTERNAL_RTMP_STATUS_MAX_AGE_MS = Math.max(
   5000,
   Number.parseInt(process.env.RTMP_STATUS_MAX_AGE_MS || "15000", 10),
 );
+const STREAMING_FEED_MAX_AGE_MS = Math.max(
+  5_000,
+  Number.parseInt(process.env.STREAMING_FEED_MAX_AGE_MS || "15000", 10),
+);
+const STREAMING_REQUIRE_LIVE_AUDIO = resolveStreamingLiveAudioRequired(
+  process.env.STREAMING_REQUIRE_LIVE_AUDIO,
+  process.env.NODE_ENV,
+);
+const STREAMING_KEEPER_HEALTH_URL =
+  process.env.HYPERBET_KEEPER_HEALTH_URL?.trim() || null;
+const STREAMING_KEEPER_HEALTH_TIMEOUT_MS = Math.max(
+  250,
+  Number.parseInt(process.env.STREAMING_KEEPER_HEALTH_TIMEOUT_MS || "2000", 10),
+);
+const STREAMING_KEEPER_HEALTH_MAX_AGE_MS = Math.max(
+  5_000,
+  Number.parseInt(
+    process.env.STREAMING_KEEPER_HEALTH_MAX_AGE_MS || "30000",
+    10,
+  ),
+);
+const STREAMING_ALERT_CONFIG = resolveStreamingRuntimeAlertConfig(process.env);
 const BETTING_BOOTSTRAP_RATE_LIMIT: RateLimitOptions = {
   max: 240,
   timeWindow: "1 minute",
@@ -114,6 +220,41 @@ const BETTING_EVENTS_RATE_LIMIT: RateLimitOptions = {
   max: 60,
   timeWindow: "1 minute",
 };
+
+function isStreamingDestinationConnected(
+  destination: Record<string, unknown>,
+): boolean {
+  if (destination.connected === true) return true;
+  const status =
+    typeof destination.status === "string"
+      ? destination.status.trim().toLowerCase()
+      : "";
+  return (
+    status === "connected" || status === "streaming" || status === "healthy"
+  );
+}
+
+function findStaleStreamingPhase(
+  cycle: ReturnType<
+    NonNullable<ReturnType<typeof getStreamingDuelScheduler>>["getCurrentCycle"]
+  >,
+  nowMs: number,
+): { phase: string; phaseStartedAt: number } | null {
+  if (!cycle) return null;
+  const phaseMaxAgeMs: Partial<Record<StreamingPhase, number>> = {
+    ANNOUNCEMENT: STREAMING_TIMING.ANNOUNCEMENT_DURATION + 10_000,
+    COUNTDOWN: STREAMING_TIMING.COUNTDOWN_DURATION + 5_000,
+    FIGHTING:
+      STREAMING_TIMING.FIGHTING_DURATION +
+      STREAMING_TIMING.END_WARNING_DURATION +
+      10_000,
+    RESOLUTION: STREAMING_TIMING.RESOLUTION_DURATION + 10_000,
+  };
+  const maxAgeMs = phaseMaxAgeMs[cycle.phase];
+  return maxAgeMs !== undefined && nowMs - cycle.phaseStartTime > maxAgeMs
+    ? { phase: cycle.phase, phaseStartedAt: cycle.phaseStartTime }
+    : null;
+}
 
 function getInventorySnapshot(
   world: World,
@@ -173,8 +314,15 @@ async function getThoughtsSnapshot(
 export function registerStreamingRoutes(
   fastify: FastifyInstance,
   world: World,
-): void {
-  const sseClients = new Map<number, FastifyReply>();
+): StreamingRoutesRuntime {
+  const sseClients = new Map<
+    number,
+    {
+      reply: FastifyReply;
+      lastDeliveredSeq: number;
+      allowAuthoritativeState: boolean;
+    }
+  >();
   const replayFrames: StreamingSseFrame[] = [];
   let replayFramesTotalBytes = 0;
   const sseMetrics = {
@@ -229,6 +377,20 @@ export function registerStreamingRoutes(
     externalStatusMaxAgeMs: EXTERNAL_RTMP_STATUS_MAX_AGE_MS,
   });
 
+  const withPublicRendererHealth = <T extends { cycle: object }>(
+    state: T,
+  ): T & {
+    cycle: T["cycle"] & {
+      rendererHealth: ReturnType<typeof bettingRoutes.getRendererHealth>;
+    };
+  } => ({
+    ...state,
+    cycle: {
+      ...state.cycle,
+      rendererHealth: bettingRoutes.getRendererHealth(),
+    },
+  });
+
   const formatSseEvent = (event: string, data: string, id?: number): string => {
     const normalizedData = data.replace(/\n/g, "\ndata: ");
     const idLine = typeof id === "number" ? `id: ${id}\n` : "";
@@ -266,8 +428,8 @@ export function registerStreamingRoutes(
     clientId: number,
     reason: SseDropReason = "client-close",
   ): void => {
-    const clientReply = sseClients.get(clientId);
-    if (!clientReply) return;
+    const client = sseClients.get(clientId);
+    if (!client) return;
 
     sseClients.delete(clientId);
     sseMetrics.totalDisconnected += 1;
@@ -276,8 +438,8 @@ export function registerStreamingRoutes(
     if (reason === "closed-socket") sseMetrics.droppedClosedSockets += 1;
 
     try {
-      if (!clientReply.raw.writableEnded) {
-        clientReply.raw.end();
+      if (!client.reply.raw.writableEnded) {
+        client.reply.raw.end();
       }
     } catch {
       // ignore socket close errors
@@ -331,17 +493,33 @@ export function registerStreamingRoutes(
     if (durationMs >= 100) sseMetrics.fanoutOver100Ms += 1;
   };
 
-  const pushFrame = (event: string, frame: StreamingSseFrame): void => {
+  const pushFrame = (
+    event: string,
+    frame: StreamingSseFrame,
+    audience: StreamingSseAudience = "all",
+  ): void => {
     const startedAt = Date.now();
     const message = formatSseEvent(event, frame.payload, frame.seq);
     sseMetrics.broadcastBatches += 1;
     let delivered = 0;
-    for (const [clientId, clientReply] of sseClients.entries()) {
-      const status = writeSseMessage(clientReply, message);
+    for (const [clientId, client] of sseClients.entries()) {
+      if (
+        !shouldDeliverStreamingFrameToClient(
+          audience,
+          client.allowAuthoritativeState,
+        )
+      ) {
+        continue;
+      }
+      if (!shouldDeliverSseFrame(client.lastDeliveredSeq, frame.seq)) {
+        continue;
+      }
+      const status = writeSseMessage(client.reply, message);
       if (status !== "ok") {
         removeSseClientForStatus(clientId, status);
         continue;
       }
+      client.lastDeliveredSeq = frame.seq;
       delivered += 1;
     }
     sseMetrics.deliveredLiveStateEvents += delivered;
@@ -364,9 +542,12 @@ export function registerStreamingRoutes(
 
   const getOldestEligibleReplayFrame = (
     nowMs: number = Date.now(),
+    allowAuthoritativeState = false,
   ): StreamingSseFrame | null => {
     if (replayFrames.length === 0) return null;
-    if (STREAMING_PUBLIC_DELAY_MS <= 0) return replayFrames[0];
+    if (allowAuthoritativeState || STREAMING_PUBLIC_DELAY_MS <= 0) {
+      return replayFrames[0];
+    }
 
     const cutoff = nowMs - STREAMING_PUBLIC_DELAY_MS;
     for (let index = 0; index < replayFrames.length; index += 1) {
@@ -378,9 +559,10 @@ export function registerStreamingRoutes(
 
   const getLatestEligibleReplayFrame = (
     nowMs: number = Date.now(),
+    allowAuthoritativeState = false,
   ): StreamingSseFrame | null => {
     if (replayFrames.length === 0) return null;
-    if (STREAMING_PUBLIC_DELAY_MS <= 0)
+    if (allowAuthoritativeState || STREAMING_PUBLIC_DELAY_MS <= 0)
       return replayFrames[replayFrames.length - 1];
 
     const cutoff = nowMs - STREAMING_PUBLIC_DELAY_MS;
@@ -394,10 +576,11 @@ export function registerStreamingRoutes(
   const getEligibleReplayFramesAfter = (
     seqValue: number,
     nowMs: number = Date.now(),
+    allowAuthoritativeState = false,
   ): StreamingSseFrame[] => {
     const startIndex = getFirstReplayIndexAfter(seqValue);
     if (startIndex >= replayFrames.length) return [];
-    if (STREAMING_PUBLIC_DELAY_MS <= 0) {
+    if (allowAuthoritativeState || STREAMING_PUBLIC_DELAY_MS <= 0) {
       return replayFrames.slice(startIndex);
     }
 
@@ -411,37 +594,14 @@ export function registerStreamingRoutes(
     return frames;
   };
 
-  const parseReplayFrameState = (
-    frame: StreamingSseFrame | null,
-  ): {
-    cycle: unknown;
-    leaderboard: unknown;
-    cameraTarget: unknown;
-  } | null => {
-    if (!frame) return null;
-    try {
-      const parsed = JSON.parse(frame.payload) as {
-        cycle?: unknown;
-        leaderboard?: unknown;
-        cameraTarget?: unknown;
-      };
-      if (!parsed || typeof parsed !== "object") return null;
-      if (!parsed.cycle || !Array.isArray(parsed.leaderboard)) return null;
-      return {
-        cycle: parsed.cycle,
-        leaderboard: parsed.leaderboard,
-        cameraTarget: parsed.cameraTarget ?? null,
-      };
-    } catch {
-      return null;
-    }
-  };
-
   const getPublicStreamingState = (
     scheduler: NonNullable<ReturnType<typeof getStreamingDuelScheduler>>,
+    allowAuthoritativeState = false,
   ): ReturnType<typeof scheduler.getStreamingState> | null => {
-    if (STREAMING_PUBLIC_DELAY_MS <= 0) {
-      return scheduler.getStreamingState();
+    if (allowAuthoritativeState || STREAMING_PUBLIC_DELAY_MS <= 0) {
+      return withPublicRendererHealth(
+        sanitizePublicStreamingState(scheduler.getStreamingState()),
+      );
     }
 
     // Keep delayed replay frames fresh for REST polling consumers
@@ -454,10 +614,12 @@ export function registerStreamingRoutes(
       captureStreamingFrame(true);
     }
 
-    const delayed = parseReplayFrameState(getLatestEligibleReplayFrame());
+    const delayed = parseStreamingReplayFrameState(
+      getLatestEligibleReplayFrame(),
+    );
     if (!delayed) return null;
 
-    return {
+    return withPublicRendererHealth({
       type: "STREAMING_STATE_UPDATE" as const,
       cycle: delayed.cycle as ReturnType<
         typeof scheduler.getStreamingState
@@ -465,12 +627,15 @@ export function registerStreamingRoutes(
       leaderboard: delayed.leaderboard as ReturnType<
         typeof scheduler.getStreamingState
       >["leaderboard"],
+      terminalNotice: (delayed.terminalNotice ?? null) as ReturnType<
+        typeof scheduler.getStreamingState
+      >["terminalNotice"],
       cameraTarget:
         typeof delayed.cameraTarget === "string" ||
         delayed.cameraTarget === null
           ? delayed.cameraTarget
           : null,
-    };
+    });
   };
 
   const captureStreamingFrame = (
@@ -479,8 +644,10 @@ export function registerStreamingRoutes(
     const scheduler = getStreamingDuelScheduler();
     if (!scheduler) return null;
 
-    const state = scheduler.getStreamingState();
-    const serialized = JSON.stringify(state);
+    const publicState = withPublicRendererHealth(
+      sanitizePublicStreamingState(scheduler.getStreamingState()),
+    );
+    const serialized = JSON.stringify(publicState);
     if (
       !forceNewFrame &&
       serialized === lastSerializedState &&
@@ -494,7 +661,7 @@ export function registerStreamingRoutes(
 
     const emittedAt = Date.now();
     const payload = JSON.stringify({
-      ...state,
+      ...publicState,
       type: "STREAMING_STATE_UPDATE",
       seq: sequence,
       emittedAt,
@@ -537,17 +704,24 @@ export function registerStreamingRoutes(
         return;
       }
 
+      // Internal consumers authenticated with the viewer-access token need
+      // the same current timeline that the authorized REST route exposes.
+      // Public clients continue to receive only delay-eligible frames below.
+      if (frame) {
+        pushFrame("state", frame, "authoritative");
+      }
+
       const eligibleFrames = getEligibleReplayFramesAfter(lastBroadcastSeq);
       for (const eligibleFrame of eligibleFrames) {
-        pushFrame("state", eligibleFrame);
+        pushFrame("state", eligibleFrame, "public");
         lastBroadcastSeq = eligibleFrame.seq;
       }
     }, STREAMING_SSE_PUSH_INTERVAL_MS);
 
     heartbeatInterval = setInterval(() => {
       const heartbeatMessage = `:hb ${Date.now()}\n\n`;
-      for (const [clientId, clientReply] of sseClients.entries()) {
-        const status = writeSseMessage(clientReply, heartbeatMessage);
+      for (const [clientId, client] of sseClients.entries()) {
+        const status = writeSseMessage(client.reply, heartbeatMessage);
         if (status === "ok") {
           sseMetrics.heartbeatsSent += 1;
           continue;
@@ -558,7 +732,10 @@ export function registerStreamingRoutes(
     }, STREAMING_SSE_HEARTBEAT_MS);
   };
 
-  fastify.addHook("onClose", (_instance, done) => {
+  // Graceful shutdown reaches HTTP close after its terminal/ACK barrier.
+  // Active SSE responses must end before Fastify waits for HTTP close; onClose
+  // runs too late and would depend on downstream clients disconnecting first.
+  fastify.addHook("preClose", (done) => {
     if (statePushInterval) {
       clearInterval(statePushInterval);
       statePushInterval = null;
@@ -580,7 +757,7 @@ export function registerStreamingRoutes(
     {
       config: { rateLimit: false },
     },
-    async (_request: FastifyRequest, reply: FastifyReply) => {
+    async (request: FastifyRequest, reply: FastifyReply) => {
       const scheduler = getStreamingDuelScheduler();
 
       if (!scheduler) {
@@ -590,7 +767,26 @@ export function registerStreamingRoutes(
         });
       }
 
-      const state = getPublicStreamingState(scheduler);
+      // REST polling and SSE replay must expose the same authoritative cursor.
+      // Publishing a cursor-less live snapshot here would force downstream
+      // consumers to invent sequence/timestamp values and then reject valid
+      // replay frames as regressions.
+      const capturedFrame = captureStreamingFrame(false);
+      const bypassPublicDelay =
+        STREAMING_PUBLIC_DELAY_MS <= 0 ||
+        hasValidStreamingViewerAccessToken(request.headers.authorization);
+      if (capturedFrame) {
+        if (STREAMING_PUBLIC_DELAY_MS <= 0) {
+          pushFrame("state", capturedFrame);
+          lastBroadcastSeq = capturedFrame.seq;
+        } else {
+          pushFrame("state", capturedFrame, "authoritative");
+        }
+      }
+      const frame = bypassPublicDelay
+        ? (replayFrames[replayFrames.length - 1] ?? null)
+        : getLatestEligibleReplayFrame();
+      const state = parseStreamingReplayFramePayload(frame);
       if (!state) {
         return reply.status(503).send({
           error: "Streaming delay warmup",
@@ -608,6 +804,7 @@ export function registerStreamingRoutes(
     },
     async (_request: FastifyRequest, reply: FastifyReply) => {
       const bettingMetrics = bettingRoutes.getMetrics();
+      const scheduler = getStreamingDuelScheduler();
       return reply.send({
         type: "STREAMING_METRICS",
         emittedAt: Date.now(),
@@ -620,6 +817,7 @@ export function registerStreamingRoutes(
             maxPendingBytes: STREAMING_SSE_MAX_PENDING_BYTES,
             publicDelayMs: STREAMING_PUBLIC_DELAY_MS,
             canonicalPlatform: STREAMING_CANONICAL_PLATFORM,
+            canonicalSourceUrl: STREAMING_CANONICAL_SOURCE_URL,
             publicDelayDefaultMs: STREAMING_PUBLIC_DELAY_DEFAULT_MS,
             publicDelayOverridden: STREAMING_PUBLIC_DELAY_OVERRIDDEN,
           },
@@ -666,7 +864,184 @@ export function registerStreamingRoutes(
           clients: bettingMetrics.clients,
           replay: bettingMetrics.replay,
         },
+        duels: scheduler
+          ? sanitizePublicOperationalMetrics(scheduler.getOperationalMetrics())
+          : null,
       });
+    },
+  );
+
+  const sampleStreamingRuntimeHealth = async () => {
+    const nowMs = Date.now();
+    const scheduler = getStreamingDuelScheduler();
+    const schedulerAuthority = getStreamingDuelAuthoritySnapshot();
+    bettingRoutes.captureCurrentState();
+    const bettingMetrics = bettingRoutes.getMetrics();
+    const captureStats = getStreamCapture().getStats();
+    const externalStatus = await loadExternalRtmpStatusSnapshot(
+      EXTERNAL_RTMP_STATUS_FILE || null,
+      EXTERNAL_RTMP_STATUS_MAX_AGE_MS,
+      { allowStale: true },
+    );
+    const externalStatusFresh = Boolean(
+      externalStatus &&
+      externalStatus.updatedAt > 0 &&
+      nowMs - externalStatus.updatedAt <= EXTERNAL_RTMP_STATUS_MAX_AGE_MS,
+    );
+    const inProcessBridge = peekRTMPBridge();
+    const inProcessBridgeStatus = inProcessBridge?.getStatus() ?? null;
+    const inProcessBridgeStats = inProcessBridge?.getStats() ?? null;
+    const destinations = externalStatusFresh
+      ? (externalStatus?.destinations ?? [])
+      : (inProcessBridgeStatus?.destinations ?? []);
+    const deliveryConfigured = destinations.length > 0;
+    const deliveryHealthy =
+      deliveryConfigured &&
+      destinations.every((destination) =>
+        isStreamingDestinationConnected(destination as Record<string, unknown>),
+      );
+    const currentCycle = scheduler?.getCurrentCycle() ?? null;
+    const renderer = deriveBettingRendererHealth(currentCycle, {
+      externalStatusSnapshot: externalStatus,
+      externalStatusMaxAgeMs: EXTERNAL_RTMP_STATUS_MAX_AGE_MS,
+      nowMs,
+      captureStats,
+    });
+    const databaseSystem = world.getSystem("database") as
+      DatabaseSystem | undefined;
+    const [keeper, projectileCostCustody] = await Promise.all([
+      loadKeeperRuntimeObservation({
+        url: STREAMING_KEEPER_HEALTH_URL,
+        timeoutMs: STREAMING_KEEPER_HEALTH_TIMEOUT_MS,
+      }),
+      checkProjectileCostCustodyHealth(databaseSystem),
+    ]);
+    const health = evaluateStreamingRuntimeHealth({
+      nowMs,
+      schedulerRunning:
+        scheduler != null && schedulerAuthority.schedulerRunning,
+      schedulerAuthorityVerified: schedulerAuthority.verified,
+      schedulerAuthorityObservedAt: schedulerAuthority.renewedAt,
+      // A valid betting state can remain semantically unchanged for longer
+      // than the health freshness window. Measure successful source
+      // observation, not the timestamp of the last deduplicated payload.
+      feedObservedAt: bettingMetrics.replay.latestObservedAt,
+      feedMaxAgeMs: STREAMING_FEED_MAX_AGE_MS,
+      renderer,
+      captureClientConnected: externalStatusFresh
+        ? externalStatus?.stats.clientConnected === true
+        : captureStats.clientConnected,
+      encoderRunning: externalStatusFresh
+        ? externalStatus?.stats.ffmpegRunning === true
+        : captureStats.ffmpegRunning,
+      encoderHealthy: externalStatusFresh
+        ? externalStatus?.stats.healthy === true
+        : captureStats.ffmpegRunning && captureStats.clientConnected,
+      audioRequired: STREAMING_REQUIRE_LIVE_AUDIO,
+      audioSource: externalStatusFresh
+        ? (externalStatus?.stats.audioSource ?? null)
+        : (inProcessBridgeStatus?.audioSource ?? null),
+      audioHealthy: externalStatusFresh
+        ? externalStatus?.stats.audioHealthy === true
+        : inProcessBridgeStatus?.audioHealthy === true,
+      deliveryConfigured,
+      deliveryHealthy,
+      deliveryObservedAt: externalStatusFresh
+        ? (externalStatus?.updatedAt ?? null)
+        : inProcessBridgeStatus
+          ? nowMs
+          : null,
+      keeper,
+      keeperMaxAgeMs: STREAMING_KEEPER_HEALTH_MAX_AGE_MS,
+      projectileCostCustody,
+    });
+    const droppedFrames = Number(
+      externalStatusFresh
+        ? (externalStatus?.stats.droppedFrames ?? 0)
+        : (inProcessBridgeStats?.droppedFrames ?? 0),
+    );
+    const normalizedDroppedFrames = Number.isFinite(droppedFrames)
+      ? droppedFrames
+      : 0;
+    const operatorMetrics = buildStreamingOperatorMetrics({
+      nowMs,
+      health,
+      rendererPerformance: externalStatusFresh
+        ? (externalStatus?.rendererPerformance ?? null)
+        : null,
+      captureHealth: externalStatusFresh
+        ? (externalStatus?.captureHealth ?? null)
+        : null,
+      encoderFps: externalStatusFresh
+        ? (externalStatus?.stats.fps ?? null)
+        : null,
+      droppedFrames: normalizedDroppedFrames,
+    });
+    return {
+      health,
+      rendererPerformance: externalStatusFresh
+        ? (externalStatus?.rendererPerformance ?? null)
+        : null,
+      operatorMetrics,
+      projectileCostCustody,
+      keeperReasons: keeper.reasons,
+      keeperCorrelationIds: keeper.correlationIds,
+      droppedFrames: normalizedDroppedFrames,
+      stalePhase: findStaleStreamingPhase(currentCycle, nowMs),
+    };
+  };
+
+  const runtimeAlerts = new StreamingRuntimeAlertDispatcher({
+    webhookUrl: STREAMING_ALERT_CONFIG.webhookUrl,
+    routeId: STREAMING_ALERT_CONFIG.routeId,
+    reminderMs: STREAMING_ALERT_CONFIG.reminderMs,
+    retryMs: STREAMING_ALERT_CONFIG.retryMs,
+    timeoutMs: STREAMING_ALERT_CONFIG.timeoutMs,
+  });
+  let runtimeMonitorInFlight = false;
+  let runtimeMonitorInterval: ReturnType<typeof setInterval> | null = null;
+  if (runtimeAlerts.isEnabled()) {
+    runtimeMonitorInterval = setInterval(() => {
+      if (runtimeMonitorInFlight) return;
+      runtimeMonitorInFlight = true;
+      void sampleStreamingRuntimeHealth()
+        .then((observation) => runtimeAlerts.observe(observation))
+        .catch((error) => {
+          fastify.log.error(
+            { error },
+            "streaming runtime health monitor failed",
+          );
+        })
+        .finally(() => {
+          runtimeMonitorInFlight = false;
+        });
+    }, STREAMING_ALERT_CONFIG.monitorIntervalMs);
+    runtimeMonitorInterval.unref?.();
+  }
+  fastify.addHook("onClose", async () => {
+    if (runtimeMonitorInterval) {
+      clearInterval(runtimeMonitorInterval);
+      runtimeMonitorInterval = null;
+    }
+  });
+
+  fastify.get(
+    "/api/streaming/health",
+    {
+      config: { rateLimit: false },
+    },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      const { health, rendererPerformance, operatorMetrics } =
+        await sampleStreamingRuntimeHealth();
+      return reply
+        .status(health.ready ? 200 : 503)
+        .header("Cache-Control", "no-store")
+        .send({
+          type: "STREAMING_RUNTIME_HEALTH",
+          ...health,
+          rendererPerformance,
+          operatorMetrics,
+        });
     },
   );
 
@@ -699,14 +1074,6 @@ export function registerStreamingRoutes(
       raw.flushHeaders?.();
       raw.write("retry: 2000\n\n");
 
-      const clientId = nextClientId++;
-      sseClients.set(clientId, reply);
-      sseMetrics.totalConnected += 1;
-      sseMetrics.peakConnected = Math.max(
-        sseMetrics.peakConnected,
-        sseClients.size,
-      );
-
       const headerLastEventId = request.headers["last-event-id"];
       const normalizedHeaderId = Array.isArray(headerLastEventId)
         ? headerLastEventId[0]
@@ -718,17 +1085,37 @@ export function registerStreamingRoutes(
         : Number.isFinite(headerSince)
           ? headerSince
           : 0;
+      const allowAuthoritativeState =
+        STREAMING_PUBLIC_DELAY_MS <= 0 ||
+        hasValidStreamingViewerAccessToken(request.headers.authorization);
+      const clientId = nextClientId++;
+      const client = {
+        reply,
+        lastDeliveredSeq: Math.max(0, lastSeenSeq),
+        allowAuthoritativeState,
+      };
+      sseClients.set(clientId, client);
+      sseMetrics.totalConnected += 1;
+      sseMetrics.peakConnected = Math.max(
+        sseMetrics.peakConnected,
+        sseClients.size,
+      );
 
       if (replayFrames.length === 0) {
         captureStreamingFrame(true);
       }
 
-      const oldestSeq = getOldestEligibleReplayFrame()?.seq ?? 0;
-      const latestFrame = getLatestEligibleReplayFrame();
+      const oldestSeq =
+        getOldestEligibleReplayFrame(Date.now(), allowAuthoritativeState)
+          ?.seq ?? 0;
+      const latestFrame = getLatestEligibleReplayFrame(
+        Date.now(),
+        allowAuthoritativeState,
+      );
 
       if (lastSeenSeq > 0 && latestFrame) {
-        if (lastSeenSeq < oldestSeq) {
-          // Gap beyond replay window: send a reset snapshot so client can resync.
+        if (lastSeenSeq < oldestSeq || lastSeenSeq > latestFrame.seq) {
+          // A replay gap or future client cursor requires an exact reset.
           const status = writeSseEvent(
             reply,
             "reset",
@@ -739,11 +1126,15 @@ export function registerStreamingRoutes(
             removeSseClientForStatus(clientId, status);
             return;
           }
+          client.lastDeliveredSeq = latestFrame.seq;
           sseMetrics.deliveredReplayResetEvents += 1;
         } else {
           let deliveredReplayFrames = 0;
-          const replayFramesForClient =
-            getEligibleReplayFramesAfter(lastSeenSeq);
+          const replayFramesForClient = getEligibleReplayFramesAfter(
+            lastSeenSeq,
+            Date.now(),
+            allowAuthoritativeState,
+          );
           for (const frame of replayFramesForClient) {
             const status = writeSseEvent(
               reply,
@@ -755,6 +1146,7 @@ export function registerStreamingRoutes(
               removeSseClientForStatus(clientId, status);
               return;
             }
+            client.lastDeliveredSeq = frame.seq;
             deliveredReplayFrames += 1;
           }
           sseMetrics.deliveredReplayStateEvents += deliveredReplayFrames;
@@ -770,8 +1162,12 @@ export function registerStreamingRoutes(
           removeSseClientForStatus(clientId, status);
           return;
         }
+        client.lastDeliveredSeq = latestFrame.seq;
         sseMetrics.deliveredBootstrapStateEvents += 1;
       } else {
+        // No eligible delayed frame can validate a reconnect cursor yet. Start
+        // live delivery from the first frame that becomes publicly eligible.
+        client.lastDeliveredSeq = 0;
         const status = writeSseEvent(
           reply,
           "unavailable",
@@ -987,7 +1383,8 @@ export function registerStreamingRoutes(
           : Number.POSITIVE_INFINITY;
       const recentDuels = scheduler
         .getRecentDuels(historyLimit)
-        .filter((duel) => duel.finishedAt <= cutoff);
+        .filter((duel) => duel.finishedAt <= cutoff)
+        .map(sanitizePublicRecentDuel);
       const delayedUpdatedAt =
         STREAMING_PUBLIC_DELAY_MS > 0
           ? (getLatestEligibleReplayFrame()?.emittedAt ?? Date.now())
@@ -996,6 +1393,7 @@ export function registerStreamingRoutes(
       return reply.send({
         leaderboard: state.leaderboard,
         cycle: state.cycle,
+        terminalNotice: state.terminalNotice,
         recentDuels,
         updatedAt: delayedUpdatedAt,
       });
@@ -1011,20 +1409,33 @@ export function registerStreamingRoutes(
     async (_request: FastifyRequest, reply: FastifyReply) => {
       const betUrl =
         (process.env.STREAMING_PUBLIC_BET_URL || "").trim() || null;
+      const schedulerAuthority = getStreamingDuelAuthoritySnapshot();
       return reply.send({
         enabled: process.env.STREAMING_DUEL_ENABLED !== "false",
+        timingContractVersion: STREAMING_TIMING.CONTRACT_VERSION,
+        timeoutPolicy: STREAMING_TIMING.TIMEOUT_POLICY,
+        preparationDuration: STREAMING_TIMING.PREPARATION_DURATION,
         cycleDuration: STREAMING_TIMING.CYCLE_DURATION,
         announcementDuration: STREAMING_TIMING.ANNOUNCEMENT_DURATION,
+        countdownTicks: STREAMING_TIMING.COUNTDOWN_TICKS,
+        countdownDuration: STREAMING_TIMING.COUNTDOWN_DURATION,
         fightDuration: STREAMING_TIMING.FIGHTING_DURATION,
         endWarningDuration: STREAMING_TIMING.END_WARNING_DURATION,
+        maxFightDuration: STREAMING_TIMING.MAX_FIGHT_DURATION,
         resolutionDuration: STREAMING_TIMING.RESOLUTION_DURATION,
+        interCycleDelay: STREAMING_TIMING.INTER_CYCLE_DELAY_MS,
+        stateBroadcastInterval: STREAMING_TIMING.STATE_BROADCAST_INTERVAL,
+        fightBroadcastInterval: STREAMING_TIMING.FIGHT_BROADCAST_INTERVAL,
         canonicalPlatform: STREAMING_CANONICAL_PLATFORM,
+        canonicalSourceUrl: STREAMING_CANONICAL_SOURCE_URL,
         publicDelayMs: STREAMING_PUBLIC_DELAY_MS,
         publicDelayDefaultMs: STREAMING_PUBLIC_DELAY_DEFAULT_MS,
         publicDelayOverridden: STREAMING_PUBLIC_DELAY_OVERRIDDEN,
         wsUrl: process.env.PUBLIC_WS_URL || getDefaultPublicWsUrl(),
         betUrl,
         bettingBridgeEnabled: process.env.DUEL_BETTING_ENABLED === "true",
+        schedulerRole: schedulerAuthority.role,
+        localSchedulerAuthorityVerified: schedulerAuthority.verified,
       });
     },
   );
@@ -1041,13 +1452,23 @@ export function registerStreamingRoutes(
     async (_request: FastifyRequest, reply: FastifyReply) => {
       const betUrl =
         (process.env.STREAMING_PUBLIC_BET_URL || "").trim() || null;
-      return reply.send({
+      const bettingBridgeEnabled = process.env.DUEL_BETTING_ENABLED === "true";
+      const runtime = await sampleStreamingRuntimeHealth();
+      const { ready, unavailableReason } = derivePublicBettingAvailability({
         betUrl,
-        bettingBridgeEnabled: process.env.DUEL_BETTING_ENABLED === "true",
-        hint:
-          betUrl != null
-            ? "Wagers typically lock when the countdown starts. Pick a side before the bell."
-            : "Set STREAMING_PUBLIC_BET_URL on the server to show a bet link on stream.",
+        bettingBridgeEnabled,
+        runtimeReady: runtime.health.ready,
+      });
+      return reply.send({
+        configured: betUrl != null,
+        betUrl: ready ? betUrl : null,
+        bettingBridgeEnabled,
+        ready,
+        unavailableReason,
+        checkedAt: runtime.health.emittedAt,
+        hint: ready
+          ? "Wagers lock at the announced deadline. Pick a side before the bell."
+          : null,
       });
     },
   );
@@ -1124,6 +1545,7 @@ export function registerStreamingRoutes(
         );
         return reply.send({
           ...capture.getStats(),
+          rendererPerformance: externalSnapshot?.rendererPerformance ?? null,
           rendererHealth: deriveBettingRendererHealth(
             getStreamingDuelScheduler()?.getCurrentCycle() ?? null,
             {
@@ -1140,4 +1562,19 @@ export function registerStreamingRoutes(
       }
     },
   );
+
+  return {
+    getBettingAuthorityHealth: () => bettingRoutes.getAuthorityHealth(),
+    waitForBettingTerminalFrame: (input) =>
+      bettingRoutes.waitForTerminalFrame(input),
+  };
 }
+
+export type StreamingRoutesRuntime = {
+  getBettingAuthorityHealth(): Promise<StreamingBettingAuthorityHealth>;
+  waitForBettingTerminalFrame(input: {
+    duelId: string;
+    cancellationReason: string;
+    timeoutMs?: number;
+  }): Promise<StreamingBettingTerminalFrame>;
+};

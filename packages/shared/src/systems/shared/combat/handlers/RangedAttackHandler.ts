@@ -35,6 +35,8 @@ import { getGameRng } from "../../../../utils/SeededRandom";
 import type { Entity } from "../../../../entities/Entity";
 import type { MobEntity } from "../../../../entities/npc/MobEntity";
 import { getNPCById } from "../../../../data/npcs";
+import { isPositionInsideDuelArenaZone } from "../../../../data/duel-manifest";
+import { uuid } from "../../../../utils/IdGenerator";
 
 export class RangedAttackHandler {
   /**
@@ -58,13 +60,13 @@ export class RangedAttackHandler {
   /**
    * Handle ranged attack - validate arrows, create projectile, queue damage
    */
-  handle(data: {
+  async handle(data: {
     attackerId: string;
     targetId: string;
     attackerType: "player" | "mob";
     targetType: "player" | "mob";
     arrowId?: string;
-  }): void {
+  }): Promise<void> {
     const { attackerType } = data;
 
     if (attackerType === "mob") {
@@ -72,7 +74,7 @@ export class RangedAttackHandler {
       return;
     }
 
-    this.handlePlayerRangedAttack(data);
+    await this.handlePlayerRangedAttack(data);
   }
 
   /**
@@ -149,7 +151,9 @@ export class RangedAttackHandler {
       xpReward: 0, // Mobs don't earn XP
     };
 
-    this.ctx.projectileService.createProjectile(projectileParams);
+    const projectile =
+      this.ctx.projectileService.createProjectile(projectileParams);
+    if (!projectile) return;
 
     this.emitRangedProjectile(
       attackerId,
@@ -158,6 +162,7 @@ export class RangedAttackHandler {
       attackerPos,
       targetPos,
       distance,
+      projectile.id,
     );
 
     // Enter combat
@@ -182,6 +187,7 @@ export class RangedAttackHandler {
     attackerPos: { x: number; y: number; z: number },
     targetPos: { x: number; y: number; z: number },
     distance: number,
+    projectileId: string,
   ): void {
     const { HIT_DELAY, TICK_DURATION_MS } = COMBAT_CONSTANTS;
     const rangedHitDelayTicks = Math.min(
@@ -199,6 +205,7 @@ export class RangedAttackHandler {
     );
 
     this.ctx.emitTypedEvent(EventType.COMBAT_PROJECTILE_LAUNCHED, {
+      projectileId,
       attackerId,
       targetId,
       projectileType: "arrow",
@@ -261,12 +268,12 @@ export class RangedAttackHandler {
   /**
    * Handle player ranged attack — full validation, arrows, equipment
    */
-  private handlePlayerRangedAttack(data: {
+  private async handlePlayerRangedAttack(data: {
     attackerId: string;
     targetId: string;
     attackerType: "player" | "mob";
     targetType: "player" | "mob";
-  }): void {
+  }): Promise<void> {
     const { attackerId, targetId, attackerType, targetType } = data;
     const currentTick = this.ctx.world.currentTick ?? 0;
 
@@ -368,6 +375,32 @@ export class RangedAttackHandler {
     if (!this.ctx.checkAttackCooldown(typedAttackerId, currentTick)) {
       return;
     }
+    const projectileSourcePosition = {
+      x: attackerPos.x,
+      z: attackerPos.z,
+    };
+    const projectileTargetPosition = {
+      x: targetPos.x,
+      z: targetPos.z,
+    };
+    const projectileRecoveryPosition = {
+      x: targetPos.x,
+      y: targetPos.y,
+      z: targetPos.z,
+    };
+    const projectileReservation = this.ctx.projectileService.reserveProjectile(
+      attackerId,
+      projectileSourcePosition,
+      projectileTargetPosition,
+    );
+    if (!projectileReservation) {
+      this.ctx.emitTypedEvent(EventType.COMBAT_ATTACK_FAILED, {
+        attackerId,
+        targetId,
+        reason: "projectile_capacity",
+      });
+      return;
+    }
 
     // Get attack speed from weapon with style modifier (rapid = -1 tick)
     const baseAttackSpeed = weapon?.attackSpeed ?? 4;
@@ -378,26 +411,10 @@ export class RangedAttackHandler {
 
     // Claim cooldown slot immediately to prevent dual-path race condition
     // (event handler + tick auto-attack can both pass checkAttackCooldown on same tick)
-    this.ctx.nextAttackTicks.set(
-      typedAttackerId,
-      currentTick + attackSpeedTicks,
-    );
-
-    // Face target
-    this.ctx.rotationManager.rotateTowardsTarget(
-      attackerId,
-      targetId,
-      attackerType,
-      targetType,
-    );
-
-    // Play attack animation
-    this.ctx.animationManager.setCombatEmote(
-      attackerId,
-      attackerType,
-      currentTick,
-      attackSpeedTicks,
-    );
+    const previousNextAttackTick =
+      this.ctx.nextAttackTicks.get(typedAttackerId);
+    const claimedNextAttackTick = currentTick + attackSpeedTicks;
+    this.ctx.nextAttackTicks.set(typedAttackerId, claimedNextAttackTick);
 
     // Calculate damage
     const damage = this.calculateRangedDamageForAttack(
@@ -407,6 +424,46 @@ export class RangedAttackHandler {
       targetType,
     );
 
+    const arrowId = arrowSlot?.itemId?.toString();
+    const recoverySelected =
+      !isPositionInsideDuelArenaZone(
+        projectileTargetPosition.x,
+        projectileTargetPosition.z,
+      ) && getGameRng().random() >= 0.2;
+    const arrowDebit =
+      arrowId && this.ctx.equipmentSystem
+        ? await this.ctx.equipmentSystem.consumeArrowForProjectileAtomic(
+            attackerId,
+            `ammunition-shot:${uuid()}${uuid()}`,
+            arrowId,
+            recoverySelected ? "recovered" : "destroyed",
+            recoverySelected ? projectileRecoveryPosition : null,
+          )
+        : null;
+    if (!arrowDebit?.ok) {
+      this.ctx.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      if (
+        this.ctx.nextAttackTicks.get(typedAttackerId) === claimedNextAttackTick
+      ) {
+        if (previousNextAttackTick === undefined) {
+          this.ctx.nextAttackTicks.delete(typedAttackerId);
+        } else {
+          this.ctx.nextAttackTicks.set(typedAttackerId, previousNextAttackTick);
+        }
+      }
+      this.ctx.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId: attackerId,
+        message:
+          arrowDebit?.reason === "insufficient_items"
+            ? "You don't have enough ammunition."
+            : "The ranged attack was cancelled before launch. Your equipment is being synchronized.",
+        type: "error",
+      });
+      return;
+    }
+
     // Create projectile with delayed hit
     const projectileParams: CreateProjectileParams = {
       sourceId: attackerId,
@@ -414,28 +471,70 @@ export class RangedAttackHandler {
       attackType: AttackType.RANGED,
       damage,
       currentTick,
-      sourcePosition: { x: attackerPos.x, z: attackerPos.z },
-      targetPosition: { x: targetPos.x, z: targetPos.z },
-      arrowId: arrowSlot?.itemId ? String(arrowSlot.itemId) : undefined,
+      sourcePosition: projectileSourcePosition,
+      targetPosition: projectileTargetPosition,
+      arrowId,
+      ammunitionCustody: {
+        operationId: arrowDebit.operationId,
+        playerId: arrowDebit.playerId,
+        requestFingerprint: arrowDebit.requestFingerprint,
+        itemId: arrowDebit.arrowId,
+        recoveryDisposition: arrowDebit.recoveryDisposition,
+      },
     };
 
-    this.ctx.projectileService.createProjectile(projectileParams);
+    const projectile = this.ctx.projectileService.createReservedProjectile(
+      projectileReservation,
+      projectileParams,
+    );
+    if (!projectile) {
+      this.ctx.projectileService.releaseProjectileReservation(
+        projectileReservation,
+      );
+      await this.ctx.equipmentSystem?.cancelArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
+      this.ctx.logger.error(
+        `Reserved projectile admission failed after staged arrow debit for ${attackerId}`,
+        new Error("ranged_projectile_commit_invariant_failed"),
+      );
+      return;
+    }
+    const scheduledHitTick = projectile.hitsAtTick;
+    projectile.hitsAtTick = Number.POSITIVE_INFINITY;
+    const launchSettlement =
+      await this.ctx.equipmentSystem!.completeArrowProjectileAtomic(
+        projectileParams.ammunitionCustody!,
+      );
+    if (!launchSettlement.ok || launchSettlement.status !== "fired") {
+      this.ctx.projectileService.cancelProjectile(projectile.id);
+      return;
+    }
+    projectile.ammunitionRecovery =
+      launchSettlement.recoverySource ?? undefined;
+    projectile.hitsAtTick = Math.max(scheduledHitTick, currentTick + 1);
 
-    // classic MMORPG: Consume one arrow from equipment on fire
-    this.ctx.emitTypedEvent(EventType.EQUIPMENT_CONSUME_ARROW, {
-      playerId: attackerId,
-    });
+    this.ctx.rotationManager.rotateTowardsTarget(
+      attackerId,
+      targetId,
+      attackerType,
+      targetType,
+    );
+    this.ctx.animationManager.setCombatEmote(
+      attackerId,
+      attackerType,
+      currentTick,
+      attackSpeedTicks,
+    );
 
-    const playerArrowId = arrowSlot?.itemId
-      ? String(arrowSlot.itemId)
-      : undefined;
     this.emitRangedProjectile(
       attackerId,
       targetId,
-      playerArrowId,
+      arrowId,
       attackerPos,
       targetPos,
       distance,
+      projectile.id,
     );
 
     // Enter combat (cooldown already claimed above before projectile creation)

@@ -8,6 +8,12 @@ import path from "path";
 import fs from "fs";
 import type { AssetService } from "../services/AssetService";
 import * as Models from "../models";
+import {
+  ArmorPublishValidationError,
+  validatePublishedRigidEquipmentGlb,
+} from "../services/armor-pipeline/DuelFitMetadata";
+
+const SAFE_ASSET_ID_PATTERN = /^[a-zA-Z0-9_-]+$/u;
 
 export const createAssetRoutes = (
   rootDir: string,
@@ -373,7 +379,28 @@ export const createAssetRoutes = (
         // Save aligned GLB for an asset
         .post(
           "/:id/save-aligned",
-          async ({ params: { id }, body, set }) => {
+          async ({ params: { id }, body, set, request, server }) => {
+            const remoteAddress = server?.requestIP(request)?.address;
+            if (
+              remoteAddress !== "127.0.0.1" &&
+              remoteAddress !== "::1" &&
+              remoteAddress !== "::ffff:127.0.0.1"
+            ) {
+              set.status = 403;
+              return {
+                success: false,
+                path: "",
+                error: "Aligned equipment publishing is localhost-only",
+              };
+            }
+            if (!SAFE_ASSET_ID_PATTERN.test(id)) {
+              set.status = 400;
+              return {
+                success: false,
+                path: "",
+                error: "Invalid competitive item ID",
+              };
+            }
             const formData = body as { file?: File };
             const file = formData.file;
 
@@ -382,55 +409,81 @@ export const createAssetRoutes = (
               return { success: false, path: "", error: "No file provided" };
             }
 
-            console.log(
-              `[Save Aligned] Saving aligned GLB for asset: ${id} (${(file.size / 1024).toFixed(1)} KB)`,
-            );
-
-            const assetDir = path.join(rootDir, "gdd-assets", id);
-
-            // Security check
-            const normalizedPath = path.normalize(assetDir);
-            if (!normalizedPath.startsWith(path.join(rootDir, "gdd-assets"))) {
-              set.status = 403;
-              return { success: false, path: "", error: "Access denied" };
-            }
-
-            // Ensure directory exists
-            await fs.promises.mkdir(assetDir, { recursive: true });
-
-            // Save aligned GLB
-            const alignedPath = path.join(assetDir, `${id}-aligned.glb`);
-            await Bun.write(alignedPath, file);
-
-            // Update metadata.json with aligned model path
             try {
+              const glbBuffer = Buffer.from(await file.arrayBuffer());
+              const duelFit = validatePublishedRigidEquipmentGlb(glbBuffer, {
+                itemId: id,
+              });
+              const assetDir = path.join(rootDir, "gdd-assets", id);
+              const assetsRoot = `${path.resolve(rootDir, "gdd-assets")}${path.sep}`;
+              if (
+                !`${path.resolve(assetDir)}${path.sep}`.startsWith(assetsRoot)
+              ) {
+                set.status = 403;
+                return { success: false, path: "", error: "Access denied" };
+              }
+
               const metadataPath = path.join(assetDir, "metadata.json");
-              const currentMetadata = JSON.parse(
+              const currentMetadata: unknown = JSON.parse(
                 await fs.promises.readFile(metadataPath, "utf-8"),
               );
+              if (
+                !currentMetadata ||
+                typeof currentMetadata !== "object" ||
+                Array.isArray(currentMetadata)
+              ) {
+                throw new Error(`Invalid metadata document for ${id}`);
+              }
 
               const updatedMetadata = {
                 ...currentMetadata,
                 alignedModelPath: `${id}-aligned.glb`,
                 alignedAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
+                duelFit,
               };
+              const alignedPath = path.join(assetDir, `${id}-aligned.glb`);
+              const suffix = crypto.randomUUID();
+              const temporaryAlignedPath = `${alignedPath}.${suffix}.tmp`;
+              const temporaryMetadataPath = `${metadataPath}.${suffix}.tmp`;
 
-              await Bun.write(
-                metadataPath,
-                JSON.stringify(updatedMetadata, null, 2),
+              await fs.promises.mkdir(assetDir, { recursive: true });
+              try {
+                await Promise.all([
+                  fs.promises.writeFile(temporaryAlignedPath, glbBuffer),
+                  fs.promises.writeFile(
+                    temporaryMetadataPath,
+                    JSON.stringify(updatedMetadata, null, 2),
+                  ),
+                ]);
+                await fs.promises.rename(temporaryAlignedPath, alignedPath);
+                await fs.promises.rename(temporaryMetadataPath, metadataPath);
+              } catch (error) {
+                await Promise.all([
+                  fs.promises
+                    .unlink(temporaryAlignedPath)
+                    .catch(() => undefined),
+                  fs.promises
+                    .unlink(temporaryMetadataPath)
+                    .catch(() => undefined),
+                ]);
+                throw error;
+              }
+
+              const relativePath = `gdd-assets/${id}/${id}-aligned.glb`;
+              console.log(
+                `[Save Aligned] Saved competitive fit: ${relativePath} (${(file.size / 1024).toFixed(1)} KB)`,
               );
+              return { success: true, path: relativePath };
             } catch (error) {
-              console.warn(
-                `[Save Aligned] Could not update metadata for ${id}:`,
-                error,
-              );
+              set.status =
+                error instanceof ArmorPublishValidationError ? 400 : 500;
+              return {
+                success: false,
+                path: "",
+                error: error instanceof Error ? error.message : String(error),
+              };
             }
-
-            const relativePath = `gdd-assets/${id}/${id}-aligned.glb`;
-            console.log(`[Save Aligned] Saved: ${relativePath}`);
-
-            return { success: true, path: relativePath };
           },
           {
             params: t.Object({

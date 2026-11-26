@@ -1455,10 +1455,12 @@ export class NavigationVisualizer {
       errorMarker.name = "demo-path-error";
       this.pathGroup.add(errorMarker);
 
-      if (
-        typeof process !== "undefined" &&
-        process.env?.NODE_ENV === "development"
-      ) {
+      const nodeEnv = (
+        globalThis as {
+          process?: { env?: Record<string, string | undefined> };
+        }
+      ).process?.env?.NODE_ENV;
+      if (nodeEnv === "development") {
         throw error;
       }
     }

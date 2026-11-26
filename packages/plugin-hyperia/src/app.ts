@@ -1,4 +1,11 @@
 import type * as http from "node:http";
+import type {
+  PluginAppBridge,
+  PluginAppBridgeLaunchContext,
+  PluginAppBridgeRunContext,
+  PluginAppTelemetryValue,
+  PluginAppViewerAuthMessage,
+} from "@elizaos/core";
 import {
   collectHyperiaLaunchDiagnostics,
   ensureHyperiaRuntimeReady,
@@ -15,11 +22,7 @@ const HYPERIA_REQUEST_TIMEOUT_MS = 5_000;
 
 type HyperiaAppSessionMode = "spectate-and-steer";
 type HyperiaAppSessionFeature =
-  | "commands"
-  | "telemetry"
-  | "pause"
-  | "resume"
-  | "suggestions";
+  "commands" | "telemetry" | "pause" | "resume" | "suggestions";
 
 interface HyperiaAppViewer {
   url: string;
@@ -63,26 +66,9 @@ export interface HyperiaAppRouteContext {
   runtime?: unknown | null;
 }
 
-export interface HyperiaLaunchSessionContext {
-  appName?: string;
-  launchUrl?: string | null;
-  runtime?: HyperiaBridgeRuntimeLike | null;
-  viewer?: {
-    authMessage?: HyperiaViewerAuthMessage;
-    postMessageAuth?: boolean;
-    url?: string;
-    embedParams?: Record<string, string>;
-    sandbox?: string;
-  } | null;
-  app?: HyperiaAppMeta | null;
-}
+export type HyperiaLaunchSessionContext = PluginAppBridgeLaunchContext;
 
-export interface HyperiaRunSessionContext extends HyperiaLaunchSessionContext {
-  runId?: string;
-  session?: {
-    sessionId?: string;
-  } | null;
-}
+export type HyperiaRunSessionContext = PluginAppBridgeRunContext;
 
 export interface HyperiaEmbeddedAgentRecord {
   agentId?: string;
@@ -193,7 +179,7 @@ type HyperiaSessionState = {
     timestamp?: number | null;
     severity?: "info" | "warning" | "error";
   }>;
-  telemetry: Record<string, unknown>;
+  telemetry: Record<string, PluginAppTelemetryValue>;
 };
 
 type SessionRefreshResult =
@@ -213,27 +199,18 @@ type HyperiaSessionTarget =
       };
     };
 
-export interface HyperiaAppBridge {
-  handleAppRoutes: (ctx: HyperiaAppRouteContext) => Promise<boolean>;
-  prepareLaunch: (ctx: HyperiaLaunchSessionContext) => Promise<{
-    diagnostics?: HyperiaLaunchDiagnostic[];
-    launchUrl?: string | null;
-    viewer?: HyperiaAppViewer | null;
-  } | null>;
-  resolveViewerAuthMessage: (
-    ctx: HyperiaLaunchSessionContext,
-  ) => Promise<HyperiaViewerAuthMessage | null>;
-  ensureRuntimeReady: (ctx: HyperiaLaunchSessionContext) => Promise<void>;
-  collectLaunchDiagnostics: (
-    ctx: HyperiaRunSessionContext,
-  ) => Promise<HyperiaLaunchDiagnostic[]>;
-  resolveLaunchSession: (
-    ctx: HyperiaLaunchSessionContext,
-  ) => Promise<HyperiaSessionState | null>;
-  refreshRunSession: (
-    ctx: HyperiaRunSessionContext,
-  ) => Promise<HyperiaSessionState | null>;
-}
+type HyperiaAppBridgeMethod =
+  | "handleAppRoutes"
+  | "prepareLaunch"
+  | "resolveViewerAuthMessage"
+  | "ensureRuntimeReady"
+  | "collectLaunchDiagnostics"
+  | "resolveLaunchSession"
+  | "refreshRunSession";
+
+export type HyperiaAppBridge = {
+  [Method in HyperiaAppBridgeMethod]-?: NonNullable<PluginAppBridge[Method]>;
+};
 
 export const hyperiaAppMeta: HyperiaAppMeta = {
   displayName: "Hyperia",
@@ -712,8 +689,8 @@ function buildTelemetry(
   goalResponse: HyperiaGoalResponse | null,
   quickActionsResponse: HyperiaQuickActionsResponse | null,
   thoughtsResponse: HyperiaThoughtsResponse | null,
-  extra: Record<string, unknown>,
-): Record<string, unknown> {
+  extra: Record<string, PluginAppTelemetryValue>,
+): Record<string, PluginAppTelemetryValue> {
   return {
     ...extra,
     nearbyLocationCount: quickActionsResponse?.nearbyLocations?.length ?? 0,
@@ -1153,9 +1130,57 @@ async function handleSessionControlRoute(
   return true;
 }
 
-export async function handleAppRoutes(
-  ctx: HyperiaAppRouteContext,
-): Promise<boolean> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isHyperiaAppRouteContext(
+  value: unknown,
+): value is HyperiaAppRouteContext {
+  if (!isRecord(value) || !isRecord(value.req) || !isRecord(value.res)) {
+    return false;
+  }
+
+  return (
+    typeof value.method === "string" &&
+    typeof value.pathname === "string" &&
+    typeof value.readJsonBody === "function" &&
+    typeof value.error === "function" &&
+    typeof value.res.setHeader === "function" &&
+    typeof value.res.end === "function" &&
+    (value.json === undefined || typeof value.json === "function")
+  );
+}
+
+function asHyperiaViewerAuthMessage(
+  value: PluginAppViewerAuthMessage | undefined,
+): HyperiaViewerAuthMessage | null {
+  if (
+    value?.type !== "HYPERIA_AUTH" ||
+    typeof value.authToken !== "string" ||
+    value.authToken.trim().length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    type: "HYPERIA_AUTH",
+    authToken: value.authToken,
+    ...(typeof value.agentId === "string" ? { agentId: value.agentId } : {}),
+    ...(typeof value.characterId === "string"
+      ? { characterId: value.characterId }
+      : {}),
+    ...(typeof value.followEntity === "string"
+      ? { followEntity: value.followEntity }
+      : {}),
+  };
+}
+
+export async function handleAppRoutes(ctx: unknown): Promise<boolean> {
+  if (!isHyperiaAppRouteContext(ctx)) {
+    return false;
+  }
+
   const { req, res, method, pathname } = ctx;
 
   try {
@@ -1373,7 +1398,7 @@ export async function collectLaunchDiagnostics(
     requestedViewerAuth: Boolean(ctx.viewer?.postMessageAuth),
     runtime,
     sessionFound: Boolean(session?.sessionId),
-    viewerAuthMessage: ctx.viewer?.authMessage ?? null,
+    viewerAuthMessage: asHyperiaViewerAuthMessage(ctx.viewer?.authMessage),
   });
 }
 

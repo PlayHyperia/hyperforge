@@ -111,9 +111,8 @@ export class ElizaDuelMatchmaker extends EventEmitter {
     );
 
     if (availableModels.length < 2) {
-      duelLogWarn(
-        "ElizaDuelMatchmaker",
-        `Only ${availableModels.length} model(s) have API keys set. Need at least 2.`,
+      throw new Error(
+        `ElizaDuelMatchmaker requires at least 2 configured model agents; found ${availableModels.length}. Configure a supported provider credential or use the deterministic local duel-agent fallback.`,
       );
     }
 

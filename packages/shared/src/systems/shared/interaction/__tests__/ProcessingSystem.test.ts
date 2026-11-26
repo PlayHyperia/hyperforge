@@ -19,6 +19,8 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { processingDataProvider } from "../../../../data/ProcessingDataProvider";
+import { PROCESSING_CONSTANTS } from "../../../../constants/ProcessingConstants";
+import { TICK_DURATION_MS } from "../../movement/TileSystem";
 
 describe("ProcessingDataProvider Structure", () => {
   beforeEach(() => {
@@ -140,9 +142,13 @@ describe("Burn Chance Calculation", () => {
 });
 
 describe("Fire Constants", () => {
-  it("FIRE_DURATION should be 2 minutes (120000ms)", () => {
-    const FIRE_DURATION = 120000;
-    expect(FIRE_DURATION).toBe(120000);
+  it("uses the authoritative bounded fire lifetime", () => {
+    expect(PROCESSING_CONSTANTS.FIRE.minDurationTicks * TICK_DURATION_MS).toBe(
+      60_000,
+    );
+    expect(PROCESSING_CONSTANTS.FIRE.maxDurationTicks * TICK_DURATION_MS).toBe(
+      118_800,
+    );
   });
 });
 

@@ -237,7 +237,7 @@ export function areRulesCompatible(
 // Arena Configuration (Manifest-Driven)
 // ============================================================================
 
-import { ALL_WORLD_AREAS } from "./world-areas";
+import { ALL_WORLD_AREAS, type WorldArea } from "./world-areas";
 import {
   ARENA_BASE_X,
   ARENA_BASE_Z,
@@ -252,6 +252,15 @@ import {
   LOBBY_SPAWN_X,
   LOBBY_SPAWN_Y,
   LOBBY_SPAWN_Z,
+  LOBBY_CENTER_X,
+  LOBBY_CENTER_Z,
+  LOBBY_WIDTH,
+  LOBBY_LENGTH,
+  HOSPITAL_CENTER_X,
+  HOSPITAL_CENTER_Z,
+  HOSPITAL_WIDTH,
+  HOSPITAL_LENGTH,
+  DUEL_FLOOR_APRON,
 } from "./arena-layout";
 
 /**
@@ -286,7 +295,7 @@ export interface DuelArenaConfig {
 }
 
 /**
- * Default arena config (fallback if manifest not loaded)
+ * Canonical single-arena layout, also used when no sub-zone override is present.
  */
 const DEFAULT_ARENA_CONFIG: DuelArenaConfig = {
   baseX: ARENA_BASE_X,
@@ -306,81 +315,244 @@ const DEFAULT_ARENA_CONFIG: DuelArenaConfig = {
 /**
  * Get duel arena configuration from manifest.
  * Reads from ALL_WORLD_AREAS["duel_arena"].subZones.arenas
- * Falls back to default values if manifest not loaded.
+ * The canonical layout is used when no sub-zone override is present. Invalid
+ * explicit overrides fail closed instead of silently selecting another ring.
  */
 export function getDuelArenaConfig(): DuelArenaConfig {
   const duelArena = ALL_WORLD_AREAS["duel_arena"];
-  if (!duelArena?.subZones?.arenas) {
-    return DEFAULT_ARENA_CONFIG;
+  if (duelArena?.subZones === undefined) {
+    return {
+      ...DEFAULT_ARENA_CONFIG,
+      lobbySpawnPoint: { ...DEFAULT_ARENA_CONFIG.lobbySpawnPoint },
+    };
   }
 
-  const arenas = duelArena.subZones.arenas;
-  const lobby = duelArena.subZones.lobby;
+  const arenas = duelArena.subZones?.arenas;
+  const lobby = duelArena.subZones?.lobby;
+  if (
+    !arenas ||
+    typeof arenas !== "object" ||
+    !arenas.bounds ||
+    typeof arenas.bounds !== "object" ||
+    (lobby !== undefined && (!lobby || typeof lobby !== "object")) ||
+    (arenas.arenaSize !== undefined &&
+      (!arenas.arenaSize || typeof arenas.arenaSize !== "object"))
+  ) {
+    throw new Error("Invalid duel arena configuration: missing arena bounds");
+  }
 
-  // Parse layout (e.g., "2x3" -> columns=2, rows=3)
-  let columns = 2;
-  let rows = 3;
-  if (arenas.arenaLayout) {
-    const match = arenas.arenaLayout.match(/(\d+)x(\d+)/);
-    if (match) {
-      columns = parseInt(match[1], 10);
-      rows = parseInt(match[2], 10);
+  let columns = ARENA_COLUMNS;
+  let rows = ARENA_ROWS;
+  if (arenas.arenaLayout !== undefined) {
+    const match =
+      typeof arenas.arenaLayout === "string"
+        ? arenas.arenaLayout.match(/^([1-9]\d*)x([1-9]\d*)$/)
+        : null;
+    if (!match) {
+      throw new Error("Invalid duel arena configuration: malformed layout");
     }
+    columns = Number(match[1]);
+    rows = Number(match[2]);
   }
 
-  const rawLayout = (arenas as { spawnLayout?: string }).spawnLayout;
-  const spawnLayout: DuelArenaConfig["spawnLayout"] =
-    rawLayout === "alongWidth" ? "alongWidth" : "alongLength";
+  const spawnLayout =
+    arenas.spawnLayout === undefined ? "alongLength" : arenas.spawnLayout;
+  const lobbySpawn =
+    lobby?.spawnPoint === undefined
+      ? DEFAULT_ARENA_CONFIG.lobbySpawnPoint
+      : lobby.spawnPoint;
+  if (!lobbySpawn || typeof lobbySpawn !== "object") {
+    throw new Error("Invalid duel arena configuration: malformed lobby spawn");
+  }
 
   const config: DuelArenaConfig = {
     baseX: arenas.bounds.minX,
     baseZ: arenas.bounds.minZ,
     baseY: 0,
-    arenaWidth: arenas.arenaSize?.width ?? DEFAULT_ARENA_CONFIG.arenaWidth,
-    arenaLength: arenas.arenaSize?.length ?? DEFAULT_ARENA_CONFIG.arenaLength,
-    arenaGap: arenas.arenaGap ?? DEFAULT_ARENA_CONFIG.arenaGap,
+    arenaWidth:
+      arenas.arenaSize === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaWidth
+        : arenas.arenaSize.width,
+    arenaLength:
+      arenas.arenaSize === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaLength
+        : arenas.arenaSize.length,
+    arenaGap:
+      arenas.arenaGap === undefined
+        ? DEFAULT_ARENA_CONFIG.arenaGap
+        : arenas.arenaGap,
     columns,
     rows,
-    arenaCount: arenas.arenaCount ?? columns * rows,
+    arenaCount:
+      arenas.arenaCount === undefined ? ARENA_COUNT : arenas.arenaCount,
     spawnOffset: DEFAULT_ARENA_CONFIG.spawnOffset,
     spawnLayout,
-    lobbySpawnPoint: lobby?.spawnPoint ?? DEFAULT_ARENA_CONFIG.lobbySpawnPoint,
+    lobbySpawnPoint: { ...lobbySpawn },
   };
+  const areaBounds = duelArena.bounds;
 
-  // Validate numeric fields are finite and positive where required
+  // Exactly one authoritative ring. Keep numeric/grid/bounds admission aligned
+  // with pool allocation, floor generation and both containment queries.
   if (
-    !Number.isFinite(config.arenaWidth) ||
+    ![
+      config.baseX,
+      config.baseZ,
+      config.baseY,
+      config.arenaWidth,
+      config.arenaLength,
+      config.arenaGap,
+      config.spawnOffset,
+      arenas.bounds.maxX,
+      arenas.bounds.maxZ,
+      lobbySpawn.x,
+      lobbySpawn.y,
+      lobbySpawn.z,
+      areaBounds?.minX,
+      areaBounds?.maxX,
+      areaBounds?.minZ,
+      areaBounds?.maxZ,
+    ].every(Number.isFinite) ||
     config.arenaWidth <= 0 ||
-    !Number.isFinite(config.arenaLength) ||
     config.arenaLength <= 0 ||
-    !Number.isFinite(config.arenaGap) ||
     config.arenaGap < 0 ||
-    config.columns <= 0 ||
-    config.rows <= 0 ||
-    config.arenaCount <= 0
+    config.columns !== ARENA_COLUMNS ||
+    config.rows !== ARENA_ROWS ||
+    config.arenaCount !== ARENA_COUNT ||
+    config.arenaCount !== config.columns * config.rows ||
+    (spawnLayout !== "alongLength" && spawnLayout !== "alongWidth") ||
+    config.spawnOffset <= 0 ||
+    config.spawnOffset >=
+      (spawnLayout === "alongWidth" ? config.arenaWidth : config.arenaLength) /
+        2 ||
+    arenas.bounds.maxX !== config.baseX + config.arenaWidth ||
+    arenas.bounds.maxZ !== config.baseZ + config.arenaLength ||
+    arenas.bounds.maxX <= config.baseX ||
+    arenas.bounds.maxZ <= config.baseZ ||
+    config.baseX < areaBounds.minX ||
+    arenas.bounds.maxX > areaBounds.maxX ||
+    config.baseZ < areaBounds.minZ ||
+    arenas.bounds.maxZ > areaBounds.maxZ ||
+    Math.abs(lobbySpawn.x - LOBBY_CENTER_X) >= LOBBY_WIDTH / 2 ||
+    Math.abs(lobbySpawn.z - LOBBY_CENTER_Z) >= LOBBY_LENGTH / 2
   ) {
-    return DEFAULT_ARENA_CONFIG;
+    throw new Error(
+      "Invalid duel arena configuration: expected one valid ring",
+    );
   }
 
   return config;
 }
 
-/**
- * Check if a position is inside the overall duel arena zone bounds.
- * Includes lobby, hospital, and combat arenas.
- *
- * @param x - World X coordinate
- * @param z - World Z coordinate
- * @returns true if position is inside duel arena bounds
- */
-export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
-  const duelArena = ALL_WORLD_AREAS["duel_arena"];
-  if (!duelArena?.bounds) {
-    return false;
-  }
+// Manifest objects are replaced on admission; identified worlds cannot hot-reload
+// geometry. Share one immutable compiled footprint across all authority owners.
+const protectionBounds = new WeakMap<
+  WorldArea,
+  readonly Readonly<DuelCombatArenaBounds>[]
+>();
+const NO_PROTECTION_BOUNDS: readonly Readonly<DuelCombatArenaBounds>[] =
+  Object.freeze([]);
 
-  const { minX, maxX, minZ, maxZ } = duelArena.bounds;
-  return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+/** Physical ring/lobby and retained west safe ground, never their convex
+ * bounding box. Only explicitly admitted worlds opt in; old manifests retain
+ * their broad-zone contract. This is not generic safe-area or PvP policy. */
+export function getDuelArenaProtectionBounds(): readonly Readonly<DuelCombatArenaBounds>[] {
+  const area = ALL_WORLD_AREAS.duel_arena;
+  if (!area) return NO_PROTECTION_BOUNDS;
+  if ("duelProtection" in area && area.duelProtection !== "facility-floors-v1")
+    throw new Error("Invalid duel protection footprint mode");
+  const cached = protectionBounds.get(area);
+  if (cached) return cached;
+  if (!area.bounds) {
+    if (area.duelProtection !== undefined)
+      throw new Error("Duel protection footprint requires area bounds");
+    return NO_PROTECTION_BOUNDS;
+  }
+  if (area.duelProtection === undefined) {
+    const legacy = Object.freeze([Object.freeze({ ...area.bounds })]);
+    protectionBounds.set(area, legacy);
+    return legacy;
+  }
+  if (area.id !== "duel_arena")
+    throw new Error(
+      "Duel protection footprint requires canonical area identity",
+    );
+  const config = getDuelArenaConfig();
+  const rectangle = (
+    minX: number,
+    maxX: number,
+    minZ: number,
+    maxZ: number,
+  ): Readonly<DuelCombatArenaBounds> =>
+    Object.freeze({
+      minX: minX - DUEL_FLOOR_APRON,
+      maxX: maxX + DUEL_FLOOR_APRON,
+      minZ: minZ - DUEL_FLOOR_APRON,
+      maxZ: maxZ + DUEL_FLOOR_APRON,
+    });
+  const bounds = [
+    rectangle(
+      config.baseX,
+      config.baseX + config.arenaWidth,
+      config.baseZ,
+      config.baseZ + config.arenaLength,
+    ),
+    rectangle(
+      LOBBY_CENTER_X - LOBBY_WIDTH / 2,
+      LOBBY_CENTER_X + LOBBY_WIDTH / 2,
+      LOBBY_CENTER_Z - LOBBY_LENGTH / 2,
+      LOBBY_CENTER_Z + LOBBY_LENGTH / 2,
+    ),
+    rectangle(
+      // Keep the established safety policy after removing the decorative court.
+      HOSPITAL_CENTER_X - HOSPITAL_WIDTH / 2,
+      HOSPITAL_CENTER_X + HOSPITAL_WIDTH / 2,
+      HOSPITAL_CENTER_Z - HOSPITAL_LENGTH / 2,
+      HOSPITAL_CENTER_Z + HOSPITAL_LENGTH / 2,
+    ),
+  ];
+  const envelope = area.bounds;
+  if (
+    ![envelope.minX, envelope.maxX, envelope.minZ, envelope.maxZ].every(
+      Number.isFinite,
+    ) ||
+    envelope.minX >= envelope.maxX ||
+    envelope.minZ >= envelope.maxZ ||
+    bounds.some(
+      (b) =>
+        !Object.values(b).every(Number.isFinite) ||
+        b.minX >= b.maxX ||
+        b.minZ >= b.maxZ ||
+        b.minX < envelope.minX ||
+        b.maxX > envelope.maxX ||
+        b.minZ < envelope.minZ ||
+        b.maxZ > envelope.maxZ,
+    )
+  )
+    throw new Error("Duel protection facilities escape their admitted area");
+  const compiled = Object.freeze(bounds);
+  protectionBounds.set(area, compiled);
+  return compiled;
+}
+
+/** One shared no-loss/drop/ammunition/evacuation protection predicate. */
+export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+  return getDuelArenaProtectionBounds().some(
+    (b) => x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ,
+  );
+}
+
+/** Challenges belong to the arrival court, not recovery, apron or open ground.
+ * Historical manifests keep their prior zone-minus-ring eligibility. */
+export function isPositionInsideDuelArenaLobby(x: number, z: number): boolean {
+  if (!isPositionInsideDuelArenaZone(x, z)) return false;
+  if (ALL_WORLD_AREAS.duel_arena.duelProtection === "facility-floors-v1")
+    return (
+      Math.abs(x - LOBBY_CENTER_X) <= LOBBY_WIDTH / 2 &&
+      Math.abs(z - LOBBY_CENTER_Z) <= LOBBY_LENGTH / 2 &&
+      !isPositionInsideCombatArena(x, z)
+    );
+  return !isPositionInsideCombatArena(x, z);
 }
 
 /**
@@ -394,25 +566,63 @@ export function isPositionInsideDuelArenaZone(x: number, z: number): boolean {
 export function isPositionInsideCombatArena(x: number, z: number): boolean {
   const config = getDuelArenaConfig();
 
-  for (let row = 0; row < config.rows; row++) {
-    for (let col = 0; col < config.columns; col++) {
-      const arenaMinX =
-        config.baseX + col * (config.arenaWidth + config.arenaGap);
-      const arenaMaxX = arenaMinX + config.arenaWidth;
-      const arenaMinZ =
-        config.baseZ + row * (config.arenaLength + config.arenaGap);
-      const arenaMaxZ = arenaMinZ + config.arenaLength;
+  for (let index = 0; index < config.arenaCount; index++) {
+    const row = Math.floor(index / config.columns);
+    const col = index % config.columns;
+    const arenaMinX =
+      config.baseX + col * (config.arenaWidth + config.arenaGap);
+    const arenaMaxX = arenaMinX + config.arenaWidth;
+    const arenaMinZ =
+      config.baseZ + row * (config.arenaLength + config.arenaGap);
+    const arenaMaxZ = arenaMinZ + config.arenaLength;
 
-      if (
-        x >= arenaMinX &&
-        x <= arenaMaxX &&
-        z >= arenaMinZ &&
-        z <= arenaMaxZ
-      ) {
-        return true;
-      }
+    if (x >= arenaMinX && x <= arenaMaxX && z >= arenaMinZ && z <= arenaMaxZ) {
+      return true;
     }
   }
 
   return false;
+}
+
+export type DuelCombatArenaBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
+/** Resolve one exact combat ring containing every supplied world position. */
+export function getCombatArenaBoundsContainingPositions(
+  positions: readonly (readonly [number, number, number])[],
+): DuelCombatArenaBounds | null {
+  if (positions.length === 0) return null;
+  const config = getDuelArenaConfig();
+
+  for (let index = 0; index < config.arenaCount; index += 1) {
+    const row = Math.floor(index / config.columns);
+    const column = index % config.columns;
+    const minX = config.baseX + column * (config.arenaWidth + config.arenaGap);
+    const minZ = config.baseZ + row * (config.arenaLength + config.arenaGap);
+    const bounds = {
+      minX,
+      maxX: minX + config.arenaWidth,
+      minZ,
+      maxZ: minZ + config.arenaLength,
+    };
+    if (
+      positions.every(
+        ([x, , z]) =>
+          Number.isFinite(x) &&
+          Number.isFinite(z) &&
+          x >= bounds.minX &&
+          x <= bounds.maxX &&
+          z >= bounds.minZ &&
+          z <= bounds.maxZ,
+      )
+    ) {
+      return bounds;
+    }
+  }
+
+  return null;
 }

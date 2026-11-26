@@ -2,6 +2,17 @@ type ReplayFrameLike = {
   payloadBytes: number;
 };
 
+export function shouldDeliverSseFrame(
+  lastDeliveredSeq: number,
+  nextSeq: number,
+): boolean {
+  return (
+    Number.isSafeInteger(nextSeq) &&
+    nextSeq > 0 &&
+    nextSeq > Math.max(0, Math.floor(lastDeliveredSeq))
+  );
+}
+
 export function trimReplayFrames<T extends ReplayFrameLike>(
   frames: T[],
   totalBytes: number,

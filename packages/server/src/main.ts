@@ -14,12 +14,23 @@ import { registerApiRoutes } from "./startup/api-routes.js";
 import { registerWebSocket } from "./startup/websocket.js";
 import { registerShutdownHandlers } from "./startup/shutdown.js";
 import { errMsg } from "./shared/errMsg.js";
+import { assertJwtSigningKeyAuthority } from "./infrastructure/auth/jwt-signing-key-authority.js";
+import { readDistributedRateLimitConfig } from "./infrastructure/rate-limit/distributed-rate-limit.js";
+import { resolveTrustedProxy } from "./infrastructure/rate-limit/trusted-proxy.js";
+import {
+  getCloudflareOriginSecretFingerprint,
+  resolveCloudflareOriginSecret,
+} from "./infrastructure/cloudflare/origin-lock.js";
 
 // Import embedded agent system
 import { initializeAgents } from "./eliza/index.js";
 
-// Import streaming duel scheduler
-import { initStreamingDuelScheduler } from "./systems/StreamingDuelScheduler/index.js";
+// Import streaming duel scheduler authority
+import {
+  initStreamingDuelAuthority,
+  resolveStreamingDuelAuthorityConfig,
+  validateStreamingDuelProcessTopology,
+} from "./systems/StreamingDuelScheduler/authority.js";
 import { DuelArenaOraclePublisher } from "./oracle/DuelArenaOraclePublisher.js";
 import { getDuelArenaOracleConfig } from "./oracle/config.js";
 
@@ -70,6 +81,42 @@ async function startServer() {
   // Step 1: Load configuration
   const config = await loadConfig();
 
+  // Resolve the complete issuer/verifier authority before opening databases,
+  // HTTP listeners, WebSockets, or agent runtimes. This makes a partial rollout
+  // with a missing active key fail closed instead of splitting replicas.
+  const jwtAuthority = assertJwtSigningKeyAuthority(process.env);
+  const jwtKeyEvidence = Object.entries(jwtAuthority.keyFingerprints)
+    .map(([keyId, keyFingerprint]) => `${keyId}:${keyFingerprint}`)
+    .join(",");
+  if (jwtAuthority.mode === "development-fallback") {
+    console.warn(
+      "[Security] Using the local development JWT fallback; configure a private signing authority before production",
+    );
+  } else {
+    process.stdout.write(
+      `[Security] JWT authority ready mode=${jwtAuthority.mode} active=${jwtAuthority.activeKeyId ?? "legacy-no-kid"} verify=${jwtKeyEvidence}\n`,
+    );
+  }
+
+  const distributedRateLimitAuthority = readDistributedRateLimitConfig(
+    process.env,
+  );
+  const trustedProxyAuthority = resolveTrustedProxy(process.env);
+  const cloudflareOriginSecret = resolveCloudflareOriginSecret(process.env);
+  if (distributedRateLimitAuthority.enabled) {
+    process.stdout.write(
+      `[Security] Distributed authentication rate-limit authority ready key=${distributedRateLimitAuthority.keyFingerprint}\n`,
+    );
+  }
+  process.stdout.write(
+    `[Security] Trusted proxy authority ready entries=${trustedProxyAuthority === false ? 0 : trustedProxyAuthority === true ? "all-local-only" : trustedProxyAuthority.length}\n`,
+  );
+  if (cloudflareOriginSecret) {
+    process.stdout.write(
+      `[Security] Cloudflare origin-lock authority ready key=${getCloudflareOriginSecretFingerprint(cloudflareOriginSecret)}\n`,
+    );
+  }
+
   const isDevelopment = config.nodeEnv !== "production";
 
   // Validate critical secrets in production
@@ -80,6 +127,12 @@ async function startServer() {
       process.env.USE_LOCAL_POSTGRES === "1";
     if (!process.env.DATABASE_URL && !useLocalPostgres) {
       missing.push("DATABASE_URL or USE_LOCAL_POSTGRES=true");
+    }
+    if (
+      new TextEncoder().encode(process.env.KILL_TOKEN_SECRET?.trim() ?? "")
+        .byteLength < 32
+    ) {
+      missing.push("KILL_TOKEN_SECRET (32+ bytes)");
     }
     if (missing.length > 0) {
       console.error(
@@ -109,6 +162,13 @@ async function startServer() {
   process.env.STREAMING_CAPTURE_ENABLED = streamCaptureEnabled
     ? "true"
     : "false";
+  const streamingAuthorityConfig = resolveStreamingDuelAuthorityConfig();
+  validateStreamingDuelProcessTopology({
+    nodeEnv: config.nodeEnv,
+    streamingDuelEnabled,
+    streamCaptureEnabled,
+    authority: streamingAuthorityConfig,
+  });
 
   // Step 2: Initialize database
   const dbContext = await initializeDatabase(config);
@@ -117,18 +177,11 @@ async function startServer() {
   const world = await initializeWorld(config, dbContext);
 
   if (process.env.DUEL_ARENA_ORACLE_ENABLED === "true") {
-    try {
-      const oraclePublisher = new DuelArenaOraclePublisher(
-        world,
-        getDuelArenaOracleConfig(),
-      );
-      await oraclePublisher.init();
-    } catch (err) {
-      console.error(
-        "[Server] ⚠️ Duel arena oracle publisher failed to initialize, continuing degraded:",
-        errMsg(err),
-      );
-    }
+    const oraclePublisher = new DuelArenaOraclePublisher(
+      world,
+      getDuelArenaOracleConfig(),
+    );
+    await oraclePublisher.init();
   }
 
   // Step 3b: Initialize Web3 (EVM chain writer) if enabled
@@ -150,7 +203,7 @@ async function startServer() {
   const fastify = await createHttpServer(config);
 
   // Step 5: Register API routes
-  registerApiRoutes(fastify, world, config);
+  const streamingRoutes = registerApiRoutes(fastify, world, config);
 
   // Step 6: Register WebSocket
   registerWebSocket(fastify, world);
@@ -191,11 +244,14 @@ async function startServer() {
   // Step 8: Initialize streaming duel scheduler (BEFORE agents so it can track their spawns)
   if (streamingDuelEnabled) {
     try {
-      initStreamingDuelScheduler(world);
+      await initStreamingDuelAuthority(
+        world,
+        dbContext.pgPool,
+        streamingAuthorityConfig,
+      );
     } catch (err) {
-      console.error(
-        "[Server] ⚠️ Streaming duel scheduler failed to initialize, continuing degraded:",
-        errMsg(err),
+      throw new Error(
+        `Streaming duel scheduler authority failed to initialize: ${errMsg(err)}`,
       );
     }
   }
@@ -203,11 +259,7 @@ async function startServer() {
   // Step 8.5: Wire up thought persistence to DB (before agent init so hydration works)
   try {
     const { setThoughtDb } = await import("./eliza/dashboardInterop.js");
-    const dbSystem = world.getSystem("database") as
-      | { db?: unknown; getDb?: () => unknown }
-      | undefined;
-    const db = dbSystem?.db ?? dbSystem?.getDb?.();
-    if (db) setThoughtDb(db);
+    setThoughtDb(dbContext.drizzleDb);
   } catch {
     // Non-critical — thoughts will stay in-memory only
   }
@@ -232,6 +284,11 @@ async function startServer() {
     }
     await initializeAgents(world, agentInitConfig);
   } catch (err) {
+    if (streamingDuelEnabled) {
+      throw new Error(
+        `Streaming duel agent initialization failed: ${errMsg(err)}`,
+      );
+    }
     console.error(
       "[Server] ⚠️ Agent initialization failed, continuing without agents:",
       errMsg(err),
@@ -241,18 +298,25 @@ async function startServer() {
   // Step 10: Initialize stream capture pipeline (RTMPBridge → HLS)
   if (streamCaptureEnabled) {
     try {
-      const captureStarted = initStreamCapture();
-      void captureStarted;
+      const captureStarted = await initStreamCapture();
+      if (!captureStarted) {
+        throw new Error("streaming_capture_start_rejected");
+      }
     } catch (err) {
-      console.error(
-        "[Server] ⚠️ Stream capture failed to initialize, continuing without capture:",
-        errMsg(err),
+      throw new Error(
+        `Streaming capture initialization failed: ${errMsg(err)}`,
       );
     }
   }
 
   // Register shutdown handlers
-  registerShutdownHandlers(fastify, world, dbContext, web3Context);
+  registerShutdownHandlers(
+    fastify,
+    world,
+    dbContext,
+    web3Context,
+    streamingRoutes,
+  );
 
   // Start periodic memory monitoring to catch leaks early
   startMemoryMonitor(world);
@@ -516,7 +580,9 @@ function startMemoryMonitor(world: unknown): void {
     sampleIntervalMs: INTERVAL_MS,
     memoryLimitGB: memLimitGB,
     verbose: collectionDebugEnabled,
-    trackCollections: collectionDebugEnabled,
+    // Collection cardinality is sampled only once per monitor interval and is
+    // required for production soak evidence even when verbose logging is off.
+    trackCollections: true,
   };
   startMemoryMonitorInfra(world as World, monitorConfig);
 

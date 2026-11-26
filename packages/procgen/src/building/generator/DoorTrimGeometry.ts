@@ -18,12 +18,7 @@ import {
 // ============================================================================
 
 export type DoorFrameStyle =
-  | "simple"
-  | "with-lintel"
-  | "architrave"
-  | "rustic"
-  | "arched"
-  | "grand";
+  "simple" | "with-lintel" | "architrave" | "rustic" | "arched" | "grand";
 
 export interface DoorFrameConfig {
   width: number;
@@ -1131,6 +1126,7 @@ export function getDoorFrameStyleForBuildingType(
     // Grand entrances for religious buildings
     church: "grand",
     cathedral: "grand",
+    chapel: "grand",
     // Formal architrave for wealthy/official buildings
     bank: "architrave",
     "guild-hall": "architrave",

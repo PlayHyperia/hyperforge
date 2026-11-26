@@ -76,6 +76,12 @@ export function createUwsServer(
        the CPU cost is not worth it for game traffic */
     compression: uWS.DISABLED,
     maxPayloadLength: 512 * 1024, // 512KB
+    // The default 64 KiB ceiling is smaller than a cold world snapshot and can
+    // make a healthy spectator silently lose the immediately following combat
+    // terminal. Replayable traffic may still be skipped under pressure; exact
+    // critical packets use UwsWebSocketAdapter's bounded drain queue.
+    maxBackpressure: 2 * 1024 * 1024,
+    closeOnBackpressureLimit: false,
     idleTimeout: 120, // 2 min — SocketManager handles faster heartbeat
     sendPingsAutomatically: false, // We manage our own pings for RTT measurement
 
@@ -150,8 +156,8 @@ export function createUwsServer(
       ws.getUserData().adapter = null;
     },
 
-    drain: (_ws) => {
-      // Future: signal backpressure relief to BandwidthBudget
+    drain: (ws) => {
+      ws.getUserData().adapter?.dispatchDrain();
     },
   });
 

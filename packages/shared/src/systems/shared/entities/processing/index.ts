@@ -67,23 +67,6 @@ export type { FoodDisplayData } from "./FoodUtils";
 // Fire manager
 export { FireManager, getFireManager, resetFireManager } from "./FireManager";
 
-// Session managers
-export { FiremakingSessionManager } from "./FiremakingSessionManager";
-export type {
-  FiremakingAttemptResult,
-  FiremakingCallbacks,
-} from "./FiremakingSessionManager";
-
-export { CookingSessionManager } from "./CookingSessionManager";
-export type {
-  CookingAttemptResult,
-  CookingSessionComplete,
-  CookingCallbacks,
-} from "./CookingSessionManager";
-
-// Pending managers (server-side entry points)
-export { PendingFiremakingManager } from "./PendingFiremakingManager";
-export type { PendingFiremakingCallbacks } from "./PendingFiremakingManager";
-
-export { PendingCookingManager } from "./PendingCookingManager";
-export type { PendingCookingCallbacks } from "./PendingCookingManager";
+// The older callback-driven session/pending managers are intentionally not
+// exported. ProcessingSystem is the sole runtime action boundary because it
+// couples inventory and XP through durable idempotent receipts.

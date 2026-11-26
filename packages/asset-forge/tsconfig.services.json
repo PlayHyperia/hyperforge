@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "allowJs": true,
+    "checkJs": false,
+    "isolatedModules": false,
+    "skipLibCheck": true,
+    "types": ["vite/client", "node", "bun"]
+  },
+  "include": [
+    "src/core/**/*",
+    "src/services/**/*",
+    "src/types/**/*",
+    "src/utils/**/*",
+    "src/config/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
+}

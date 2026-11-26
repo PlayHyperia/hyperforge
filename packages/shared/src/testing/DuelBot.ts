@@ -57,10 +57,7 @@ const DPS_WINDOW_TICKS = 8;
 // ============================================================================
 
 export type CombatPersonality =
-  | "aggressive"
-  | "defensive"
-  | "calculated"
-  | "reckless";
+  "aggressive" | "defensive" | "calculated" | "reckless";
 
 interface PersonalityProfile {
   baseEatThreshold: number;
@@ -271,6 +268,12 @@ export class DuelBot extends EventEmitter {
       if (this.getNetworkSystem()?.id) break;
       await new Promise((r) => setTimeout(r, 100));
     }
+    if (!this.getNetworkSystem()?.id) {
+      this.disconnect();
+      throw new Error(
+        `${this.config.name} did not receive an authenticated network identity; ensure LOAD_TEST_MODE=true on both the local server and duel-bot process`,
+      );
+    }
 
     // Enter world
     this.sendPacket("enterWorld", {
@@ -294,6 +297,12 @@ export class DuelBot extends EventEmitter {
     while (Date.now() - startPlayerWait < 5000) {
       if (this.getLocalPlayerEntity()) break;
       await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!this.getLocalPlayerEntity()) {
+      this.disconnect();
+      throw new Error(
+        `${this.config.name} did not receive a spawned player entity after enterWorld`,
+      );
     }
 
     // Mark the spawned player as active/targetable (mirrors browser client flow).
@@ -798,8 +807,7 @@ export class DuelBot extends EventEmitter {
     if (!player) return false;
 
     const data = player.data as
-      | { health?: number; maxHealth?: number }
-      | undefined;
+      { health?: number; maxHealth?: number } | undefined;
     const health = data?.health;
     const maxHealth = data?.maxHealth;
     if (

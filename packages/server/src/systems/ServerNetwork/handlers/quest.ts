@@ -7,8 +7,12 @@
  */
 
 import type { World } from "@hyperforge/shared";
-import type { QuestSystem } from "@hyperforge/shared";
-import { SystemLogger, isValidQuestId } from "@hyperforge/shared";
+import type { QuestSystem, QuestListPayload } from "@hyperforge/shared";
+import {
+  SystemLogger,
+  isValidQuestId,
+  createQuestSnapshot,
+} from "@hyperforge/shared";
 import type { ServerSocket } from "../../../shared/types";
 import { sendToSocket, getPlayerId } from "./common";
 import {
@@ -45,6 +49,15 @@ export function handleGetQuestList(
     return;
   }
 
+  sendQuestListSnapshot(socket, world, playerId);
+}
+
+/** Server-owned changes push the same snapshot without another client RPC. */
+function sendQuestListSnapshot(
+  socket: ServerSocket,
+  world: World,
+  playerId: string,
+): void {
   const questSystem = world.getSystem("quest") as QuestSystem | undefined;
   if (!questSystem) {
     logger.warn("QuestSystem not available");
@@ -61,36 +74,17 @@ export function handleGetQuestList(
   const quests = allDefinitions.map((def) => {
     const status = questSystem.getQuestStatus(playerId, def.id);
     const active = activeQuests.find((aq) => aq.questId === def.id);
-    const currentStage = active
-      ? def.stages.find((s) => s.id === active.currentStage)
-      : undefined;
-
-    return {
-      id: def.id,
-      name: def.name,
-      status,
-      difficulty: def.difficulty,
-      questPoints: def.questPoints,
-      startNpc: def.startNpc,
-      // Include current stage info for in-progress quests
-      ...(active && currentStage
-        ? {
-            stageType: currentStage.type,
-            stageTarget: currentStage.target,
-            stageCount: currentStage.count,
-            stageProgress: active.stageProgress,
-          }
-        : {}),
-    };
+    return createQuestSnapshot(def, status, active);
   });
 
   const questPoints = questSystem.getQuestPoints(playerId);
 
   // Send quest list to client via packet
-  sendToSocket(socket, "questList", {
+  const payload: QuestListPayload = {
     quests,
     questPoints,
-  });
+  };
+  sendToSocket(socket, "questList", payload);
 }
 
 /**
@@ -147,23 +141,7 @@ export function handleGetQuestDetail(
   });
 
   // Build detail response
-  const detail = {
-    id: definition.id,
-    name: definition.name,
-    description: definition.description,
-    status,
-    difficulty: definition.difficulty,
-    questPoints: definition.questPoints,
-    currentStage: activeQuest?.currentStage || definition.stages[0]?.id || "",
-    stageProgress: activeQuest?.stageProgress || {},
-    stages: definition.stages.map((stage) => ({
-      id: stage.id,
-      description: stage.description,
-      type: stage.type,
-      target: stage.target,
-      count: stage.count,
-    })),
-  };
+  const detail = createQuestSnapshot(definition, status, activeQuest);
 
   logger.debug("Sending detail with stageProgress", {
     stageProgress: detail.stageProgress,
@@ -263,6 +241,7 @@ export async function handleQuestAbandon(
 
   if (success) {
     logger.info(`Player ${playerId} abandoned quest ${questId}`);
+    sendQuestListSnapshot(socket, world, playerId);
   } else {
     logger.warn(`Failed to abandon quest ${questId} for player ${playerId}`);
   }

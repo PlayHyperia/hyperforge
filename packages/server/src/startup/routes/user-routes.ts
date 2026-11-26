@@ -9,6 +9,11 @@ import type { World } from "@hyperforge/shared";
 import type { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
 import * as schema from "../../database/schema.js";
 import { eq } from "drizzle-orm";
+import { createDistributedRateLimitPreHandler } from "../../infrastructure/rate-limit/distributed-rate-limit.js";
+import {
+  requirePrivyRequestUser,
+  verifyPrivyRequestUser,
+} from "../../infrastructure/auth/http-auth.js";
 
 /**
  * Rate limiter for user check endpoint to prevent enumeration attacks.
@@ -80,31 +85,6 @@ function checkUserCheckRateLimit(ip: string): boolean {
 
   attempt.count++;
   return true;
-}
-
-/**
- * Verify Privy token and return user ID.
- * Returns null if verification fails.
- */
-async function verifyAuth(request: FastifyRequest): Promise<string | null> {
-  const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authHeader.substring(7);
-  if (!token) {
-    return null;
-  }
-
-  try {
-    const { verifyPrivyToken } =
-      await import("../../infrastructure/auth/privy-auth.js");
-    const privyInfo = await verifyPrivyToken(token);
-    return privyInfo?.privyUserId ?? null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -180,55 +160,72 @@ export function registerUserRoutes(
    */
   fastify.get<{
     Querystring: { accountId?: string };
-  }>("/api/users/check", async (request, reply) => {
-    // SECURITY: Rate limit to prevent enumeration attacks
-    const clientIp =
-      request.ip || request.headers["x-forwarded-for"] || "unknown";
-    const ip = Array.isArray(clientIp) ? clientIp[0] : clientIp;
+  }>(
+    "/api/users/check",
+    {
+      preHandler: createDistributedRateLimitPreHandler({
+        getPool: () => databaseSystem.getPool(),
+        max: CHECK_RATE_LIMIT,
+        scope: "user-existence-check",
+        windowMs: CHECK_RATE_WINDOW_MS,
+      }),
+    },
+    async (request, reply) => {
+      // Keep the local counter as an inexpensive load-shedding layer. The
+      // shared pre-handler above is authoritative across deployment replicas.
+      const ip = request.ip;
 
-    if (!checkUserCheckRateLimit(ip)) {
-      return reply.status(429).send({
-        exists: false,
-        error: "Too many requests",
-        retryAfter: CHECK_RATE_WINDOW_MS / 1000,
-      });
-    }
-
-    const { accountId } = request.query;
-
-    if (!accountId) {
-      return reply.status(400).send({
-        exists: false,
-        error: "Missing accountId parameter",
-      });
-    }
-
-    try {
-      const db = databaseSystem.getDb();
-      if (!db) {
-        return reply.status(500).send({
+      if (!checkUserCheckRateLimit(ip)) {
+        return reply.status(429).send({
           exists: false,
-          error: "Database not available",
+          error: "Too many requests",
+          retryAfter: CHECK_RATE_WINDOW_MS / 1000,
         });
       }
 
-      const user = await db
-        .select()
-        .from(schema.users)
-        .where(eq(schema.users.id, accountId))
-        .limit(1);
+      const { accountId } = request.query;
 
-      return reply.send({
-        exists: user.length > 0,
-      });
-    } catch (error) {
-      console.error(`[UserRoutes] ❌ Error checking if user exists:`, error);
-      return reply.status(500).send({
-        exists: false,
-        error: "Database error",
-      });
-    }
-  });
+      if (!accountId) {
+        return reply.status(400).send({
+          exists: false,
+          error: "Missing accountId parameter",
+        });
+      }
+
+      const authenticatedUserId = await requirePrivyRequestUser(
+        request,
+        reply,
+        accountId,
+      );
+      if (!authenticatedUserId) return;
+
+      try {
+        const db = databaseSystem.getDb();
+        if (!db) {
+          return reply.status(500).send({
+            exists: false,
+            error: "Database not available",
+          });
+        }
+
+        const user = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.id, accountId))
+          .limit(1);
+
+        return reply.send({
+          exists: user.length > 0,
+        });
+      } catch (error) {
+        console.error(`[UserRoutes] ❌ Error checking if user exists:`, error);
+        return reply.status(500).send({
+          exists: false,
+          error: "Database error",
+        });
+      }
+    },
+  );
 
   /**
    * POST /api/users/create
@@ -262,6 +259,13 @@ export function registerUserRoutes(
         error: "Missing required fields: accountId, username, and wallet",
       });
     }
+
+    const authenticatedUserId = await requirePrivyRequestUser(
+      request,
+      reply,
+      accountId,
+    );
+    if (!authenticatedUserId) return;
 
     // Validate username format
     const trimmedUsername = username.trim();
@@ -400,7 +404,7 @@ export function registerUserRoutes(
     }
 
     // SECURITY: Verify authentication and ownership
-    const authenticatedUserId = await verifyAuth(request);
+    const authenticatedUserId = await verifyPrivyRequestUser(request);
     if (!authenticatedUserId) {
       return reply.status(401).send({
         success: false,

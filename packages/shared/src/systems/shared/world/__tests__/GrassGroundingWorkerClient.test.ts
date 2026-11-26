@@ -1,0 +1,1640 @@
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { BufferAttribute } from "three/src/core/BufferAttribute.js";
+import {
+  GrassGroundingWorkerClient,
+  type GrassGroundingClientRequest,
+} from "../../../../utils/workers/GrassGroundingWorkerClient";
+import {
+  grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
+  type GrassGroundingWorkerRequest,
+  type GrassGroundingWorkerCachedRequest,
+  type GrassGroundingWorkerPrepareSurface,
+  type GrassGroundingWorkerResponse,
+} from "../../../../utils/workers/GrassGroundingWorkerWire";
+import {
+  groundGrassBlades,
+  GRASS_BLADE_GROUNDING_LIMITS,
+  GRASS_BLADE_GROUNDING_JOB_LIMITS,
+  captureGrassGroundingExecution,
+  type GrassGroundingTiming,
+} from "../GrassBladeGrounding";
+import { RetainedTerrainSurface } from "../TerrainGridSurface";
+import { gridGeometry } from "./terrain-grid.fixture";
+import {
+  createSameFaceCase,
+  sameFaceInputHash,
+  type SameFaceCase,
+} from "./fixtures/GrassBladeGroundingSameFaceCases";
+import {
+  bundleGrassGroundingWorker,
+  createGrassGroundingWorkerRequest as workerRequest,
+  grassGroundingWorkerSemanticResult as semanticResult,
+} from "./fixtures/GrassGroundingWorkerHarness";
+import { ActualGrassGroundingClientPort } from "./fixtures/ActualGrassGroundingClientPort";
+import {
+  GRASS_GROUNDING_CLOCK_STARTUP_MS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+  GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS,
+} from "../../../../utils/workers/GrassGroundingWorkerClock";
+
+let bundledSource = "";
+const sessions: {
+  client: GrassGroundingWorkerClient;
+  port: ActualGrassGroundingClientPort;
+}[] = [];
+
+async function actualClient() {
+  const port = new ActualGrassGroundingClientPort(bundledSource);
+  const client = new GrassGroundingWorkerClient(port);
+  sessions.push({ client, port });
+  await port.readyFor(client);
+  return { client, port };
+}
+
+function withoutId<T extends { jobId: number }>(packet: T): Omit<T, "jobId"> {
+  const { jobId, ...request } = packet;
+  expect(jobId).toBeGreaterThan(0);
+  return request;
+}
+
+function cachedPacket(
+  cold: GrassGroundingWorkerRequest,
+  generation = cold.generation,
+): Omit<GrassGroundingWorkerCachedRequest, "jobId"> {
+  const { type, surfaces, ...request } = withoutId(cold);
+  expect(type).toBe("start");
+  return {
+    ...request,
+    type: "start_cached",
+    generation,
+    surfaceTokens: surfaces.map(({ token }) => token),
+  };
+}
+
+function preparation(
+  cold: GrassGroundingWorkerRequest,
+  index = 0,
+): Omit<GrassGroundingWorkerPrepareSurface, "jobId"> {
+  const { token, snapshot } = cold.surfaces[index];
+  return {
+    type: "prepare_surface",
+    schemaVersion: 1,
+    generation: cold.generation,
+    token,
+    snapshot,
+    consumed: { operations: 0, activeMs: 0, maximumSliceMs: 0 },
+  };
+}
+
+function takeResponse(client: GrassGroundingWorkerClient) {
+  const settled = client.takeSettled();
+  expect(settled?.status, JSON.stringify(settled)).toBe("response");
+  if (!settled || settled.status !== "response")
+    throw new Error(`Actual client failed: ${JSON.stringify(settled)}`);
+  expect(settled.dispatchCpuMs).toBeGreaterThanOrEqual(
+    settled.postMessageCpuMs,
+  );
+  expect(settled.postMessageCpuMs).toBeGreaterThanOrEqual(0);
+  expect(settled.receiveCpuMs).toBeGreaterThanOrEqual(0);
+  expect(client.busy).toBe(false);
+  expect(client.takeSettled()).toBeNull();
+  return settled;
+}
+
+async function settledResponse<K extends GrassGroundingWorkerResponse["type"]>(
+  client: GrassGroundingWorkerClient,
+  port: ActualGrassGroundingClientPort,
+  type: K,
+  jobId: number,
+) {
+  const reply = await port.waitFor(type, jobId);
+  expect(client.busy).toBe(true);
+  const settled = takeResponse(client);
+  expect(settled.jobId).toBe(jobId);
+  expect(settled.generation).toBe(reply.generation);
+  expect(settled.response).toBe(reply);
+  return reply;
+}
+
+function maximumClumpPacket(packet: GrassGroundingWorkerRequest) {
+  const count = GRASS_BLADE_GROUNDING_LIMITS.maxClumps;
+  for (const [key, stride] of [
+    ["offsets", 3],
+    ["rotScaleHash", 3],
+    ["groundColors", 3],
+    ["grassTints", 4],
+    ["groundNormals", 3],
+  ] as const) {
+    const source = packet.data[key],
+      output = new Float32Array(count * stride);
+    for (let i = 0; i < count; i++) {
+      const start = (i % packet.data.count) * stride;
+      output.set(source.subarray(start, start + stride), i * stride);
+    }
+    packet.data[key] = output;
+  }
+  packet.data.count = count;
+  return packet;
+}
+
+/** Real fan topology requires more than 8192 admission resumptions, so a
+ * queued cancellation can be observed without replacing clocks or schedulers. */
+function cancellablePreparation() {
+  const resolution = 48,
+    geometry = gridGeometry(100, resolution, () => 20);
+  const positions = Array.from(geometry.getAttribute("position").array),
+    indices: number[] = [],
+    offsets = [0];
+  for (let z = 0; z < resolution - 1; z++)
+    for (let x = 0; x < resolution - 1; x++) {
+      const a = z * resolution + x,
+        center = positions.length / 3;
+      positions.push(
+        (positions[a * 3] + positions[(a + 1) * 3]) / 2,
+        20,
+        (positions[a * 3 + 2] + positions[(a + resolution) * 3 + 2]) / 2,
+      );
+      const boundary = [a, a + resolution, a + resolution + 1, a + 1];
+      for (let side = 0; side < 4; side++)
+        indices.push(center, boundary[side], boundary[(side + 1) % 4]);
+      offsets.push(indices.length);
+    }
+  geometry.setAttribute(
+    "position",
+    new BufferAttribute(new Float32Array(positions), 3),
+  );
+  geometry.setIndex(indices);
+  geometry.userData.terrainCellTopology = Object.freeze({
+    schemaVersion: 1,
+    resolution,
+    surfaceVertexCount: positions.length / 3,
+    cellIndexOffsets: Object.freeze(offsets),
+  });
+  const surface = new RetainedTerrainSurface(
+    101,
+    "actual-client-cancellation-v1",
+    0,
+    0,
+    100,
+    resolution,
+    geometry,
+  );
+  const steps = surface.copySnapshotSteps(surface.snapshotByteLength());
+  for (let i = 0; i < 10000; i++) {
+    const step = steps.next();
+    if (step.done)
+      return {
+        geometry,
+        surface,
+        request: {
+          type: "prepare_surface",
+          schemaVersion: 1,
+          generation: 9,
+          token: 1,
+          snapshot: step.value,
+          consumed: { operations: 0, activeMs: 0, maximumSliceMs: 0 },
+        } satisfies GrassGroundingClientRequest,
+      };
+  }
+  steps.return(undefined as never);
+  geometry.dispose();
+  throw new Error("Actual cancellation surface snapshot exceeded bound");
+}
+
+beforeAll(async () => {
+  bundledSource = (await bundleGrassGroundingWorker()).source;
+});
+afterEach(async () => {
+  for (const { client, port } of sessions.splice(0)) {
+    client.destroy();
+    await port.close();
+  }
+});
+
+describe("actual grounding worker client", () => {
+  it("admits no gameplay or transferred input until the actual startup clock is ready", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    const port = new ActualGrassGroundingClientPort(bundledSource);
+    try {
+      await port.ready();
+      const client = new GrassGroundingWorkerClient(port);
+      sessions.push({ client, port });
+      const packet = workerRequest(fixture.request);
+      const buffers = grassGroundingWorkerInputTransfers(packet);
+      expect(client.busy).toBe(true);
+      expect(client.cancel()).toBe(false);
+      expect(() => client.submit(withoutId(packet))).toThrow(
+        /clock is not ready/,
+      );
+      expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+      expect(port.postCalls).toBe(0);
+      await port.readyFor(client);
+      expect(client.busy).toBe(false);
+      expect(client.transportFailure).toBeNull();
+      expect(port.clockPostCalls).toBeGreaterThanOrEqual(1);
+      expect(port.clockPostCalls).toBeLessThanOrEqual(
+        GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+      );
+      expect(client.submit(withoutId(packet))).toBe(1);
+      expect(
+        (await settledResponse(client, port, "result", 1)).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+      await port.close();
+    }
+  });
+
+  it("recovers after three delayed actual clock replies within the original startup deadline and completes a real job", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    const delayed = GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25;
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      delayed,
+      delayed,
+      delayed,
+    ]);
+    try {
+      await port.ready();
+      const client = new GrassGroundingWorkerClient(port);
+      sessions.push({ client, port });
+      const startupEpoch: unknown = Reflect.get(client, "clockStartupEpochMs");
+      await port.readyFor(client);
+      expect(port.clockPostCalls).toBe(4);
+      expect(client.transportFailure).toBeNull();
+      expect(client.terminated).toBe(false);
+      expect(port.pendingClockDeliveries).toBe(0);
+      expect(Reflect.get(client, "clockStartupEpochMs")).toBe(startupEpoch);
+      expect(Reflect.get(client, "timer")).toBeNull();
+      expect(port.postCalls).toBe(0);
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      });
+      if (!execution) throw new Error("Missing original execution envelope");
+      const originalDeadline = execution.deadlineEpochMs;
+      const packet = { ...workerRequest(fixture.request), execution };
+      expect(client.submit(withoutId(packet))).toBe(1);
+      expect(
+        (await settledResponse(client, port, "result", 1)).state.status,
+      ).toBe("ready");
+      expect(packet.execution).toBe(execution);
+      expect(execution.deadlineEpochMs).toBe(originalDeadline);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+      await port.close();
+    }
+  });
+
+  it("expires the original startup deadline after delayed actual replies without renewing it", async () => {
+    const delayed = GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25;
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      delayed,
+      delayed,
+      delayed,
+      GRASS_GROUNDING_CLOCK_STARTUP_MS + 100,
+    ]);
+    await port.ready();
+    const started = performance.now();
+    const client = new GrassGroundingWorkerClient(port);
+    sessions.push({ client, port });
+    const startupTimer: unknown = Reflect.get(client, "timer");
+    const untilFourth = performance.now() + 5_000;
+    while (port.clockPostCalls < 4 && !client.terminated) {
+      if (performance.now() >= untilFourth)
+        throw new Error("Actual fourth clock probe was not sent");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    expect(port.clockPostCalls).toBe(4);
+    expect(Reflect.get(client, "timer")).toBe(startupTimer);
+    await expect(port.readyFor(client)).rejects.toThrow(
+      "Grounding worker clock startup timed out",
+    );
+    expect(performance.now() - started).toBeGreaterThanOrEqual(
+      GRASS_GROUNDING_CLOCK_STARTUP_MS - 1,
+    );
+    expect(client.terminated).toBe(true);
+    expect(client.busy).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.clockPostCalls).toBe(4);
+    expect(port.pendingClockDeliveries).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+    expect(Reflect.get(client, "timer")).toBeNull();
+  });
+
+  it("fails closed on an unsolicited actual worker clock reply after startup", async () => {
+    const { client, port } = await actualClient();
+    // Ask the real worker for another sample. No clock or response is replaced.
+    // A worker already at its probe cap rejects this unsolicited request instead.
+    port.postMessage(
+      {
+        type: "clock_probe",
+        schemaVersion: 1,
+        probeId: port.clockPostCalls + 1,
+      },
+      [],
+    );
+    const deadline = performance.now() + 11_000;
+    while (!client.terminated) {
+      if (performance.now() >= deadline)
+        throw new Error("Unsolicited actual clock reply was not rejected");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    expect(client.transportFailure?.reason).toBe("protocol");
+    expect(client.busy).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+  });
+
+  it("destroys an actual client during startup without retaining timers or listeners", async () => {
+    const port = new ActualGrassGroundingClientPort(bundledSource, [
+      GRASS_GROUNDING_CLOCK_MAXIMUM_ROUND_TRIP_MS + 25,
+    ]);
+    await port.ready();
+    const client = new GrassGroundingWorkerClient(port);
+    sessions.push({ client, port });
+    expect(client.busy).toBe(true);
+    const deadline = performance.now() + 2_000;
+    while (port.pendingClockDeliveries === 0) {
+      if (performance.now() >= deadline)
+        throw new Error("Actual clock sample was not queued for delivery");
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    client.destroy();
+    client.destroy();
+    await port.close();
+    expect(client.terminated).toBe(true);
+    expect(client.busy).toBe(false);
+    expect(client.cancel()).toBe(false);
+    expect(client.takeSettled()).toBeNull();
+    expect(port.postCalls).toBe(0);
+    expect(port.listenerCount).toBe(0);
+    expect(port.terminateCalls).toBe(1);
+    expect(port.pendingClockDeliveries).toBe(0);
+    expect(Reflect.get(client, "timer")).toBeNull();
+    await expect(port.readyFor(client)).rejects.toThrow(/terminated/);
+  });
+  it("validates requested diagnostic subcells against a real ready slot and rejects malformed or unsolicited metadata", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = workerRequest(fixture.request);
+      packet.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+      client.submit(withoutId(packet));
+      const response = await port.waitFor("result", 1);
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (
+        !slot ||
+        typeof validate !== "function" ||
+        response.state.status !== "ready" ||
+        response.state.result.status !== "ready" ||
+        !response.state.result.diagnosticSubcells
+      )
+        throw new Error("Missing actual ready diagnostic boundary");
+      const result = response.state.result;
+      const metadata = result.diagnosticSubcells;
+      if (!metadata) throw new Error("Missing diagnostic cells");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      const withMetadata = (value: unknown) => ({
+        ...response,
+        state: {
+          ...response.state,
+          result: { ...result, diagnosticSubcells: value },
+        },
+      });
+      expect(metadata.cells.length).toBeGreaterThan(1);
+      expect(metadata.cells.some((cell) => cell.x < 0 || cell.z < 0)).toBe(
+        true,
+      );
+      expect(check(response)).toBe(response);
+      expect(takeResponse(client).response).toBe(response);
+      const numericBytes = 8 + metadata.cells.length * 72;
+      expect(
+        validateGrassGroundingDiagnosticSubcells(
+          metadata,
+          "world-grid-6.25m-v1",
+          result.data.count,
+          result.sweptBounds,
+        ),
+      ).toBe(numericBytes);
+      expect(() =>
+        check({
+          ...response,
+          resultBytes: response.resultBytes - numericBytes,
+        }),
+      ).toThrow(/buffer receipt/);
+      const without = { ...result };
+      delete without.diagnosticSubcells;
+      expect(() =>
+        check({ ...response, state: { ...response.state, result: without } }),
+      ).toThrow();
+      const first = metadata.cells[0];
+      const withCell = (patch: Record<string, unknown>) => ({
+        ...metadata,
+        cells: [{ ...first, ...patch }, ...metadata.cells.slice(1)],
+      });
+      const malformed: Array<[string, unknown]> = [
+        ["absent", undefined],
+        ["null", null],
+        ["array", []],
+        ["class", new Date()],
+        ["mode", { ...metadata, mode: "other" }],
+        ["grid", { ...metadata, cellSize: 6.5 }],
+        ["extra", { ...metadata, extra: true }],
+        ["missing", { mode: metadata.mode, cells: metadata.cells }],
+        ["empty", { ...metadata, cells: [] }],
+        [
+          "overflow",
+          { ...metadata, cells: Array.from({ length: 4097 }, () => first) },
+        ],
+        ["duplicate", { ...metadata, cells: [first, ...metadata.cells] }],
+        ["unsorted", { ...metadata, cells: [...metadata.cells].reverse() }],
+        ["count zero", withCell({ count: 0 })],
+        ["count fractional", withCell({ count: 0.5 })],
+        ["count mismatch", withCell({ count: first.count + 1 })],
+        ["key fraction", withCell({ x: 0.5 })],
+        ["key NaN", withCell({ z: NaN })],
+        ["key unsafe", withCell({ x: Number.MAX_SAFE_INTEGER + 1 })],
+        ["negative zero", withCell({ z: -0 })],
+        ["cell extra", withCell({ extra: 1 })],
+        [
+          "nonfinite",
+          withCell({ bounds: { ...first.bounds, maxY: Infinity } }),
+        ],
+        [
+          "inverted",
+          withCell({
+            bounds: { ...first.bounds, minY: first.bounds.maxY + 1 },
+          }),
+        ],
+        [
+          "outside",
+          withCell({
+            bounds: {
+              ...first.bounds,
+              minY: (result.sweptBounds?.minY ?? 0) - 1,
+            },
+          }),
+        ],
+        [
+          "union mismatch",
+          {
+            ...metadata,
+            cells: metadata.cells.map((cell) => ({
+              ...cell,
+              bounds: { ...cell.bounds, maxY: cell.bounds.maxY - 0.000001 },
+            })),
+          },
+        ],
+      ];
+      for (const [label, value] of malformed)
+        expect(() => check(withMetadata(value)), label).toThrow();
+      let getters = 0;
+      const getter = () => {
+        getters++;
+        throw new Error("Diagnostic getter must not run");
+      };
+      for (const level of [
+        "top",
+        "metadata",
+        "array",
+        "cell",
+        "bounds",
+      ] as const) {
+        const value = structuredClone(metadata);
+        const reply = withMetadata(value);
+        if (level === "top")
+          Object.defineProperty(reply.state.result, "diagnosticSubcells", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "metadata")
+          Object.defineProperty(value, "cells", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "array")
+          Object.defineProperty(value.cells, "0", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "cell")
+          Object.defineProperty(value.cells[0], "x", {
+            enumerable: true,
+            get: getter,
+          });
+        if (level === "bounds")
+          Object.defineProperty(value.cells[0].bounds, "minX", {
+            enumerable: true,
+            get: getter,
+          });
+        expect(() => check(reply), level).toThrow();
+      }
+      const sparse = structuredClone(metadata);
+      Reflect.deleteProperty(sparse.cells, "0");
+      expect(() => check(withMetadata(sparse))).toThrow();
+      const hidden = structuredClone(metadata);
+      Object.defineProperty(hidden, "mode", { enumerable: false });
+      expect(() => check(withMetadata(hidden))).toThrow();
+      const symbol = structuredClone(metadata);
+      Reflect.set(symbol.cells[0], Symbol("extra"), 1);
+      expect(() => check(withMetadata(symbol))).toThrow();
+      const inherited = structuredClone(metadata);
+      Object.setPrototypeOf(inherited.cells[0], { ...first });
+      expect(() => check(withMetadata(inherited))).toThrow();
+      expect(getters).toBe(0);
+      // Numeric-boundary packets derived from the real admitted bounds; these
+      // validate transport limits, not a claim of 4096 physically fitted cells.
+      const maximum = {
+        ...metadata,
+        cells: Array.from({ length: 4096 }, (_, x) => ({
+          x: x - 2048,
+          z: 0,
+          count: 1,
+          bounds: { ...first.bounds },
+        })),
+      };
+      expect(
+        validateGrassGroundingDiagnosticSubcells(
+          maximum,
+          "world-grid-6.25m-v1",
+          4096,
+          first.bounds,
+        ),
+      ).toBe(8 + 4096 * 72);
+      expect(() =>
+        validateGrassGroundingDiagnosticSubcells(
+          maximum,
+          undefined,
+          4096,
+          first.bounds,
+        ),
+      ).toThrow();
+      client.submit(withoutId(workerRequest(fixture.request, 2)));
+      const ordinary = await port.waitFor("result", 2);
+      const ordinarySlot: unknown = Reflect.get(client, "slot");
+      if (ordinary.state.status !== "ready")
+        throw new Error("Expected ordinary ready result");
+      const ordinaryResult = ordinary.state.result;
+      for (const value of [metadata, undefined])
+        expect(() =>
+          Reflect.apply(validate, client, [
+            {
+              ...ordinary,
+              state: {
+                ...ordinary.state,
+                result: { ...ordinaryResult, diagnosticSubcells: value },
+              },
+            },
+            ordinarySlot,
+          ]),
+        ).toThrow();
+      expect(takeResponse(client).response).toBe(ordinary);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it.each<SameFaceCase>(["empty", "missing-neighbor"])(
+    "accepts requested diagnostic subcell %s results with exact empty/deferred accounting",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const { client, port } = await actualClient();
+        const packet = workerRequest(fixture.request);
+        packet.settings.diagnosticSubcells = "world-grid-6.25m-v1";
+        client.submit(withoutId(packet));
+        const response = await settledResponse(client, port, "result", 1);
+        if (!("result" in response.state))
+          throw new Error("Expected terminal fitted result");
+        if (id === "empty") {
+          expect(response.state.result).toMatchObject({
+            status: "ready",
+            data: { count: 0 },
+            sweptBounds: null,
+            diagnosticSubcells: {
+              mode: "world-grid-6.25m-v1",
+              cellSize: 6.25,
+              cells: [],
+            },
+          });
+          expect(response.resultBytes).toBe(8);
+        } else {
+          expect(response.state.status).toBe("waiting_support");
+          expect(
+            Object.prototype.hasOwnProperty.call(
+              response.state.result,
+              "diagnosticSubcells",
+            ),
+          ).toBe(false);
+          expect(response.resultBytes).toBe(0);
+        }
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("rejects invalid diagnostic selectors without getters, posting or detaching owned input", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      for (const value of [null, "other", true, {}]) {
+        const packet = workerRequest(fixture.request);
+        Reflect.set(packet.settings, "diagnosticSubcells", value);
+        expect(() => client.submit(withoutId(packet))).toThrow();
+        expect(packet.data.offsets.byteLength).toBeGreaterThan(0);
+      }
+      let getters = 0;
+      const packet = workerRequest(fixture.request);
+      Object.defineProperty(packet.settings, "diagnosticSubcells", {
+        enumerable: true,
+        get() {
+          getters++;
+          return "world-grid-6.25m-v1";
+        },
+      });
+      expect(() => client.submit(withoutId(packet))).toThrow();
+      expect(getters).toBe(0);
+      expect(port.postCalls).toBe(0);
+      expect(client.busy).toBe(false);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("accepts real opt-in prepared and fitted work above250ms with one unchanged deadline", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const cold = workerRequest(fixture.request, 1, 7);
+      const execution = captureGrassGroundingExecution({
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() + 10_000,
+      })!;
+      for (let i = 0; i < cold.surfaces.length; i++) {
+        const packet = preparation(cold, i);
+        packet.execution = execution;
+        packet.consumed = { operations: 1, activeMs: 251, maximumSliceMs: 2 };
+        const id = client.submit(packet);
+        const response = await settledResponse(
+          client,
+          port,
+          "surface_prepared",
+          id,
+        );
+        expect(response.state.status).toBe("prepared");
+        expect(response.work.activeMs).toBeGreaterThanOrEqual(251);
+      }
+      const packet = cachedPacket(cold);
+      packet.execution = execution;
+      packet.consumed = { operations: 1, activeMs: 251, maximumSliceMs: 2 };
+      const id = client.submit(packet);
+      const response = await settledResponse(client, port, "result", id);
+      expect(response.state.status).toBe("ready");
+      if (response.state.status !== "ready")
+        throw new Error(JSON.stringify(response));
+      expect(response.state.result.receipt.cost).toEqual({
+        policy: execution.policy,
+        status: "OVER_TARGET",
+        targetMs: 250,
+      });
+      const reference = groundGrassBlades(fixture.request);
+      const result = {
+        ...response.state.result,
+        receipt: { ...response.state.result.receipt },
+      };
+      delete result.receipt.cost;
+      expect(semanticResult(result, fixture.request)).toEqual(
+        semanticResult(reference, fixture.request),
+      );
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("rejects unknown policy and extended lifetime before transferring actual input", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client, port } = await actualClient();
+      for (const execution of [
+        {
+          policy: "unbounded",
+          deadlineEpochMs: performance.timeOrigin + performance.now() + 1000,
+        },
+        {
+          policy: "soft-cost-finite-lifetime-v1",
+          deadlineEpochMs: performance.timeOrigin + performance.now() + 20_000,
+        },
+      ]) {
+        const packet = Object.assign(
+          withoutId(workerRequest(fixture.request, 1, 7)),
+          { execution },
+        );
+        expect(() =>
+          client.submit(packet as GrassGroundingClientRequest),
+        ).toThrow("Invalid grounding execution policy");
+        expect(packet.data.offsets.byteLength).toBeGreaterThan(0);
+      }
+      expect(port.postCalls).toBe(0);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("uses the original expired deadline for the real worker transport watchdog", async () => {
+    const fixture = createSameFaceCase("fine-lod1");
+    try {
+      const { client } = await actualClient();
+      const packet = withoutId(workerRequest(fixture.request, 1, 7));
+      packet.execution = {
+        policy: "soft-cost-finite-lifetime-v1",
+        deadlineEpochMs: performance.timeOrigin + performance.now() - 1,
+      };
+      client.submit(packet);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(client.transportFailure?.reason).toBe("timeout");
+      expect(client.terminated).toBe(true);
+      expect(client.takeSettled()?.status).toBe("failed_transport");
+    } finally {
+      fixture.dispose();
+    }
+  });
+  it.each<SameFaceCase>([
+    "ordinary-lod0",
+    "fine-near4",
+    "refined-interiors",
+    "adjacent-reversed",
+    "missing-neighbor",
+    "overlapping-owners",
+    "mixed-exclusions",
+    "empty",
+  ])(
+    "transfers owned cold %s input and preserves every output byte and dependency",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const original = sameFaceInputHash(fixture),
+          expected = groundGrassBlades(fixture.request);
+        const { client, port } = await actualClient(),
+          packet = workerRequest(fixture.request, 1, 7);
+        const transfers = grassGroundingWorkerInputTransfers(packet);
+        expect(client.busy).toBe(false);
+        expect(client.takeSettled()).toBeNull();
+        expect(client.cancel()).toBe(false);
+        expect(client.submit(withoutId(packet))).toBe(1);
+        expect(client.busy).toBe(true);
+        expect(client.takeSettled()).toBeNull();
+        expect(transfers.every((buffer) => buffer.byteLength === 0)).toBe(true);
+        const result = await settledResponse(client, port, "result", 1);
+        if (
+          result.state.status !== "ready" &&
+          result.state.status !== "waiting_support"
+        )
+          throw new Error(`Unexpected real result: ${JSON.stringify(result)}`);
+        expect(semanticResult(result.state.result, fixture.request)).toEqual(
+          semanticResult(expected, fixture.request),
+        );
+        expect(result.state.result.receipt.refinedSameFaceEdges).toBe(
+          expected.receipt.refinedSameFaceEdges,
+        );
+        expect(
+          Number.isSafeInteger(
+            result.state.result.receipt.refinedSameFaceEdges,
+          ),
+        ).toBe(true);
+        expect(
+          result.state.result.receipt.refinedSameFaceEdges,
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          result.state.result.receipt.refinedSameFaceEdges,
+        ).toBeLessThanOrEqual(result.state.result.receipt.sameFaceEdges);
+        expect(client.terminated).toBe(false);
+        expect(client.transportFailure).toBeNull();
+        expect(client.cacheReceipt).toEqual({
+          owners: 0,
+          inputBytes: 0,
+          derivedBytesReserved: 0,
+        });
+        expect(sameFaceInputHash(fixture)).toBe(original);
+        for (const { surface, geometry } of fixture.owned)
+          expect(surface.matchesGeometry(geometry)).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each<SameFaceCase>([
+    "ordinary-lod1",
+    "fine-near4",
+    "adjacent-reversed",
+    "mixed-exclusions",
+  ])(
+    "prepares, repeatedly fits and releases actual %s owners with exact cache receipts",
+    async (id) => {
+      const fixture = createSameFaceCase(id);
+      try {
+        const original = sameFaceInputHash(fixture),
+          expected = groundGrassBlades(fixture.request);
+        const { client, port } = await actualClient(),
+          cold = workerRequest(fixture.request, 1, 11);
+        let nextId = 1,
+          payloadBytes = 0;
+        for (let index = 0; index < cold.surfaces.length; index++) {
+          const request = preparation(cold, index),
+            bytes = request.snapshot.payloadBytes;
+          const buffers = grassGroundingWorkerInputTransfers({
+            ...request,
+            jobId: nextId,
+          });
+          const jobId = client.submit(request);
+          expect(jobId).toBe(nextId++);
+          expect(buffers.every((buffer) => buffer.byteLength === 0)).toBe(true);
+          const prepared = await settledResponse(
+            client,
+            port,
+            "surface_prepared",
+            jobId,
+          );
+          expect(prepared.state).toMatchObject({
+            status: "prepared",
+            token: request.token,
+          });
+          payloadBytes += bytes;
+          expect(client.cacheReceipt).toEqual(prepared.cache);
+          expect(client.cacheReceipt.owners).toBe(index + 1);
+          expect(client.cacheReceipt.inputBytes).toBe(payloadBytes);
+          expect(Object.isFrozen(client.cacheReceipt)).toBe(true);
+        }
+        const stableCache = client.cacheReceipt;
+        for (const generation of [11, 12]) {
+          const jobId = client.submit(
+            cachedPacket(workerRequest(fixture.request), generation),
+          );
+          expect(jobId).toBe(nextId++);
+          const result = await settledResponse(client, port, "result", jobId);
+          expect(result.generation).toBe(generation);
+          expect(result.terrainRebuildWork).toBeNull();
+          expect(client.cacheReceipt).toEqual(stableCache);
+          if (result.state.status !== "ready")
+            throw new Error(`Cached fitting failed: ${JSON.stringify(result)}`);
+          expect(semanticResult(result.state.result, fixture.request)).toEqual(
+            semanticResult(expected, fixture.request),
+          );
+        }
+        const releaseId = client.submit({
+          type: "release_surfaces",
+          schemaVersion: 1,
+          generation: 13,
+          surfaceTokens: cold.surfaces.map(({ token }) => token).reverse(),
+        });
+        expect(releaseId).toBe(nextId++);
+        expect(client.cancel()).toBe(false);
+        await settledResponse(client, port, "surfaces_released", releaseId);
+        expect(client.cacheReceipt).toEqual({
+          owners: 0,
+          inputBytes: 0,
+          derivedBytesReserved: 0,
+        });
+        expect(stableCache.owners).toBe(cold.surfaces.length);
+        const emptyRelease = client.submit({
+          type: "release_surfaces",
+          schemaVersion: 1,
+          generation: 14,
+          surfaceTokens: [],
+        });
+        expect(emptyRelease).toBe(nextId);
+        await settledResponse(client, port, "surfaces_released", emptyRelease);
+        expect(sameFaceInputHash(fixture)).toBe(original);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("holds the only slot before acknowledgement and while a real terminal result is parked", async () => {
+    const fixture = createSameFaceCase("fine-dense-nonplanar");
+    try {
+      const { client, port } = await actualClient();
+      const first = maximumClumpPacket(workerRequest(fixture.request, 1, 31));
+      expect(client.submit(withoutId(first))).toBe(1);
+      expect(client.cancel()).toBe(true);
+      expect(client.cancel()).toBe(false);
+      expect(client.busy).toBe(true);
+      expect(client.takeSettled()).toBeNull();
+      const next = workerRequest(fixture.request, 2, 32),
+        buffers = grassGroundingWorkerInputTransfers(next);
+      const postCalls = port.postCalls;
+      expect(() => client.submit(withoutId(next))).toThrow(/busy/);
+      expect(port.postCalls).toBe(postCalls);
+      expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+      const cancelled = await port.waitFor("result", 1);
+      expect(cancelled.state).toEqual({
+        status: "cancelled",
+        reason: "caller",
+      });
+      expect(client.busy).toBe(true);
+      expect(() => client.submit(withoutId(next))).toThrow(/busy/);
+      expect(client.cancel()).toBe(false);
+      expect(takeResponse(client).response).toBe(cancelled);
+      expect(client.submit(withoutId(next))).toBe(2);
+      const result = await settledResponse(client, port, "result", 2);
+      expect(result.generation).toBe(32);
+      expect(result.state.status).toBe("ready");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("cancels actual sliced preparation, burns its token and accepts a new generation", async () => {
+    const owned = cancellablePreparation(),
+      fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient();
+      expect(client.submit(owned.request)).toBe(1);
+      expect(client.cancel()).toBe(true);
+      expect(client.busy).toBe(true);
+      expect(client.takeSettled()).toBeNull();
+      const cancelled = await settledResponse(
+        client,
+        port,
+        "surface_prepared",
+        1,
+      );
+      expect(cancelled.state).toEqual({
+        status: "cancelled",
+        reason: "caller",
+      });
+      expect(client.cacheReceipt.owners).toBe(0);
+      const request = preparation(workerRequest(fixture.request));
+      expect(() => client.submit(request)).toThrow(/token/);
+      request.token = 2;
+      request.generation = 10;
+      expect(client.submit(request)).toBe(2);
+      expect(
+        (await settledResponse(client, port, "surface_prepared", 2)).state
+          .status,
+      ).toBe("prepared");
+      expect(owned.surface.matchesGeometry(owned.geometry)).toBe(true);
+    } finally {
+      owned.geometry.dispose();
+      fixture.dispose();
+    }
+  });
+
+  it.each([
+    "generation",
+    "length",
+    "subview",
+    "alias",
+    "bytes",
+    "consumed",
+    "accessor",
+  ] as const)(
+    "rejects invalid %s before transfer, callback invocation or ID consumption",
+    async (kind) => {
+      const fixture = createSameFaceCase("ordinary-lod1");
+      try {
+        const { client, port } = await actualClient(),
+          packet = workerRequest(fixture.request);
+        const buffers = grassGroundingWorkerInputTransfers(packet);
+        let getters = 0;
+        if (kind === "generation") packet.generation = 0;
+        if (kind === "length") packet.data.offsets = new Float32Array(1);
+        if (kind === "subview")
+          packet.geometry.position = new Float32Array(
+            packet.geometry.position.length + 1,
+          ).subarray(1);
+        if (kind === "alias") packet.data.groundColors = packet.data.offsets;
+        if (kind === "bytes")
+          packet.surfaces[0].snapshot = {
+            ...packet.surfaces[0].snapshot,
+            payloadBytes: packet.surfaces[0].snapshot.payloadBytes + 1,
+          };
+        if (kind === "consumed") packet.consumed.activeMs = NaN;
+        if (kind === "accessor")
+          Object.defineProperty(packet.settings.wind, "x", {
+            enumerable: true,
+            get() {
+              getters++;
+              return 0;
+            },
+          });
+        expect(() => client.submit(withoutId(packet))).toThrow();
+        expect(port.postCalls).toBe(0);
+        expect(getters).toBe(0);
+        expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+        expect(client.busy).toBe(false);
+        expect(client.terminated).toBe(false);
+        expect(client.submit(withoutId(workerRequest(fixture.request)))).toBe(
+          1,
+        );
+        expect(
+          (await settledResponse(client, port, "result", 1)).state.status,
+        ).toBe("ready");
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("rejects unknown cache tokens and atomic invalid releases without transferring input or losing known owners", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient(),
+        cold = workerRequest(fixture.request);
+      const cached = cachedPacket(cold),
+        buffers = grassGroundingWorkerInputTransfers({ ...cached, jobId: 1 });
+      expect(() => client.submit(cached)).toThrow(/cached/);
+      expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+      expect(port.postCalls).toBe(0);
+      expect(client.submit(preparation(workerRequest(fixture.request)))).toBe(
+        1,
+      );
+      await settledResponse(client, port, "surface_prepared", 1);
+      const cache = client.cacheReceipt,
+        sent = port.postCalls;
+      expect(() =>
+        client.submit({
+          type: "release_surfaces",
+          schemaVersion: 1,
+          generation: 2,
+          surfaceTokens: [1, 999],
+        }),
+      ).toThrow(/unknown/);
+      expect(client.cacheReceipt).toEqual(cache);
+      expect(port.postCalls).toBe(sent);
+      expect(client.submit(cached)).toBe(2);
+      expect(
+        (await settledResponse(client, port, "result", 2)).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("handles a real pre-acceptance worker rejection and remains usable with the next ID", async () => {
+    const fixture = createSameFaceCase("adjacent-owners");
+    try {
+      const { client, port } = await actualClient(),
+        packet = workerRequest(fixture.request, 1, 41);
+      packet.surfaces[1].snapshot = {
+        ...packet.surfaces[1].snapshot,
+        terrainProfileIdentity: "different-actual-profile-v1",
+      };
+      expect(client.submit(withoutId(packet))).toBe(1);
+      const rejected = await settledResponse(client, port, "rejected", 1);
+      expect(rejected.reason).toBe("invalid_message");
+      expect(client.transportFailure).toBeNull();
+      expect(client.terminated).toBe(false);
+      expect(
+        client.submit(withoutId(workerRequest(fixture.request, 1, 42))),
+      ).toBe(2);
+      expect(
+        (await settledResponse(client, port, "result", 2)).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it.each(["prepare", "fit"] as const)(
+    "preserves actual %s budget failures as terminal responses",
+    async (kind) => {
+      const fixture = createSameFaceCase("ordinary-lod1");
+      try {
+        const { client, port } = await actualClient(),
+          cold = workerRequest(fixture.request);
+        const request =
+          kind === "prepare" ? preparation(cold) : withoutId(cold);
+        request.consumed = {
+          operations: GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+          activeMs: 1,
+          maximumSliceMs: 1,
+        };
+        expect(client.submit(request)).toBe(1);
+        const reply =
+          kind === "prepare"
+            ? await settledResponse(client, port, "surface_prepared", 1)
+            : await settledResponse(client, port, "result", 1);
+        expect(reply.state).toEqual({
+          status: "failed_budget",
+          reason: "operations",
+        });
+        expect(reply.work.operations).toBe(
+          GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations,
+        );
+        expect(client.terminated).toBe(false);
+        expect(client.cacheReceipt.owners).toBe(0);
+        expect(reply.timing).toMatchObject({
+          timeBasis: "slice-elapsed-including-preemption",
+          scope: "local-continuation",
+        });
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it("admits bounded preparation timing and rejects malformed spans at the actual surface slot", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = preparation(workerRequest(fixture.request));
+      packet.consumed.operations =
+        GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - 1;
+      expect(client.submit(packet)).toBe(1);
+      const reply = await port.waitFor("surface_prepared", 1);
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (!slot || typeof validate !== "function" || !reply.timing?.peakSlice)
+        throw new Error("Missing real surface timing/slot");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      expect(check(reply)).toBe(reply);
+      expect(takeResponse(client).response).toBe(reply);
+      expect(reply.state).toEqual({
+        status: "failed_budget",
+        reason: "operations",
+      });
+      expect(reply.work.operations - packet.consumed.operations).toBe(1);
+      const timing = reply.timing;
+      const withoutTiming = { ...reply };
+      delete withoutTiming.timing;
+      expect(check(withoutTiming)).toBe(withoutTiming);
+      expect(() =>
+        check({
+          ...reply,
+          timing: {
+            ...timing,
+            peakSlice: {
+              ...timing.peakSlice,
+              startOperations: packet.consumed.operations - 1,
+            },
+          },
+        }),
+      ).toThrow("Invalid grounding timing span");
+      expect(() => check({ ...reply, state: { status: "prepared" } })).toThrow(
+        "failure-only",
+      );
+      expect(() =>
+        check({ ...reply, state: { status: "cancelled", reason: "caller" } }),
+      ).toThrow("failure-only");
+      let getters = 0;
+      const unsafe = { ...reply };
+      Object.defineProperty(unsafe, "timing", {
+        enumerable: true,
+        get() {
+          getters++;
+          return timing;
+        },
+      });
+      expect(() => check(unsafe)).toThrow();
+      expect(getters).toBe(0);
+      expect(client.transportFailure).toBeNull();
+      expect(client.cacheReceipt.owners).toBe(0);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("validates failure timing against a real admitted worker slot, with strict accessor-safe bounded spans", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient();
+      const packet = maximumClumpPacket(workerRequest(fixture.request));
+      const start = GRASS_BLADE_GROUNDING_JOB_LIMITS.maximumOperations - 10000;
+      packet.consumed = { operations: start, activeMs: 1, maximumSliceMs: 1 };
+      expect(client.submit(withoutId(packet))).toBe(1);
+      const reply = await port.waitFor("result", 1);
+      // This is the actual terminal response and its actual admitted slot, not
+      // a fake Worker, clock, accounting ledger or manufactured successful job.
+      // Adversarial packets below test the real private boundary validator only;
+      // they are deliberately NOT described as messages emitted by the worker.
+      const slot: unknown = Reflect.get(client, "slot");
+      const validate: unknown = Reflect.get(client, "validateResponse");
+      if (!slot || typeof validate !== "function")
+        throw new Error("Missing actual client validator/slot");
+      const check = (value: unknown) =>
+        Reflect.apply(validate, client, [value, slot]);
+      expect(takeResponse(client).response).toBe(reply);
+      expect(reply.state.status).toBe("failed_budget");
+      expect(reply.work.operations - start).toBeGreaterThanOrEqual(8192);
+      expect(reply.timing).toMatchObject({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+      });
+      expect(check(reply)).toBe(reply);
+
+      const localActiveMs = reply.work.activeMs - packet.consumed.activeMs;
+      const spanElapsedMs = Math.min(
+        1,
+        reply.work.maximumSliceMs,
+        localActiveMs,
+      );
+      expect(spanElapsedMs).toBeGreaterThan(0);
+      const timing = (): GrassGroundingTiming => ({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+        peakSlice: {
+          elapsedMs: spanElapsedMs,
+          startOperations: start,
+          endOperations: start + 8192,
+          startPhase: null,
+          endPhase: "x".repeat(128),
+        },
+        peakClockInterval: {
+          elapsedMs: spanElapsedMs,
+          startOperations: start,
+          endOperations: start + 64,
+          startPhase: "",
+          endPhase: null,
+        },
+      });
+      const withTiming = (value: unknown) => ({ ...reply, timing: value });
+      const withoutTiming = { ...reply };
+      delete withoutTiming.timing;
+      expect(check(withoutTiming)).toBe(withoutTiming);
+      for (const value of [
+        timing(),
+        { ...timing(), peakSlice: null, peakClockInterval: null },
+        { ...timing(), peakClockInterval: null },
+        {
+          ...timing(),
+          peakSlice: {
+            ...timing().peakSlice,
+            elapsedMs: 0,
+            endOperations: start,
+          },
+          peakClockInterval: {
+            ...timing().peakClockInterval,
+            elapsedMs: 0,
+            endOperations: start,
+          },
+        },
+        {
+          ...timing(),
+          peakSlice: {
+            ...timing().peakSlice,
+            elapsedMs: Math.min(reply.work.maximumSliceMs, localActiveMs),
+            endOperations: reply.work.operations,
+            startOperations: reply.work.operations - 8192,
+          },
+        },
+        Object.assign(Object.create(null), timing()),
+      ])
+        expect(() => check(withTiming(value))).not.toThrow();
+
+      // Mutate only this real response at its real admitted-slot boundary.
+      // Neither cumulative maxima nor pre-seed time can become a local peak.
+      const boundedTiming = (elapsedMs: number): GrassGroundingTiming => ({
+        ...timing(),
+        peakSlice: {
+          elapsedMs,
+          startOperations: start,
+          endOperations: start,
+          startPhase: null,
+          endPhase: null,
+        },
+        peakClockInterval: {
+          elapsedMs,
+          startOperations: start,
+          endOperations: start,
+          startPhase: null,
+          endPhase: null,
+        },
+      });
+      const timingBoundary = (activeMs: number, elapsedMs: number) => ({
+        ...reply,
+        work: { ...reply.work, activeMs, maximumSliceMs: 1 },
+        timing: boundedTiming(elapsedMs),
+      });
+      expect(() => check(timingBoundary(3, 1))).not.toThrow();
+      expect(() => check(timingBoundary(3, 1.5))).toThrow(
+        "Invalid grounding timing span",
+      );
+      expect(() => check(timingBoundary(1.25, 0.25))).not.toThrow();
+      expect(() => check(timingBoundary(1.25, 0.5))).toThrow(
+        "Invalid grounding timing span",
+      );
+      // A positive measured increment can round away when added to the seed.
+      // This is a numerical receipt mutation, not a replaced clock or an
+      // assertion that the real worker emitted these synthetic durations.
+      const lostIncrement = Number.EPSILON / 4;
+      expect(packet.consumed.activeMs + lostIncrement).toBe(
+        packet.consumed.activeMs,
+      );
+      expect(() =>
+        check(timingBoundary(packet.consumed.activeMs, lostIncrement)),
+      ).not.toThrow();
+      expect(() =>
+        check(timingBoundary(packet.consumed.activeMs, 1e-6)),
+      ).toThrow("Invalid grounding timing span");
+
+      const malformed: Array<[string, unknown]> = [
+        ["undefined", undefined],
+        ["null", null],
+        ["array", []],
+        ["class", new Date()],
+        ["time basis", { ...timing(), timeBasis: "exclusive-cpu" }],
+        ["scope", { ...timing(), scope: "whole-job" }],
+        ["extra key", { ...timing(), extra: 1 }],
+        [
+          "missing key",
+          {
+            timeBasis: timing().timeBasis,
+            scope: timing().scope,
+            peakSlice: null,
+          },
+        ],
+        ["interval without slice", { ...timing(), peakSlice: null }],
+        [
+          "interval exceeds slice",
+          { ...timing(), peakSlice: { ...timing().peakSlice, elapsedMs: 0 } },
+        ],
+      ];
+      for (const key of ["peakSlice", "peakClockInterval"] as const) {
+        const span = timing()[key];
+        for (const value of [undefined, [], new Date()])
+          malformed.push([
+            key + ": non-record span",
+            { ...timing(), [key]: value },
+          ]);
+        for (const [name, patch] of [
+          ["negative elapsed", { elapsedMs: -1 }],
+          ["NaN elapsed", { elapsedMs: NaN }],
+          ["infinite elapsed", { elapsedMs: Infinity }],
+          ["elapsed beyond work", { elapsedMs: reply.work.activeMs + 1 }],
+          ["before seed", { startOperations: start - 1 }],
+          ["fractional start", { startOperations: start + 0.5 }],
+          ["fractional end", { endOperations: start + 0.5 }],
+          [
+            "reversed",
+            { startOperations: start + 2, endOperations: start + 1 },
+          ],
+          [
+            "end beyond work",
+            {
+              startOperations: reply.work.operations,
+              endOperations: reply.work.operations + 1,
+            },
+          ],
+          ["start beyond work", { startOperations: reply.work.operations + 1 }],
+          [
+            "delta overflow",
+            { endOperations: start + (key === "peakSlice" ? 8193 : 65) },
+          ],
+          ["start phase length", { startPhase: "x".repeat(129) }],
+          ["end phase length", { endPhase: "x".repeat(129) }],
+          ["start phase type", { startPhase: 1 }],
+          ["end phase type", { endPhase: {} }],
+          ["extra span key", { extra: true }],
+        ] as const)
+          malformed.push([
+            key + ": " + name,
+            { ...timing(), [key]: { ...span, ...patch } },
+          ]);
+        malformed.push([
+          key + ": missing field",
+          {
+            ...timing(),
+            [key]: {
+              elapsedMs: 0,
+              startOperations: start,
+              endOperations: start,
+              startPhase: null,
+            },
+          },
+        ]);
+      }
+      for (const [label, value] of malformed)
+        expect(() => check(withTiming(value)), label).toThrow();
+
+      let getters = 0;
+      const getter = () => {
+        getters++;
+        throw new Error("Timing accessor must never run");
+      };
+      const top = { ...reply };
+      Object.defineProperty(top, "timing", { enumerable: true, get: getter });
+      expect(() => check(top)).toThrow();
+      for (const key of [
+        "timeBasis",
+        "scope",
+        "peakSlice",
+        "peakClockInterval",
+      ] as const) {
+        const value = timing();
+        Object.defineProperty(value, key, { enumerable: true, get: getter });
+        expect(() => check(withTiming(value))).toThrow();
+      }
+      for (const owner of ["peakSlice", "peakClockInterval"] as const) {
+        for (const key of [
+          "elapsedMs",
+          "startOperations",
+          "endOperations",
+          "startPhase",
+          "endPhase",
+        ]) {
+          const value = timing();
+          const span = value[owner];
+          if (span === null) throw new Error("Missing test timing span");
+          Object.defineProperty(span, key, { enumerable: true, get: getter });
+          expect(() => check(withTiming(value))).toThrow();
+        }
+      }
+      const hidden = timing();
+      Object.defineProperty(hidden, "scope", {
+        value: "local-continuation",
+        enumerable: false,
+      });
+      expect(() => check(withTiming(hidden))).toThrow();
+      const symbol = timing();
+      Reflect.set(symbol, Symbol("extra"), 1);
+      expect(() => check(withTiming(symbol))).toThrow();
+      expect(getters).toBe(0);
+      for (const status of ["ready", "waiting_support", "cancelled"])
+        expect(() =>
+          check({ ...reply, state: { status }, timing: timing() }),
+        ).toThrow("failure-only");
+      // Both failure states admit the same bounded optional diagnostics. The
+      // real cached input-failure test below additionally exercises transport.
+      expect(() =>
+        check({
+          ...reply,
+          state: { status: "failed_input", error: "boundary qualification" },
+          timing: timing(),
+        }),
+      ).not.toThrow();
+      expect(client.terminated).toBe(false);
+      expect(client.transportFailure).toBeNull();
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("keeps strict-admission and cached-core input failures recoverable without leaking or losing cache owners", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient(),
+        invalid = preparation(workerRequest(fixture.request));
+      invalid.snapshot.positions[0] += 1;
+      expect(client.submit(invalid)).toBe(1);
+      expect(
+        (await settledResponse(client, port, "surface_prepared", 1)).state
+          .status,
+      ).toBe("failed_input");
+      expect(client.cacheReceipt.owners).toBe(0);
+      const valid = preparation(workerRequest(fixture.request));
+      valid.token = 2;
+      expect(client.submit(valid)).toBe(2);
+      expect(
+        (await settledResponse(client, port, "surface_prepared", 2)).state
+          .status,
+      ).toBe("prepared");
+      const cache = client.cacheReceipt,
+        badFit = cachedPacket(workerRequest(fixture.request));
+      badFit.surfaceTokens = [2];
+      badFit.ownSurfaceToken = 2;
+      badFit.data.offsets[0] = NaN;
+      expect(client.submit(badFit)).toBe(3);
+      const failed = await settledResponse(client, port, "result", 3);
+      expect(failed.state.status).toBe("failed_input");
+      expect(failed.timing).toMatchObject({
+        timeBasis: "slice-elapsed-including-preemption",
+        scope: "local-continuation",
+      });
+      expect(client.cacheReceipt).toEqual(cache);
+      expect(client.transportFailure).toBeNull();
+      const next = cachedPacket(workerRequest(fixture.request));
+      next.surfaceTokens = [2];
+      next.ownSurfaceToken = 2;
+      expect(client.submit(next)).toBe(4);
+      expect(
+        (await settledResponse(client, port, "result", 4)).state.status,
+      ).toBe("ready");
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("retains a native structured-clone failure without detaching input or reopening the transport", async () => {
+    const fixture = createSameFaceCase("ordinary-lod1");
+    try {
+      const { client, port } = await actualClient(),
+        packet = workerRequest(fixture.request, 1, 51);
+      const buffers = grassGroundingWorkerInputTransfers(packet);
+      // A real uncloneable nested value: Node's native postMessage throws,
+      // rather than a replacement worker manufacturing a failure response.
+      Reflect.set(
+        packet.constraints.terrainSurface,
+        "arenaGradeHeight",
+        () => 0,
+      );
+      expect(client.submit(withoutId(packet))).toBe(1);
+      expect(port.postCalls).toBe(1);
+      expect(buffers.every((buffer) => buffer.byteLength > 0)).toBe(true);
+      expect(client.busy).toBe(true);
+      expect(client.terminated).toBe(true);
+      expect(client.transportFailure?.reason).toBe("post_message");
+      const failed = client.takeSettled();
+      expect(failed).toMatchObject({
+        status: "failed_transport",
+        reason: "post_message",
+        jobId: 1,
+        generation: 51,
+      });
+      expect(client.busy).toBe(false);
+      expect(client.takeSettled()).toBeNull();
+      expect(port.listenerCount).toBe(0);
+      expect(() =>
+        client.submit(withoutId(workerRequest(fixture.request))),
+      ).toThrow(/terminated/);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("handles actual unexpected worker termination and clears cached ownership", async () => {
+    const fixture = createSameFaceCase("fine-dense-nonplanar");
+    try {
+      const { client, port } = await actualClient();
+      expect(client.submit(preparation(workerRequest(fixture.request)))).toBe(
+        1,
+      );
+      await settledResponse(client, port, "surface_prepared", 1);
+      expect(client.cacheReceipt.owners).toBe(1);
+      const packet = cachedPacket(
+        maximumClumpPacket(workerRequest(fixture.request)),
+        61,
+      );
+      expect(client.submit(packet)).toBe(2);
+      await port.terminateUnexpectedly();
+      expect(client.terminated).toBe(true);
+      expect(client.cacheReceipt).toEqual({
+        owners: 0,
+        inputBytes: 0,
+        derivedBytesReserved: 0,
+      });
+      expect(client.takeSettled()).toMatchObject({
+        status: "failed_transport",
+        reason: "error",
+        jobId: 2,
+        generation: 61,
+      });
+      expect(client.busy).toBe(false);
+      expect(port.listenerCount).toBe(0);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it.each(["active", "settled", "cached"] as const)(
+    "destroys a real %s worker idempotently and discards owned state",
+    async (phase) => {
+      const fixture = createSameFaceCase("ordinary-lod1");
+      try {
+        const { client, port } = await actualClient();
+        if (phase === "cached") {
+          client.submit(preparation(workerRequest(fixture.request)));
+          await settledResponse(client, port, "surface_prepared", 1);
+          expect(client.cacheReceipt.owners).toBe(1);
+        } else {
+          client.submit(withoutId(workerRequest(fixture.request)));
+          if (phase === "settled") await port.waitFor("result", 1);
+          expect(client.busy).toBe(true);
+        }
+        expect(port.listenerCount).toBe(3);
+        client.destroy();
+        client.destroy();
+        expect(client.terminated).toBe(true);
+        expect(client.busy).toBe(false);
+        expect(client.takeSettled()).toBeNull();
+        expect(client.cancel()).toBe(false);
+        expect(client.cacheReceipt).toEqual({
+          owners: 0,
+          inputBytes: 0,
+          derivedBytesReserved: 0,
+        });
+        expect(port.listenerCount).toBe(0);
+        expect(port.terminateCalls).toBe(1);
+        expect(() =>
+          client.submit(withoutId(workerRequest(fixture.request))),
+        ).toThrow(/terminated/);
+        await port.close();
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+});

@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectHyperiaLaunchDiagnostics,
@@ -13,6 +14,61 @@ type WalletAuthFixtureServer = {
   requests: Array<Record<string, unknown>>;
   url: string;
 };
+
+const base58Alphabet =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(data: Buffer | Uint8Array): string {
+  let value = BigInt(`0x${Buffer.from(data).toString("hex")}`);
+  const characters: string[] = [];
+  while (value > 0n) {
+    characters.unshift(base58Alphabet[Number(value % 58n)]!);
+    value /= 58n;
+  }
+  for (const byte of data) {
+    if (byte !== 0) break;
+    characters.unshift("1");
+  }
+  return characters.join("") || "1";
+}
+
+function base58Decode(value: string): Buffer {
+  let decoded = 0n;
+  for (const character of value) {
+    const index = base58Alphabet.indexOf(character);
+    if (index < 0) throw new Error("invalid test base58 value");
+    decoded = decoded * 58n + BigInt(index);
+  }
+  const hex = decoded.toString(16);
+  const body = Buffer.from(hex.length % 2 === 0 ? hex : `0${hex}`, "hex");
+  const leadingZeros = value.match(/^1*/u)?.[0].length ?? 0;
+  return Buffer.concat([Buffer.alloc(leadingZeros), body]);
+}
+
+function createTestSolanaWallet() {
+  const seed = Buffer.alloc(32, 7);
+  const privateKey = crypto.createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from("302e020100300506032b657004220420", "hex"),
+      seed,
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const publicKey = (
+    crypto
+      .createPublicKey(privateKey)
+      .export({ format: "der", type: "spki" }) as Buffer
+  ).subarray(12, 44);
+  return {
+    address: base58Encode(publicKey),
+    privateKey: base58Encode(Buffer.concat([seed, publicKey])),
+  };
+}
+
+const TEST_SOLANA_WALLET = createTestSolanaWallet();
+const FIXTURE_CHALLENGE_ID = "00000000-0000-4000-8000-000000000001";
+const FIXTURE_MESSAGE = "Hyperia test SOL wallet challenge";
 
 async function readJsonBody(
   req: http.IncomingMessage,
@@ -31,6 +87,7 @@ async function readJsonBody(
 }
 
 async function startWalletAuthFixtureServer(options?: {
+  credentialStatus?: number;
   errorMessage?: string;
   status?: number;
 }): Promise<WalletAuthFixtureServer> {
@@ -39,8 +96,32 @@ async function startWalletAuthFixtureServer(options?: {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     res.setHeader("Content-Type", "application/json");
 
-    if (req.method === "POST" && url.pathname === "/api/agents/wallet-auth") {
-      requests.push((await readJsonBody(req)) ?? {});
+    if (
+      req.method === "GET" &&
+      url.pathname === "/api/agents/credentials/status"
+    ) {
+      requests.push({
+        authorization: req.headers.authorization,
+        path: url.pathname,
+      });
+      const status = options?.credentialStatus ?? 200;
+      res.statusCode = status;
+      res.end(
+        status === 200
+          ? JSON.stringify({ success: true, active: true })
+          : JSON.stringify({ success: false, active: false }),
+      );
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/agents/sol-wallet-auth/challenge"
+    ) {
+      requests.push({
+        ...((await readJsonBody(req)) ?? {}),
+        path: url.pathname,
+      });
       const status = options?.status ?? 200;
       res.statusCode = status;
       if (status >= 400) {
@@ -55,6 +136,27 @@ async function startWalletAuthFixtureServer(options?: {
       res.end(
         JSON.stringify({
           success: true,
+          challengeId: FIXTURE_CHALLENGE_ID,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          message: FIXTURE_MESSAGE,
+          signatureEncoding: "base58",
+        }),
+      );
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/agents/sol-wallet-auth/verify"
+    ) {
+      requests.push({
+        ...((await readJsonBody(req)) ?? {}),
+        path: url.pathname,
+      });
+      res.statusCode = 200;
+      res.end(
+        JSON.stringify({
+          success: true,
           authToken: "runtime-auth-token",
           characterId: "runtime-character-id",
           accountId: "runtime-account-id",
@@ -63,18 +165,32 @@ async function startWalletAuthFixtureServer(options?: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/agents/mappings") {
+      requests.push({
+        ...((await readJsonBody(req)) ?? {}),
+        authorization: req.headers.authorization,
+        path: url.pathname,
+      });
+      res.statusCode = 200;
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
     res.statusCode = 404;
     res.end(JSON.stringify({ success: false, error: "not found" }));
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", (error?: Error | null) => {
-      if (error) {
-        reject(error);
-        return;
-      }
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
       resolve();
-    });
+    };
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", onListening);
   });
 
   const address = server.address();
@@ -104,7 +220,7 @@ function createRuntime(options?: {
   authToken?: string | null;
   characterId?: string | null;
   hasService?: boolean;
-  walletAddress?: string;
+  solanaPrivateKey?: string | null;
 }) {
   const settings = new Map<string, string>();
   if (options?.authToken !== null) {
@@ -129,12 +245,16 @@ function createRuntime(options?: {
     character: {
       name: "Chen",
       walletAddresses: {
-        evm:
-          options?.walletAddress ??
-          "0x1234567890123456789012345678901234567890",
+        solana: TEST_SOLANA_WALLET.address,
       },
       settings: {
-        secrets: {},
+        secrets:
+          options?.solanaPrivateKey === null
+            ? {}
+            : {
+                SOLANA_PRIVATE_KEY:
+                  options?.solanaPrivateKey ?? TEST_SOLANA_WALLET.privateKey,
+              },
       },
       secrets: {},
     },
@@ -154,9 +274,52 @@ afterEach(() => {
   delete process.env.HYPERIA_AUTH_TOKEN;
   delete process.env.HYPERIA_CHARACTER_ID;
   delete process.env.HYPERIA_ACCOUNT_ID;
+  delete process.env.SOLANA_PRIVATE_KEY;
 });
 
 describe("plugin-hyperia app runtime helpers", () => {
+  it("retains an existing credential only after the server confirms its active session", async () => {
+    const fixtureServer = await startWalletAuthFixtureServer();
+    process.env.HYPERIA_API_URL = fixtureServer.url;
+    try {
+      const runtime = createRuntime();
+      await expect(prepareHyperiaAppLaunch(runtime)).resolves.toEqual([]);
+      expect(fixtureServer.requests).toEqual([
+        {
+          authorization: "Bearer existing-auth-token",
+          path: "/api/agents/credentials/status",
+        },
+      ]);
+      expect(runtime.setSetting).not.toHaveBeenCalled();
+    } finally {
+      await fixtureServer.close();
+    }
+  });
+
+  it("re-proves wallet possession and rotates a rejected stored credential", async () => {
+    const fixtureServer = await startWalletAuthFixtureServer({
+      credentialStatus: 401,
+    });
+    process.env.HYPERIA_API_URL = fixtureServer.url;
+    try {
+      const runtime = createRuntime();
+      await expect(prepareHyperiaAppLaunch(runtime)).resolves.toEqual([]);
+      expect(fixtureServer.requests.map((request) => request.path)).toEqual([
+        "/api/agents/credentials/status",
+        "/api/agents/sol-wallet-auth/challenge",
+        "/api/agents/sol-wallet-auth/verify",
+        "/api/agents/mappings",
+      ]);
+      expect(runtime.setSetting).toHaveBeenCalledWith(
+        "HYPERIA_AUTH_TOKEN",
+        "runtime-auth-token",
+        true,
+      );
+    } finally {
+      await fixtureServer.close();
+    }
+  });
+
   it("provisions and persists Hyperia credentials through wallet auth", async () => {
     const fixtureServer = await startWalletAuthFixtureServer();
     process.env.HYPERIA_API_URL = fixtureServer.url;
@@ -170,12 +333,42 @@ describe("plugin-hyperia app runtime helpers", () => {
       await expect(prepareHyperiaAppLaunch(runtime)).resolves.toEqual([]);
       expect(fixtureServer.requests).toEqual([
         expect.objectContaining({
-          walletAddress: "0x1234567890123456789012345678901234567890",
-          walletType: "evm",
+          walletAddress: TEST_SOLANA_WALLET.address,
           agentName: "Chen",
+          path: "/api/agents/sol-wallet-auth/challenge",
+        }),
+        expect.objectContaining({
+          challengeId: FIXTURE_CHALLENGE_ID,
+          message: FIXTURE_MESSAGE,
+          signature: expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]+$/u),
+          walletAddress: TEST_SOLANA_WALLET.address,
+          path: "/api/agents/sol-wallet-auth/verify",
+        }),
+        expect.objectContaining({
+          accountId: "runtime-account-id",
           agentId: "runtime-agent-id",
+          characterId: "runtime-character-id",
+          authorization: "Bearer runtime-auth-token",
+          path: "/api/agents/mappings",
         }),
       ]);
+      const verifyRequest = fixtureServer.requests[1]!;
+      const verificationKey = crypto.createPublicKey({
+        key: Buffer.concat([
+          Buffer.from("302a300506032b6570032100", "hex"),
+          base58Decode(TEST_SOLANA_WALLET.address),
+        ]),
+        format: "der",
+        type: "spki",
+      });
+      expect(
+        crypto.verify(
+          null,
+          Buffer.from(FIXTURE_MESSAGE, "utf8"),
+          verificationKey,
+          base58Decode(String(verifyRequest.signature)),
+        ),
+      ).toBe(true);
       expect(runtime.setSetting).toHaveBeenCalledWith(
         "HYPERIA_AUTH_TOKEN",
         "runtime-auth-token",
@@ -221,6 +414,27 @@ describe("plugin-hyperia app runtime helpers", () => {
         }),
       ]);
       expect(runtime.setSetting).not.toHaveBeenCalled();
+    } finally {
+      await fixtureServer.close();
+    }
+  });
+
+  it("fails before the network when the agent has an address but no matching signing key", async () => {
+    const fixtureServer = await startWalletAuthFixtureServer();
+    process.env.HYPERIA_API_URL = fixtureServer.url;
+    try {
+      const runtime = createRuntime({
+        authToken: null,
+        characterId: null,
+        solanaPrivateKey: null,
+      });
+      await expect(prepareHyperiaAppLaunch(runtime)).resolves.toEqual([
+        expect.objectContaining({
+          code: "hyperia-auth-provisioning-failed",
+          message: expect.stringContaining("signing key"),
+        }),
+      ]);
+      expect(fixtureServer.requests).toEqual([]);
     } finally {
       await fixtureServer.close();
     }

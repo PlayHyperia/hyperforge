@@ -1,0 +1,1250 @@
+{
+  "contract": "hyperia-betting-feed",
+  "schemaVersion": 2,
+  "producer": "packages/server/src/routes/streaming-betting-feed.ts#buildBettingFeedPayload",
+  "cases": [
+    {
+      "name": "idle",
+      "expected": {
+        "callbacks": [],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 1,
+        "emittedAt": 1785829602000,
+        "duelId": null,
+        "duelKey": null,
+        "phase": null,
+        "phaseVersion": 0,
+        "betOpenTime": null,
+        "betCloseTime": null,
+        "fightStartTime": null,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": null,
+        "agent2": null,
+        "arenaPositions": null,
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829602000
+        }
+      }
+    },
+    {
+      "name": "announcement",
+      "expected": {
+        "callbacks": [
+          "start"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 2,
+        "emittedAt": 1785829603000,
+        "duelId": "streaming-contract-announcement",
+        "duelKey": "de9ab1a0829b516dedbf935c8771133a51ed7c16c6cf875c0bdb24a48222fac0",
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829603000
+        }
+      }
+    },
+    {
+      "name": "countdown",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 3,
+        "emittedAt": 1785829604000,
+        "duelId": "streaming-contract-countdown",
+        "duelKey": "72ecad31d4f2b552403e0fc018a75d764dd347fbee5812684b31fdc7767c413d",
+        "phase": "COUNTDOWN",
+        "phaseVersion": 2,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829604000
+        }
+      }
+    },
+    {
+      "name": "fighting",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 4,
+        "emittedAt": 1785829605000,
+        "duelId": "streaming-contract-fighting",
+        "duelKey": "308a4460d7d3cd6f9d9d452a3335f3cbbdd5fdd6f2a5032dbc4af4d67eeed83a",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829605000
+        }
+      }
+    },
+    {
+      "name": "win-agent-a-kill",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock",
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "settle",
+          "winnerSide": "A"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 5,
+        "emittedAt": 1785829606000,
+        "duelId": "streaming-contract-win-agent-a-kill",
+        "duelKey": "1efd0132383c42a633569456e17e2d582dd67ac52505739262955732a631ee82",
+        "phase": "RESOLUTION",
+        "phaseVersion": 4,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829606000,
+        "winnerId": "agent-a",
+        "winnerName": "Agent Alpha",
+        "outcome": "win",
+        "cancellationReason": null,
+        "winReason": "kill",
+        "seed": "842586902121855182",
+        "replayHash": "b46d2c4c051df5dd2cf71f36ca626be9ac99c8c67f3ef68271bb2d9afb2fbfe6",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829606000
+        }
+      }
+    },
+    {
+      "name": "win-agent-b-forfeit",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock",
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "settle",
+          "winnerSide": "B"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 6,
+        "emittedAt": 1785829607000,
+        "duelId": "streaming-contract-win-agent-b-forfeit",
+        "duelKey": "17de043a4a964b7b692e6b98dd50a9468f83d89ab2c08ac4961beaf3542784e8",
+        "phase": "RESOLUTION",
+        "phaseVersion": 4,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829607000,
+        "winnerId": "agent-b",
+        "winnerName": "Agent Beta",
+        "outcome": "win",
+        "cancellationReason": null,
+        "winReason": "forfeit",
+        "seed": "5819608503786215738",
+        "replayHash": "3b6fe361e5264aeaa12ed3bb6cdd2bd6254dd0bbeedf91e9252f8cf54f2ed617",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829607000
+        }
+      }
+    },
+    {
+      "name": "draw",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "draw",
+          "reason": "draw"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 7,
+        "emittedAt": 1785829608000,
+        "duelId": "streaming-contract-draw",
+        "duelKey": "e7c277d273f36d64b3c8502e5bade57fb6745351a407078923a45ceb7fa94db5",
+        "phase": "RESOLUTION",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829608000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "draw",
+        "cancellationReason": "draw",
+        "winReason": "draw",
+        "seed": "4464630956409452144",
+        "replayHash": "4afa99970293f652dba90a479be33c816539abb004a88997ed854c057bdce1c4",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829608000
+        }
+      }
+    },
+    {
+      "name": "cancel-contestant-prep-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "contestant_prep_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 8,
+        "emittedAt": 1785829609000,
+        "duelId": "streaming-contract-cancel-contestant-prep-failed",
+        "duelKey": "25f7b969cad3e8d818dbf1aa73965fddaea903c634eac613cbf3a4d08f7c06ee",
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829609000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "contestant_prep_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829609000
+        }
+      }
+    },
+    {
+      "name": "cancel-both-agents-lost-during-prep",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "both_agents_lost_during_prep"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 9,
+        "emittedAt": 1785829610000,
+        "duelId": "streaming-contract-cancel-both-agents-lost-during-prep",
+        "duelKey": "1f7caf79260e1e2462106915431560d6f4dd112fd14df2a0ac192670689fb6ad",
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829610000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "both_agents_lost_during_prep",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829610000
+        }
+      }
+    },
+    {
+      "name": "cancel-arena-teleport-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "arena_teleport_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 10,
+        "emittedAt": 1785829611000,
+        "duelId": "streaming-contract-cancel-arena-teleport-failed",
+        "duelKey": "521ce369bc3932487b0ce87acb275aaf590d434475b74f3ad642684c0da56dea",
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829611000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "arena_teleport_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829611000
+        }
+      }
+    },
+    {
+      "name": "cancel-both-agents-missing",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "both_agents_missing"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 11,
+        "emittedAt": 1785829612000,
+        "duelId": "streaming-contract-cancel-both-agents-missing",
+        "duelKey": "0cf9295978c7e6fdc9700494e091df8b3de7000d8bda8e3abdebb9b1911ab2e5",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829612000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "both_agents_missing",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829612000
+        }
+      }
+    },
+    {
+      "name": "cancel-combat-engagement-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "combat_engagement_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 12,
+        "emittedAt": 1785829613000,
+        "duelId": "streaming-contract-cancel-combat-engagement-failed",
+        "duelKey": "303f43ee89e06a36232ef26161dd1fe8c0c442d8a54b44d00cb40a4f767e77ba",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829613000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "combat_engagement_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829613000
+        }
+      }
+    },
+    {
+      "name": "cancel-no-combat-activity",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "no_combat_activity"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 13,
+        "emittedAt": 1785829614000,
+        "duelId": "streaming-contract-cancel-no-combat-activity",
+        "duelKey": "9aca1fb5d879bfc1284ea3f42920c9af7c0408357112f8cfad43553ad1a370ec",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829614000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "no_combat_activity",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829614000
+        }
+      }
+    },
+    {
+      "name": "cancel-watchdog-announcement-timeout",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "watchdog_announcement_timeout"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 14,
+        "emittedAt": 1785829615000,
+        "duelId": "streaming-contract-cancel-watchdog-announcement-timeout",
+        "duelKey": "376e439fd12ca28ddd86a48108eeb4b13654fc19a6695d5703dc35ae033a0b72",
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829615000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "watchdog_announcement_timeout",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829615000
+        }
+      }
+    },
+    {
+      "name": "cancel-watchdog-fighting-timeout",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "watchdog_fighting_timeout"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 15,
+        "emittedAt": 1785829616000,
+        "duelId": "streaming-contract-cancel-watchdog-fighting-timeout",
+        "duelKey": "5edd960026813540718e39680f1b8997354f2885391e611a86b17f7dce23413d",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829616000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "watchdog_fighting_timeout",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829616000
+        }
+      }
+    },
+    {
+      "name": "cancel-scheduler-shutdown",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "scheduler_shutdown"
+        }
+      },
+      "payload": {
+        "schemaVersion": 2,
+        "sourceEpoch": 1785829600000,
+        "seq": 16,
+        "emittedAt": 1785829617000,
+        "duelId": "streaming-contract-cancel-scheduler-shutdown",
+        "duelKey": "7dac2cbb5b643f4d66f3338433fe7b545bd288f754a65e9e7e3dfef6a5a23ffd",
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829662000,
+        "duelEndTime": 1785829617000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "scheduler_shutdown",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829617000
+        }
+      }
+    }
+  ]
+}

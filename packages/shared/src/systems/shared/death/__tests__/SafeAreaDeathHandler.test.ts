@@ -24,6 +24,7 @@ interface MockWorld {
   getSystem: Mock;
   entities: {
     players: Map<string, { playerName?: string; name?: string }>;
+    get: Mock;
   };
 }
 
@@ -33,6 +34,7 @@ interface MockGroundItemSystem {
 
 interface MockDeathStateManager {
   createDeathLock: Mock;
+  getDeathLock: Mock;
   onItemLooted: Mock;
   onGravestoneExpired: Mock;
 }
@@ -50,6 +52,7 @@ function createMockWorld(isServer = true, currentTick = 1000): MockWorld {
     getSystem: vi.fn(),
     entities: {
       players: new Map<string, { playerName?: string; name?: string }>(),
+      get: vi.fn(),
     },
   };
 }
@@ -65,6 +68,7 @@ function createMockGroundItemSystem(): MockGroundItemSystem {
 function createMockDeathStateManager(): MockDeathStateManager {
   return {
     createDeathLock: vi.fn().mockResolvedValue(undefined),
+    getDeathLock: vi.fn().mockResolvedValue(null),
     onItemLooted: vi.fn().mockResolvedValue(undefined),
     onGravestoneExpired: vi.fn().mockResolvedValue(undefined),
   };
@@ -387,6 +391,118 @@ describe("SafeAreaDeathHandler", () => {
       expect(
         handler.getTicksUntilExpiration(gravestoneId, expirationTick + 1),
       ).toBe(-1);
+    });
+
+    it("renews a database-native gravestone instead of exposing ephemeral ground loot", async () => {
+      world.currentTick = 1000;
+      deathStateManager.getDeathLock.mockResolvedValue({
+        playerId: "player1",
+        deathOperationId: "safe-death-operation-1",
+      });
+      const gravestoneId = await handler.spawnAndTrackGravestone(
+        "player1",
+        TEST_POSITION,
+        createTestItems(),
+        "goblin",
+      );
+      const expirationTick = 1000 + COMBAT_CONSTANTS.GRAVESTONE_TICKS;
+
+      handler.processTick(expirationTick);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(entityManager.destroyEntity).not.toHaveBeenCalled();
+      expect(groundItemSystem.spawnGroundItems).not.toHaveBeenCalled();
+      expect(
+        handler.getTicksUntilExpiration(gravestoneId, expirationTick),
+      ).toBeGreaterThan(COMBAT_CONSTANTS.GRAVESTONE_TICKS);
+    });
+
+    it("restores the exact durable gravestone identity across process replacement", async () => {
+      const exactGravestoneId = "gravestone_player1_committed";
+      deathStateManager.getDeathLock.mockResolvedValue({
+        playerId: "player1",
+        deathOperationId: "safe-death-operation-1",
+        gravestoneId: exactGravestoneId,
+      });
+
+      const restored = await handler.spawnAndTrackGravestone(
+        "player1",
+        TEST_POSITION,
+        createTestItems(),
+        "goblin",
+        {
+          deathOperationId: "safe-death-operation-1",
+          exactGravestoneId,
+        },
+      );
+
+      expect(restored).toBe(exactGravestoneId);
+      expect(entityManager.spawnEntity).toHaveBeenCalledWith(
+        expect.objectContaining({ id: exactGravestoneId }),
+      );
+      expect(handler.getTicksUntilExpiration(exactGravestoneId, 1000)).toBe(
+        Number.MAX_SAFE_INTEGER - 1000,
+      );
+    });
+
+    it("rejects stale operation, altered identity, and occupied-identity recovery", async () => {
+      const exactGravestoneId = "gravestone_player1_committed";
+      deathStateManager.getDeathLock.mockResolvedValue({
+        playerId: "player1",
+        deathOperationId: "safe-death-operation-1",
+        gravestoneId: exactGravestoneId,
+      });
+
+      await expect(
+        handler.spawnAndTrackGravestone(
+          "player1",
+          TEST_POSITION,
+          createTestItems(),
+          "goblin",
+          {
+            deathOperationId: "stale-operation",
+            exactGravestoneId,
+          },
+        ),
+      ).rejects.toThrow("death_recovery_operation_mismatch");
+      await expect(
+        handler.spawnAndTrackGravestone(
+          "player1",
+          TEST_POSITION,
+          createTestItems(),
+          "goblin",
+          {
+            deathOperationId: "safe-death-operation-1",
+            exactGravestoneId: "gravestone_other-player_committed",
+          },
+        ),
+      ).rejects.toThrow("death_recovery_gravestone_identity_invalid");
+
+      world.entities.get.mockReturnValue({
+        getOwnerId: () => "player1",
+        getLootItems: () => [
+          {
+            id: "wrong",
+            itemId: "coins",
+            quantity: 1,
+            slot: 0,
+            metadata: null,
+          },
+        ],
+      });
+      await expect(
+        handler.spawnAndTrackGravestone(
+          "player1",
+          TEST_POSITION,
+          createTestItems(),
+          "goblin",
+          {
+            deathOperationId: "safe-death-operation-1",
+            exactGravestoneId,
+          },
+        ),
+      ).rejects.toThrow("death_recovery_gravestone_collision");
+      expect(entityManager.spawnEntity).not.toHaveBeenCalled();
     });
   });
 

@@ -17,7 +17,10 @@ import {
 } from "./TerrainQuadTree";
 import {
   assembleQuadChunkGeometry,
+  assembleQuadChunkGeometrySteps,
   generateQuadChunkDataSync,
+  generateQuadChunkDataSteps,
+  type ChunkGeometryResult,
   type FullTerrainProvider,
 } from "./TerrainQuadChunkGenerator";
 import {
@@ -27,21 +30,68 @@ import {
   type QuadChunkWorkerInput,
   type QuadChunkWorkerOutput,
 } from "../../../utils/workers/QuadChunkWorker";
+import { assertTerrainWorkerRequest } from "../../../utils/workers/TerrainWorkerShared";
+import {
+  RetainedTerrainSurface,
+  type TerrainGridBounds,
+} from "./TerrainGridSurface";
 
-export type VisualManagerTerrainProvider = FullTerrainProvider;
+export type VisualManagerTerrainProvider = FullTerrainProvider & {
+  /** All mutable canonical, road and biome inputs, bound to these worker inputs. */
+  capturePreparationLease(
+    biomeCenters: QuadChunkWorkerInput["biomeCenters"],
+    biomes: QuadChunkWorkerInput["biomes"],
+  ): Readonly<{ isCurrent(): boolean }>;
+};
 
 export interface TerrainVisualChunk {
   key: string;
   node: TerrainQuadNode;
   mesh: THREE.Mesh;
   heightData: Float32Array;
+  surface: RetainedTerrainSurface;
 }
 
-interface SettledWorkerResult {
-  nodeId: number;
+export interface TerrainVisualReadiness {
+  ready: boolean;
+  criticalRadius: number;
+  requiredChunks: number;
+  readyChunks: number;
+  pendingChunks: number;
+}
+
+/** Borrowed rendered geometry only: neither complete coverage nor a lease on
+ * roads, exclusions or water. Consumers must retain those owners separately. */
+export interface RetainedTerrainRegion {
+  readonly bounds: Readonly<TerrainGridBounds>;
+  readonly surfaces: readonly RetainedTerrainSurface[];
+  /** Includes newly arriving neighbors, not just the surfaces present at capture.
+   * Once observed stale, this lease never becomes valid again. */
+  isCurrent(): boolean;
+}
+
+interface ChunkPreparationRequest {
+  /** Object identity is the generation token; node IDs can outlive a request. */
   node: TerrainQuadNode;
+  input: Pick<
+    QuadChunkWorkerInput,
+    "centerX" | "centerZ" | "size" | "resolution"
+  >;
+  skirtDrop: number;
+  lease: Readonly<{ isCurrent(): boolean }>;
+  revision: number;
+  reservedBytes: number;
+  state: "worker" | "ready" | "preparing" | "cancelled";
   result: QuadChunkWorkerOutput | null;
-  error: unknown;
+}
+
+type PreparedChunk = ChunkGeometryResult & { surface: RetainedTerrainSurface };
+
+interface ActiveChunkPreparation {
+  request: ChunkPreparationRequest;
+  steps: Generator<string, PreparedChunk, void>;
+  phase: string;
+  completed?: PreparedChunk;
 }
 
 /**
@@ -50,9 +100,28 @@ interface SettledWorkerResult {
 export class TerrainVisualManager implements QuadTreeListener {
   private quadTree: TerrainQuadTree;
   private provider: VisualManagerTerrainProvider;
+  private readonly terrainProfileIdentity: string;
   private container: THREE.Group;
   private material: THREE.Material;
   private chunks = new Map<string, TerrainVisualChunk>();
+  /** Weak reverse ownership keeps retired geometry out of worker caches without
+   * retaining every historical surface or scanning the installed chunk set. */
+  private retainedSurfaceNodes = new WeakMap<
+    RetainedTerrainSurface,
+    TerrainQuadNode
+  >();
+  private releasedGeometry = new WeakSet<THREE.BufferGeometry>();
+  private removedMeshes = new WeakSet<THREE.Mesh>();
+  private terrainBoundsCullingEnabled = false;
+  private readonly terrainBoundsHooks = new WeakMap<
+    THREE.Mesh,
+    {
+      original: THREE.Mesh["intersectsFrustum"];
+      installed: THREE.Mesh["intersectsFrustum"];
+      originalDescriptor: PropertyDescriptor | undefined;
+    }
+  >();
+  private disposed = false;
   private playerX = 0;
   private playerZ = 0;
   private debugWireframe: boolean;
@@ -64,14 +133,22 @@ export class TerrainVisualManager implements QuadTreeListener {
   private workerBiomes: QuadChunkWorkerInput["biomes"];
   private useWorkers: boolean;
 
-  /** Node IDs with in-flight worker promises */
-  private pendingNodeIds = new Set<number>();
-  /** Settled worker results ready for main-thread assembly */
-  private settledResults: SettledWorkerResult[] = [];
-  /** Sync fallback queue (used when workers unavailable) */
-  private syncQueue: TerrainQuadNode[] = [];
-  /** Destroyed node IDs that should be ignored when results come back */
-  private cancelledNodeIds = new Set<number>();
+  /** Wanted node references own no buffers/leases; bounded by the live tree. */
+  private wantedNodes = new Set<TerrainQuadNode>();
+  private requests = new Map<TerrainQuadNode, ChunkPreparationRequest>();
+  /** Cancelled promises retain their reservation until they actually settle. */
+  private workerFlights = new Set<ChunkPreparationRequest>();
+  private forceSyncNodes = new Set<TerrainQuadNode>();
+  private activePreparation: ActiveChunkPreparation | null = null;
+  private inputRevision = 0;
+  private reservedRawBytes = 0;
+  private peakReservedRawBytes = 0;
+  private lastPreparationMs = 0;
+  private maxPreparationMs = 0;
+  private maxPreparationStepMs = 0;
+  private maxPreparationStepPhase = "";
+  private preparationSlices = 0;
+  private cancelledPreparations = 0;
   /** Tracks generation failure count per node ID for bounded retry */
   private failedAttempts = new Map<number, number>();
   /** Whether initial sync bootstrap has run for the current tree structure */
@@ -81,8 +158,15 @@ export class TerrainVisualManager implements QuadTreeListener {
   private maxAssembliesPerFrame: number;
 
   private framesSinceInit = 0;
-  private static BURST_FRAMES = 30;
+  /** Give healthy workers two seconds at 60 FPS before bounded sync failover. */
+  private static SYNC_BOOTSTRAP_DELAY_FRAMES = 120;
   private static MAX_GENERATION_RETRIES = 5;
+  /** CPU scheduling targets, not native frame-time acceptance. Native typed
+   * allocations/bounding volumes and GC may overrun a slice; record overruns. */
+  private static PREPARATION_BUDGET_MS = 2;
+  private static MAX_WORKER_FLIGHTS = 4;
+  private static MAX_PREPARATION_REQUESTS = 16;
+  private static MAX_RAW_BYTES = 16 * 1024 * 1024;
 
   constructor(
     config: Partial<QuadTreeConfig>,
@@ -99,6 +183,36 @@ export class TerrainVisualManager implements QuadTreeListener {
     maxSyncChunksPerFrame = 4,
     maxAssembliesPerFrame = 6,
   ) {
+    // Validate once, before tree creation or worker dispatch. Result admission
+    // below uses cached string equality, never per-vertex profile serialization.
+    assertTerrainWorkerRequest(workerConfig, workerSeed);
+    if (
+      config.resolution !== undefined &&
+      (!Number.isInteger(config.resolution) ||
+        config.resolution < 2 ||
+        config.resolution > 256)
+    ) {
+      throw new Error(
+        "Terrain visual resolution must be an integer from 2 to 256",
+      );
+    }
+    if (
+      provider.terrainProfileIdentity !== workerConfig.TERRAIN_PROFILE_IDENTITY
+    ) {
+      throw new Error(
+        "Terrain visual provider/worker profile identity mismatch",
+      );
+    }
+    if (
+      provider.TILE_SIZE !== workerConfig.TILE_SIZE ||
+      provider.MAX_HEIGHT !== workerConfig.MAX_HEIGHT ||
+      provider.WATER_LEVEL_NORMALIZED !== workerConfig.WATER_LEVEL_NORMALIZED ||
+      provider.SHORELINE_THRESHOLD !== workerConfig.SHORELINE_THRESHOLD ||
+      provider.SHORELINE_STRENGTH !== workerConfig.SHORELINE_STRENGTH
+    ) {
+      throw new Error("Terrain visual provider/worker derived config mismatch");
+    }
+    this.terrainProfileIdentity = provider.terrainProfileIdentity;
     this.provider = provider;
     this.container = container;
     this.material = material;
@@ -107,10 +221,10 @@ export class TerrainVisualManager implements QuadTreeListener {
     this.castShadow = castShadow;
     this.maxSyncChunksPerFrame = maxSyncChunksPerFrame;
     this.maxAssembliesPerFrame = maxAssembliesPerFrame;
-    this.workerConfig = workerConfig;
+    this.workerConfig = structuredClone(workerConfig);
     this.workerSeed = workerSeed;
-    this.workerBiomeCenters = workerBiomeCenters;
-    this.workerBiomes = workerBiomes;
+    this.workerBiomeCenters = structuredClone(workerBiomeCenters);
+    this.workerBiomes = structuredClone(workerBiomes);
     this.useWorkers = isQuadChunkWorkerAvailable();
 
     this.quadTree = new TerrainQuadTree(config);
@@ -118,6 +232,7 @@ export class TerrainVisualManager implements QuadTreeListener {
   }
 
   update(playerX: number, playerZ: number): void {
+    if (this.disposed) return;
     this.playerX = playerX;
     this.playerZ = playerZ;
     const structureChanged = this.quadTree.update(playerX, playerZ);
@@ -128,28 +243,44 @@ export class TerrainVisualManager implements QuadTreeListener {
 
     if (
       !this.syncBootstrapped &&
-      this.framesSinceInit >= 1 &&
+      this.framesSinceInit >=
+        TerrainVisualManager.SYNC_BOOTSTRAP_DELAY_FRAMES &&
       this.chunks.size === 0 &&
-      this.pendingNodeIds.size > 0
+      this.workerFlights.size > 0
     ) {
       this.syncBootstrapNearbyChunks();
     }
 
-    this.processSettledResults();
-    this.processSyncQueue();
+    this.processPreparation();
     this.framesSinceInit++;
   }
 
+  /** Native qualification switch only; never changes visibility or geometry. */
+  setTerrainBoundsCullingEnabled(enabled: boolean): void {
+    if (typeof enabled !== "boolean")
+      throw new Error("Terrain bounds culling requires a boolean");
+    if (this.disposed) return;
+    this.terrainBoundsCullingEnabled = enabled;
+    // Default-off publishes unchanged meshes without bounds scans or hooks.
+    // Qualification enables once before warmup; subsequent toggles reuse the
+    // admitted immutable bounds rather than rescan geometry in a render pass.
+    if (enabled)
+      for (const chunk of this.chunks.values())
+        this.bindTerrainBoundsCulling(chunk);
+  }
+
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.terrainBoundsCullingEnabled = false;
     this.quadTree.dispose();
     for (const chunk of this.chunks.values()) {
       this.removeMeshFromScene(chunk);
     }
     this.chunks.clear();
-    this.pendingNodeIds.clear();
-    this.settledResults = [];
-    this.syncQueue = [];
-    this.cancelledNodeIds.clear();
+    for (const request of this.requests.values()) this.cancelRequest(request);
+    this.wantedNodes.clear();
+    this.forceSyncNodes.clear();
     this.failedAttempts.clear();
 
     if (this.container.parent) {
@@ -165,19 +296,498 @@ export class TerrainVisualManager implements QuadTreeListener {
     return this.chunks;
   }
 
+  /** Installed ownership, including a still-drawn transitioning ancestor.
+   * Unlike grass contact leases, water may retain that ancestor until a whole
+   * replacement partition is ready. This never changes terrain readiness.
+   */
+  hasInstalledChunk(node: TerrainQuadNode): boolean {
+    if (this.disposed || node.visualChunkKey === null) return false;
+    const chunk = this.chunks.get(node.visualChunkKey);
+    return Boolean(
+      chunk?.node === node &&
+      chunk.mesh.parent === this.container &&
+      chunk.mesh.visible,
+    );
+  }
+
+  getRetainedSurface(node: TerrainQuadNode): RetainedTerrainSurface | null {
+    // A transitioning parent keeps isFinal until its children are ready. It
+    // cannot certify contact while new child meshes may overlap it on screen.
+    if (
+      !node.isFinal ||
+      node.splitting ||
+      node.unsplitting ||
+      node.visualChunkKey === null
+    )
+      return null;
+    const chunk = this.chunks.get(node.visualChunkKey);
+    if (!chunk || chunk.node !== node || chunk.mesh.parent !== this.container)
+      return null;
+    if (!chunk.surface.matchesGeometry(chunk.mesh.geometry)) return null;
+    // A split keeps its old parent mesh until all children are ready. Do not
+    // place grass against one surface while an overlapping ancestor is drawn.
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (parent.visualChunkKey && this.chunks.has(parent.visualChunkKey))
+        return null;
+    }
+    return chunk.surface;
+  }
+
+  /** Exact drawn owner, including geometry revisions and transition overlap.
+   * Region leases are still required to detect new neighboring surfaces. */
+  isRetainedSurfaceCurrent(surface: RetainedTerrainSurface): boolean {
+    if (this.disposed) return false;
+    const node = this.retainedSurfaceNodes.get(surface);
+    return !!node && this.getRetainedSurface(node) === surface;
+  }
+
+  /** Exact installed surface only; no parent/child overlap or stale geometry. */
+  getRetainedSurfaceAt(x: number, z: number): RetainedTerrainSurface | null {
+    for (const chunk of this.chunks.values()) {
+      const node = chunk.node,
+        half = node.size / 2;
+      if (
+        x < node.centerX - half ||
+        x >= node.centerX + half ||
+        z < node.centerZ - half ||
+        z >= node.centerZ + half
+      )
+        continue;
+      const surface = this.getRetainedSurface(node);
+      if (surface) return surface;
+    }
+    return null;
+  }
+
+  /** Capture every admitted final surface intersecting the closed world-space
+   * envelope. Never infer neighbors from a handful of height samples: their
+   * sizes can differ during streaming. A missing region is an empty lease, not
+   * ready grass. Exceeding capacity fails explicitly; no partial set is returned.
+   * Revalidation reads the actual installed owners without allocating arrays or
+   * serializing terrain. Cost is O(installed chunks × bounded region surfaces). */
+  captureRetainedSurfaceRegion(
+    bounds: TerrainGridBounds,
+    maxSurfaces = 16,
+  ): RetainedTerrainRegion {
+    if (this.disposed) throw new Error("Terrain visual manager is disposed");
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ ||
+      !Number.isSafeInteger(maxSurfaces) ||
+      maxSurfaces < 1 ||
+      maxSurfaces > 256
+    )
+      throw new Error("Invalid retained terrain region");
+    const region = Object.freeze({ ...bounds });
+    const intersects = (node: TerrainQuadNode) => {
+      const half = node.size / 2;
+      return (
+        node.centerX + half >= region.minX &&
+        node.centerX - half <= region.maxX &&
+        node.centerZ + half >= region.minZ &&
+        node.centerZ - half <= region.maxZ
+      );
+    };
+    const captured: RetainedTerrainSurface[] = [];
+    for (const chunk of this.chunks.values()) {
+      if (!intersects(chunk.node)) continue;
+      const surface = this.getRetainedSurface(chunk.node);
+      if (!surface) continue;
+      if (captured.length === maxSurfaces)
+        throw new Error("Retained terrain region exceeds surface capacity");
+      captured.push(surface);
+    }
+    const surfaces = Object.freeze(captured);
+    let current = true;
+    return Object.freeze({
+      bounds: region,
+      surfaces,
+      isCurrent: () => {
+        if (!current || this.disposed) return (current = false);
+        let matches = 0;
+        for (const chunk of this.chunks.values()) {
+          if (!intersects(chunk.node)) continue;
+          const surface = this.getRetainedSurface(chunk.node);
+          if (!surface) continue;
+          if (!surfaces.includes(surface)) return (current = false);
+          matches++;
+        }
+        return (current = matches === surfaces.length);
+      },
+    });
+  }
+
+  /** Complete, nonoverlapping MAIN-surface XZ coverage at canonical placement.
+   * The caller includes its entire sampling gutter in bounds. This composes
+   * the retained grids' existing topology proofs; it does not certify slopes,
+   * skirt rendering, materials/deformation, cameras, unmanaged scene meshes,
+   * filtering, roads or water inputs. Unsupported
+   * or incomplete coverage returns null, never a partial certificate.
+   *
+   * Capture costs O(installed chunks + S² log S), S <= 16; revalidation scans
+   * installed owners without a triangle walk or fresh rectangle allocations.
+   * No matrices are updated: ordinary scene propagation must already be done.
+   */
+  captureCompleteRetainedSurfaceRegion(
+    bounds: TerrainGridBounds,
+    maxSurfaces = 16,
+  ): RetainedTerrainRegion | null {
+    if (this.disposed) throw new Error("Terrain visual manager is disposed");
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX >= bounds.maxX ||
+      bounds.minZ >= bounds.maxZ ||
+      !Number.isSafeInteger(maxSurfaces) ||
+      maxSurfaces < 1 ||
+      maxSurfaces > 16
+    )
+      throw new Error("Invalid complete retained terrain region");
+    const region = Object.freeze({ ...bounds });
+    const isTranslation = (matrix: THREE.Matrix4, x: number, z: number) =>
+      matrix.elements.every(
+        (value, i) =>
+          value === (i === 12 ? x : i === 14 ? z : i % 5 === 0 ? 1 : 0),
+      );
+    const canonical = (object: THREE.Object3D, x = 0, z = 0) =>
+      object.position.x === x &&
+      object.position.y === 0 &&
+      object.position.z === z &&
+      object.quaternion.x === 0 &&
+      object.quaternion.y === 0 &&
+      object.quaternion.z === 0 &&
+      object.quaternion.w === 1 &&
+      object.scale.x === 1 &&
+      object.scale.y === 1 &&
+      object.scale.z === 1 &&
+      isTranslation(object.matrix, x, z) &&
+      isTranslation(object.matrixWorld, x, z);
+    const ancestors: THREE.Object3D[] = [];
+    for (let object: THREE.Object3D | null = this.container; object;) {
+      // A foreign cyclic/deep hierarchy is unsupported, not unbounded work.
+      if (
+        ancestors.length === 64 ||
+        ancestors.includes(object) ||
+        !object.visible ||
+        !canonical(object)
+      )
+        return null;
+      ancestors.push(object);
+      object = object.parent;
+    }
+    const hierarchyCurrent = () =>
+      ancestors.every(
+        (object, i) =>
+          object.parent === (ancestors[i + 1] ?? null) &&
+          object.visible &&
+          canonical(object),
+      );
+    const chunkCanonical = (chunk: TerrainVisualChunk) =>
+      chunk.mesh.parent === this.container &&
+      chunk.mesh.matrixAutoUpdate === false &&
+      chunk.surface.nodeId === chunk.node.id &&
+      chunk.surface.centerX === chunk.node.centerX &&
+      chunk.surface.centerZ === chunk.node.centerZ &&
+      chunk.surface.size === chunk.node.size &&
+      chunk.surface.resolution === chunk.node.resolution &&
+      chunk.surface.matchesGeometry(chunk.mesh.geometry) &&
+      finiteBounds(chunk.surface) &&
+      canonical(chunk.mesh, chunk.node.centerX, chunk.node.centerZ);
+    const minimum = (surface: RetainedTerrainSurface) =>
+      Math.fround(-surface.size / 2);
+    const maximum = (surface: RetainedTerrainSurface) =>
+      Math.fround(
+        -surface.size / 2 +
+          (surface.resolution - 1) * (surface.size / (surface.resolution - 1)),
+      );
+    const finiteBounds = (surface: RetainedTerrainSurface) => {
+      const low = minimum(surface),
+        high = maximum(surface);
+      return (
+        [
+          low,
+          high,
+          surface.centerX + low,
+          surface.centerX + high,
+          surface.centerZ + low,
+          surface.centerZ + high,
+        ].every(Number.isFinite) &&
+        surface.centerX + low < surface.centerX + high &&
+        surface.centerZ + low < surface.centerZ + high
+      );
+    };
+    const fullDraw = (chunk: TerrainVisualChunk) =>
+      chunk.mesh.visible &&
+      chunk.mesh.geometry.groups.length === 0 &&
+      chunk.mesh.geometry.drawRange.start === 0 &&
+      chunk.mesh.geometry.drawRange.count === Infinity;
+    const intersects = (surface: RetainedTerrainSurface) => {
+      // Replay the exact admitted Float32 prefix expressions. For nonbinary
+      // sizes the final coordinate need not equal fround(size / 2).
+      const low = minimum(surface),
+        high = maximum(surface);
+      return (
+        surface.centerX + high >= region.minX &&
+        surface.centerX + low <= region.maxX &&
+        surface.centerZ + high >= region.minZ &&
+        surface.centerZ + low <= region.maxZ
+      );
+    };
+    const captured = new Map<TerrainVisualChunk, RetainedTerrainSurface>();
+    const rectangles: TerrainGridBounds[] = [];
+    for (const chunk of this.chunks.values()) {
+      // Otherwise an owner outside its nominal bounds could move into the
+      // footprint and escape both coverage and later invalidation checks.
+      if (!chunkCanonical(chunk)) return null;
+      if (!intersects(chunk.surface)) continue;
+      const surface = this.getRetainedSurface(chunk.node);
+      if (!surface || !fullDraw(chunk)) return null;
+      if (captured.size === maxSurfaces) return null;
+      captured.set(chunk, surface);
+      const low = minimum(surface),
+        high = maximum(surface);
+      const rectangle = {
+        minX: Math.max(region.minX, surface.centerX + low),
+        maxX: Math.min(region.maxX, surface.centerX + high),
+        minZ: Math.max(region.minZ, surface.centerZ + low),
+        maxZ: Math.min(region.maxZ, surface.centerZ + high),
+      };
+      if (rectangle.minX < rectangle.maxX && rectangle.minZ < rectangle.maxZ)
+        rectangles.push(rectangle);
+    }
+    if (rectangles.length === 0) return null;
+    const edges = [region.minX, region.maxX];
+    for (const rectangle of rectangles)
+      edges.push(rectangle.minX, rectangle.maxX);
+    edges.sort((a, b) => a - b);
+    for (let i = 1; i < edges.length; i++) {
+      const left = edges[i - 1],
+        right = edges[i];
+      if (left === right) continue;
+      const intervals = rectangles
+        .filter(
+          (rectangle) => rectangle.minX <= left && rectangle.maxX >= right,
+        )
+        .sort((a, b) => a.minZ - b.minZ || a.maxZ - b.maxZ);
+      let cursor = region.minZ;
+      for (const interval of intervals) {
+        // Exact shared boundaries are allowed; any positive gap OR overlap
+        // rejects. Area totals/epsilons could hide matching holes and overlaps.
+        if (interval.minZ !== cursor) return null;
+        cursor = interval.maxZ;
+      }
+      if (cursor !== region.maxZ) return null;
+    }
+    const surfaces = Object.freeze([...captured.values()]);
+    let current = true;
+    return Object.freeze({
+      bounds: region,
+      surfaces,
+      isCurrent: () => {
+        if (!current || this.disposed || !hierarchyCurrent())
+          return (current = false);
+        let matches = 0;
+        for (const chunk of this.chunks.values()) {
+          if (!chunkCanonical(chunk)) return (current = false);
+          if (!intersects(chunk.surface)) continue;
+          // Unlike the ordinary ownership lease, a newly installed but
+          // nonadmitted overlapping owner also invalidates complete coverage.
+          const surface = this.getRetainedSurface(chunk.node);
+          if (!surface || !fullDraw(chunk) || captured.get(chunk) !== surface)
+            return (current = false);
+          matches++;
+        }
+        return (current = matches === captured.size);
+      },
+    });
+  }
+
+  /**
+   * Compile the exact quad-tree terrain pipeline before the first generated
+   * chunk reaches the scene. A flat-grid terrain tile is not representative:
+   * quad chunks have additional biome/road attributes, skirts, and a Uint32
+   * index, all of which participate in WebGPU pipeline creation.
+   */
+  async precompileRepresentativeChunk(
+    centerX: number,
+    centerZ: number,
+    precompileObject: (object: THREE.Object3D) => Promise<void>,
+  ): Promise<void> {
+    const config = { ...this.quadTree.config };
+    // The focus may lie between grid centers, but this sample still covers a
+    // minimum-size rectangle. Match TerrainQuadNode's strict area-overlap/max
+    // detail rule; base streaming density cannot represent an admitted pond.
+    const halfSize = config.minSize / 2;
+    let resolution = config.resolution;
+    for (const region of config.fineDetailRegions ?? []) {
+      if (
+        centerX - halfSize < region.maxX &&
+        centerX + halfSize > region.minX &&
+        centerZ - halfSize < region.maxZ &&
+        centerZ + halfSize > region.minZ
+      ) {
+        resolution = Math.max(resolution, region.resolution);
+      }
+    }
+    const revision = this.inputRevision;
+    const lease = this.provider.capturePreparationLease(
+      this.workerBiomeCenters,
+      this.workerBiomes,
+    );
+    const current = () =>
+      !this.disposed &&
+      revision === this.inputRevision &&
+      config.minSize === this.quadTree.config.minSize &&
+      config.resolution === this.quadTree.config.resolution &&
+      config.fineDetailRegions === this.quadTree.config.fineDetailRegions &&
+      config.skirtDrop === this.quadTree.config.skirtDrop &&
+      lease.isCurrent();
+    // start() awaits this before update() is enabled. Drain cooperatively here,
+    // not through the frame queue (which would deadlock initialization).
+    const provider = this.provider;
+    function* sampleSteps(): Generator<string, ChunkGeometryResult, void> {
+      const raw = yield* generateQuadChunkDataSteps(
+        centerX,
+        centerZ,
+        config.minSize,
+        resolution,
+        provider,
+      );
+      return yield* assembleQuadChunkGeometrySteps(
+        raw,
+        provider,
+        config.skirtDrop,
+      );
+    }
+    const steps = sampleSteps();
+    let sample: ChunkGeometryResult | undefined;
+    try {
+      while (!sample) {
+        const start = performance.now();
+        if (!current())
+          throw new Error(
+            "Terrain precompile inputs changed or owner disposed",
+          );
+        do {
+          const step = steps.next();
+          if (step.done) {
+            sample = step.value;
+            break;
+          }
+        } while (
+          performance.now() - start <
+          TerrainVisualManager.PREPARATION_BUDGET_MS
+        );
+        if (!current())
+          throw new Error(
+            "Terrain precompile inputs changed or owner disposed",
+          );
+        if (!sample)
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    } catch (error) {
+      if (sample) this.releaseGeometry(sample.geometry);
+      throw error;
+    } finally {
+      steps.return(undefined as never);
+    }
+    const { geometry } = sample;
+
+    const ownsMaterial = this.debugWireframe;
+    const material = ownsMaterial
+      ? new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true })
+      : this.material;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(centerX, 0, centerZ);
+    mesh.name = "QuadTerrain_PrecompileSample";
+    mesh.receiveShadow = this.receiveShadow;
+    mesh.castShadow = this.castShadow;
+    mesh.frustumCulled = true;
+
+    try {
+      if (!current())
+        throw new Error("Terrain precompile inputs changed or owner disposed");
+      await precompileObject(mesh);
+      if (!current())
+        throw new Error("Terrain precompile inputs changed or owner disposed");
+    } finally {
+      this.releaseGeometry(geometry);
+      if (ownsMaterial) material.dispose();
+    }
+  }
+
   getStats(): {
     totalNodes: number;
     visualChunks: number;
     pendingWorkers: number;
     settledQueue: number;
     syncQueue: number;
+    preparationActive: boolean;
+    reservedRawBytes: number;
+    peakReservedRawBytes: number;
+    preparationRequests: number;
+    preparationSlices: number;
+    lastPreparationMs: number;
+    maxPreparationMs: number;
+    maxPreparationStepMs: number;
+    maxPreparationStepPhase: string;
+    cancelledPreparations: number;
   } {
     return {
       totalNodes: this.quadTree.totalNodeCount,
       visualChunks: this.chunks.size,
-      pendingWorkers: this.pendingNodeIds.size,
-      settledQueue: this.settledResults.length,
-      syncQueue: this.syncQueue.length,
+      pendingWorkers: this.workerFlights.size,
+      settledQueue: [...this.requests.values()].filter(
+        (request) => request.state === "ready",
+      ).length,
+      syncQueue: this.wantedNodes.size,
+      preparationActive: this.activePreparation !== null,
+      reservedRawBytes: this.reservedRawBytes,
+      peakReservedRawBytes: this.peakReservedRawBytes,
+      preparationRequests: this.requests.size,
+      preparationSlices: this.preparationSlices,
+      lastPreparationMs: this.lastPreparationMs,
+      maxPreparationMs: this.maxPreparationMs,
+      maxPreparationStepMs: this.maxPreparationStepMs,
+      maxPreparationStepPhase: this.maxPreparationStepPhase,
+      cancelledPreparations: this.cancelledPreparations,
+    };
+  }
+
+  /**
+   * Report whether every terrain leaf intersecting the stream's critical
+   * camera radius has reached the scene. Far-world streaming may continue in
+   * the background without allowing a visible arena hole or late GPU upload
+   * to pass the capture readiness gate.
+   */
+  getStreamingReadiness(criticalRadius = 250): TerrainVisualReadiness {
+    const safeRadius = Math.max(1, criticalRadius);
+    const radiusSquared = safeRadius * safeRadius;
+    const requiredNodes = this.quadTree.getFinalNodes().filter((node) => {
+      const box = node.boundingBox;
+      const nearestX = THREE.MathUtils.clamp(this.playerX, box.xMin, box.xMax);
+      const nearestZ = THREE.MathUtils.clamp(this.playerZ, box.zMin, box.zMax);
+      const dx = this.playerX - nearestX;
+      const dz = this.playerZ - nearestZ;
+      return dx * dx + dz * dz <= radiusSquared;
+    });
+    let readyChunks = 0;
+    for (const node of requiredNodes) {
+      if (this.hasInstalledChunk(node)) {
+        readyChunks++;
+      }
+    }
+    const requiredChunks = requiredNodes.length;
+    return {
+      ready: requiredChunks > 0 && readyChunks === requiredChunks,
+      criticalRadius: safeRadius,
+      requiredChunks,
+      readyChunks,
+      pendingChunks: requiredChunks - readyChunks,
     };
   }
 
@@ -185,8 +795,10 @@ export class TerrainVisualManager implements QuadTreeListener {
     biomeCenters: QuadChunkWorkerInput["biomeCenters"],
     biomes: QuadChunkWorkerInput["biomes"],
   ): void {
-    this.workerBiomeCenters = biomeCenters;
-    this.workerBiomes = biomes;
+    this.workerBiomeCenters = structuredClone(biomeCenters);
+    this.workerBiomes = structuredClone(biomes);
+    this.inputRevision++;
+    this.invalidateRegion(-Infinity, -Infinity, Infinity, Infinity);
   }
 
   /**
@@ -201,7 +813,19 @@ export class TerrainVisualManager implements QuadTreeListener {
     maxX: number,
     maxZ: number,
   ): void {
-    for (const [key, chunk] of this.chunks) {
+    for (const request of this.requests.values()) {
+      const node = request.node,
+        half = node.size / 2;
+      if (
+        node.centerX + half < minX ||
+        node.centerX - half > maxX ||
+        node.centerZ + half < minZ ||
+        node.centerZ - half > maxZ
+      )
+        continue;
+      this.cancelRequest(request, true);
+    }
+    for (const chunk of this.chunks.values()) {
       const node = chunk.node;
       const half = node.size * 0.5;
       const nMinX = node.centerX - half;
@@ -214,8 +838,6 @@ export class TerrainVisualManager implements QuadTreeListener {
       }
 
       this.removeMeshFromScene(chunk);
-      this.chunks.delete(key);
-      node.visualChunkKey = null;
       node.terrainNeedsUpdate = true;
     }
   }
@@ -225,15 +847,12 @@ export class TerrainVisualManager implements QuadTreeListener {
   // =========================================================================
 
   onNodeNeedsGeometry(node: TerrainQuadNode): void {
-    if (this.pendingNodeIds.has(node.id)) return;
-
-    if (this.useWorkers) {
-      this.dispatchWorker(node);
-    } else {
-      if (!this.syncQueue.includes(node)) {
-        this.syncQueue.push(node);
-      }
-    }
+    if (
+      !this.disposed &&
+      !this.requests.has(node) &&
+      node.visualChunkKey === null
+    )
+      this.wantedNodes.add(node);
   }
 
   onNodeDestroyGeometry(node: TerrainQuadNode): void {
@@ -242,122 +861,404 @@ export class TerrainVisualManager implements QuadTreeListener {
       const chunk = this.chunks.get(key);
       if (chunk) {
         this.removeMeshFromScene(chunk);
-        this.chunks.delete(key);
-      }
-      node.visualChunkKey = null;
+      } else node.visualChunkKey = null;
     }
-    if (this.pendingNodeIds.has(node.id)) {
-      this.cancelledNodeIds.add(node.id);
-      this.pendingNodeIds.delete(node.id);
-    }
-    const sqIdx = this.syncQueue.indexOf(node);
-    if (sqIdx !== -1) this.syncQueue.splice(sqIdx, 1);
+    const request = this.requests.get(node);
+    if (request) this.cancelRequest(request);
+    this.wantedNodes.delete(node);
+    this.forceSyncNodes.delete(node);
     this.failedAttempts.delete(node.id);
   }
 
   // =========================================================================
-  // Worker dispatch — fire-and-forget, results arrive in settledResults
+  // Bounded requests, resumable private drafts, atomic scene admission.
   // =========================================================================
 
-  private dispatchWorker(node: TerrainQuadNode): void {
+  private dispatchWorker(request: ChunkPreparationRequest): void {
+    const node = request.node;
     const input: QuadChunkWorkerInput = {
       type: "generateQuadChunk",
-      centerX: node.centerX,
-      centerZ: node.centerZ,
-      size: node.size,
-      resolution: node.resolution,
+      ...request.input,
       config: this.workerConfig,
       seed: this.workerSeed,
       biomeCenters: this.workerBiomeCenters,
       biomes: this.workerBiomes,
     };
 
-    this.pendingNodeIds.add(node.id);
-    const nodeId = node.id;
-
+    this.workerFlights.add(request);
     generateQuadChunkAsync(input).then(
-      (result) => {
-        this.settledResults.push({ nodeId, node, result, error: null });
-        this.pendingNodeIds.delete(nodeId);
-      },
+      (result) => this.acceptWorkerResult(request, result),
       (error) => {
-        this.settledResults.push({ nodeId, node, result: null, error });
-        this.pendingNodeIds.delete(nodeId);
+        if (this.requests.get(node) === request && !this.disposed)
+          console.error(
+            "[TerrainVisualManager] Worker error; queued cooperative fallback:",
+            error,
+          );
+        this.acceptWorkerResult(request, null);
       },
     );
   }
 
-  private processSettledResults(): void {
-    if (this.settledResults.length === 0) return;
+  private acceptWorkerResult(
+    request: ChunkPreparationRequest,
+    result: QuadChunkWorkerOutput | null,
+  ): void {
+    this.workerFlights.delete(request);
+    // No provider work here: settlement only transfers ownership to the queue.
+    // In particular an old callback cannot delete a newer request for this node.
+    if (
+      this.disposed ||
+      this.requests.get(request.node) !== request ||
+      request.state === "cancelled"
+    ) {
+      this.releaseReservation(request);
+      return;
+    }
+    request.result = result;
+    request.state = "ready";
+  }
 
-    // Sort by distance to player (nearest first) for minimal visible holes.
-    const px = this.playerX;
-    const pz = this.playerZ;
-    this.settledResults.sort((a, b) => {
-      const da = (a.node.centerX - px) ** 2 + (a.node.centerZ - pz) ** 2;
-      const db = (b.node.centerX - px) ** 2 + (b.node.centerZ - pz) ** 2;
-      return da - db;
-    });
+  private releaseReservation(request: ChunkPreparationRequest): void {
+    this.reservedRawBytes -= request.reservedBytes;
+    request.reservedBytes = 0;
+    request.result = null;
+  }
 
-    // During initial burst or when many results are pending, process all
-    // of them to avoid prolonged holes.
-    const isBurst =
-      this.framesSinceInit < TerrainVisualManager.BURST_FRAMES ||
-      this.settledResults.length > this.maxAssembliesPerFrame * 3;
-    const limit = isBurst
-      ? this.settledResults.length
-      : this.maxAssembliesPerFrame;
-    const batch = this.settledResults.splice(0, limit);
+  private cancelRequest(request: ChunkPreparationRequest, retry = false): void {
+    if (request.state === "cancelled") return;
+    request.state = "cancelled";
+    this.cancelledPreparations++;
+    if (this.activePreparation?.request === request) {
+      if (this.activePreparation.completed)
+        this.releaseGeometry(this.activePreparation.completed.geometry);
+      this.activePreparation.steps.return(undefined as never);
+      this.activePreparation = null;
+    }
+    if (this.requests.get(request.node) === request)
+      this.requests.delete(request.node);
+    if (!this.workerFlights.has(request)) this.releaseReservation(request);
+    if (
+      retry &&
+      !this.disposed &&
+      request.node.isFinal &&
+      request.node.visualChunkKey === null
+    ) {
+      this.wantedNodes.add(request.node);
+      request.node.terrainNeedsUpdate = true;
+    }
+  }
 
-    for (const entry of batch) {
-      if (this.cancelledNodeIds.has(entry.nodeId)) {
-        this.cancelledNodeIds.delete(entry.nodeId);
+  private isRequestCurrent(
+    request: ChunkPreparationRequest,
+    unpublished = true,
+  ): boolean {
+    return (
+      !this.disposed &&
+      this.requests.get(request.node) === request &&
+      request.state !== "cancelled" &&
+      request.node.isFinal &&
+      (!unpublished || request.node.visualChunkKey === null) &&
+      request.node.tree === this.quadTree &&
+      request.node.centerX === request.input.centerX &&
+      request.node.centerZ === request.input.centerZ &&
+      request.node.size === request.input.size &&
+      request.node.resolution === request.input.resolution &&
+      this.quadTree.config.skirtDrop === request.skirtDrop &&
+      request.revision === this.inputRevision &&
+      this.provider.terrainProfileIdentity === this.terrainProfileIdentity &&
+      request.lease.isCurrent()
+    );
+  }
+
+  private distanceSquared(node: TerrainQuadNode): number {
+    return (
+      (node.centerX - this.playerX) ** 2 + (node.centerZ - this.playerZ) ** 2
+    );
+  }
+
+  private nextWantedNode(): TerrainQuadNode | null {
+    let nearest: TerrainQuadNode | null = null,
+      distance = Infinity;
+    for (const node of this.wantedNodes) {
+      if (
+        !node.isFinal ||
+        node.visualChunkKey !== null ||
+        this.requests.has(node)
+      ) {
+        this.wantedNodes.delete(node);
+        this.forceSyncNodes.delete(node);
         continue;
       }
+      const needsWorker = this.useWorkers && !this.forceSyncNodes.has(node);
+      if (
+        needsWorker &&
+        this.workerFlights.size >= TerrainVisualManager.MAX_WORKER_FLIGHTS
+      )
+        continue;
+      const nextDistance = this.distanceSquared(node);
+      if (nextDistance < distance) {
+        nearest = node;
+        distance = nextDistance;
+      }
+    }
+    return nearest;
+  }
 
-      if (!entry.node.isFinal || entry.node.visualChunkKey !== null) continue;
+  private admitRequest(node: TerrainQuadNode): ChunkPreparationRequest | null {
+    // Raw channels = ten float32 + one uint8 per vertex; reserve the worker's
+    // overflow height grid too. Geometry has a separate single-draft bound.
+    const reservedBytes =
+      41 * node.resolution ** 2 + 4 * (node.resolution + 2) ** 2;
+    const cancelledFlights = [...this.workerFlights].filter(
+      (request) => request.state === "cancelled",
+    ).length;
+    if (
+      this.requests.size + cancelledFlights >=
+        TerrainVisualManager.MAX_PREPARATION_REQUESTS ||
+      this.reservedRawBytes + reservedBytes > TerrainVisualManager.MAX_RAW_BYTES
+    )
+      return null;
+    const lease = this.provider.capturePreparationLease(
+      this.workerBiomeCenters,
+      this.workerBiomes,
+    );
+    if (!lease.isCurrent()) return null;
+    const useWorker = this.useWorkers && !this.forceSyncNodes.has(node);
+    const request: ChunkPreparationRequest = {
+      node,
+      input: {
+        centerX: node.centerX,
+        centerZ: node.centerZ,
+        size: node.size,
+        resolution: node.resolution,
+      },
+      skirtDrop: this.quadTree.config.skirtDrop,
+      lease,
+      revision: this.inputRevision,
+      reservedBytes,
+      state: useWorker ? "worker" : "ready",
+      result: null,
+    };
+    this.wantedNodes.delete(node);
+    this.forceSyncNodes.delete(node);
+    this.requests.set(node, request);
+    this.reservedRawBytes += reservedBytes;
+    this.peakReservedRawBytes = Math.max(
+      this.peakReservedRawBytes,
+      this.reservedRawBytes,
+    );
+    if (useWorker) this.dispatchWorker(request);
+    return request;
+  }
 
-      if (entry.error || !entry.result) {
-        if (entry.error) {
-          console.error("[TerrainVisualManager] Worker error:", entry.error);
+  private assertResult(
+    request: ChunkPreparationRequest,
+    raw: QuadChunkWorkerOutput,
+  ): void {
+    const node = request.input,
+      count = node.resolution ** 2;
+    if (
+      raw.type !== "quadChunkResult" ||
+      raw.terrainProfileIdentity !== this.terrainProfileIdentity ||
+      raw.centerX !== node.centerX ||
+      raw.centerZ !== node.centerZ ||
+      raw.size !== node.size ||
+      raw.resolution !== node.resolution
+    )
+      throw new Error(
+        "Terrain visual result profile or chunk identity mismatch",
+      );
+    const channels: Array<[Float32Array | Uint8Array, number]> = [
+      [raw.heightData, count],
+      [raw.normalData, count * 3],
+      [raw.colorData, count * 3],
+      [raw.biomeForestWeight, count],
+      [raw.biomeCanyonWeight, count],
+      [raw.riverProximity, count],
+    ];
+    for (const [channel, length] of channels)
+      if (!(channel instanceof Float32Array) || channel.length !== length)
+        throw new Error("Terrain worker channel dimensions mismatch");
+    if (
+      !(raw.biomeData instanceof Uint8Array) ||
+      raw.biomeData.length !== count
+    )
+      throw new Error("Terrain worker biome dimensions mismatch");
+    channels.push([raw.biomeData, count]);
+    const buffers = new Set(channels.map(([channel]) => channel.buffer));
+    let bytes = 0;
+    for (const buffer of buffers) bytes += buffer.byteLength;
+    if (bytes > request.reservedBytes)
+      throw new Error("Terrain worker exceeded raw memory reservation");
+  }
+
+  private *prepareChunk(
+    request: ChunkPreparationRequest,
+  ): Generator<string, PreparedChunk, void> {
+    const node = request.node;
+    let result: ChunkGeometryResult | undefined;
+    let transferred = false;
+    try {
+      const raw =
+        request.result ??
+        (yield* generateQuadChunkDataSteps(
+          request.input.centerX,
+          request.input.centerZ,
+          request.input.size,
+          request.input.resolution,
+          this.provider,
+        ));
+      this.assertResult(request, raw);
+      result = yield* assembleQuadChunkGeometrySteps(
+        raw,
+        this.provider,
+        request.skirtDrop,
+      );
+      const surface = yield* RetainedTerrainSurface.prepare(
+        node.id,
+        this.terrainProfileIdentity,
+        node.centerX,
+        node.centerZ,
+        node.size,
+        node.resolution,
+        result.geometry,
+      );
+      transferred = true;
+      return { ...result, surface };
+    } finally {
+      if (!transferred && result) this.releaseGeometry(result.geometry);
+    }
+  }
+
+  private processPreparation(): void {
+    const start = performance.now();
+    const deadline = start + TerrainVisualManager.PREPARATION_BUDGET_MS;
+    let assembled = 0,
+      synced = 0;
+    try {
+      while (!this.disposed && performance.now() < deadline) {
+        if (!this.activePreparation) {
+          let ready: ChunkPreparationRequest | undefined;
+          for (const request of this.requests.values()) {
+            if (request.state !== "ready") continue;
+            if (
+              !ready ||
+              this.distanceSquared(request.node) <
+                this.distanceSquared(ready.node)
+            )
+              ready = request;
+          }
+          if (ready) {
+            if (
+              ready.result
+                ? assembled >= this.maxAssembliesPerFrame
+                : synced >= this.maxSyncChunksPerFrame
+            )
+              break;
+            if (!this.isRequestCurrent(ready)) {
+              this.cancelRequest(ready, true);
+              continue;
+            }
+            ready.state = "preparing";
+            this.activePreparation = {
+              request: ready,
+              steps: this.prepareChunk(ready),
+              phase: "prepare_start",
+            };
+          } else {
+            const node = this.nextWantedNode();
+            if (!node || !this.admitRequest(node)) break;
+            continue;
+          }
         }
-        this.generateChunkSync(entry.node);
-        continue;
+        const active = this.activePreparation;
+        if (!this.isRequestCurrent(active.request)) {
+          this.cancelRequest(active.request, true);
+          continue;
+        }
+        try {
+          // No asynchronous boundary inside this slice. Full input leases are
+          // checked before/after it and immediately before publication.
+          do {
+            const stepStart = performance.now();
+            const step = active.steps.next();
+            const elapsed = performance.now() - stepStart;
+            const phase = step.done ? "prepare_complete" : step.value;
+            if (elapsed > this.maxPreparationStepMs) {
+              this.maxPreparationStepMs = elapsed;
+              this.maxPreparationStepPhase = `${active.phase} -> ${phase}`;
+            }
+            active.phase = phase;
+            if (step.done) {
+              active.completed = step.value;
+              if (!this.isRequestCurrent(active.request)) {
+                this.cancelRequest(active.request, true);
+                break;
+              }
+              try {
+                this.addMeshToScene(
+                  active.request.node,
+                  this.makeChunkKey(active.request.node),
+                  step.value,
+                  step.value.surface,
+                  () => this.isRequestCurrent(active.request),
+                );
+              } catch (error) {
+                this.releaseGeometry(step.value.geometry);
+                throw error;
+              }
+              active.completed = undefined;
+              if (!this.isRequestCurrent(active.request, false)) {
+                const chunk = this.chunks.get(
+                  this.makeChunkKey(active.request.node),
+                );
+                if (chunk?.mesh.geometry === step.value.geometry)
+                  this.removeMeshFromScene(chunk);
+                this.cancelRequest(active.request, true);
+                break;
+              }
+              if (active.request.result) assembled++;
+              else synced++;
+              if (this.requests.get(active.request.node) === active.request)
+                this.requests.delete(active.request.node);
+              this.releaseReservation(active.request);
+              this.activePreparation = null;
+              break;
+            }
+          } while (performance.now() < deadline);
+          if (
+            this.activePreparation === active &&
+            !this.isRequestCurrent(active.request)
+          )
+            this.cancelRequest(active.request, true);
+        } catch (error) {
+          if (
+            active.request.state === "cancelled" ||
+            !this.isRequestCurrent(active.request)
+          ) {
+            this.cancelRequest(active.request, true);
+            continue;
+          }
+          console.error(
+            `[TerrainVisualManager] Preparation failed for ${this.makeChunkKey(active.request.node)}:`,
+            error,
+          );
+          this.cancelRequest(active.request);
+          this.handleGenerationFailure(active.request.node);
+        }
       }
-
-      this.assembleAndAddChunk(entry.node, entry.result);
+    } finally {
+      this.lastPreparationMs = performance.now() - start;
+      this.maxPreparationMs = Math.max(
+        this.maxPreparationMs,
+        this.lastPreparationMs,
+      );
+      this.preparationSlices++;
     }
   }
 
-  private processSyncQueue(): void {
-    if (this.syncQueue.length === 0) return;
-
-    const px = this.playerX;
-    const pz = this.playerZ;
-    this.syncQueue.sort((a, b) => {
-      const da = (a.centerX - px) ** 2 + (a.centerZ - pz) ** 2;
-      const db = (b.centerX - px) ** 2 + (b.centerZ - pz) ** 2;
-      return da - db;
-    });
-
-    const isBurst =
-      this.framesSinceInit < TerrainVisualManager.BURST_FRAMES ||
-      this.syncQueue.length > this.maxSyncChunksPerFrame * 3;
-    const limit = isBurst ? this.syncQueue.length : this.maxSyncChunksPerFrame;
-
-    let generated = 0;
-    while (this.syncQueue.length > 0 && generated < limit) {
-      const node = this.syncQueue.shift()!;
-      if (!node.isFinal || node.visualChunkKey !== null) continue;
-      this.generateChunkSync(node);
-      generated++;
-    }
-  }
-
-  // =========================================================================
-  // Sync bootstrap — generate nearest chunks synchronously to avoid holes
-  // during initial load while workers are still spinning up.
-  // =========================================================================
+  // Slow/unavailable workers use the same bounded generator, never a whole
+  // synchronous chunk. Cancelled flights still count toward the memory cap.
 
   private static SYNC_BOOTSTRAP_MAX = 30;
   private static SYNC_BOOTSTRAP_RADIUS_SQ = 1200 * 1200;
@@ -389,18 +1290,19 @@ export class TerrainVisualManager implements QuadTreeListener {
       const dz = node.centerZ - pz;
       if (dx * dx + dz * dz > radiusSq) break;
 
-      if (this.pendingNodeIds.has(node.id)) {
-        this.cancelledNodeIds.add(node.id);
-        this.pendingNodeIds.delete(node.id);
+      const request = this.requests.get(node);
+      if (request?.state === "worker") this.cancelRequest(request, true);
+      if (!this.requests.has(node)) {
+        this.forceSyncNodes.add(node);
+        this.wantedNodes.add(node);
       }
-
-      this.generateChunkSync(node);
       count++;
     }
   }
 
   // =========================================================================
-  // Chunk assembly
+  // Explicit synchronous CPU consumers share the same generator arithmetic.
+  // No update, worker completion, fallback or bootstrap calls these helpers.
   // =========================================================================
 
   private assembleAndAddChunk(
@@ -411,18 +1313,24 @@ export class TerrainVisualManager implements QuadTreeListener {
 
     let result;
     try {
+      if (
+        workerData.terrainProfileIdentity !== this.terrainProfileIdentity ||
+        this.provider.terrainProfileIdentity !== this.terrainProfileIdentity
+      ) {
+        throw new Error("Terrain visual result profile identity mismatch");
+      }
       result = assembleQuadChunkGeometry(
         workerData,
         this.provider,
         this.quadTree.config.skirtDrop,
       );
+      this.addMeshToScene(node, key, result);
     } catch (err) {
+      if (result) this.releaseGeometry(result.geometry);
       console.error(`[TerrainVisualManager] Assembly failed for ${key}:`, err);
       this.handleGenerationFailure(node);
       return;
     }
-
-    this.addMeshToScene(node, key, result);
   }
 
   private generateChunkSync(node: TerrainQuadNode): void {
@@ -450,6 +1358,7 @@ export class TerrainVisualManager implements QuadTreeListener {
   }
 
   private handleGenerationFailure(node: TerrainQuadNode): void {
+    if (this.disposed || !node.isFinal) return;
     const attempts = (this.failedAttempts.get(node.id) ?? 0) + 1;
     if (attempts < TerrainVisualManager.MAX_GENERATION_RETRIES) {
       this.failedAttempts.set(node.id, attempts);
@@ -474,7 +1383,24 @@ export class TerrainVisualManager implements QuadTreeListener {
     node: TerrainQuadNode,
     key: string,
     result: { geometry: THREE.BufferGeometry; heightData: Float32Array },
+    preparedSurface?: RetainedTerrainSurface,
+    isCurrent: () => boolean = () => !this.disposed,
   ): void {
+    // Validate before allocating a material/mesh or publishing it to the scene.
+    // The assembly caller owns and disposes the geometry if admission fails.
+    const surface =
+      preparedSurface ??
+      new RetainedTerrainSurface(
+        node.id,
+        this.terrainProfileIdentity,
+        node.centerX,
+        node.centerZ,
+        node.size,
+        node.resolution,
+        result.geometry,
+      );
+    if (!surface.matchesGeometry(result.geometry))
+      throw new Error("Terrain surface changed before publication");
     let meshMaterial: THREE.Material;
     if (this.debugWireframe) {
       const depthColor =
@@ -494,6 +1420,9 @@ export class TerrainVisualManager implements QuadTreeListener {
 
     const mesh = new THREE.Mesh(result.geometry, meshMaterial);
     mesh.position.set(node.centerX, 0, node.centerZ);
+    // Chunk-local placement is immutable; parent/world transforms stay live.
+    mesh.updateMatrix();
+    mesh.matrixAutoUpdate = false;
     mesh.name = `QuadTerrain_${key}`;
     mesh.receiveShadow = this.receiveShadow;
     mesh.castShadow = this.castShadow;
@@ -509,25 +1438,208 @@ export class TerrainVisualManager implements QuadTreeListener {
       resolution: node.resolution,
     };
 
-    this.container.add(mesh);
-
     const chunk: TerrainVisualChunk = {
       key,
       node,
       mesh,
       heightData: result.heightData,
+      surface,
     };
-
-    this.chunks.set(key, chunk);
-    node.visualChunkKey = key;
-    this.failedAttempts.delete(node.id);
-    node.testReady();
+    try {
+      if (this.terrainBoundsCullingEnabled)
+        this.bindTerrainBoundsCulling(chunk);
+      if (!isCurrent()) throw new Error("Terrain publication owner changed");
+      // Three dispatches synchronous added/childadded events. They may dispose,
+      // invalidate, reparent or throw before publication: recheck and roll back.
+      this.container.add(mesh);
+      if (!isCurrent() || mesh.parent !== this.container)
+        throw new Error(
+          "Terrain publication owner changed during scene attachment",
+        );
+      this.chunks.set(key, chunk);
+      this.retainedSurfaceNodes.set(chunk.surface, chunk.node);
+      node.visualChunkKey = key;
+      this.failedAttempts.delete(node.id);
+      node.testReady();
+    } catch (error) {
+      this.releaseTerrainBoundsCulling(mesh);
+      if (this.chunks.get(key) === chunk) this.chunks.delete(key);
+      if (node.visualChunkKey === key) node.visualChunkKey = null;
+      try {
+        mesh.removeFromParent();
+      } finally {
+        if (this.debugWireframe) meshMaterial.dispose();
+      }
+      // The caller still owns geometry until this method returns successfully.
+      throw error;
+    }
   }
 
   private removeMeshFromScene(chunk: TerrainVisualChunk): void {
-    if (chunk.mesh.parent) {
-      this.container.remove(chunk.mesh);
+    if (this.removedMeshes.has(chunk.mesh)) return;
+    this.removedMeshes.add(chunk.mesh);
+    this.releaseTerrainBoundsCulling(chunk.mesh);
+    // Retire ownership before Three's synchronous removal callbacks. They can
+    // re-enter dispose/invalidation; an old removal must not delete a new owner.
+    if (this.chunks.get(chunk.key) === chunk) this.chunks.delete(chunk.key);
+    if (chunk.node.visualChunkKey === chunk.key)
+      chunk.node.visualChunkKey = null;
+    try {
+      chunk.mesh.removeFromParent();
+    } catch (error) {
+      console.error(
+        "[TerrainVisualManager] Scene removal listener failed:",
+        error,
+      );
+    } finally {
+      this.releaseGeometry(chunk.mesh.geometry);
+      if (this.debugWireframe) {
+        const materials = Array.isArray(chunk.mesh.material)
+          ? chunk.mesh.material
+          : [chunk.mesh.material];
+        for (const material of materials) {
+          try {
+            material.dispose();
+          } catch (error) {
+            console.error(
+              "[TerrainVisualManager] Material disposal listener failed:",
+              error,
+            );
+          }
+        }
+      }
     }
-    chunk.mesh.geometry.dispose();
+  }
+
+  private bindTerrainBoundsCulling(chunk: TerrainVisualChunk): void {
+    const mesh = chunk.mesh;
+    const original = mesh.intersectsFrustum;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      mesh,
+      "intersectsFrustum",
+    );
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    if (
+      this.terrainBoundsHooks.has(mesh) ||
+      original !== THREE.Mesh.prototype.intersectsFrustum ||
+      !Object.isExtensible(mesh) ||
+      (originalDescriptor &&
+        (!("value" in originalDescriptor) ||
+          !originalDescriptor.configurable ||
+          !originalDescriptor.writable)) ||
+      !chunk.surface.matchesGeometry(geometry) ||
+      !(position instanceof THREE.BufferAttribute) ||
+      position.normalized
+    )
+      return;
+    // Capture actual published vertices once, INCLUDING skirts/collars. Tree
+    // height bounds describe only the surface and cannot safely replace these.
+    // Never trust a later mutable geometry.boundingBox or scan in a render pass.
+    const localBounds = new THREE.Box3().setFromBufferAttribute(position);
+    if (
+      localBounds.isEmpty() ||
+      ![...localBounds.min.toArray(), ...localBounds.max.toArray()].every(
+        Number.isFinite,
+      )
+    )
+      return;
+    const worldBounds = new THREE.Box3();
+    const material = mesh.material;
+    const installed: THREE.Mesh["intersectsFrustum"] = (frustum) => {
+      if (!this.terrainBoundsCullingEnabled || this.disposed)
+        return original.call(mesh, frustum);
+      const m = mesh.matrixWorld.elements;
+      const knownMaterial =
+        material instanceof THREE.MeshStandardNodeMaterial &&
+        material.constructor === THREE.MeshStandardNodeMaterial
+          ? !material.positionNode &&
+            !material.vertexNode &&
+            !material.geometryNode &&
+            !material.contextNode &&
+            !material.displacementMap &&
+            material.setupPosition ===
+              THREE.NodeMaterial.prototype.setupPosition &&
+            material.setupVertex === THREE.NodeMaterial.prototype.setupVertex
+          : material instanceof THREE.MeshBasicMaterial &&
+            material.constructor === THREE.MeshBasicMaterial;
+      if (
+        this.chunks.get(chunk.key) !== chunk ||
+        this.releasedGeometry.has(geometry) ||
+        mesh.geometry !== geometry ||
+        mesh.material !== material ||
+        !chunk.surface.matchesGeometry(geometry) ||
+        position.normalized ||
+        geometry.morphAttributes.position?.length ||
+        !knownMaterial ||
+        !(material instanceof THREE.Material) ||
+        material.onBeforeRender !== THREE.Material.prototype.onBeforeRender ||
+        material.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile ||
+        mesh.customDepthMaterial ||
+        mesh.customDistanceMaterial ||
+        mesh.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+        mesh.onBeforeShadow !== THREE.Object3D.prototype.onBeforeShadow ||
+        !(frustum instanceof THREE.Frustum) ||
+        !m.every(Number.isFinite) ||
+        m[3] !== 0 ||
+        m[7] !== 0 ||
+        m[11] !== 0 ||
+        m[15] !== 1 ||
+        !frustum.planes.every(
+          (plane) =>
+            Number.isFinite(plane.constant) &&
+            Number.isFinite(plane.normal.x) &&
+            Number.isFinite(plane.normal.y) &&
+            Number.isFinite(plane.normal.z) &&
+            plane.normal.lengthSq() > 0,
+        )
+      )
+        return original.call(mesh, frustum);
+      worldBounds.copy(localBounds).applyMatrix4(mesh.matrixWorld);
+      if (
+        !Number.isFinite(worldBounds.min.x) ||
+        !Number.isFinite(worldBounds.min.y) ||
+        !Number.isFinite(worldBounds.min.z) ||
+        !Number.isFinite(worldBounds.max.x) ||
+        !Number.isFinite(worldBounds.max.y) ||
+        !Number.isFinite(worldBounds.max.z)
+      )
+        return original.call(mesh, frustum);
+      return frustum.intersectsBox(worldBounds);
+    };
+    this.terrainBoundsHooks.set(mesh, {
+      original,
+      installed,
+      originalDescriptor,
+    });
+    mesh.intersectsFrustum = installed;
+  }
+
+  private releaseTerrainBoundsCulling(mesh: THREE.Mesh): void {
+    const hooks = this.terrainBoundsHooks.get(mesh);
+    if (!hooks) return;
+    if (mesh.intersectsFrustum === hooks.installed) {
+      if (hooks.originalDescriptor)
+        Object.defineProperty(
+          mesh,
+          "intersectsFrustum",
+          hooks.originalDescriptor,
+        );
+      else Reflect.deleteProperty(mesh, "intersectsFrustum");
+    }
+    this.terrainBoundsHooks.delete(mesh);
+  }
+
+  private releaseGeometry(geometry: THREE.BufferGeometry): void {
+    if (this.releasedGeometry.has(geometry)) return;
+    this.releasedGeometry.add(geometry);
+    try {
+      geometry.dispose();
+    } catch (error) {
+      console.error(
+        "[TerrainVisualManager] Geometry disposal listener failed:",
+        error,
+      );
+    }
   }
 }

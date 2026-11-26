@@ -19,6 +19,7 @@
  */
 
 import * as THREE from "../../../extras/three/three";
+import type { Node, NodeBuilder } from "three/webgpu";
 import {
   uniform,
   sub,
@@ -60,10 +61,16 @@ import {
   normalLocal,
   modelNormalMatrix,
 } from "../../../extras/three/three";
-import { varyingProperty } from "three/tsl";
+import { diffuseColor, materialAO, varyingProperty } from "three/tsl";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { SUN_SHADE, SUN_LIGHT, NIGHT, applySunShade } from "./LightingConfig";
+import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
+import {
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
+import { createTreeWindPositionNode, type TreeWindMode } from "./TreeWind";
 
 // ============================================================================
 // CONFIGURATION
@@ -483,8 +490,18 @@ export function createDissolveMaterial(
   source: THREE.MeshStandardMaterial | THREE.Material,
   options: DissolveMaterialOptions = {},
 ): DissolveMaterial {
-  const material = new MeshStandardNodeMaterial();
+  return configureDissolveMaterial(
+    source,
+    options,
+    new MeshStandardNodeMaterial(),
+  );
+}
 
+function configureDissolveMaterial(
+  source: THREE.MeshStandardMaterial | THREE.Material,
+  options: DissolveMaterialOptions,
+  material: THREE.MeshStandardNodeMaterial,
+): DissolveMaterial {
   // Copy properties from source material.
   // ModelCache converts all materials to MeshStandardNodeMaterial, which may
   // not pass `instanceof MeshStandardMaterial` in the WebGPU build where
@@ -704,7 +721,7 @@ export function createDissolveMaterial(
             float(0.0),
             float(1.0),
           )
-        : attribute("instanceDissolve", "float");
+        : attribute<"float">("instanceDissolve", "float");
       const dissolveAmount = mul(
         dissolveVal,
         float(GPU_VEG_CONFIG.DISSOLVE_ALPHA_SCALE),
@@ -744,7 +761,7 @@ export function createDissolveMaterial(
 
     material.outputNode = Fn(() => {
       const litColor = output;
-      const hlIntensity = attribute("instanceHighlight", "float");
+      const hlIntensity = attribute<"float">("instanceHighlight", "float");
 
       const N = normalize(normalView);
       const V = normalize(sub(vec3(0, 0, 0), positionView.xyz));
@@ -758,7 +775,7 @@ export function createDissolveMaterial(
 
       // Gentle brighten + rim-only highlight color
       const brightened = add(litColor.rgb, float(BRIGHTEN));
-      const rimGlow = mul(vec3(uHighlightColor), rim);
+      const rimGlow = mul(uHighlightColor.rgb, rim);
       const highlighted = add(brightened, rimGlow);
 
       const finalRgb = mix(litColor.rgb, highlighted, hlIntensity);
@@ -941,7 +958,7 @@ export function applyRimHighlight(
   const RIM_POWER = 2.5;
   const RIM_STRENGTH = 0.4;
 
-  const prevOutput = mat.outputNode;
+  const prevOutput = mat.outputNode as Node<"vec4"> | null;
 
   mat.outputNode = Fn(() => {
     const litColor = prevOutput ? prevOutput : output;
@@ -957,7 +974,7 @@ export function applyRimHighlight(
     );
 
     const brightened = add(litColor.rgb, float(BRIGHTEN));
-    const rimGlow = mul(vec3(uHighlightColor), rim);
+    const rimGlow = mul(uHighlightColor.rgb, rim);
     const highlighted = add(brightened, rimGlow);
 
     const finalRgb = mix(litColor.rgb, highlighted, hlIntensity);
@@ -975,7 +992,40 @@ export function applyRimHighlight(
 /**
  * Options for creating tree dissolve materials.
  */
-export type TreeMaterialOptions = DissolveMaterialOptions;
+export type TreeMaterialOptions = DissolveMaterialOptions & {
+  /** Explicit pool-owned selection; connected geometry metadata is required. */
+  treeWind?: TreeWindMode;
+  /** Per-world art direction; never inferred from shared material/cache state. */
+  treePalette?: {
+    terrainProfile: WorldTerrainProfile;
+    species: string;
+  };
+};
+
+// The current source leaf maps have uniform visible RGB. Work in linear RGB so
+// map detail/alpha remain intact; these muted hues preserve species recognition.
+const COMPACT_TREE_LEAF_PALETTE = {
+  maple: { source: 0xb75757, target: 0x96534c },
+  magic: { source: 0x1a7c8d, target: 0x4f7e77 },
+} as const;
+
+/**
+ * Tree COLOR_0 and batch colors carry AO/wind/gameplay masks, not RGB tint.
+ * r186's native diffuse setup multiplies both into the albedo. Preserve that
+ * setup's opacity, alpha test/hash and discard work, then replace RGB only,
+ * before standard material variants and lighting consume diffuseColor.
+ */
+class CompactTreePBRMaterial extends MeshStandardNodeMaterial {
+  declare colorNode: Node<"vec3"> | null;
+
+  override setupDiffuseColor(builder: NodeBuilder): void {
+    if (this.colorNode === null) {
+      throw new Error("Compact tree PBR requires its authored albedo node");
+    }
+    super.setupDiffuseColor(builder);
+    diffuseColor.rgb.assign(this.colorNode.convert("vec3"));
+  }
+}
 
 /**
  * Tree-specific dissolve material with toon shading.
@@ -988,7 +1038,19 @@ export type TreeMaterialOptions = DissolveMaterialOptions;
  * - Per-instance rim highlight
  */
 export type TreeDissolveMaterial = DissolveMaterial & {
+  readonly treeWind: Readonly<{ mode: TreeWindMode }>;
+  readonly treeLighting: Readonly<{
+    mode: "scene-pbr-mask-safe-v1" | "legacy-custom-rgb";
+    sourceMaterialName: string;
+    species: string | null;
+    compactPaletteApplied: boolean;
+    /** Original mapped alpha flags, recorded before dissolve conversion. */
+    sourceAlphaBearing: boolean;
+    /** Selected coverage graph; actual multisampling still requires the renderer. */
+    compactLeafCoverage: boolean;
+  }>;
   treeUniforms: {
+    illumination: WorldIlluminationUniforms;
     sunDirection: { value: THREE.Vector3 };
     sunIntensity: { value: number };
     dayIntensity: { value: number };
@@ -1017,13 +1079,54 @@ export function createTreeDissolveMaterial(
   source: THREE.MeshStandardMaterial | THREE.Material,
   options: TreeMaterialOptions = {},
 ): TreeDissolveMaterial {
-  const baseDm = createDissolveMaterial(source, {
-    ...options,
-    enableRimHighlight: false,
-    enableDepletionDissolve: true,
-  });
+  const treeWindMode = options.treeWind ?? "legacy-leaf-v1";
+  if (treeWindMode !== "legacy-leaf-v1" && treeWindMode !== "connected-v1") {
+    throw new Error("Unsupported tree wind mode");
+  }
+  const palette = options.treePalette;
+  const compact =
+    palette?.terrainProfile.kind === "compact-candidate" &&
+    isCompactSculptProfile(palette.terrainProfile);
+  // Inspect the original source before configureDissolveMaterial replaces its
+  // transparency. Names alone miss General "Leaves" and unnamed Oak leaves.
+  const sourceMap = (source as THREE.Material & { map?: THREE.Texture | null })
+    .map;
+  const sourceAlphaBearing =
+    sourceMap?.isTexture === true &&
+    (source.alphaTest > 0 || source.transparent === true);
+  const compactLeafCoverage = compact && sourceAlphaBearing;
+  const compactMaterial = compact ? new CompactTreePBRMaterial() : null;
+  const baseDm = configureDissolveMaterial(
+    source,
+    {
+      ...options,
+      enableRimHighlight: false,
+      enableDepletionDissolve: true,
+    },
+    compactMaterial ?? new MeshStandardNodeMaterial(),
+  );
 
   const material = baseDm as unknown as THREE.MeshStandardNodeMaterial;
+
+  const compactPaletteApplied =
+    source.name === "leaf" &&
+    compact &&
+    (palette.species === "maple" || palette.species === "magic");
+  if (
+    compactPaletteApplied &&
+    (palette.species === "maple" || palette.species === "magic")
+  ) {
+    const colors = COMPACT_TREE_LEAF_PALETTE[palette.species];
+    const original = new THREE.Color(colors.source);
+    const target = new THREE.Color(colors.target);
+    material.color.multiply(
+      new THREE.Color(
+        target.r / original.r,
+        target.g / original.g,
+        target.b / original.b,
+      ),
+    );
+  }
 
   const srcMat = source as any;
   const hasVertexColors =
@@ -1037,6 +1140,7 @@ export function createTreeDissolveMaterial(
   const uDayIntensity = uniform(1.0);
   const uShadeColor = uniform(new THREE.Color(...SUN_SHADE.TINT_COLOR));
   const uHighlightColor = uniform(new THREE.Color(0x00ffff));
+  const illumination = new WorldIlluminationUniforms();
   const uWindTime = uniform(0.0);
   const uWindStrength = uniform(0.3);
   const uWindDir = uniform(new THREE.Vector2(1, 0));
@@ -1064,25 +1168,37 @@ export function createTreeDissolveMaterial(
   const ENABLE_TREE_SSS = true;
 
   // --- Wind vertex displacement ---
-  // Modulated by leafMask from vertex color R so bark stays still.
-  // Displacement proportional to local Y auto-scales to any model coord system.
-  material.positionNode = Fn(() => {
-    const pos = positionLocal;
-    const vc = hasVertexColors ? attribute("color", "vec3") : vec3(0, 1, 0);
-    const leafMask = vc.x;
+  if (treeWindMode === "connected-v1") {
+    material.positionNode = createTreeWindPositionNode({
+      time: uWindTime,
+      strength: uWindStrength,
+      direction: uWindDir,
+    });
+  } else {
+    // Legacy expression intentionally unchanged: leafMask keeps bark still.
+    // Displacement proportional to local Y auto-scales to any model coord system.
+    material.positionNode = Fn(() => {
+      const pos = positionLocal;
+      const vc = hasVertexColors
+        ? attribute<"vec3">("color", "vec3")
+        : vec3(0, 1, 0);
+      const leafMask = vc.x;
 
-    const phase = add(mul(pos.x, float(0.013)), mul(pos.z, float(0.017)));
-    const wave1 = sin(add(mul(uWindTime, float(1.8)), phase));
-    const wave2 = sin(add(mul(uWindTime, float(3.2)), mul(phase, float(0.6))));
-    const combined = add(mul(wave1, float(0.65)), mul(wave2, float(0.35)));
-    const amplitude = mul(abs(pos.y), float(0.006));
-    const disp = mul(combined, mul(uWindStrength, mul(amplitude, leafMask)));
-    return vec3(
-      add(pos.x, mul(disp, uWindDir.x)),
-      pos.y,
-      add(pos.z, mul(disp, uWindDir.y)),
-    );
-  })();
+      const phase = add(mul(pos.x, float(0.013)), mul(pos.z, float(0.017)));
+      const wave1 = sin(add(mul(uWindTime, float(1.8)), phase));
+      const wave2 = sin(
+        add(mul(uWindTime, float(3.2)), mul(phase, float(0.6))),
+      );
+      const combined = add(mul(wave1, float(0.65)), mul(wave2, float(0.35)));
+      const amplitude = mul(abs(pos.y), float(0.006));
+      const disp = mul(combined, mul(uWindStrength, mul(amplitude, leafMask)));
+      return vec3(
+        add(pos.x, mul(disp, uWindDir.x)),
+        pos.y,
+        add(pos.z, mul(disp, uWindDir.y)),
+      );
+    })();
+  }
 
   // --- Alpha cutout sharpening ---
   // Applied to any material with a texture map (leaf textures have alpha).
@@ -1090,9 +1206,31 @@ export function createTreeDissolveMaterial(
     material.alphaTest = 0.5;
     const leafCutoutMap = material.map;
     material.opacityNode = Fn(() => {
-      const uv = attribute("uv", "vec2");
-      return step(float(0.5), texture(leafCutoutMap, uv).a);
+      const uv = attribute<"vec2">("uv", "vec2");
+      const alpha = texture(leafCutoutMap, uv).a;
+      return compactLeafCoverage ? alpha : step(float(0.5), alpha);
     })();
+    if (compactLeafCoverage) {
+      // configureDissolveMaterial constructs a scalar 0-or-2 threshold. Three's
+      // public material slot erases that known node type.
+      const dissolveThreshold = material.alphaTestNode as Node<"float"> | null;
+      if (dissolveThreshold === null) {
+        throw new Error(
+          "Compact leaf coverage requires its dissolve threshold",
+        );
+      }
+      // Native r186 smooths from T to T+fwidth(alpha). Center that interval on
+      // the authored .5 cutoff: an unshifted T=.5 erodes minified crowns. D is
+      // the unchanged 0-or-2 Bayer threshold; max with D also prevents a
+      // negative cutoff and transparent-texel leakage at very wide gradients.
+      // Widths above one still need separate mip/coverage qualification.
+      const alpha = material.opacityNode as Node<"float">;
+      const centeredCutoff = float(0.5).sub(alpha.fwidth().mul(0.5));
+      material.alphaTestNode = max(centeredCutoff, dissolveThreshold);
+      material.alphaToCoverage = true;
+      // Numeric alphaTest stays .5 for the existing single-sample shadow pass.
+      // Its pre-existing omission of custom dissolve nodes is not changed here.
+    }
   }
 
   // --- Sky-color fog (same as terrain/vegetation) ---
@@ -1110,19 +1248,83 @@ export function createTreeDissolveMaterial(
   const albedoMap = material.map;
   const matColor = vec3(material.color.r, material.color.g, material.color.b);
 
+  if (compactMaterial) {
+    // Keep mask attributes available to wind, snow and dissolve, but never use
+    // the leaf/AO channels as vertex RGB. Batch mask multiplication is removed
+    // by CompactTreePBRMaterial after native alpha/discard setup.
+    material.vertexColors = false;
+    compactMaterial.colorNode = Fn(() => {
+      const texCoord = attribute<"vec2">("uv", "vec2");
+      const sampled = albedoMap ? texture(albedoMap, texCoord).rgb : vec3(1);
+      const albedo = mul(sampled, matColor);
+      const aoRaw = hasVertexColors
+        ? attribute<"vec3">("color", "vec3").y
+        : float(1);
+      const aoFactor = pow(aoRaw, float(AO_POWER));
+      const upFacing = smoothstep(
+        float(SNOW_THRESHOLD),
+        float(SNOW_THRESHOLD + SNOW_RANGE),
+        normalize(normalWorld).y,
+      );
+      const snowMask = clamp(
+        mul(mul(upFacing, aoRaw), float(SNOW_STRENGTH)),
+        float(0),
+        float(1),
+      );
+      const snowCol = mix(vec3(...SNOW_AO_TINT), vec3(...SNOW_COLOR), aoFactor);
+      const snowStrength = options.batched
+        ? pow(
+            clamp(varyingProperty("vec3", "vBatchColor").y, float(0), float(1)),
+            float(3),
+          )
+        : float(0);
+      return mix(albedo, snowCol, mul(snowMask, snowStrength));
+    })();
+    // AO attenuates indirect light through the native PBR AO stage; it is not
+    // an albedo hue multiplier or an added unshadowed lighting term.
+    const aoRaw = hasVertexColors
+      ? attribute<"vec3">("color", "vec3").y
+      : float(1);
+    material.aoNode = mul(
+      materialAO,
+      mix(float(AO_DARK), float(1), pow(aoRaw, float(AO_POWER))),
+    );
+  }
+
+  const finishTreeOutput = (litRgb: Node<"vec3">, alpha: Node<"float">) => {
+    const batchColor = varyingProperty("vec3", "vBatchColor");
+    const hlIntensity = options.batched
+      ? step(float(1.01), batchColor.x)
+      : attribute<"float">("instanceHighlight", "float");
+    const NV = normalize(normalView);
+    const Vv = normalize(sub(vec3(0, 0, 0), positionView.xyz));
+    const NdotV = clamp(dot(NV, Vv), float(0), float(1));
+    const hlRim = mul(
+      pow(sub(float(1), NdotV), float(HL_RIM_POWER)),
+      float(HL_RIM_STRENGTH),
+    );
+    const highlighted = add(
+      add(litRgb, float(HL_BRIGHTEN)),
+      mul(uHighlightColor.rgb, hlRim),
+    );
+    const finalRgb = mix(litRgb, highlighted, hlIntensity);
+    return vec4(mix(finalRgb, treeFogTex.rgb, treeFogFactor), alpha);
+  };
+
   material.outputNode = Fn(() => {
+    if (compactMaterial) return finishTreeOutput(output.rgb, output.a);
     const pbrOut = output;
 
     // ---- Albedo ----
-    const texCoord = attribute("uv", "vec2");
+    const texCoord = attribute<"vec2">("uv", "vec2");
     const albedoSample = albedoMap
       ? texture(albedoMap, texCoord)
       : vec4(1, 1, 1, 1);
-    let baseAlbedo: any = mul(albedoSample.rgb, matColor);
+    let baseAlbedo: Node<"vec3"> = mul(albedoSample.rgb, matColor);
 
     // ---- Vertex colors ----
     const vtxColor = hasVertexColors
-      ? attribute("color", "vec3")
+      ? attribute<"vec3">("color", "vec3")
       : vec3(0, 1, 0);
     const aoRaw = vtxColor.y;
 
@@ -1149,13 +1351,15 @@ export function createTreeDissolveMaterial(
     const biomeSnowStrength = pow(biomeSnowRaw, float(3.0));
     const snowWeight = mul(snowMask, biomeSnowStrength);
     baseAlbedo = mix(baseAlbedo, snowCol, snowWeight);
+    // Preserve literal textured/snow albedo before the legacy color treatment.
+    const worldAlbedo = baseAlbedo;
 
     // ---- dayFactor (night fading for rim / saturation; SSS when enabled) ----
     const sunI = clamp(uSunIntensity, float(0.0), float(2.0));
     const dayFactor = div(sunI, float(2.0));
 
     // ---- Sun shade on albedo ----
-    baseAlbedo = applySunShade(baseAlbedo, uDayIntensity, vec3(uShadeColor));
+    baseAlbedo = applySunShade(baseAlbedo, uDayIntensity, uShadeColor.rgb);
 
     // ---- Smooth diffuse ramp (warm highlights -> cool shadows) ----
     const leafMask = vtxColor.x;
@@ -1226,37 +1430,38 @@ export function createTreeDissolveMaterial(
       mul(sub(result, vec3(luma, luma, luma)), satScale),
       vec3(luma, luma, luma),
     );
-
-    // ---- Instance rim highlight (hover) ----
-    let hlIntensity;
-    if (options.batched) {
-      hlIntensity = step(float(1.01), batchColor.x);
-    } else {
-      hlIntensity = attribute("instanceHighlight", "float");
-    }
-    const NV = normalize(normalView);
-    const Vv = normalize(sub(vec3(0, 0, 0), positionView.xyz));
-    const NdotV = clamp(dot(NV, Vv), float(0.0), float(1.0));
-    const hlRim = mul(
-      pow(sub(float(1.0), NdotV), float(HL_RIM_POWER)),
-      float(HL_RIM_STRENGTH),
+    // Opt-in Lambert diffuse uses the geometric normal and the same vertex AO.
+    // Legacy warm/cool ramp, additive SSS, rim and saturation remain at blend=0;
+    // they are not treated as physically sourced illumination at blend=1.
+    const litRgb = illumination.select(
+      boosted,
+      mul(illumination.diffuse(worldAlbedo, N), aoMul),
     );
-    const brightened = add(boosted, float(HL_BRIGHTEN));
-    const rimGlow = mul(vec3(uHighlightColor), hlRim);
-    const highlighted = add(brightened, rimGlow);
-    const finalRgb = mix(boosted, highlighted, hlIntensity);
 
-    // ---- Sky-color fog ----
-    const fogged = mix(finalRgb, treeFogTex.rgb, treeFogFactor);
-
-    return vec4(fogged, pbrOut.a);
+    return finishTreeOutput(litRgb, pbrOut.a);
   })();
 
   material.needsUpdate = true;
 
   const treeMat = baseDm as TreeDissolveMaterial;
+  Object.defineProperty(treeMat, "treeWind", {
+    value: Object.freeze({ mode: treeWindMode }),
+    enumerable: true,
+  });
+  Object.defineProperty(treeMat, "treeLighting", {
+    value: Object.freeze({
+      mode: compactMaterial ? "scene-pbr-mask-safe-v1" : "legacy-custom-rgb",
+      sourceMaterialName: source.name,
+      species: palette?.species ?? null,
+      compactPaletteApplied,
+      sourceAlphaBearing,
+      compactLeafCoverage,
+    }),
+    enumerable: true,
+  });
   treeMat.highlightColor = uHighlightColor;
   treeMat.treeUniforms = {
+    illumination,
     sunDirection: uSunDir as unknown as { value: THREE.Vector3 },
     sunIntensity: uSunIntensity as unknown as { value: number },
     dayIntensity: uDayIntensity as unknown as { value: number },

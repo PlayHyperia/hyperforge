@@ -13,6 +13,7 @@
  * For rocks/plants, use AtlasedRockPlantImpostorManager instead.
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -37,6 +38,7 @@ import THREE, {
   MeshBasicNodeMaterial,
   DataArrayTexture,
 } from "../../../extras/three/three";
+import type { UniformNode } from "three/webgpu";
 import type { World } from "../../../core/World";
 import {
   ImpostorManager,
@@ -135,13 +137,13 @@ export class AtlasedImpostorManager {
   private raycastMesh: THREE.Mesh | null = null;
 
   // View uniforms (cached for shader updates)
-  private uFaceIndices: ReturnType<typeof uniform> | null = null;
-  private uFaceWeights: ReturnType<typeof uniform> | null = null;
+  private uFaceIndices: UniformNode<"vec3", THREE.Vector3> | null = null;
+  private uFaceWeights: UniformNode<"vec3", THREE.Vector3> | null = null;
 
   // Lighting uniforms (synced from Environment system)
-  private uLightDir: ReturnType<typeof uniform> | null = null;
-  private uLightColor: ReturnType<typeof uniform> | null = null;
-  private uAmbientColor: ReturnType<typeof uniform> | null = null;
+  private uLightDir: UniformNode<"vec3", THREE.Vector3> | null = null;
+  private uLightColor: UniformNode<"vec3", THREE.Vector3> | null = null;
+  private uAmbientColor: UniformNode<"vec3", THREE.Vector3> | null = null;
 
   // Stats & callbacks
   private stats = {
@@ -280,21 +282,21 @@ export class AtlasedImpostorManager {
   ): THREE.MeshBasicNodeMaterial {
     const material = new MeshBasicNodeMaterial();
 
-    const uGridSize = uniform(vec2(gridX, gridY));
-    this.uFaceIndices = uniform(vec3(0, 0, 0));
-    this.uFaceWeights = uniform(vec3(0.33, 0.33, 0.34));
-    const uAlphaThreshold = uniform(float(0.5));
-    const instanceSlot = attribute("instanceSlot", "float");
+    const uGridSize = uniform(new THREE.Vector2(gridX, gridY));
+    this.uFaceIndices = uniform(new THREE.Vector3(0, 0, 0));
+    this.uFaceWeights = uniform(new THREE.Vector3(0.33, 0.33, 0.34));
+    const uAlphaThreshold = uniform(0.5);
+    const instanceSlot = attribute<"float">("instanceSlot", "float");
     const atlasArrayTex = this.atlasArray!;
     const normalArrayTex = this.normalAtlasArray!;
 
     // Lighting uniforms - synced from world Environment system
-    this.uLightDir = uniform(vec3(0.5, 0.8, 0.3));
-    this.uLightColor = uniform(vec3(1, 1, 1));
-    this.uAmbientColor = uniform(vec3(0.4, 0.45, 0.5));
+    this.uLightDir = uniform(new THREE.Vector3(0.5, 0.8, 0.3));
+    this.uLightColor = uniform(new THREE.Vector3(1, 1, 1));
+    this.uAmbientColor = uniform(new THREE.Vector3(0.4, 0.45, 0.5));
 
     // Convert flat octahedral index to grid coords
-    const flatToCoords = Fn(([idx]: [ReturnType<typeof float>]) => {
+    const flatToCoords = Fn(([idx]: [Node<"float">]) => {
       const row = floor(div(idx, uGridSize.x));
       const col = sub(idx, mul(row, uGridSize.x));
       return vec2(col, row);
@@ -342,7 +344,7 @@ export class AtlasedImpostorManager {
       );
 
       // Decode sRGB to linear for lighting calculations
-      const albedoLinear = pow(albedoSRGB, vec3(2.2, 2.2, 2.2));
+      const albedoLinear = albedoSRGB.pow(vec3(2.2, 2.2, 2.2));
 
       // Blend normals (stored as 0-1, decode to -1 to 1)
       const blendedNormalEncoded = add(
@@ -610,8 +612,7 @@ export class AtlasedImpostorManager {
     if (hasRenderTarget) {
       // Fresh bake - read from render targets
       const graphics = this.world.graphics as
-        | { renderer?: THREE.WebGPURenderer }
-        | undefined;
+        { renderer?: THREE.WebGPURenderer } | undefined;
       const renderer = graphics?.renderer;
       if (!renderer) {
         console.warn(`[AtlasedImpostorManager] No renderer`);
@@ -683,8 +684,7 @@ export class AtlasedImpostorManager {
     // Get pixel data from texture
     const canvas = document.createElement("canvas");
     const textureImage = texture.image as
-      | { width?: number; height?: number }
-      | undefined;
+      { width?: number; height?: number } | undefined;
     const texWidth = textureImage?.width ?? ATLAS_SIZE;
     const texHeight = textureImage?.height ?? ATLAS_SIZE;
     canvas.width = texWidth;
@@ -957,9 +957,9 @@ export class AtlasedImpostorManager {
       // This is expected early in startup before the instanced mesh exists
       return;
     }
-    (this.uLightDir.value as THREE.Vector3).copy(lightDir);
-    (this.uLightColor.value as THREE.Vector3).copy(lightColor);
-    (this.uAmbientColor.value as THREE.Vector3).copy(ambientColor);
+    this.uLightDir.value.copy(lightDir);
+    this.uLightColor.value.copy(lightColor);
+    this.uAmbientColor.value.copy(ambientColor);
   }
 
   private updateViewSampling(camera: THREE.Camera): void {
@@ -975,8 +975,8 @@ export class AtlasedImpostorManager {
     const hits = this.raycaster.intersectObject(this.raycastMesh, false);
     if (hits.length > 0 && hits[0].face && hits[0].barycoord) {
       const { face, barycoord } = hits[0];
-      (this.uFaceIndices.value as THREE.Vector3).set(face.a, face.b, face.c);
-      (this.uFaceWeights.value as THREE.Vector3).copy(barycoord);
+      this.uFaceIndices.value.set(face.a, face.b, face.c);
+      this.uFaceWeights.value.copy(barycoord);
     }
   }
 

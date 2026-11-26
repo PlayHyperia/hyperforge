@@ -666,7 +666,7 @@ describe("Building-Terrain Interaction", () => {
     });
   });
 
-  describe("Fix Verification: Bbox Tiles Get Building Elevation", () => {
+  describe("Exact Footprint Elevation", () => {
     let world: World;
     let collisionService: BuildingCollisionService;
     const BUILDING_ID = "lshape_elevation";
@@ -691,13 +691,14 @@ describe("Building-Terrain Interaction", () => {
       world.destroy();
     });
 
-    it("should return building elevation for ALL tiles in bbox via queryCollision", () => {
+    it("returns building elevation only for exact covered tiles via queryCollision", () => {
       const building = collisionService.getBuilding(BUILDING_ID)!;
       const bbox = building.boundingBox;
       const expectedElevation = building.floors[0].elevation;
 
       let tilesWithElevation = 0;
       let tilesWithoutElevation = 0;
+      let exteriorTiles = 0;
 
       for (let x = bbox.minTileX; x <= bbox.maxTileX; x++) {
         for (let z = bbox.minTileZ; z <= bbox.maxTileZ; z++) {
@@ -713,6 +714,8 @@ describe("Building-Terrain Interaction", () => {
             console.log(
               `[LShape-Elev] Tile (${x},${z}) in building but NO elevation!`,
             );
+          } else {
+            exteriorTiles++;
           }
         }
       }
@@ -724,17 +727,19 @@ describe("Building-Terrain Interaction", () => {
         `[LShape-Elev] Bbox tiles without elevation: ${tilesWithoutElevation}`,
       );
 
-      // ALL tiles in bbox should have building elevation (including hole tiles)
+      // Exact covered tiles have floor elevation; the missing L-shaped corner
+      // remains exterior terrain instead of inheriting invisible floor height.
       expect(tilesWithoutElevation).toBe(0);
       expect(tilesWithElevation).toBeGreaterThan(0);
+      expect(exteriorTiles).toBeGreaterThan(0);
     });
 
-    it("should have hole tiles that are NOT walkable but HAVE elevation", () => {
+    it("keeps an L-shaped exterior concavity outside the building elevation", () => {
       const building = collisionService.getBuilding(BUILDING_ID)!;
       const bbox = building.boundingBox;
       const floor0 = building.floors[0];
 
-      const holeTiles: Array<{
+      const exteriorConcavityTiles: Array<{
         x: number;
         z: number;
         elevation: number | null;
@@ -746,25 +751,15 @@ describe("Building-Terrain Interaction", () => {
           const isWalkable = floor0.walkableTiles.has(key);
 
           if (!isWalkable) {
-            // This is a hole tile - check if it has elevation
             const result = collisionService.queryCollision(x, z, 0);
-            if (result.isInsideBuilding) {
-              holeTiles.push({ x, z, elevation: result.elevation });
-            }
+            expect(result.isInsideBuilding).toBe(false);
+            expect(result.elevation).toBeNull();
+            exteriorConcavityTiles.push({ x, z, elevation: result.elevation });
           }
         }
       }
 
-      console.log(`[LShape-Hole] Found ${holeTiles.length} hole tiles in bbox`);
-
-      // L-shaped building should have hole tiles
-      expect(holeTiles.length).toBeGreaterThan(0);
-
-      // All hole tiles should have building elevation
-      for (const tile of holeTiles) {
-        expect(tile.elevation).not.toBeNull();
-        expect(tile.elevation).toBeCloseTo(floor0.elevation, 0.01);
-      }
+      expect(exteriorConcavityTiles.length).toBeGreaterThan(0);
     });
   });
 });

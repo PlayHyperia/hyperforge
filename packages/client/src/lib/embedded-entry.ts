@@ -7,7 +7,10 @@ import type {
 } from "../types/embeddedConfig";
 import type { URLParamValidation } from "../utils/InputValidator";
 
-const EMBEDDED_MODE_VALUES = ["spectator", "free"] as const;
+// `streaming` is a compatibility alias used by older embedded stream URLs.
+// It is normalized to the passive spectator viewport and never enters the
+// authenticated/free-control path.
+const EMBEDDED_MODE_VALUES = ["spectator", "streaming", "free"] as const;
 const EMBEDDED_SURFACE_VALUES = ["viewport", "agent-control"] as const;
 const GRAPHICS_QUALITY_VALUES = [
   "potato",

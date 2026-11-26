@@ -27,6 +27,7 @@ import {
   EventType,
   PlayerEntity,
   getDuelArenaConfig,
+  getDuelArenaEgressPosition,
   isPositionInsideCombatArena,
   type DuelRules,
   type DuelState,
@@ -67,6 +68,10 @@ import {
 } from "./config";
 import { DUEL_ERRORS } from "./error-messages";
 import { getDuelFoodItemForLevels, isDuelFoodItemId } from "../duelFood.js";
+import {
+  STREAMING_DUEL_ARENA_ID,
+  STREAMING_DUEL_ARENA_RESERVATION_ID,
+} from "./streaming-arena.js";
 
 // ============================================================================
 // Helpers
@@ -141,6 +146,18 @@ export class DuelSystem {
   private duelBotFoodSlotsByPlayer: Map<string, DuelFoodProvisionedSlot[]> =
     new Map();
 
+  /** True only while this instance owns the process-wide streaming arena. */
+  private streamingArenaReserved = false;
+
+  /** Prayer custody must settle before an ordinary duel can enter combat. */
+  private readonly pendingFightStarts = new Map<string, Promise<void>>();
+
+  /** Finished sessions remain fenced until their prayer restore barrier ends. */
+  private readonly pendingResolutionCleanup = new Set<string>();
+
+  /** Prevent lifecycle continuations from publishing after teardown. */
+  private isDestroyed = false;
+
   constructor(world: World) {
     this.world = world;
     this.pendingDuels = new PendingDuelManager(world);
@@ -153,11 +170,32 @@ export class DuelSystem {
    * Initialize the duel system
    */
   init(): void {
-    // Initialize pending duel manager
-    this.pendingDuels.init();
+    this.isDestroyed = false;
+    if (process.env.STREAMING_DUEL_ENABLED === "true") {
+      if (
+        !this.arenaPool.reserveSpecificArena(
+          STREAMING_DUEL_ARENA_ID,
+          STREAMING_DUEL_ARENA_RESERVATION_ID,
+        )
+      ) {
+        throw new Error(
+          `[DuelSystem] Streaming arena ${STREAMING_DUEL_ARENA_ID} is unavailable; refusing to start with split arena ownership`,
+        );
+      }
+      this.streamingArenaReserved = true;
+    }
 
-    // Register arena wall collision to prevent players from escaping arenas
-    this.arenaPool.registerArenaWallCollision(this.world.collision);
+    // Initialize pending duel manager
+    try {
+      this.pendingDuels.init();
+
+      // Register arena wall collision to prevent players from escaping arenas
+      this.arenaPool.registerArenaWallCollision(this.world.collision);
+    } catch (error) {
+      this.pendingDuels.destroy();
+      this.releaseStreamingArenaReservation();
+      throw error;
+    }
 
     // Start periodic cleanup
     this.cleanupInterval = setInterval(() => {
@@ -235,6 +273,7 @@ export class DuelSystem {
    * Cleanup when system is destroyed
    */
   destroy(): void {
+    this.isDestroyed = true;
     // Remove world event listeners to prevent leaks
     for (const { event, fn } of this.eventListeners) {
       this.world.off(event, fn);
@@ -254,8 +293,30 @@ export class DuelSystem {
     this.sessionManager.clearAllSessions();
     this.pendingDuels.destroy();
     this.duelBotFoodSlotsByPlayer.clear();
+    this.pendingFightStarts.clear();
+    this.pendingResolutionCleanup.clear();
+    this.combatResolver.destroy();
+    this.releaseStreamingArenaReservation();
 
     Logger.info("DuelSystem", "Destroyed");
+  }
+
+  private releaseStreamingArenaReservation(): void {
+    if (!this.streamingArenaReserved) return;
+
+    const released = this.arenaPool.releaseSpecificArena(
+      STREAMING_DUEL_ARENA_ID,
+      STREAMING_DUEL_ARENA_RESERVATION_ID,
+    );
+    if (!released) {
+      Logger.error(
+        "DuelSystem",
+        "Streaming arena reservation ownership was lost before teardown",
+        null,
+        { arenaId: STREAMING_DUEL_ARENA_ID },
+      );
+    }
+    this.streamingArenaReserved = false;
   }
 
   /**
@@ -375,6 +436,16 @@ export class DuelSystem {
       };
     }
 
+    // Rechecked here after any walk-to-target delay, before publishing pending
+    // state. The streaming owner may hold the only arena for its full lifetime.
+    if (this.arenaPool.getAvailableCount() === 0) {
+      return {
+        success: false,
+        error: DUEL_ERRORS.NO_ARENA_AVAILABLE,
+        errorCode: DuelErrorCode.NO_ARENA_AVAILABLE,
+      };
+    }
+
     // Create pending challenge
     const result = this.pendingDuels.createChallenge(
       createPlayerID(challengerId),
@@ -417,6 +488,16 @@ export class DuelSystem {
           success: false,
           error: DUEL_ERRORS.CHALLENGE_NOT_FOUND_EXPIRED,
           errorCode: DuelErrorCode.CHALLENGE_NOT_FOUND,
+        };
+      }
+
+      // Capacity can change while an invitation is outstanding. Retire the
+      // accepted invitation without opening setup/custody when the ring is busy.
+      if (this.arenaPool.getAvailableCount() === 0) {
+        return {
+          success: false,
+          error: DUEL_ERRORS.NO_ARENA_AVAILABLE,
+          errorCode: DuelErrorCode.NO_ARENA_AVAILABLE,
         };
       }
 
@@ -551,7 +632,7 @@ export class DuelSystem {
 
     // Release arena if one was reserved
     if (session.arenaId !== null) {
-      this.releaseArena(session.arenaId);
+      this.releaseArena(session.arenaId, session.duelId);
     }
 
     // Clean up session
@@ -1038,9 +1119,17 @@ export class DuelSystem {
   /**
    * Release an arena back to the pool
    */
-  releaseArena(arenaId: number): void {
-    this.arenaPool.releaseArena(arenaId);
-    this.world.emit("duel:arena:released", { arenaId });
+  releaseArena(arenaId: number, duelId: string): void {
+    if (this.arenaPool.releaseSpecificArena(arenaId, duelId)) {
+      this.world.emit("duel:arena:released", { arenaId });
+    } else {
+      Logger.error(
+        "DuelSystem",
+        "Refused to release an arena owned by another lifecycle",
+        null,
+        { arenaId, duelId },
+      );
+    }
   }
 
   /**
@@ -1321,12 +1410,83 @@ export class DuelSystem {
    * Start the actual fight after countdown completes
    */
   private startFight(session: ServerDuelSession): void {
+    if (
+      this.isDestroyed ||
+      session.state !== "COUNTDOWN" ||
+      this.pendingFightStarts.has(session.duelId)
+    ) {
+      return;
+    }
+
+    // A production PlayerEntity with PrayerSystem custody must not enter the
+    // fight until both exact restore operations have answered. Minimal test or
+    // legacy worlds without that system retain the existing synchronous path.
+    const restores = [
+      this.restorePlayerStats(
+        session.challengerId,
+        `ordinary-duel-start-prayer:${session.duelId}:${session.challengerId}`,
+      ),
+      this.restorePlayerStats(
+        session.targetId,
+        `ordinary-duel-start-prayer:${session.duelId}:${session.targetId}`,
+      ),
+    ].filter((restore): restore is Promise<boolean> => restore !== null);
+
+    if (restores.length === 0) {
+      this.finalizeFightStart(session);
+      return;
+    }
+
+    const pending = Promise.all(restores)
+      .then((results) => {
+        if (
+          this.isDestroyed ||
+          this.sessionManager.getSession(session.duelId) !== session ||
+          session.state !== "COUNTDOWN"
+        ) {
+          return;
+        }
+        if (results.some((restored) => !restored)) {
+          this.cancelDuel(session.duelId, "prayer_restore_failed");
+          return;
+        }
+        this.finalizeFightStart(session);
+      })
+      .catch((error) => {
+        Logger.error(
+          "DuelSystem",
+          "Prayer restoration failed before duel start",
+          error instanceof Error ? error : null,
+          { duelId: session.duelId },
+        );
+        if (
+          !this.isDestroyed &&
+          this.sessionManager.getSession(session.duelId) === session &&
+          session.state === "COUNTDOWN"
+        ) {
+          this.cancelDuel(session.duelId, "prayer_restore_failed");
+        }
+      })
+      .finally(() => {
+        if (this.pendingFightStarts.get(session.duelId) === pending) {
+          this.pendingFightStarts.delete(session.duelId);
+        }
+      });
+    this.pendingFightStarts.set(session.duelId, pending);
+    void pending;
+  }
+
+  private finalizeFightStart(session: ServerDuelSession): void {
+    if (
+      this.isDestroyed ||
+      this.sessionManager.getSession(session.duelId) !== session ||
+      session.state !== "COUNTDOWN"
+    ) {
+      return;
+    }
+
     session.state = "FIGHTING";
     session.fightStartedAt = Date.now();
-
-    // rules-accurate: Restore both players to full stats before the fight
-    this.restorePlayerStats(session.challengerId);
-    this.restorePlayerStats(session.targetId);
 
     // Fill duel bot inventories with food (fire-and-forget: in-memory add is
     // synchronous so food is available before the first combat tick at 600ms)
@@ -1356,32 +1516,51 @@ export class DuelSystem {
    * Restore a player to full health, prayer, and stamina before a duel fight
    * rules-accurate: Players always start duels at full stats
    */
-  private restorePlayerStats(playerId: string): void {
+  private restorePlayerStats(
+    playerId: string,
+    operationId: string,
+  ): Promise<boolean> | null {
     const playerEntity = this.world.entities?.get?.(playerId);
-    if (!(playerEntity instanceof PlayerEntity)) return;
+    if (!(playerEntity instanceof PlayerEntity)) return null;
 
-    // Restore health to max
+    // Restore prayer points to max
+    const prayerSystem = this.world.getSystem?.("prayer") as {
+      restorePrayerPoints?: (
+        playerId: string,
+        amount: number,
+        operationId: string,
+      ) => Promise<{ success: boolean; reason?: string }>;
+      getMaxPrayerPoints?: (playerId: string) => number;
+    } | null;
+
+    if (!prayerSystem?.restorePrayerPoints) {
+      this.applyRestoredPlayerVitals(playerEntity);
+      return null;
+    }
+
+    const maxPrayer = prayerSystem.getMaxPrayerPoints?.(playerId) ?? 99;
+    return prayerSystem
+      .restorePrayerPoints(playerId, maxPrayer, operationId)
+      .then((receipt) => {
+        if (!receipt.success) {
+          Logger.warn("DuelSystem", "Prayer restore rejected before duel", {
+            playerId,
+            reason: receipt.reason ?? "unknown",
+          });
+          return false;
+        }
+        this.applyRestoredPlayerVitals(playerEntity);
+        return true;
+      });
+  }
+
+  private applyRestoredPlayerVitals(playerEntity: PlayerEntity): void {
     playerEntity.setHealth(playerEntity.getMaxHealth());
-
-    // Restore stamina to max via the stamina component
     const staminaComponent = playerEntity.getComponent("stamina");
     const staminaMax = staminaComponent?.data?.max;
     if (typeof staminaMax === "number") {
       playerEntity.setStamina(staminaMax);
     }
-
-    // Restore prayer points to max
-    const prayerSystem = this.world.getSystem?.("prayer") as {
-      restorePrayerPoints?: (playerId: string, amount: number) => void;
-      getMaxPrayerPoints?: (playerId: string) => number;
-    } | null;
-
-    if (prayerSystem?.restorePrayerPoints) {
-      const maxPrayer = prayerSystem.getMaxPrayerPoints?.(playerId) ?? 99;
-      prayerSystem.restorePrayerPoints(playerId, maxPrayer);
-    }
-
-    // Mark entity dirty so clients receive the updated stats
     playerEntity.markNetworkDirty();
   }
 
@@ -1928,18 +2107,34 @@ export class DuelSystem {
         { duelId: session.duelId, winnerId, loserId, reason },
       );
     }
+    if (!this.combatResolver.hasPendingResolution(session.duelId)) {
+      this.completeResolutionCleanup(session);
+      return;
+    }
+
+    if (this.pendingResolutionCleanup.has(session.duelId)) return;
+    this.pendingResolutionCleanup.add(session.duelId);
+    void this.combatResolver
+      .waitForResolution(session.duelId)
+      .then(() => {
+        if (!this.isDestroyed) this.completeResolutionCleanup(session);
+      })
+      .finally(() => {
+        this.pendingResolutionCleanup.delete(session.duelId);
+      });
+  }
+
+  private completeResolutionCleanup(session: ServerDuelSession): void {
+    if (this.sessionManager.getSession(session.duelId) !== session) return;
     this.removeDuelBotFoodForPlayers(
       session.challengerId,
       session.targetId,
       "resolve",
     );
 
-    // Release arena
     if (session.arenaId !== null) {
-      this.releaseArena(session.arenaId);
+      this.releaseArena(session.arenaId, session.duelId);
     }
-
-    // Clean up session
     this.sessionManager.deleteSession(session.duelId);
   }
 
@@ -2012,10 +2207,12 @@ export class DuelSystem {
    */
   /** Per-player cooldown to avoid teleporting the same player every tick. */
   private _ejectionCooldowns = new Map<string, number>();
+  private _lastEjectionCooldownPruneAt = 0;
 
   private ejectNonDuelingPlayersFromCombatArenas(): void {
     const now = Date.now();
-    const egress = this.getArenaEgressPosition();
+    this.pruneEjectionCooldowns(now);
+    let egress: { x: number; y: number; z: number } | null = null;
 
     for (const [playerId, player] of this.world.entities.players) {
       const { position } = player;
@@ -2051,6 +2248,9 @@ export class DuelSystem {
         continue;
       }
       this._ejectionCooldowns.set(playerId, now);
+      // Terrain height sampling can invoke procedural work. Resolve it lazily
+      // and at most once for the rare tick that actually ejects somebody.
+      egress ??= this.getArenaEgressPosition();
 
       this.world.emit("player:teleport", {
         playerId,
@@ -2061,22 +2261,19 @@ export class DuelSystem {
     }
   }
 
+  private pruneEjectionCooldowns(now: number): void {
+    const cooldownMs = 30_000;
+    if (now - this._lastEjectionCooldownPruneAt < cooldownMs) return;
+    this._lastEjectionCooldownPruneAt = now;
+    for (const [playerId, lastEjectedAt] of this._ejectionCooldowns) {
+      if (now - lastEjectedAt >= cooldownMs) {
+        this._ejectionCooldowns.delete(playerId);
+      }
+    }
+  }
+
   private getArenaEgressPosition(): { x: number; y: number; z: number } {
-    // Send ejected players to the starter area center (0, 0) instead of the
-    // lobby (105, 60) which is right next to the arenas and causes re-entry loops.
-    const safeX = 0;
-    const safeZ = 0;
-    const terrain = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number;
-    } | null;
-
-    const sampledY = terrain?.getHeightAt?.(safeX, safeZ);
-    const y =
-      typeof sampledY === "number" && Number.isFinite(sampledY)
-        ? sampledY + 0.1
-        : 0.42;
-
-    return { x: safeX, y, z: safeZ };
+    return getDuelArenaEgressPosition();
   }
 
   /**

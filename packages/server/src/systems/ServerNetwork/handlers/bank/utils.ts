@@ -295,6 +295,7 @@ export async function sendBankStateWithTabs(
   socket: ServerSocket,
   playerId: string,
   db: { drizzle: NodePgDatabase<typeof schema>; pool: pg.Pool },
+  responseContext?: { requestId?: string },
 ): Promise<void> {
   const bankRepo = new BankRepository(db.drizzle, db.pool);
   // modern MMORPG-style: getPlayerBank now includes qty=0 items (placeholders)
@@ -308,5 +309,8 @@ export async function sendBankStateWithTabs(
     tabs: bankTabs,
     alwaysSetPlaceholder,
     maxSlots: MAX_BANK_SLOTS,
+    ...(responseContext?.requestId
+      ? { requestId: responseContext.requestId }
+      : {}),
   });
 }

@@ -187,6 +187,10 @@ describe("ProcessingDataProvider", () => {
         expect(data.primaryOre).toBe("copper_ore");
         expect(data.secondaryOre).toBe("tin_ore");
         expect(data.coalRequired).toBe(0);
+        expect(data.inputs).toEqual([
+          { itemId: "copper_ore", quantity: 1 },
+          { itemId: "tin_ore", quantity: 1 },
+        ]);
         expect(data.levelRequired).toBe(1);
         expect(data.successRate).toBe(1); // Bronze always succeeds
       }
@@ -209,6 +213,10 @@ describe("ProcessingDataProvider", () => {
       if (data) {
         expect(data.coalRequired).toBeGreaterThan(0);
         expect(data.primaryOre).toBe("iron_ore");
+        expect(data.inputs).toEqual([
+          { itemId: "iron_ore", quantity: 1 },
+          { itemId: "coal", quantity: 2 },
+        ]);
       }
     });
   });

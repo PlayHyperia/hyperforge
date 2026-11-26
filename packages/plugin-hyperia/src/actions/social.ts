@@ -19,6 +19,21 @@ import {
 } from "../providers/socialMemory.js";
 import { getPersonalityTraits } from "../providers/personalityProvider.js";
 import { hasFood as detectHasFood } from "../utils/item-detection.js";
+import {
+  formatUntrustedPromptData,
+  parseSafePublicChat,
+} from "../utils/prompt-safety.js";
+
+function isDevelopmentPublicModelChatEnabled(runtime: IAgentRuntime): boolean {
+  const environment = String(process.env.NODE_ENV || "").toLowerCase();
+  const enabled = String(
+    runtime.getSetting("HYPERIA_LLM_PUBLIC_CHAT_ENABLED") || "",
+  ).toLowerCase();
+  return (
+    (environment === "development" || environment === "test") &&
+    enabled === "true"
+  );
+}
 
 function isPlayerEntity(
   entity: Entity,
@@ -249,43 +264,45 @@ export const shareOpinionAction: Action = {
         ? Math.round((player.health.current / player.health.max) * 100)
         : 100;
 
-      const context: string[] = [];
-      if (goal) context.push(`doing: ${goal.description}`);
-      if (healthPercent < 50) context.push(`health: ${healthPercent}%`);
-
       const nearbyTypes: string[] = [];
       for (const e of nearbyEntities.slice(0, 5)) {
         if (e.resourceType) nearbyTypes.push(e.resourceType);
         if (e.mobType) nearbyTypes.push(e.name || "mob");
       }
-      if (nearbyTypes.length > 0)
-        context.push(`nearby: ${nearbyTypes.join(", ")}`);
+      const fallbacks = [
+        "Good progress",
+        "Staying focused",
+        "Training is going well",
+        "One step at a time",
+        "Preparing for the next duel",
+      ];
+      const fallback = () =>
+        fallbacks[Math.floor(Math.random() * fallbacks.length)];
+      let opinion = fallback();
 
-      const prompt = `You are a player in an MMORPG. Generate a VERY SHORT casual comment (under 40 characters) about what you're doing. Be brief like a real MMO player.
+      if (isDevelopmentPublicModelChatEnabled(runtime)) {
+        const prompt = [
+          "Write one short, sportsmanlike RPG activity comment for public chat.",
+          "Do not insult, threaten, advertise, link, or issue instructions.",
+          "Return only one plain-text line using letters, numbers, spaces, and basic punctuation. Maximum 40 characters.",
+          formatUntrustedPromptData("SOCIAL_CHAT_CONTEXT", {
+            activity: goal?.description ?? "training",
+            healthPercent,
+            nearbyEntityTypes: nearbyTypes,
+            style: traits.chattiness > 0.6 ? "casual" : "minimal",
+          }),
+        ].join("\n");
 
-Context: ${context.join("; ")}
-Style: ${traits.chattiness > 0.6 ? "casual and brief" : "minimal"}
-
-Reply with ONLY the chat message, no quotes.`;
-
-      let opinion: string;
-      try {
-        opinion = await runtime.useModel(ModelType.TEXT_SMALL, {
-          prompt,
-          maxTokens: 20,
-          temperature: 0.8,
-        });
-        opinion = opinion.trim().replace(/^["']|["']$/g, "");
-        if (opinion.length > 50) opinion = opinion.substring(0, 47) + "...";
-      } catch {
-        const fallbacks = [
-          "Nice day!",
-          "The grind...",
-          "Lets go",
-          "Good progress",
-          "Peaceful here",
-        ];
-        opinion = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+        try {
+          const response = await runtime.useModel(ModelType.TEXT_SMALL, {
+            prompt,
+            maxTokens: 20,
+            temperature: 0.8,
+          });
+          opinion = parseSafePublicChat(response, 40) ?? opinion;
+        } catch {
+          // The curated production-safe fallback is already selected.
+        }
       }
 
       await service.executeChatMessage({ message: opinion });
@@ -403,10 +420,21 @@ export const offerHelpAction: Action = {
 
         if (foodItem) {
           try {
-            await service.executeDropItem(foodItem.itemId || foodItem.name, 1);
+            const receipt = await service.executeDropItem(
+              foodItem.itemId || foodItem.name,
+              1,
+            );
+            if (!receipt.success) {
+              helpAction = "advice";
+              helpMessage = `${targetName} eat some food!`;
+            }
           } catch {
             helpAction = "advice";
+            helpMessage = `${targetName} eat some food!`;
           }
+        } else {
+          helpAction = "advice";
+          helpMessage = `${targetName} eat some food!`;
         }
       } else if (isLowHealth) {
         helpMessage = `${targetName} eat some food!`;

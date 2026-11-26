@@ -6,6 +6,8 @@
  * @packageDocumentation
  */
 
+import type { QuestListPayload, QuestSnapshot } from "@hyperforge/shared";
+
 // ============================================================================
 // Quest Types
 // ============================================================================
@@ -29,13 +31,7 @@ export type ObjectiveType =
 
 /** Reward type */
 export type RewardType =
-  | "xp"
-  | "gold"
-  | "item"
-  | "reputation"
-  | "unlock"
-  | "xp_lamp"
-  | "quest_points";
+  "xp" | "gold" | "item" | "reputation" | "unlock" | "xp_lamp" | "quest_points";
 
 /** Single quest objective */
 export interface QuestObjective {
@@ -83,6 +79,8 @@ export interface Quest {
   description: string;
   /** Current state */
   state: QuestState;
+  /** Authoritative claim eligibility, distinct from objective-work percentage. */
+  readyToComplete?: boolean;
   /** Category */
   category: QuestCategory;
   /** Recommended level */
@@ -117,17 +115,154 @@ export interface Quest {
   lore?: string;
 }
 
+/** Do not admit partial legacy rows: they cannot describe the quest denominator. */
+export function isQuestListPayload(data: unknown): data is QuestListPayload {
+  if (!data || typeof data !== "object") return false;
+  const payload = data as Record<string, unknown>;
+  if (
+    !Array.isArray(payload.quests) ||
+    typeof payload.questPoints !== "number" ||
+    !Number.isFinite(payload.questPoints)
+  )
+    return false;
+  return payload.quests.every((value: unknown) => {
+    if (!value || typeof value !== "object") return false;
+    const quest = value as Record<string, unknown>;
+    if (
+      typeof quest.id !== "string" ||
+      typeof quest.name !== "string" ||
+      typeof quest.description !== "string" ||
+      typeof quest.currentStage !== "string" ||
+      typeof quest.startNpc !== "string" ||
+      typeof quest.questPoints !== "number" ||
+      !Number.isFinite(quest.questPoints) ||
+      typeof quest.status !== "string" ||
+      typeof quest.difficulty !== "string" ||
+      ![
+        "novice",
+        "intermediate",
+        "experienced",
+        "master",
+        "grandmaster",
+      ].includes(quest.difficulty) ||
+      ![
+        "not_started",
+        "in_progress",
+        "ready_to_complete",
+        "completed",
+      ].includes(String(quest.status)) ||
+      !Array.isArray(quest.stages) ||
+      !quest.stageProgress ||
+      typeof quest.stageProgress !== "object" ||
+      Array.isArray(quest.stageProgress)
+    )
+      return false;
+    if (
+      !Object.values(quest.stageProgress).every(
+        (count) =>
+          typeof count === "number" && Number.isFinite(count) && count >= 0,
+      )
+    )
+      return false;
+    return quest.stages.every((entry: unknown) => {
+      if (!entry || typeof entry !== "object") return false;
+      const stage = entry as Record<string, unknown>;
+      return (
+        typeof stage.id === "string" &&
+        typeof stage.description === "string" &&
+        typeof stage.type === "string" &&
+        ["dialogue", "kill", "gather", "travel", "interact"].includes(
+          String(stage.type),
+        ) &&
+        (stage.target === undefined || typeof stage.target === "string") &&
+        (!["kill", "gather"].includes(stage.type) ||
+          (typeof stage.count === "number" &&
+            typeof stage.target === "string")) &&
+        (stage.count === undefined ||
+          (typeof stage.count === "number" &&
+            Number.isFinite(stage.count) &&
+            stage.count > 0))
+      );
+    });
+  });
+}
+
+/** One projection for list, mobile detail, and detached desktop detail. */
+export function questFromSnapshot(snapshot: QuestSnapshot): Quest {
+  const currentStageIndex = snapshot.stages.findIndex(
+    (stage) => stage.id === snapshot.currentStage,
+  );
+  // Recovery may derive ready from only the current objective; never infer
+  // completion of later work from that status alone.
+  const finishedObjectives = snapshot.status === "completed";
+  const objectiveTypes = {
+    kill: "kill",
+    gather: "collect",
+    travel: "explore",
+    interact: "interact",
+  } as const;
+  const objectives: QuestObjective[] = [];
+  snapshot.stages.forEach((stage, index) => {
+    if (stage.type === "dialogue") return;
+    const target = stage.count ?? 1;
+    let current = 0;
+    if (snapshot.status !== "not_started") {
+      if (
+        finishedObjectives ||
+        (currentStageIndex >= 0 && index < currentStageIndex)
+      )
+        current = target;
+      else if (stage.type === "kill" && index === currentStageIndex)
+        current = snapshot.stageProgress.kills ?? 0;
+      else if (
+        (stage.type === "gather" || stage.type === "interact") &&
+        stage.target
+      )
+        current = snapshot.stageProgress[stage.target] ?? 0;
+    }
+    objectives.push({
+      id: stage.id,
+      type: objectiveTypes[stage.type],
+      description: stage.description,
+      current: Number.isFinite(current)
+        ? Math.max(0, Math.min(current, target))
+        : 0,
+      target,
+      optional: false,
+    });
+  });
+  return {
+    id: snapshot.id,
+    title: snapshot.name,
+    description: snapshot.description,
+    state:
+      snapshot.status === "not_started"
+        ? "available"
+        : snapshot.status === "completed"
+          ? "completed"
+          : "active",
+    readyToComplete: snapshot.status === "ready_to_complete",
+    category: "main",
+    level: 1,
+    objectives,
+    rewards: [
+      {
+        type: "quest_points",
+        name: "Quest Points",
+        amount: snapshot.questPoints,
+      },
+    ],
+    pinned: false,
+  };
+}
+
 // ============================================================================
 // Sort Functions
 // ============================================================================
 
 /** Sort options for quests */
 export type QuestSortOption =
-  | "name"
-  | "level"
-  | "progress"
-  | "category"
-  | "recent";
+  "name" | "level" | "progress" | "category" | "recent";
 
 /** Sort direction */
 export type SortDirection = "asc" | "desc";
@@ -138,9 +273,8 @@ export type SortDirection = "asc" | "desc";
 export function calculateQuestProgress(quest: Quest): number {
   const requiredObjectives = quest.objectives.filter((o) => !o.optional);
   if (requiredObjectives.length === 0) {
-    // No objectives loaded - use state to determine progress
-    // Completed quests show 100%, otherwise show 0% until objectives are fetched
-    return quest.state === "completed" ? 100 : 0;
+    // Dialogue-only quests can be ready even without counted objectives.
+    return quest.state === "completed" || quest.readyToComplete ? 100 : 0;
   }
 
   const totalProgress = requiredObjectives.reduce((acc, obj) => {
@@ -148,6 +282,16 @@ export function calculateQuestProgress(quest: Quest): number {
   }, 0);
 
   return Math.round((totalProgress / requiredObjectives.length) * 100);
+}
+
+/** Objective progress and server claim eligibility must both be satisfied. */
+export function canClaimQuest(quest: Quest): boolean {
+  return (
+    quest.state === "active" &&
+    calculateQuestProgress(quest) === 100 &&
+    areAllObjectivesComplete(quest) &&
+    (quest.readyToComplete ?? true)
+  );
 }
 
 /**
@@ -500,20 +644,13 @@ export function getRewardSummary(rewards: QuestReward[]): string {
  * Matches: "not_started" | "in_progress" | "ready_to_complete" | "completed"
  */
 export type SharedQuestStatus =
-  | "not_started"
-  | "in_progress"
-  | "ready_to_complete"
-  | "completed";
+  "not_started" | "in_progress" | "ready_to_complete" | "completed";
 
 /**
  * Shared package quest difficulty type (from @hyperforge/shared)
  */
 export type SharedQuestDifficulty =
-  | "novice"
-  | "intermediate"
-  | "experienced"
-  | "master"
-  | "grandmaster";
+  "novice" | "intermediate" | "experienced" | "master" | "grandmaster";
 
 /**
  * Shared package quest rewards structure

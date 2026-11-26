@@ -144,7 +144,7 @@ export function createTestWorldState(
       npcs: [],
     },
     world: {
-      currentZone: "lumbridge",
+      currentZone: "starter_region",
       time: 12 * 60 * 60 * 1000, // Noon
       weather: "clear",
     },

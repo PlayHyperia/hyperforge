@@ -11,7 +11,6 @@
  * - Blocked: 0x200000 (full tile block)
  * - LoS block: 0x400000 (ranged combat)
  *
- * @see https://rune-server.org/threads/collision-flags-map-rendering.620525/
  */
 
 /**

@@ -50,6 +50,18 @@ export interface StreamingStatus {
   destinations: DestinationStatus[];
   ffmpegRunning: boolean;
   clientConnected: boolean;
+  /** Audio input selected for the current encoder process. */
+  audioSource: "uninitialized" | "browser" | "pulse" | "silent";
+  /** Whether the selected live audio source is currently producing data. */
+  audioHealthy: boolean;
+  /** Last browser PCM chunk timestamp, when browser capture is selected. */
+  audioLastChunkAt: number | null;
+  /** Browser PCM chunks accepted by the current bridge lifetime. */
+  audioChunks: number;
+  /** Browser PCM chunks rejected due to encoder backpressure/unavailability. */
+  audioDroppedChunks: number;
+  /** Browser PCM chunks intentionally trimmed to bound live audio latency. */
+  audioTrimmedChunks: number;
 }
 
 /** Default streaming configuration */

@@ -101,11 +101,13 @@ describe("DuelMatchmakerConfig", () => {
       matchIntervalMs: 3000,
       countdownMs: 5000,
       verbose: true,
+      connectOnly: true,
     };
     expect(config.botCount).toBe(8);
     expect(config.rampUpDelayMs).toBe(500);
     expect(config.namePrefix).toBe("Arena");
     expect(config.verbose).toBe(true);
+    expect(config.connectOnly).toBe(true);
   });
 });
 

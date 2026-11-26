@@ -1,0 +1,880 @@
+{
+  "schemaVersion": 1,
+  "scope": "Native diagnostic work reduction; not AAA, presented FPS, full GPU frame, stream, motion, low-end or production approval.",
+  "before": {
+    "run": "gpu-frame-probe04",
+    "reportSHA256": "a1643ff230f18ae30deda6d569f6c6c48e0169eb6519892888933f3b766c124e",
+    "studyPassed": true,
+    "overallPassed": false,
+    "views": [
+      {
+        "view": "campus-link",
+        "summary": {
+          "complete": true,
+          "performanceApproved": false,
+          "measuredFrames": 485,
+          "resolvedPasses": 3198,
+          "measuredSpanMs": 9971.699999809265,
+          "cpuTickMs": {
+            "count": 485,
+            "min": 18.09999990463257,
+            "p50": 19.799999952316284,
+            "p95": 23.799999952316284,
+            "p99": 28.5,
+            "max": 32
+          },
+          "renderGpuMs": {
+            "count": 485,
+            "min": 8.781824,
+            "p50": 18.153472,
+            "p95": 23.527424000000003,
+            "p99": 25.493504,
+            "max": 29.687808
+          },
+          "computeGpuMs": {
+            "count": 485,
+            "min": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0
+          },
+          "totalPassGpuMs": {
+            "count": 485,
+            "min": 8.781824,
+            "p50": 18.153472,
+            "p95": 23.527424000000003,
+            "p99": 25.493504,
+            "max": 29.687808
+          },
+          "clientTickIntervalMs": {
+            "count": 484,
+            "min": 18.299999952316284,
+            "p50": 20.09999990463257,
+            "p95": 24.200000047683716,
+            "p99": 29.100000143051147,
+            "max": 32.299999952316284
+          },
+          "drawCalls": {
+            "count": 485,
+            "min": 1269,
+            "p50": 1273,
+            "p95": 1277,
+            "p99": 1277,
+            "max": 1277
+          },
+          "triangles": {
+            "count": 485,
+            "min": 5188003,
+            "p50": 5408575,
+            "p95": 5468731,
+            "p99": 5468731,
+            "max": 5468731
+          },
+          "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+        },
+        "rawFrames": 533,
+        "rawPasses": 3198,
+        "phase": [0.49228754965, 0.5418251029500001],
+        "cpuProfile": {
+          "file": "cpu-campus-link.cpuprofile",
+          "sha256": "9ab334e4503f7b74bf980c5868bef2e5f8e9e84863422b31defda3eaaed6feec",
+          "bytes": 830573,
+          "samples": 7633,
+          "samplingIntervalUs": 1000,
+          "startTime": 2140520437157,
+          "endTime": 2140532098050
+        },
+        "workCalls": 6,
+        "workDraws": 1281
+      },
+      {
+        "view": "meadow-close",
+        "summary": {
+          "complete": true,
+          "performanceApproved": false,
+          "measuredFrames": 600,
+          "resolvedPasses": 2648,
+          "measuredSpanMs": 9982.200000047684,
+          "cpuTickMs": {
+            "count": 600,
+            "min": 8,
+            "p50": 9.600000143051147,
+            "p95": 11.299999952316284,
+            "p99": 13.199999809265137,
+            "max": 14.699999809265137
+          },
+          "renderGpuMs": {
+            "count": 600,
+            "min": 6.094848,
+            "p50": 15.794176,
+            "p95": 18.67776,
+            "p99": 20.31616,
+            "max": 23.26528
+          },
+          "computeGpuMs": {
+            "count": 600,
+            "min": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0
+          },
+          "totalPassGpuMs": {
+            "count": 600,
+            "min": 6.094848,
+            "p50": 15.794176,
+            "p95": 18.67776,
+            "p99": 20.31616,
+            "max": 23.26528
+          },
+          "clientTickIntervalMs": {
+            "count": 599,
+            "min": 14.700000047683716,
+            "p50": 16.699999809265137,
+            "p95": 18.09999990463257,
+            "p99": 18.299999952316284,
+            "max": 18.5
+          },
+          "drawCalls": {
+            "count": 600,
+            "min": 610,
+            "p50": 614,
+            "p95": 614,
+            "p99": 614,
+            "max": 614
+          },
+          "triangles": {
+            "count": 600,
+            "min": 2752405,
+            "p50": 2764405,
+            "p95": 2764405,
+            "p99": 2764405,
+            "max": 2764405
+          },
+          "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+        },
+        "rawFrames": 662,
+        "rawPasses": 2648,
+        "phase": [0.5432484362833333, 0.5912599762125],
+        "cpuProfile": {
+          "file": "cpu-meadow-close.cpuprofile",
+          "sha256": "cdac87bc48ec535b87315fa15fd0c4b053bba688b1fc8e0146140086f0938ea2",
+          "bytes": 431988,
+          "samples": 7573,
+          "samplingIntervalUs": 1000,
+          "startTime": 2140532597114,
+          "endTime": 2140544012250
+        },
+        "workCalls": 4,
+        "workDraws": 610
+      }
+    ]
+  },
+  "after": {
+    "run": "gpu-frame-probe09",
+    "reportSHA256": "90755e6d1f42c5f044bb9f5504cb271044c65ef402e57294d7e972558c941303",
+    "studyPassed": true,
+    "overallPassed": false,
+    "views": [
+      {
+        "view": "campus-link",
+        "summary": {
+          "complete": true,
+          "performanceApproved": false,
+          "measuredFrames": 595,
+          "resolvedPasses": 2628,
+          "measuredSpanMs": 9974.400000095367,
+          "cpuTickMs": {
+            "count": 595,
+            "min": 9.200000047683716,
+            "p50": 10.900000095367432,
+            "p95": 16.600000143051147,
+            "p99": 20.90000009536743,
+            "max": 26.600000143051147
+          },
+          "renderGpuMs": {
+            "count": 595,
+            "min": 6.946816,
+            "p50": 14.876672000000001,
+            "p95": 17.432576,
+            "p99": 19.00544,
+            "max": 20.905984
+          },
+          "computeGpuMs": {
+            "count": 595,
+            "min": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0
+          },
+          "totalPassGpuMs": {
+            "count": 595,
+            "min": 6.946816,
+            "p50": 14.876672000000001,
+            "p95": 17.432576,
+            "p99": 19.00544,
+            "max": 20.905984
+          },
+          "clientTickIntervalMs": {
+            "count": 594,
+            "min": 9.300000190734863,
+            "p50": 16.59999990463257,
+            "p95": 24.90000009536743,
+            "p99": 26.299999952316284,
+            "max": 27
+          },
+          "drawCalls": {
+            "count": 595,
+            "min": 641,
+            "p50": 643,
+            "p95": 645,
+            "p99": 645,
+            "max": 645
+          },
+          "triangles": {
+            "count": 595,
+            "min": 2709651,
+            "p50": 2739729,
+            "p95": 2819937,
+            "p99": 2819937,
+            "max": 2819937
+          },
+          "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+        },
+        "rawFrames": 657,
+        "rawPasses": 2628,
+        "phase": [0.48746488784583336, 0.5389963979166666],
+        "cpuProfile": {
+          "file": "cpu-campus-link.cpuprofile",
+          "sha256": "966279e4c2c698a3aa29ea17c1761cb86e0c9eced1206a3fd7bec08462884060",
+          "bytes": 465228,
+          "samples": 7603,
+          "samplingIntervalUs": 1000,
+          "startTime": 2143017826826,
+          "endTime": 2143030034435
+        },
+        "workCalls": 4,
+        "workDraws": 645
+      },
+      {
+        "view": "meadow-close",
+        "summary": {
+          "complete": true,
+          "performanceApproved": false,
+          "measuredFrames": 591,
+          "resolvedPasses": 2612,
+          "measuredSpanMs": 9982.699999809265,
+          "cpuTickMs": {
+            "count": 591,
+            "min": 8.099999904632568,
+            "p50": 10.100000143051147,
+            "p95": 14.699999809265137,
+            "p99": 24,
+            "max": 80.40000009536743
+          },
+          "renderGpuMs": {
+            "count": 591,
+            "min": 6.291455999999999,
+            "p50": 16.777216,
+            "p95": 20.31616,
+            "p99": 21.95456,
+            "max": 25.427968
+          },
+          "computeGpuMs": {
+            "count": 591,
+            "min": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0
+          },
+          "totalPassGpuMs": {
+            "count": 591,
+            "min": 6.291455999999999,
+            "p50": 16.777216,
+            "p95": 20.31616,
+            "p99": 21.95456,
+            "max": 25.427968
+          },
+          "clientTickIntervalMs": {
+            "count": 590,
+            "min": 8.799999952316284,
+            "p50": 16.600000143051147,
+            "p95": 24.5,
+            "p99": 27.200000047683716,
+            "max": 80.70000004768372
+          },
+          "drawCalls": {
+            "count": 591,
+            "min": 606,
+            "p50": 608,
+            "p95": 612,
+            "p99": 612,
+            "max": 612
+          },
+          "triangles": {
+            "count": 591,
+            "min": 2652145,
+            "p50": 2746405,
+            "p95": 2788483,
+            "p99": 2788483,
+            "max": 2788483
+          },
+          "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+        },
+        "rawFrames": 653,
+        "rawPasses": 2612,
+        "phase": [0.54041973125, 0.5921297868041667],
+        "cpuProfile": {
+          "file": "cpu-meadow-close.cpuprofile",
+          "sha256": "168062aa352858fce427d44ea5b4a4ce9d034bb2fbb42e38d3aaf7e960da6d01",
+          "bytes": 471290,
+          "samples": 7601,
+          "samplingIntervalUs": 1000,
+          "startTime": 2143030506991,
+          "endTime": 2143042792869
+        },
+        "workCalls": 4,
+        "workDraws": 610
+      }
+    ]
+  },
+  "matchedViews": [
+    {
+      "view": "meadow-close",
+      "file": "planting-meadow-close.png",
+      "sha256": "a28e94869ac6e531bce262b04e705601f509e3e8bc3fb9a79935cb35be641920",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.46140467013750003, 0.4632100868041667]
+    },
+    {
+      "view": "bank",
+      "file": "planting-bank.png",
+      "sha256": "fb372e749980812fe77c86a2283863620486e404e9c362aab6ef073a1fb6aae9",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.4647375868041667, 0.46650842013750005]
+    },
+    {
+      "view": "anvil",
+      "file": "planting-anvil.png",
+      "sha256": "5c922b190b748aafc934470a19ed16af85f43a59f01558bab6679c5be8cafa13",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.46796675347083344, 0.4698417534708334]
+    },
+    {
+      "view": "campus-link",
+      "file": "planting-campus-link.png",
+      "sha256": "e7cf2126965d8c7ed931520627583c3d20f8acea0a8863a603ee15a31acf9fab",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.47130008680416674, 0.4733146701375001]
+    },
+    {
+      "view": "west-ridge",
+      "file": "planting-west-ridge.png",
+      "sha256": "22e25b050c4bf00844c1c1c29dd90392ce90da9d39a92080de2bf082f46b19e2",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.47477217013750006, 0.4764738368041667]
+    },
+    {
+      "view": "bay-horizon",
+      "file": "planting-bay-horizon.png",
+      "sha256": "5612867779cc025100072693cf934d610a3c2efbc9c303e95bca58dd9c217298",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.47793175347083333, 0.4798405034708334]
+    },
+    {
+      "view": "smithy-front",
+      "file": "planting-smithy-front.png",
+      "sha256": "5a24e3bd2ab46db028d51701f3ec5586a406f28961a6f4602250290ab71b59d5",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.48123050347083335, 0.4828819711791667]
+    },
+    {
+      "view": "smithy-west",
+      "file": "planting-smithy-west.png",
+      "sha256": "6b7ab3a50d69f390d7dfb0e13d01e66f362e22a6cda1993638fbeeb065e573ae",
+      "cameraSettingsPlacementsGrassEqual": true,
+      "phase": [0.4843398878458334, 0.48600655451249997]
+    }
+  ],
+  "grass": [
+    {
+      "x": 250,
+      "z": 350,
+      "count": 483,
+      "rootBytes": 46368,
+      "naturalPlazaClumps": 0,
+      "excludedRoots": 0
+    },
+    {
+      "x": 350,
+      "z": 250,
+      "count": 344,
+      "rootBytes": 33024,
+      "naturalPlazaClumps": 11,
+      "excludedRoots": 0
+    },
+    {
+      "x": 350,
+      "z": 350,
+      "count": 187,
+      "rootBytes": 17952,
+      "naturalPlazaClumps": 44,
+      "excludedRoots": 0
+    },
+    {
+      "x": 350,
+      "z": 450,
+      "count": 521,
+      "rootBytes": 50016,
+      "naturalPlazaClumps": 0,
+      "excludedRoots": 0
+    },
+    {
+      "x": 450,
+      "z": 350,
+      "count": 257,
+      "rootBytes": 24672,
+      "naturalPlazaClumps": 0,
+      "excludedRoots": 0
+    },
+    {
+      "x": 450,
+      "z": 450,
+      "count": 483,
+      "rootBytes": 46368,
+      "naturalPlazaClumps": 0,
+      "excludedRoots": 0
+    }
+  ],
+  "reflectionToggle": {
+    "before": {
+      "enabled": false,
+      "intensity": 0,
+      "node": "867edc12-3d64-40d3-9c19-917d3337f58e",
+      "base": "c5c0dee2-6c60-4aa9-8f2a-d067b14b97c7",
+      "registered": "render",
+      "runtime": "none",
+      "targets": 0
+    },
+    "steps": [
+      {
+        "enabled": true,
+        "state": {
+          "enabled": true,
+          "intensity": 0.4,
+          "node": "867edc12-3d64-40d3-9c19-917d3337f58e",
+          "base": "c5c0dee2-6c60-4aa9-8f2a-d067b14b97c7",
+          "registered": "render",
+          "runtime": "render",
+          "targets": 1
+        },
+        "calls": 6,
+        "draws": 1277,
+        "contexts": [
+          {
+            "camera": {
+              "uuid": "e4385dba-8425-4c46-90db-58166c37770d",
+              "name": "",
+              "type": "PerspectiveCamera",
+              "main": false,
+              "layers": 1,
+              "matrixWorld": [
+                0.7071067811865476, 0, -0.7071067811865475, 0,
+                -0.45749571099781394, 0.7624928516630234, -0.45749571099781405,
+                0, 0.539163866017192, 0.6469966392206304, 0.5391638660171921, 0,
+                0, 0, 0, 1
+              ],
+              "projection": [
+                1.153295910888354, 0, 0, 0, 0, 2.050303841579296, 0, 0, 0, 0,
+                -1.0000200004000082, -1, 0, 0, -0.2000040000800016, 0
+              ],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 128,
+              "height": 72,
+              "samples": 1,
+              "textureNames": [""],
+              "depthTexture": "353cd275-c778-4c83-9c3b-9dfa4d46871d",
+              "colorTextures": ["e8ba3e6b-00a7-4f6c-bcc7-45549ce19366"],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "eccd5d5d-a6f4-4f06-97be-b3bf6b9b496c",
+              "name": "",
+              "type": "PerspectiveCamera",
+              "main": true,
+              "layers": 7,
+              "matrixWorld": [
+                0.7071067811865476, 0, -0.7071067811865475, 0,
+                -0.45749571099781394, 0.7624928516630234, -0.45749571099781405,
+                0, 0.539163866017192, 0.6469966392206304, 0.5391638660171921, 0,
+                427.5, 101.41930152309769, 407, 1
+              ],
+              "projection": [
+                1.153295910888354, 0, 0, 0, 0, 2.050303841579296, 0, 0, 0, 0,
+                -1.0000200004000082, -1, 0, 0, -0.2000040000800016, 0
+              ],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 1280,
+              "height": 720,
+              "samples": 4,
+              "textureNames": [""],
+              "depthTexture": "23126917-05c6-4d88-a23e-b77fe07585f6",
+              "colorTextures": ["e1222fbc-043f-45bb-9812-646ec5a56d31"],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "05575cc1-d454-478b-a3e7-6a4f2c0b0d58",
+              "name": "",
+              "type": "OrthographicCamera",
+              "main": false,
+              "layers": 7,
+              "matrixWorld": [
+                -0.8659921025362327, 0, 0.5000576750184675, 0,
+                0.49160434127679037, 0.18309469018127045, 0.851352750665221, 0,
+                -0.09155790508027278, 0.9830952824764367, -0.1585585557132987,
+                0, 304.4281710514741, 517.4736691451109, 321.0794155572194, 1
+              ],
+              "projection": [
+                0.005, 0, 0, 0, 0, 0.005, 0, 0, 0, 0, -0.0016680567139282735, 0,
+                0, 0, -0.0008340283569641367, 1
+              ],
+              "cascade": -1,
+              "directSun": true,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 4096,
+              "height": 4096,
+              "samples": 1,
+              "textureNames": ["ShadowMap"],
+              "depthTexture": "de1d9b17-a0d4-4e5b-8908-e3f24229576d",
+              "colorTextures": ["294db520-7e65-44b4-af15-9516306e0622"],
+              "sunShadow": true,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "8e4baa02-8fe7-4aeb-89d1-0130f2fadffb",
+              "name": "",
+              "type": "PerspectiveCamera",
+              "main": false,
+              "layers": 7,
+              "matrixWorld": [
+                -0.7071067811865475, -2.220446049250313e-16, 0.7071067811865475,
+                0, -0.4574957109978151, -0.7624928516630216,
+                -0.4574957109978154, 0, 0.5391638660171911, -0.6469966392206322,
+                0.5391638660171909, 0, 427.5, -69.41930152309786,
+                406.99999999999994, 1
+              ],
+              "projection": [
+                1.153295910888354, 0, -6.436930912855374e-17, 0, 0,
+                2.050303841579296, -0.7546838948679271, 0, 0, 0,
+                -0.6403705196560672, -1, 0, 0, -84.54449248901152, 0
+              ],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": true
+            },
+            "target": {
+              "uuid": null,
+              "width": 640,
+              "height": 360,
+              "samples": 1,
+              "textureNames": [""],
+              "depthTexture": "1040abd2-deaa-4b97-82ba-bfbb7bbbebb3",
+              "colorTextures": ["fe06c95b-222c-4a09-bc42-d32ef08d56f3"],
+              "sunShadow": false,
+              "waterReflection": true
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "05575cc1-d454-478b-a3e7-6a4f2c0b0d58",
+              "name": "",
+              "type": "OrthographicCamera",
+              "main": false,
+              "layers": 7,
+              "matrixWorld": [
+                -0.8659921025362327, 0, 0.5000576750184675, 0,
+                0.49160434127679037, 0.18309469018127045, 0.851352750665221, 0,
+                -0.09155790508027278, 0.9830952824764367, -0.1585585557132987,
+                0, 304.4281710514741, 517.4736691451109, 321.0794155572194, 1
+              ],
+              "projection": [
+                0.005, 0, 0, 0, 0, 0.005, 0, 0, 0, 0, -0.0016680567139282735, 0,
+                0, 0, -0.0008340283569641367, 1
+              ],
+              "cascade": -1,
+              "directSun": true,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 4096,
+              "height": 4096,
+              "samples": 1,
+              "textureNames": ["ShadowMap"],
+              "depthTexture": "de1d9b17-a0d4-4e5b-8908-e3f24229576d",
+              "colorTextures": ["294db520-7e65-44b4-af15-9516306e0622"],
+              "sunShadow": true,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "4489ba0d-3d0b-48fe-b04a-914e773f7eef",
+              "name": "",
+              "type": "OrthographicCamera",
+              "main": false,
+              "layers": 1,
+              "matrixWorld": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+              "projection": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 1280,
+              "height": 720,
+              "samples": 1,
+              "textureNames": [],
+              "depthTexture": null,
+              "colorTextures": [],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          }
+        ],
+        "cleanup": {
+          "tickRestored": true,
+          "updateRestored": true,
+          "beginRestored": true
+        }
+      },
+      {
+        "enabled": false,
+        "state": {
+          "enabled": false,
+          "intensity": 0,
+          "node": "867edc12-3d64-40d3-9c19-917d3337f58e",
+          "base": "c5c0dee2-6c60-4aa9-8f2a-d067b14b97c7",
+          "registered": "render",
+          "runtime": "none",
+          "targets": 1
+        },
+        "calls": 4,
+        "draws": 643,
+        "contexts": [
+          {
+            "camera": {
+              "uuid": "e4385dba-8425-4c46-90db-58166c37770d",
+              "name": "",
+              "type": "PerspectiveCamera",
+              "main": false,
+              "layers": 1,
+              "matrixWorld": [
+                0.7071067811865476, 0, -0.7071067811865475, 0,
+                -0.45749571099781394, 0.7624928516630234, -0.45749571099781405,
+                0, 0.539163866017192, 0.6469966392206304, 0.5391638660171921, 0,
+                0, 0, 0, 1
+              ],
+              "projection": [
+                1.153295910888354, 0, 0, 0, 0, 2.050303841579296, 0, 0, 0, 0,
+                -1.0000200004000082, -1, 0, 0, -0.2000040000800016, 0
+              ],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 128,
+              "height": 72,
+              "samples": 1,
+              "textureNames": [""],
+              "depthTexture": "353cd275-c778-4c83-9c3b-9dfa4d46871d",
+              "colorTextures": ["e8ba3e6b-00a7-4f6c-bcc7-45549ce19366"],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "eccd5d5d-a6f4-4f06-97be-b3bf6b9b496c",
+              "name": "",
+              "type": "PerspectiveCamera",
+              "main": true,
+              "layers": 7,
+              "matrixWorld": [
+                0.7071067811865476, 0, -0.7071067811865475, 0,
+                -0.45749571099781394, 0.7624928516630234, -0.45749571099781405,
+                0, 0.539163866017192, 0.6469966392206304, 0.5391638660171921, 0,
+                427.5, 101.41930152309769, 407, 1
+              ],
+              "projection": [
+                1.153295910888354, 0, 0, 0, 0, 2.050303841579296, 0, 0, 0, 0,
+                -1.0000200004000082, -1, 0, 0, -0.2000040000800016, 0
+              ],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 1280,
+              "height": 720,
+              "samples": 4,
+              "textureNames": [""],
+              "depthTexture": "23126917-05c6-4d88-a23e-b77fe07585f6",
+              "colorTextures": ["e1222fbc-043f-45bb-9812-646ec5a56d31"],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "05575cc1-d454-478b-a3e7-6a4f2c0b0d58",
+              "name": "",
+              "type": "OrthographicCamera",
+              "main": false,
+              "layers": 7,
+              "matrixWorld": [
+                -0.8499097835610014, -5.551115123125783e-17, 0.5269282302242801,
+                0, 0.5168154695368861, 0.19497562985146366, 0.8335983890407856,
+                0, -0.10273816357449617, 0.9808080871220552,
+                -0.16571169536672747, 0, 298.89591829295716, 516.0241733286786,
+                317.5715846459214, 1
+              ],
+              "projection": [
+                0.005, 0, 0, 0, 0, 0.005, 0, 0, 0, 0, -0.0016680567139282735, 0,
+                0, 0, -0.0008340283569641367, 1
+              ],
+              "cascade": -1,
+              "directSun": true,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 4096,
+              "height": 4096,
+              "samples": 1,
+              "textureNames": ["ShadowMap"],
+              "depthTexture": "de1d9b17-a0d4-4e5b-8908-e3f24229576d",
+              "colorTextures": ["294db520-7e65-44b4-af15-9516306e0622"],
+              "sunShadow": true,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          },
+          {
+            "camera": {
+              "uuid": "4489ba0d-3d0b-48fe-b04a-914e773f7eef",
+              "name": "",
+              "type": "OrthographicCamera",
+              "main": false,
+              "layers": 1,
+              "matrixWorld": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+              "projection": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
+              "cascade": -1,
+              "directSun": false,
+              "waterReflection": false
+            },
+            "target": {
+              "uuid": null,
+              "width": 1280,
+              "height": 720,
+              "samples": 1,
+              "textureNames": [],
+              "depthTexture": null,
+              "colorTextures": [],
+              "sunShadow": false,
+              "waterReflection": false
+            },
+            "shadowAutoUpdate": true
+          }
+        ],
+        "cleanup": {
+          "tickRestored": true,
+          "updateRestored": true,
+          "beginRestored": true
+        }
+      }
+    ],
+    "after": {
+      "enabled": false,
+      "intensity": 0,
+      "node": "867edc12-3d64-40d3-9c19-917d3337f58e",
+      "base": "c5c0dee2-6c60-4aa9-8f2a-d067b14b97c7",
+      "registered": "render",
+      "runtime": "none",
+      "targets": 1
+    }
+  },
+  "verification": {
+    "tests": 1160,
+    "testFiles": 84,
+    "focused": 3,
+    "preflights": 13,
+    "types": ["shared", "client", "server"],
+    "builds": ["shared", "server", "client"],
+    "sourcePins": 675,
+    "archives": 596,
+    "images": 14,
+    "pageErrors": 0,
+    "gpuErrors": 0,
+    "cleanupErrors": 0,
+    "consoleErrors": 19,
+    "browserClosed": true,
+    "portsAfter": {
+      "3333": "",
+      "5555": "",
+      "9236": "",
+      "57831": ""
+    }
+  },
+  "sourceFiles": [
+    {
+      "path": "packages/shared/src/systems/shared/world/WaterSystem.ts",
+      "sha256": "9797e7e5416ca1733f27a2dac25e4dbe08bee6ec1282cf59e8ba246d10ae0de3",
+      "bytes": 61486,
+      "observedAt": "2026-09-12T18:49:10.751Z",
+      "archive": "executed/hyperia-implementation/packages/shared/src/systems/shared/world/WaterSystem.ts"
+    },
+    {
+      "path": "packages/shared/src/systems/shared/world/__tests__/WaterSystem.materials.test.ts",
+      "sha256": "d821537511ac0508c9b5401caa7bf15354ffb7273457a2fb0b55b0abf202f895",
+      "bytes": 4149,
+      "scope": "Unit-test source verified after native completion; not a native-run source pin."
+    }
+  ]
+}

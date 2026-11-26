@@ -18,10 +18,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: 1.1.38
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: |
@@ -30,6 +35,12 @@ jobs:
             echo "Attempt $i failed, retrying in $((i * 15))s..."
             sleep $((i * 15))
           done
+
+      - name: Verify pinned ElizaOS runtime graph
+        run: |
+          bun run eliza:runtime-pins
+          bun run eliza:runtime-pins:test
+          bun run eliza:runtime-smoke
 
       - name: Run ESLint
         run: bun run lint
@@ -67,15 +78,21 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libglib2.0-dev
+            libglib2.0-dev \
+            ffmpeg
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: 1.1.38
+          bun-version: 1.3.14
 
       - name: Cache Turbo
         uses: actions/cache@v5
@@ -103,6 +120,29 @@ jobs:
           cd ../plugin-hyperia && bun run build
           cd ../server && bun run build
 
+      - name: Verify launch-world navigation gates
+        run: |
+          bun run assets:verify:duel-arena-layout
+          bun run assets:verify:preparation-topology
+          bun run assets:verify:town-collision
+
+      - name: Verify stream media runtime and startup failures
+        run: |
+          bun run stream:runtime:test
+          bun run physics:runtime:test
+
+      - name: Verify browser stream resource accounting
+        run: |
+          bunx --no-install playwright install --with-deps chromium
+          bun run stream:browser-performance:test
+
+      - name: Verify duel equipment authority policy
+        run: |
+          bun run equipment:active-combat-orientation:test
+          bun run equipment:active-combat-orientation:check
+          bun run equipment:fit:test
+          bun run duel:smoke:policy:test
+
       - name: Setup database schema
         working-directory: packages/server
         run: bunx drizzle-kit push
@@ -115,6 +155,30 @@ jobs:
           DATABASE_URL: postgresql://hyperia:hyperia_test@localhost:5432/hyperia_test
           NODE_ENV: test
           PUBLIC_CDN_URL: https://assets.hyperia.club
+
+      - name: Verify retained competitive tactical ablation
+        working-directory: packages/server
+        run: bun run fixtures:tactical-ablation:check
+
+      - name: Verify gathering reward process-kill custody
+        working-directory: packages/server
+        run: bun run test:gathering-reward-chaos
+
+      - name: Verify processing action process-kill custody
+        working-directory: packages/server
+        run: bun run test:processing-action-chaos
+
+      - name: Verify external ElizaOS preparation process-kill fencing
+        working-directory: packages/server
+        run: bun run test:external-duel-preparation-host-lease-built-chaos
+
+      - name: Verify production agent WebSocket authentication, reconnect, and on-deck host loss
+        working-directory: packages/server
+        run: bun run test:agent-websocket-auth-built
+
+      - name: Verify fired projectile process and database crash custody
+        working-directory: packages/server
+        run: bun run test:projectile-cost-host-loss-chaos
 
   build:
     name: Build
@@ -140,10 +204,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: 1.1.38
+          bun-version: 1.3.14
 
       - name: Cache Turbo
         uses: actions/cache@v5

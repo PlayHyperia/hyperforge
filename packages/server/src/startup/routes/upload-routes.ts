@@ -30,6 +30,7 @@ import {
   getUploadRateLimit,
   isRateLimitEnabled,
 } from "../../infrastructure/rate-limit/rate-limit-config.js";
+import { isProductionLikeEnvironment } from "../../infrastructure/http/origin-policy.js";
 
 /**
  * Sanitize a filename to prevent path traversal attacks.
@@ -70,6 +71,14 @@ export function registerUploadRoutes(
   fastify: FastifyInstance,
   config: ServerConfig,
 ): void {
+  // Production assets are immutable deployment/CDN inputs. Keeping this legacy
+  // filesystem writer out of the production route table removes an unnecessary
+  // disk-exhaustion and executable-content boundary.
+  if (isProductionLikeEnvironment(config.nodeEnv)) {
+    console.log("[UploadRoutes] Production upload routes disabled");
+    return;
+  }
+
   // Build route config with rate limiting if enabled
   const uploadRouteConfig = isRateLimitEnabled()
     ? { config: { rateLimit: getUploadRateLimit() } }

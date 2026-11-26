@@ -168,6 +168,19 @@ export interface Item {
   // Visual assets
   modelPath: string | null; // 3D model path for DROPPED items (null if no model exists yet)
   equippedModelPath?: string | null; // 3D model path for EQUIPPED items (hand-held weapons)
+  /** SHA-256 identity for the default equipped model, used for cache-safe URLs. */
+  equippedModelSha256?: string;
+  /** Avatar-specific fitted equipped models, keyed by the exact registered avatar ID. */
+  equippedModelPathsByAvatar?: Record<string, string>;
+  /** SHA-256 identities matching equippedModelPathsByAvatar. */
+  equippedModelSha256ByAvatar?: Record<string, string>;
+  /**
+   * Avatar-specific gathering presentation models. This keeps a tool's fitted
+   * gathering attachment separate from its weapon-slot combat presentation.
+   */
+  gatheringModelPathsByAvatar?: Record<string, string>;
+  /** SHA-256 identities matching gatheringModelPathsByAvatar. */
+  gatheringModelSha256ByAvatar?: Record<string, string>;
   iconPath: string; // UI icon path
 
   // Ground item display overrides
@@ -376,11 +389,7 @@ export interface InventorySlotItem {
 }
 
 export type StoreItemCategory =
-  | "tools"
-  | "ammunition"
-  | "consumables"
-  | "weapons"
-  | "armor";
+  "tools" | "ammunition" | "consumables" | "weapons" | "armor";
 
 // Store types
 export interface StoreItem {

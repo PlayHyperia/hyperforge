@@ -26,6 +26,18 @@ node_modules
 **/coverage
 **/test-results
 **/playwright-report
+**/__tests__/
+**/tests/
+**/*.test.*
+**/*.spec.*
+**/*.e2e.*
+
+# Retained local qualification evidence is never a production build input.
+artifacts/
+progress-videos/
+heap-snapshots/
+**/*.cpuprofile
+**/*.heapsnapshot
 
 # Development files
 *.log
@@ -45,9 +57,12 @@ packages/server/world/assets/*
 assets/
 
 # Other packages not needed for server
-packages/asset-forge
-packages/app
-packages/website
+packages/asset-forge/**
+!packages/asset-forge/package.json
+packages/app/**
+!packages/app/package.json
+packages/website/**
+!packages/website/package.json
 packages/docs-site
 
 # Tools and publishing (not needed for build)

@@ -7,6 +7,20 @@ export { createServerWorld } from "./createServerWorld";
 export { createViewerWorld } from "./createViewerWorld";
 export { createNodeClientWorld } from "./createNodeClientWorld";
 export {
+  STREAMING_RENDER_PROFILES,
+  resolveExplicitStreamingRenderProfile,
+  resolveStreamingRenderFrameRate,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
+  type StreamingRenderProfile,
+  type StreamingRenderProfileId,
+  type StreamingRenderPreferences,
+  type StreamingRenderAppliedState,
+  type StreamingGrassProfileReceipt,
+  type GrassSurfaceEligibility,
+  type StreamingRenderProfileApplication,
+} from "./clientViewportMode";
+export {
   createEditorWorld,
   initEditorWorld,
   EditorWorld,

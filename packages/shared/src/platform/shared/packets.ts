@@ -120,7 +120,7 @@ const names = [
   'gatheringComplete',
   'gatheringStarted',  // Server -> Client: gathering session started
   'gatheringStopped',  // Server -> Client: gathering session stopped
-  'gatheringToolShow', // Server -> Client: show gathering tool in hand (classic MMORPG fishing rod)
+  'gatheringToolShow', // Server -> Client: show the active gathering tool in hand
   'gatheringToolHide', // Server -> Client: hide gathering tool from hand
   // Processing packets (firemaking/cooking)
   'firemakingRequest', // Client -> Server: request to light fire (tinderbox + logs)
@@ -422,7 +422,38 @@ const names = [
   'entitiesBatchAdded', // Server -> Client: batch of newly spawned entities for a tile
   // Dev diagnostics
   'tickHealth',         // Server -> Client: tick system health stats for DevStats panel
-]
+  // Authoritative projectile impact (appended to preserve all existing packet IDs)
+  'projectileHit',      // Server -> Client: remove projectile at server damage time
+  // Appended to preserve every existing positional packet ID.
+  'runecraftingComplete', // Server -> Client: runecrafting transaction finished
+  // Correlated negative processing acknowledgement (append-only protocol).
+  'processingRejected', // Server -> Client: requested processing action was rejected
+  // Correlated processing liveness acknowledgement (append-only protocol).
+  'processingProgress', // Server -> Client: authority still owns the processing request
+  // Player-scoped durable processing receipt lookup (bidirectional, append-only).
+  'processingRequestStatus',
+  // Player-scoped durable command reconstruction and terminal acknowledgement.
+  'processingRequestRecovery',
+  // Correlated Prayer acknowledgement (append-only protocol).
+  'prayerActionReceipt', // Server -> Client: exact authoritative Prayer receipt
+  // Durable ordinary external-agent banking (append-only protocol).
+  'externalAgentBankTransfer', // Bidirectional: execute/return exact bank receipt
+  'externalAgentBankRecovery', // Bidirectional: recover/ack one durable bank command
+  // Spectator-safe activity presentation (append-only protocol).
+  'fishingInteractionPresentation', // Server -> Client: exact held/world fishing phase
+  'processingInteractionPresentation', // Server -> Client: privacy-safe station/portable work state
+  // Exact terminal lifecycle for an accepted projectile launch (append-only).
+  'projectileCancelled', // Server -> Client: remove one server-cancelled projectile visual
+  // Bounded application-level recovery for rare mid-stream projectile gaps.
+  'requestProjectileEventReplay', // Client -> Server: request an exact missing sequence range
+  'projectileEventReplay', // Server -> Client: ordered authoritative events for that range
+  // Exact authoritative completion for a manual inventory-to-ground transfer.
+  'groundItemDropResult', // Server -> Client: committed/rejected drop operation receipt
+  // Private-preparation contestant host ownership (bidirectional, append-only).
+  'duelPreparationHostLease', // Claim/heartbeat acknowledgement for the authenticated contestant
+  'duelPreparationStatus', // Private correlated planning/readiness acknowledgement
+  'duelPreparationStrategy', // Bounded authenticated external ElizaOS role decision
+];
 
 const byName: Record<string, PacketInfo> = {};
 const byId: Record<number, PacketInfo> = {};

@@ -18,6 +18,7 @@ interface PostFightStatsCardProps {
 
 const WIN_REASON_LABELS: Record<string, string> = {
   kill: "Knockout",
+  forfeit: "Forfeit",
   hp_advantage: "HP Advantage",
   damage_advantage: "Damage Advantage",
   draw: "Draw",
@@ -32,12 +33,20 @@ export function PostFightStatsCard({
   const reasonLabel = WIN_REASON_LABELS[winReason] ?? winReason;
 
   return (
-    <div style={styles.container}>
+    <div className="streaming-post-fight-card" style={styles.container}>
       <div style={styles.reasonBadge}>{reasonLabel}</div>
-      <div style={styles.table}>
-        <AgentColumn agent={agent1} isWinner={agent1.id === winnerId} />
+      <div className="streaming-post-fight-table" style={styles.table}>
+        <AgentColumn
+          agent={agent1}
+          isWinner={agent1.id === winnerId}
+          side="left"
+        />
         <StatLabels />
-        <AgentColumn agent={agent2} isWinner={agent2.id === winnerId} />
+        <AgentColumn
+          agent={agent2}
+          isWinner={agent2.id === winnerId}
+          side="right"
+        />
       </div>
     </div>
   );
@@ -46,13 +55,19 @@ export function PostFightStatsCard({
 function AgentColumn({
   agent,
   isWinner,
+  side,
 }: {
   agent: AgentInfo;
   isWinner: boolean;
+  side: "left" | "right";
 }) {
   return (
-    <div style={styles.column}>
+    <div
+      className={`streaming-post-fight-agent streaming-post-fight-agent--${side}`}
+      style={styles.column}
+    >
       <div
+        className="streaming-post-fight-agent-name"
         style={{
           ...styles.agentName,
           color: isWinner ? "#f2d08a" : "#94a3b8",
@@ -102,7 +117,6 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.1)",
     borderRadius: "8px",
     backdropFilter: "blur(4px)",
-    minWidth: "340px",
   },
   reasonBadge: {
     fontSize: "0.7rem",
@@ -125,7 +139,6 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     flex: 1,
-    alignItems: "flex-end",
     gap: "0.15rem",
   },
   labelColumn: {
@@ -143,10 +156,6 @@ const styles: Record<string, React.CSSProperties> = {
     height: ROW_HEIGHT,
     display: "flex",
     alignItems: "center",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    maxWidth: "120px",
   },
   crownIcon: {
     color: "#f2d08a",

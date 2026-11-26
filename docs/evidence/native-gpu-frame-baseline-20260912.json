@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "reportSHA256": "51861d08587b616b317c632b97431bff9adb437f0901dafa3c81b15de85667b7",
+  "sourceCommit": "e98463a0c99e4ef25b181a99c3252f07dd92edac",
+  "nativeExecutedFunctionsMatchSaved": true,
+  "formattedFunctionSHA256": {
+    "measureNativeGpuFrames": "2a71cc55a8aa2835e7373e2e2e517f3f1dcdd2547e0dc157782de30ea6f12d21",
+    "summarizeNativeGpuFrames": "7990cfb9f46b48b28d170b6c33e22c6c7f476dab90f238454a46388ba9c2a54f"
+  },
+  "studyPassed": true,
+  "overallPassed": false,
+  "consoleErrors": 19,
+  "pageErrors": [],
+  "gpuErrors": [],
+  "cleanupErrors": [],
+  "browserClosed": true,
+  "launcherAbsent": true,
+  "portsAfter": {
+    "3333": "",
+    "5555": "",
+    "9236": "",
+    "57831": ""
+  },
+  "profile": {
+    "profile": "island-720p60-v1",
+    "diagnostics": "lightweight",
+    "lightweight": true,
+    "nativeLifetimeEvidence": false,
+    "performanceApproved": false
+  },
+  "probes": [
+    {
+      "view": "campus-link",
+      "phase": [0.4924711109375, 0.5391759401041667],
+      "rendering": {
+        "samples": 4,
+        "pixelRatio": 1,
+        "width": 1280,
+        "height": 720,
+        "postprocessing": false,
+        "webgpu": true
+      },
+      "summary": {
+        "complete": true,
+        "performanceApproved": false,
+        "measuredFrames": 467,
+        "resolvedPasses": 3096,
+        "measuredSpanMs": 9989.400000095367,
+        "cpuTickMs": {
+          "count": 467,
+          "min": 18.200000047683716,
+          "p50": 20.399999856948853,
+          "p95": 25.799999952316284,
+          "p99": 31,
+          "max": 38.09999990463257
+        },
+        "renderGpuMs": {
+          "count": 467,
+          "min": 9.109504,
+          "p50": 18.415616,
+          "p95": 23.855104,
+          "p99": 26.083327999999998,
+          "max": 29.949952000000003
+        },
+        "computeGpuMs": {
+          "count": 467,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "totalPassGpuMs": {
+          "count": 467,
+          "min": 9.109504,
+          "p50": 18.415616,
+          "p95": 23.855104,
+          "p99": 26.083327999999998,
+          "max": 29.949952000000003
+        },
+        "clientTickIntervalMs": {
+          "count": 466,
+          "min": 18.299999952316284,
+          "p50": 20.700000047683716,
+          "p95": 26.299999952316284,
+          "p99": 32.200000047683716,
+          "max": 38.799999952316284
+        },
+        "drawCalls": {
+          "count": 467,
+          "min": 1285,
+          "p50": 1285,
+          "p95": 1289,
+          "p99": 1289,
+          "max": 1293
+        },
+        "triangles": {
+          "count": 467,
+          "min": 5348419,
+          "p50": 5348419,
+          "p95": 5649199,
+          "p99": 5649199,
+          "max": 5709355
+        },
+        "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+      },
+      "cleanup": {
+        "tickRestored": true,
+        "resetRestored": true,
+        "queryRestored": true,
+        "trackingRestored": true,
+        "descriptorsRestored": true,
+        "poolsRestored": true
+      },
+      "pools": [
+        {
+          "type": "render",
+          "maxQueries": 2048,
+          "querySetCount": 2048,
+          "bufferBytes": 32768,
+          "disposed": true
+        }
+      ],
+      "rawFrames": 516,
+      "rawPasses": 3096,
+      "batches": 87
+    },
+    {
+      "view": "meadow-close",
+      "phase": [0.5407030234375, 0.5875620805541667],
+      "rendering": {
+        "samples": 4,
+        "pixelRatio": 1,
+        "width": 1280,
+        "height": 720,
+        "postprocessing": false,
+        "webgpu": true
+      },
+      "summary": {
+        "complete": true,
+        "performanceApproved": false,
+        "measuredFrames": 601,
+        "resolvedPasses": 2648,
+        "measuredSpanMs": 9999.200000047684,
+        "cpuTickMs": {
+          "count": 601,
+          "min": 8.400000095367432,
+          "p50": 9.900000095367432,
+          "p95": 12.599999904632568,
+          "p99": 15.700000047683716,
+          "max": 18.90000009536743
+        },
+        "renderGpuMs": {
+          "count": 601,
+          "min": 10.81344,
+          "p50": 16.777216,
+          "p95": 19.202047999999998,
+          "p99": 21.037056,
+          "max": 23.986176
+        },
+        "computeGpuMs": {
+          "count": 601,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "totalPassGpuMs": {
+          "count": 601,
+          "min": 10.81344,
+          "p50": 16.777216,
+          "p95": 19.202047999999998,
+          "p99": 21.037056,
+          "max": 23.986176
+        },
+        "clientTickIntervalMs": {
+          "count": 600,
+          "min": 11.600000143051147,
+          "p50": 16.700000047683716,
+          "p95": 17.90000009536743,
+          "p99": 18.299999952316284,
+          "max": 21.199999809265137
+        },
+        "drawCalls": {
+          "count": 601,
+          "min": 612,
+          "p50": 616,
+          "p95": 620,
+          "p99": 620,
+          "max": 620
+        },
+        "triangles": {
+          "count": 601,
+          "min": 2640067,
+          "p50": 2820535,
+          "p95": 2914795,
+          "p99": 2914795,
+          "max": 2914795
+        },
+        "scope": "Actual query-pass sums and instrumented client CPU. Not presented FPS, copy/queue idle time or full stream/target-device qualification."
+      },
+      "cleanup": {
+        "tickRestored": true,
+        "resetRestored": true,
+        "queryRestored": true,
+        "trackingRestored": true,
+        "descriptorsRestored": true,
+        "poolsRestored": true
+      },
+      "pools": [
+        {
+          "type": "render",
+          "maxQueries": 2048,
+          "querySetCount": 2048,
+          "bufferBytes": 32768,
+          "disposed": true
+        }
+      ],
+      "rawFrames": 662,
+      "rawPasses": 2648,
+      "batches": 96
+    }
+  ],
+  "scope": "Instrumented native client CPU and GPU pass sums on one host. Not browser presented frames, GPU wall-frame time, full native memory, full-load streaming, low-end qualification or AAA approval."
+}

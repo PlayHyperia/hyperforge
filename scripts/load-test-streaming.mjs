@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { Agent, setGlobalDispatcher } from "undici";
+import {
+  buildStreamingSoakChecks,
+  StreamingSoakIntegrityTracker,
+} from "./streaming-soak-integrity.mjs";
+import {
+  buildStreamingTelemetryChecks,
+  classifySseSequence,
+  deriveSseDeliveryOverheadMs,
+  StreamingSoakTelemetryCollector,
+} from "./streaming-soak-telemetry.mjs";
 
 const parsed = parseArgs({
   options: {
@@ -15,6 +28,12 @@ const parsed = parseArgs({
     "connect-timeout-ms": { type: "string", default: "10000" },
     "stats-interval-ms": { type: "string", default: "10000" },
     "metrics-poll-ms": { type: "string", default: "5000" },
+    "telemetry-snapshot-ms": { type: "string", default: "60000" },
+    "require-server-telemetry": { type: "boolean" },
+    "require-renderer-telemetry": { type: "boolean" },
+    "require-resource-telemetry": { type: "boolean" },
+    "require-resource-ecology-telemetry": { type: "boolean" },
+    "json-output": { type: "string" },
     "max-http-connections": { type: "string", default: "20000" },
     "sse-clients": { type: "string", default: "250" },
     "sse-ramp-ms": { type: "string", default: "3" },
@@ -25,6 +44,10 @@ const parsed = parseArgs({
     "state-poll-ms": { type: "string", default: "1000" },
     "duel-context-pollers": { type: "string", default: "3" },
     "duel-context-poll-ms": { type: "string", default: "10000" },
+    "integrity-poll-ms": { type: "string", default: "1000" },
+    "min-resolved-duels": { type: "string", default: "0" },
+    "max-cancelled-duels": { type: "string" },
+    "require-full-phase-coverage": { type: "boolean" },
     "min-sse-open-ratio": { type: "string", default: "0.95" },
     "min-sse-peak-ratio": { type: "string", default: "0.95" },
     "max-sse-p95-lag-ms": { type: "string", default: "2500" },
@@ -53,6 +76,19 @@ Core options:
   --hls-clients <n>               HLS watcher loops (default: 80)
   --state-pollers <n>             /api/streaming/state pollers (default: 10)
   --duel-context-pollers <n>      /api/streaming/duel-context pollers (default: 3)
+  --integrity-poll-ms <ms>        Lifecycle-integrity sampling interval (default: 1000)
+  --max-sse-p95-lag-ms <ms>      Maximum transport overhead beyond the configured public delay
+  --min-resolved-duels <n>        Require at least n authoritative resolutions (default: 0)
+  --max-cancelled-duels <n>       Fail above this many observed cancellations (unset by default)
+  --require-full-phase-coverage   Require every observed resolution to include all four phases
+  --telemetry-snapshot-ms <ms>    Retain tick/frame snapshots at this interval (default: 60000)
+  --require-server-telemetry      Require authenticated tick/memory samples with zero poll failures
+  --require-renderer-telemetry    Require renderer frame samples with zero poll failures
+  --require-resource-telemetry    Require aggregate asset/network timing with at least one entry
+  --require-resource-ecology-telemetry
+                                 Require internally consistent server resource ecology samples
+                                 Server telemetry reads STREAMING_LOAD_ADMIN_CODE or ADMIN_CODE
+  --json-output <path>            Atomically write the complete JSON evidence artifact
   --allow-fail                    Always exit 0 and print failed checks
   -v, --verbose                   Verbose error output
 
@@ -65,8 +101,7 @@ Examples:
 
 const serverUrl = parsed["server-url"].replace(/\/$/, "");
 const bettingUrl = parsed["betting-url"].replace(/\/$/, "");
-const hlsUrl =
-  parsed["hls-url"]?.trim() || `${serverUrl}/live/stream.m3u8`;
+const hlsUrl = parsed["hls-url"]?.trim() || `${serverUrl}/live/stream.m3u8`;
 
 const durationMs = Math.max(
   10_000,
@@ -92,6 +127,10 @@ const metricsPollMs = Math.max(
   1_000,
   Number.parseInt(parsed["metrics-poll-ms"], 10) || 5_000,
 );
+const telemetrySnapshotMs = Math.max(
+  1_000,
+  Number.parseInt(parsed["telemetry-snapshot-ms"], 10) || 60_000,
+);
 const maxHttpConnections = Math.max(
   512,
   Number.parseInt(parsed["max-http-connections"], 10) || 20_000,
@@ -113,7 +152,10 @@ const sseReconnectDelayMs = Math.max(
   Number.parseInt(parsed["sse-reconnect-delay-ms"], 10) || 500,
 );
 const hlsClients = Math.max(0, Number.parseInt(parsed["hls-clients"], 10) || 0);
-const hlsPollMs = Math.max(250, Number.parseInt(parsed["hls-poll-ms"], 10) || 2_000);
+const hlsPollMs = Math.max(
+  250,
+  Number.parseInt(parsed["hls-poll-ms"], 10) || 2_000,
+);
 const statePollers = Math.max(
   0,
   Number.parseInt(parsed["state-pollers"], 10) || 0,
@@ -130,12 +172,39 @@ const duelContextPollMs = Math.max(
   1_000,
   Number.parseInt(parsed["duel-context-poll-ms"], 10) || 10_000,
 );
+const integrityPollMs = Math.max(
+  250,
+  Number.parseInt(parsed["integrity-poll-ms"], 10) || 1_000,
+);
+const minResolvedDuels = Math.max(
+  0,
+  Number.parseInt(parsed["min-resolved-duels"], 10) || 0,
+);
+const parsedMaxCancelledDuels = Number.parseInt(
+  parsed["max-cancelled-duels"] ?? "",
+  10,
+);
+const maxCancelledDuels = Number.isSafeInteger(parsedMaxCancelledDuels)
+  ? Math.max(0, parsedMaxCancelledDuels)
+  : null;
+const requireFullPhaseCoverage = parsed["require-full-phase-coverage"] === true;
+const requireServerTelemetry = parsed["require-server-telemetry"] === true;
+const requireRendererTelemetry = parsed["require-renderer-telemetry"] === true;
+const requireResourceTelemetry = parsed["require-resource-telemetry"] === true;
+const requireResourceEcologyTelemetry =
+  parsed["require-resource-ecology-telemetry"] === true;
+const jsonOutputPath = String(parsed["json-output"] || "").trim();
+const streamingLoadAdminCode = String(
+  process.env.STREAMING_LOAD_ADMIN_CODE || process.env.ADMIN_CODE || "",
+).trim();
 
 const minSseOpenRatio = Number.parseFloat(parsed["min-sse-open-ratio"]) || 0.95;
 const minSsePeakRatio = Number.parseFloat(parsed["min-sse-peak-ratio"]) || 0.95;
 const maxSseP95LagMs = Number.parseFloat(parsed["max-sse-p95-lag-ms"]) || 2500;
-const maxHlsFailureRate = Number.parseFloat(parsed["max-hls-failure-rate"]) || 0.05;
-const maxApiFailureRate = Number.parseFloat(parsed["max-api-failure-rate"]) || 0.02;
+const maxHlsFailureRate =
+  Number.parseFloat(parsed["max-hls-failure-rate"]) || 0.05;
+const maxApiFailureRate =
+  Number.parseFloat(parsed["max-api-failure-rate"]) || 0.02;
 const allowFail = parsed["allow-fail"] === true;
 const verbose = parsed.verbose === true;
 
@@ -144,6 +213,8 @@ const stateUrl = `${serverUrl}/api/streaming/state`;
 const duelContextUrl = `${serverUrl}/api/streaming/duel-context`;
 const healthUrl = `${serverUrl}/health`;
 const streamingMetricsUrl = `${serverUrl}/api/streaming/metrics`;
+const streamingHealthUrl = `${serverUrl}/api/streaming/health`;
+const serverTelemetryUrl = `${serverUrl}/admin/memory/report`;
 
 const loadStartedAt = Date.now();
 let stopRequested = false;
@@ -260,6 +331,10 @@ const stats = {
     },
   },
 };
+const duelIntegrity = new StreamingSoakIntegrityTracker();
+const runtimeTelemetry = new StreamingSoakTelemetryCollector({
+  retentionIntervalMs: telemetrySnapshotMs,
+});
 
 function log(message) {
   console.log(`[stream-load] ${message}`);
@@ -272,6 +347,25 @@ function sleep(ms) {
 function formatPercent(numerator, denominator) {
   if (!denominator) return "0.00%";
   return `${((numerator / denominator) * 100).toFixed(2)}%`;
+}
+
+async function writeJsonEvidence(result) {
+  if (!jsonOutputPath) return null;
+  const destination = path.resolve(jsonOutputPath);
+  const temporary = `${destination}.${process.pid}.tmp`;
+  const payload = `${JSON.stringify(result, null, 2)}\n`;
+  await mkdir(path.dirname(destination), { recursive: true });
+  try {
+    await writeFile(temporary, payload, { encoding: "utf8", mode: 0o600 });
+    await rename(temporary, destination);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  return {
+    destination,
+    sha256: createHash("sha256").update(payload).digest("hex"),
+  };
 }
 
 function isAbortLikeError(error) {
@@ -380,7 +474,11 @@ function extractSegmentRefs(playlistText) {
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i]?.trim();
     if (!line || line.startsWith("#")) continue;
-    if (line.includes(".ts") || line.includes(".m4s") || line.includes(".mp4")) {
+    if (
+      line.includes(".ts") ||
+      line.includes(".m4s") ||
+      line.includes(".mp4")
+    ) {
       segments.push(line);
     }
   }
@@ -405,13 +503,17 @@ async function runSseClient(clientId, globalAbortController) {
         url.searchParams.set("since", String(lastSeq));
       }
 
-      const response = await fetchWithTimeout(url.toString(), connectTimeoutMs, {
-        headers: {
-          Accept: "text/event-stream",
-          "Cache-Control": "no-store",
+      const response = await fetchWithTimeout(
+        url.toString(),
+        connectTimeoutMs,
+        {
+          headers: {
+            Accept: "text/event-stream",
+            "Cache-Control": "no-store",
+          },
+          signal: connectionAbortController.signal,
         },
-        signal: connectionAbortController.signal,
-      });
+      );
 
       if (!response.ok || !response.body) {
         stats.sse.connectFailures += 1;
@@ -436,7 +538,9 @@ async function runSseClient(clientId, globalAbortController) {
       const consumeEvent = () => {
         const payload = dataLines.join("\n");
         const numericEventId = Number.parseInt(eventId, 10);
-        const seqFromId = Number.isFinite(numericEventId) ? numericEventId : null;
+        const seqFromId = Number.isFinite(numericEventId)
+          ? numericEventId
+          : null;
 
         if (eventName === "state") {
           stats.sse.stateEvents += 1;
@@ -459,16 +563,11 @@ async function runSseClient(clientId, globalAbortController) {
                   ? parsed.seq
                   : seqFromId;
               if (typeof seq === "number") {
-                if (seq === lastSeq) {
-                  stats.sse.duplicateEvents += 1;
-                } else if (seq < lastSeq) {
-                  stats.sse.outOfOrderEvents += 1;
-                } else {
-                  if (seq > lastSeq + 1) {
-                    stats.sse.gapEvents += seq - lastSeq - 1;
-                  }
-                  lastSeq = seq;
-                }
+                const sequence = classifySseSequence(lastSeq, seq);
+                stats.sse.gapEvents += sequence.gapEvents;
+                stats.sse.duplicateEvents += sequence.duplicateEvents;
+                stats.sse.outOfOrderEvents += sequence.outOfOrderEvents;
+                lastSeq = sequence.nextSeq;
               }
 
               if (
@@ -500,9 +599,7 @@ async function runSseClient(clientId, globalAbortController) {
         while (lineBreakIndex >= 0) {
           const rawLine = buffer.slice(0, lineBreakIndex);
           buffer = buffer.slice(lineBreakIndex + 1);
-          const line = rawLine.endsWith("\r")
-            ? rawLine.slice(0, -1)
-            : rawLine;
+          const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 
           if (line === "") {
             consumeEvent();
@@ -551,10 +648,14 @@ async function runHlsWatcher(globalAbortController) {
   while (!stopRequested && Date.now() < runUntilMs) {
     try {
       const manifestStart = Date.now();
-      const manifestResponse = await fetchWithTimeout(hlsUrl, requestTimeoutMs, {
-        cache: "no-store",
-        signal: globalAbortController.signal,
-      });
+      const manifestResponse = await fetchWithTimeout(
+        hlsUrl,
+        requestTimeoutMs,
+        {
+          cache: "no-store",
+          signal: globalAbortController.signal,
+        },
+      );
 
       stats.hls.manifestRequests += 1;
       if (!manifestResponse.ok) {
@@ -572,11 +673,7 @@ async function runHlsWatcher(globalAbortController) {
         ];
         const segmentCandidates = [];
         for (const ref of preferredSegmentRefs) {
-          if (
-            !ref ||
-            ref === lastSegment ||
-            segmentCandidates.includes(ref)
-          ) {
+          if (!ref || ref === lastSegment || segmentCandidates.includes(ref)) {
             continue;
           }
           segmentCandidates.push(ref);
@@ -710,22 +807,72 @@ async function runApiPollers(
 
 async function runServerMetricsPoller(globalAbortController) {
   while (!stopRequested && Date.now() < runUntilMs) {
-    try {
-      const response = await fetchWithTimeout(
-        streamingMetricsUrl,
-        requestTimeoutMs,
-        {
+    const observedAt = Date.now();
+    const requests = [
+      fetchWithTimeout(streamingMetricsUrl, requestTimeoutMs, {
+        cache: "no-store",
+        signal: globalAbortController.signal,
+      }),
+      fetchWithTimeout(streamingHealthUrl, requestTimeoutMs, {
+        cache: "no-store",
+        signal: globalAbortController.signal,
+      }),
+    ];
+    if (streamingLoadAdminCode) {
+      requests.push(
+        fetchWithTimeout(serverTelemetryUrl, requestTimeoutMs, {
           cache: "no-store",
+          headers: { "x-admin-code": streamingLoadAdminCode },
           signal: globalAbortController.signal,
-        },
+        }),
       );
-      if (response.ok) {
-        latestServerMetrics = await response.json();
+    }
+
+    const [metricsResult, rendererResult, serverResult] =
+      await Promise.allSettled(requests);
+    if (metricsResult.status === "fulfilled" && metricsResult.value.ok) {
+      latestServerMetrics = await metricsResult.value.json().catch(() => null);
+    }
+
+    if (rendererResult.status === "fulfilled") {
+      const payload = await rendererResult.value.json().catch(() => null);
+      runtimeTelemetry.observeRenderer(payload, observedAt);
+    } else {
+      runtimeTelemetry.recordRendererFailure();
+    }
+
+    if (streamingLoadAdminCode) {
+      if (serverResult?.status === "fulfilled" && serverResult.value.ok) {
+        const payload = await serverResult.value.json().catch(() => null);
+        runtimeTelemetry.observeServer(payload, observedAt);
+      } else {
+        runtimeTelemetry.recordServerFailure();
       }
-    } catch {
-      // best effort only
     }
     await sleep(metricsPollMs);
+  }
+}
+
+async function runDuelIntegrityPoller(globalAbortController) {
+  while (!stopRequested && Date.now() < runUntilMs) {
+    try {
+      const response = await fetchWithTimeout(stateUrl, requestTimeoutMs, {
+        cache: "no-store",
+        signal: globalAbortController.signal,
+      });
+      if (response.ok) {
+        duelIntegrity.observe(await response.json());
+      }
+    } catch (error) {
+      if (verbose && !stopRequested && !isAbortLikeError(error)) {
+        log(
+          `integrity poller error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    await sleep(integrityPollMs);
   }
 }
 
@@ -762,10 +909,23 @@ function summarize() {
   const elapsedSeconds = elapsedMs / 1_000;
 
   const sseLag = stats.sse.lagMs.summary();
+  const configuredPublicDelayMs = Number.isFinite(
+    latestServerMetrics?.sse?.config?.publicDelayMs,
+  )
+    ? Math.max(0, latestServerMetrics.sse.config.publicDelayMs)
+    : 0;
+  const sseDeliveryOverheadP95Ms = deriveSseDeliveryOverheadMs(
+    sseLag.p95,
+    configuredPublicDelayMs,
+  );
   const manifestLatency = stats.hls.manifestLatencyMs.summary();
   const segmentLatency = stats.hls.segmentLatencyMs.summary();
   const stateLatency = stats.api.state.latencyMs.summary();
   const duelLatency = stats.api.duelContext.latencyMs.summary();
+  const duelIntegritySummary = duelIntegrity.summary();
+  const runtimeTelemetrySummary = runtimeTelemetry.summary({
+    serverConfigured: streamingLoadAdminCode.length > 0,
+  });
 
   const sseOpenRatio = sseClients > 0 ? stats.sse.opened / sseClients : 1;
   const ssePeakOpenedRatio =
@@ -814,10 +974,50 @@ function summarize() {
       actual: stats.sse.parseErrors,
     },
     {
-      label: `SSE p95 lag <= ${maxSseP95LagMs}ms`,
+      label: `SSE connect failures == 0`,
+      pass: stats.sse.connectFailures === 0,
+      actual: stats.sse.connectFailures,
+    },
+    {
+      label: `SSE reconnects == 0`,
+      pass: stats.sse.reconnects === 0,
+      actual: stats.sse.reconnects,
+    },
+    {
+      label: `SSE reset and unavailable events == 0`,
+      pass: stats.sse.resetEvents === 0 && stats.sse.unavailableEvents === 0,
+      actual: {
+        resets: stats.sse.resetEvents,
+        unavailable: stats.sse.unavailableEvents,
+      },
+    },
+    {
+      label: `SSE sequence gaps == 0`,
+      pass: stats.sse.gapEvents === 0,
+      actual: stats.sse.gapEvents,
+    },
+    {
+      label: `SSE duplicate sequences == 0`,
+      pass: stats.sse.duplicateEvents === 0,
+      actual: stats.sse.duplicateEvents,
+    },
+    {
+      label: `SSE out-of-order sequences == 0`,
+      pass: stats.sse.outOfOrderEvents === 0,
+      actual: stats.sse.outOfOrderEvents,
+    },
+    {
+      label: `SSE fatal client errors == 0`,
+      pass: stats.sse.fatalClientErrors === 0,
+      actual: stats.sse.fatalClientErrors,
+    },
+    {
+      label: `SSE p95 delivery overhead beyond configured public delay <= ${maxSseP95LagMs}ms`,
       pass:
-        sseLag.p95 == null ? true : Number.isFinite(sseLag.p95) && sseLag.p95 <= maxSseP95LagMs,
-      actual: sseLag.p95,
+        sseDeliveryOverheadP95Ms == null
+          ? true
+          : sseDeliveryOverheadP95Ms <= maxSseP95LagMs,
+      actual: sseDeliveryOverheadP95Ms,
     },
     {
       label: `HLS manifest failure rate <= ${maxHlsFailureRate}`,
@@ -830,6 +1030,11 @@ function summarize() {
       actual: Number(hlsSegmentFailureRate.toFixed(4)),
     },
     {
+      label: `HLS fatal poller errors == 0`,
+      pass: stats.hls.fatalPollerErrors === 0,
+      actual: stats.hls.fatalPollerErrors,
+    },
+    {
       label: `API state failure rate <= ${maxApiFailureRate}`,
       pass: stateFailureRate <= maxApiFailureRate,
       actual: Number(stateFailureRate.toFixed(4)),
@@ -839,6 +1044,27 @@ function summarize() {
       pass: duelFailureRate <= maxApiFailureRate,
       actual: Number(duelFailureRate.toFixed(4)),
     },
+    {
+      label: `API fatal poller errors == 0`,
+      pass:
+        stats.api.state.fatalErrors === 0 &&
+        stats.api.duelContext.fatalErrors === 0,
+      actual: {
+        state: stats.api.state.fatalErrors,
+        duelContext: stats.api.duelContext.fatalErrors,
+      },
+    },
+    ...buildStreamingSoakChecks(duelIntegritySummary, {
+      minResolvedDuels,
+      maxCancelledDuels,
+      requireFullPhaseCoverage,
+    }),
+    ...buildStreamingTelemetryChecks(runtimeTelemetrySummary, {
+      requireServerTelemetry,
+      requireRendererTelemetry,
+      requireResourceTelemetry,
+      requireResourceEcologyTelemetry,
+    }),
   ];
 
   const ok = checks.every((check) => check.pass);
@@ -857,6 +1083,16 @@ function summarize() {
       hlsPollMs,
       statePollMs,
       duelContextPollMs,
+      integrityPollMs,
+      minResolvedDuels,
+      maxCancelledDuels,
+      requireFullPhaseCoverage,
+      metricsPollMs,
+      telemetrySnapshotMs,
+      requireServerTelemetry,
+      requireRendererTelemetry,
+      requireResourceTelemetry,
+      requireResourceEcologyTelemetry,
     },
     sse: {
       opened: stats.sse.opened,
@@ -880,6 +1116,8 @@ function summarize() {
       rxBytes: stats.sse.rxBytes,
       likelySingleProcessConnectionCap,
       lagMs: sseLag,
+      configuredPublicDelayMs,
+      deliveryOverheadP95Ms: sseDeliveryOverheadP95Ms,
     },
     hls: {
       manifestRequests: stats.hls.manifestRequests,
@@ -907,6 +1145,8 @@ function summarize() {
         latencyMs: duelLatency,
       },
     },
+    duelIntegrity: duelIntegritySummary,
+    runtimeTelemetry: runtimeTelemetrySummary,
     checks,
     warnings,
     serverMetricsSample: latestServerMetrics,
@@ -930,6 +1170,11 @@ async function main() {
       // best-effort endpoint
     }),
   );
+  tasks.push(
+    runDuelIntegrityPoller(globalAbortController).catch(() => {
+      duelIntegrity.recordIssue("integrity_poller_failed");
+    }),
+  );
 
   for (let i = 0; i < hlsClients; i += 1) {
     tasks.push(
@@ -940,28 +1185,24 @@ async function main() {
   }
 
   tasks.push(
-    ...(
-      await runApiPollers(
-        "state",
-        stateUrl,
-        statePollMs,
-        statePollers,
-        stats.api.state,
-        globalAbortController,
-      )
-    ),
+    ...(await runApiPollers(
+      "state",
+      stateUrl,
+      statePollMs,
+      statePollers,
+      stats.api.state,
+      globalAbortController,
+    )),
   );
   tasks.push(
-    ...(
-      await runApiPollers(
-        "duel-context",
-        duelContextUrl,
-        duelContextPollMs,
-        duelContextPollers,
-        stats.api.duelContext,
-        globalAbortController,
-      )
-    ),
+    ...(await runApiPollers(
+      "duel-context",
+      duelContextUrl,
+      duelContextPollMs,
+      duelContextPollers,
+      stats.api.duelContext,
+      globalAbortController,
+    )),
   );
 
   for (let i = 0; i < sseClients; i += 1) {
@@ -985,6 +1226,12 @@ async function main() {
   await Promise.allSettled(tasks);
 
   const result = summarize();
+  const evidence = await writeJsonEvidence(result);
+  if (evidence) {
+    log(
+      `evidence written: ${evidence.destination} (sha256 ${evidence.sha256})`,
+    );
+  }
   log(`completed. overall result: ${result.ok ? "PASS" : "FAIL"}`);
   console.log(JSON.stringify(result, null, 2));
 

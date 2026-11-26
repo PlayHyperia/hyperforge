@@ -6,6 +6,7 @@ import {
 } from "../../../extras/three/geometryToPxMesh";
 import THREE, { MeshStandardNodeMaterial } from "../../../extras/three/three";
 import { System } from "../infrastructure/System";
+import type { ClientGraphics } from "../../client/ClientGraphics";
 import { EventType } from "../../../types/events";
 import { NoiseGenerator } from "../../../utils/NoiseGenerator";
 import { InstancedMeshManager } from "../../../utils/rendering/InstancedMeshManager";
@@ -18,34 +19,56 @@ import {
   type TerrainWorkerOutput,
 } from "../../../utils/workers";
 import {
-  ISLAND_RADIUS,
   computeBaseHeight,
+  computeIslandMask,
   adjustShorelineHeight,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
-  SHORELINE_CONFIG,
   BIOME_CONFIG,
   BIOME_CONFIGS,
 } from "./TerrainHeightParams";
+import {
+  worldTerrainProfileIdentity,
+  isCompactSculptProfile,
+  type WorldTerrainProfile,
+} from "./WorldTerrainProfile";
+import { createTerrainWorkerConfig } from "../../../utils/workers/TerrainWorkerShared";
 import type { ShorelineConfig, BiomeNoiseSet } from "./TerrainHeightParams";
 import { BiomeType, DEFAULT_BIOME, BIOME_LIST } from "./TerrainBiomeTypes";
 import { WaterBodyRegistry } from "./WaterBodyRegistry";
+import { createCompactPondDressing } from "./CompactPondDressing";
+import {
+  createCompactServicePlanting,
+  createCompactServiceSoil,
+  createCompactPondServiceGround,
+  isCompactBankCourt,
+} from "./CompactServiceCourt";
+import { createCompactLandscapeRockFootprints } from "./CompactLandscapeRockFootprints";
+import { CompactPondDressingVisuals } from "./CompactPondDressingVisuals";
+import { validateRadialPondTerrainProfile } from "./RadialPondTerrainProfile";
+import { createAuthoredTerrainSurfaceOperations } from "./AuthoredTerrainSurface";
+import {
+  createGrassTerrainSurfaceOperations,
+  GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+  type GrassTerrainSurfaceSnapshot,
+  type GrassTerrainExclusionPolygon,
+} from "../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import type { TerrainGridBounds } from "./TerrainGridSurface";
+import type { GrassGroundingInputLease } from "./GrassGroundingPipeline";
+import type { CanonicalGroundLease } from "./CoastalBathymetry";
+import {
+  GRASS_BLADE_GROUNDING_LIMITS,
+  type GrassGroundingRoadSegment,
+} from "./GrassBladeGrounding";
 import type { BridgeSystem } from "./BridgeSystem";
 // Import terrain generator from procgen package
-import {
-  TerrainGenerator,
-  BiomeSystem,
-  type TerrainConfig,
-  type BiomeDefinition,
-} from "@hyperforge/procgen/terrain";
+import { BiomeSystem, type BiomeDefinition } from "@hyperforge/procgen/terrain";
 
 /**
  * Terrain System
  *
  * Specifications:
  * - 100x100m tiles (100m x 100m each)
- * - 100x100 world grid = 10km x 10km total world
+ * - Explicit compact-world profile shared by authoritative and worker sampling
  * - Only load current tile + adjacent tiles (3x3 = 9 tiles max)
  * - Procedural heightmap generation with biomes
  * - PhysX collision support
@@ -55,25 +78,57 @@ import {
 import type { BiomeData } from "../../../types/core/core";
 import type {
   ResourceNode,
+  TerrainResourceSpawnPoint,
   TerrainTile,
   FlatZone,
+  RadialPondTerrainProfile,
 } from "../../../types/world/terrain";
+import { centeredTerrainTileIndex } from "../../../types/world/terrain";
 import type { RoadTileSegment } from "../../../types/world/world-types";
 import { PhysicsHandle } from "../../../types/systems/physics";
 import { getPhysX } from "../../../physics/PhysXManager";
 import { Layers } from "../../../physics/Layers";
 import { BIOMES } from "../../../data/world-structure";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
-import { getDuelArenaConfig } from "../../../data/duel-manifest";
+import { createCompactResourceGroveNodes } from "./CompactResourceGroves";
+import {
+  getDuelArenaConfig,
+  isPositionInsideDuelArenaZone,
+} from "../../../data/duel-manifest";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+} from "../../../data/arena-grading";
 import { DataManager } from "../../../data/DataManager";
+import { createCompactPreparationDetailRegions } from "./CompactIslandDetail";
+import {
+  prioritizeLocalTerrainCenter,
+  resolveTerrainVisualRootRadius,
+} from "./TerrainVisualFocus";
+import habitatCompositionData from "../../../data/compact-haven-habitat-v1.json";
+import {
+  validateCompactHabitatComposition,
+  type CompactHabitatField,
+} from "./CompactHabitatComposition";
+import {
+  createCompactTerrainColorOperations,
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactTerrainPond,
+  type CompactPondBankField,
+  type CompactTerrainMacroField,
+  type CompactTerrainBankVerge,
+  type CompactTerrainPlantingLobe,
+  type CompactGrassColorGrade,
+} from "./CompactTerrainPalette";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { WaterSystem } from "./WaterSystem";
 import {
-  generateTrees,
+  generateCenteredTrees,
   generateOres,
   generateRocks,
   // generatePlants, // DISABLED - plants not working/looking good yet
   type ResourceGenerationContext,
+  type TreeGenerationSource,
 } from "./BiomeResourceGenerator";
 import {
   getTreeConfigForBiome,
@@ -103,10 +158,17 @@ import {
   createTerrainMaterial,
   TerrainUniforms,
   computeTerrainColorCPU,
+  sampleNoiseCPU,
+  TERRAIN_SHADER_CONSTANTS,
 } from "./TerrainShader";
 import { isLamppostLightTextureReady } from "./LamppostLightMask";
 import { isCsmEnabled } from "./Environment";
 import type { RoadNetworkSystem } from "./RoadNetworkSystem";
+import { roadInfluenceOperations } from "./RoadInfluence";
+import {
+  setRoadInfluenceTextureData,
+  clearRoadInfluenceTexture,
+} from "./RoadInfluenceMask";
 import type { TownSystem } from "./TownSystem";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import {
@@ -119,22 +181,105 @@ import {
   type VisualManagerTerrainProvider,
 } from "./TerrainVisualManager";
 import { WaterVisualManager } from "./WaterVisualManager";
+import { RootedFlowerVisualManager } from "./RootedFlowerVisualManager";
 import {
   GrassVisualManager,
+  COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+  DENSE_MEADOW_GRASS_VISUAL_PROFILE,
+  FINE_MEADOW_GRASS_VISUAL_PROFILE,
+  STREAMING_GRASS_VISUAL_PROFILE,
   type GrassWorkerSetup,
 } from "./GrassVisualManager";
 import { terminateGrassWorkerPool } from "../../../utils/workers/GrassWorker";
 import { CompositeQuadTreeListener } from "./TerrainQuadTree";
 import type { QuadChunkWorkerConfig } from "../../../utils/workers/QuadChunkWorker";
 import { terminateQuadChunkWorkerPool } from "../../../utils/workers/QuadChunkWorker";
+import {
+  isStreamPageRoute,
+  isStreamingLikeViewport,
+  resolveExplicitStreamingWorldProfile,
+  resolveExplicitStreamingRenderProfile,
+  resolveCompactDirtProjectionCandidate,
+  resolveCompactRockProjectionCandidate,
+  resolveCompactRockSampling,
+  resolveCompactGroundSampling,
+  resolveCompactTerrainTextureEncoding,
+  resolveCompactTerrainTextureMatrix,
+  resolveCompactTerrainTextureFiltering,
+  resolveCompactTerrainBankEvaluation,
+  resolveCompactDirtSurfaceCache,
+  resolveCompactSurfaceBlendCandidate,
+  resolveCompactPondBlendCandidate,
+  resolveCompactCoastBlend,
+  resolveGrassAppearanceCandidate,
+  resolveGrassLightingCandidate,
+  resolveGrassGeometryCandidate,
+  resolveGrassVergeEvaluation,
+  resolveGrassInstancingCandidate,
+  resolveGrassSubmissionCandidate,
+  resolveGrassShadowCandidate,
+  resolveGrassEnvironmentCandidate,
+  resolveGrassLightingModelCandidate,
+  resolveGrassDynamicsCandidate,
+  resolveGrassPaletteCandidate,
+  resolveGrassCoverageTrial,
+  resolveGrassRoadClearance,
+  resolveGrassGroundingExecution,
+  resolveRootedFlowerCandidate,
+  resolveHabitatCompositionCandidate,
+  type GrassSurfaceEligibility,
+} from "../../../runtime/clientViewportMode";
+import { createGrassGroundingWorker } from "../../../utils/workers/createGrassGroundingWorker";
+import {
+  hasActiveStreamingPreparationPresentation,
+  resolveStreamingPreparationFocus,
+  type StreamingPreparationEntity,
+} from "../../../runtime/streamingPreparationFocus";
+
+const SERVER_LAUNCH_PREPARATION_AREA_IDS = [
+  "central_haven",
+  "haven_pond",
+  "preparation_training_grounds",
+] as const;
 
 // Road influence blending - used for shader's roadInfluence attribute
 const ROAD_BLEND_WIDTH = 0.5; // Extra blend distance beyond road width (meters)
+const compactTerrainColorOperations = createCompactTerrainColorOperations();
 const TERRAIN_ROAD_INFLUENCE_DEBUG =
   process.env.TERRAIN_ROAD_INFLUENCE_DEBUG === "true";
 const TERRAIN_TIMING_DEBUG = process.env.TERRAIN_TIMING_DEBUG === "true";
+// These constants are embedded into emitted worker source at module load.
+// Unsupported in-process edits cannot be admitted by merely creating a new
+// provider; a code/worker reload is required to keep the two implementations equal.
+const COMPILED_TERRAIN_BIOME_CONFIGS = Object.entries(BIOME_CONFIGS).map(
+  ([name, config]) => ({
+    name,
+    owner: config,
+    fields: Object.entries(config).map(([key, value]) => ({
+      key: key as keyof typeof config,
+      value,
+    })),
+  }),
+);
+const COMPILED_BIOME_PLACEMENT = {
+  gaussianCoeff: BIOME_CONFIG.gaussianCoeff,
+  boundaryNoiseScale: BIOME_CONFIG.boundaryNoiseScale,
+  boundaryNoiseAmount: BIOME_CONFIG.boundaryNoiseAmount,
+};
 /** Maximum entries retained in pendingSerializationData to prevent unbounded growth */
 const MAX_PENDING_SERIALIZATION_ENTRIES = 100;
+// The fixed broadcast camera never approaches terrain closely enough to reveal
+// the exploration mesh's 64x64 vertices per quad-tree leaf. Halving each axis
+// retains the authored height field while cutting terrain triangles and vertex
+// work by roughly 75% on the public stream.
+/**
+ * The arena floor and architecture provide the close-range broadcast detail;
+ * quad terrain is only the distant landscape behind that set. A 16-segment
+ * grid keeps the silhouette while avoiding hundreds of thousands of off-set
+ * terrain triangles in every 1080p stream frame. Exploration retains the
+ * authored 64-segment terrain profile.
+ */
+export const STREAMING_TERRAIN_QUADTREE_RESOLUTION = 16;
 
 // Lamppost vertex lighting (terrain-only, GPU shader accumulation)
 const LAMP_VERTEX_LIGHT_RANGE = 12;
@@ -176,6 +321,11 @@ export class TerrainSystem extends System {
   private flatZones = new Map<string, FlatZone>();
   private flatZonesByTile = new Map<string, FlatZone[]>(); // Spatial index by terrain tile
   private _flatZoneChecked = new Set<string>(); // PERF: reusable dedup set for flat zone queries
+  private readonly authoredSurface = createAuthoredTerrainSurfaceOperations();
+  private readonly authoredSurfaceCandidates: FlatZone[] = [];
+  private authoredSurfaceCandidateTileX: number | undefined;
+  private authoredSurfaceCandidateTileZ: number | undefined;
+  private authoredSurfaceCandidateTileSize: number | undefined;
   private _pendingTileRegeneration = new Set<string>(); // Tracks tiles being regenerated to avoid duplicates
   private _queuedTileRegenerations = new Map<
     string,
@@ -185,6 +335,14 @@ export class TerrainSystem extends System {
   public instancedMeshManager!: InstancedMeshManager;
   private _terrainInitialized = false;
   private _initialTilesReady = false; // Track when initial tiles are loaded
+  private initialTileLoading: Promise<void> | null = null;
+  private startup: Promise<void> | null = null;
+  private readinessFailure: Error | null = null;
+  private readonly readinessWaiters = new Set<(error?: Error) => void>();
+  private destroyed = false;
+  private canonicalGroundInitialized = false;
+  private canonicalHeightRevision = 0;
+  private roadInfluenceRefreshGeneration = 0;
   private lastPlayerTile = { x: 0, z: 0 };
   private updateTimer = 0;
   private terrainTime = 0; // For animated caustics
@@ -221,6 +379,12 @@ export class TerrainSystem extends System {
   // Smooth generation queue to avoid main-thread spikes when player moves
   private pendingTileKeys: string[] = [];
   private pendingTileSet = new Set<string>();
+  /** Preserve full-content versus geometry-only intent while a tile is queued. */
+  private pendingTileContent = new Map<string, boolean>();
+  /** Geometry-only residents entering the core; ownership is the exact tile, not its key. */
+  private pendingContentPromotions = new Map<string, TerrainTile>();
+  private pendingTileGenerations = new Map<string, object>();
+  private workerBatchLease: object | null = null;
   private pendingCollisionKeys: string[] = [];
   private pendingCollisionSet = new Set<string>();
   // Deferred walkability baking queue — spreads 10,000 iterations across ticks
@@ -247,13 +411,18 @@ export class TerrainSystem extends System {
   private _tempVec2_3 = new THREE.Vector2(); // For road distance calculations
   private _tempBox3 = new THREE.Box3();
   private _spectatorFocusPos = new THREE.Vector3();
+  private _streamingPreparationFocusPos = new THREE.Vector3();
+  private _hasStreamingArenaFocus = false;
   private lamppostLightUpdateTimer = 0;
   private lamppostActiveLights: VertexLight[] = [];
   private lamppostLightIndices: number[] = [];
   private lamppostLightDistances: number[] = [];
   private waterSystem?: WaterSystem;
+  private initializingWater: WaterSystem | null = null;
+  private initialization: Promise<void> | null = null;
   private waterBodyRegistry!: WaterBodyRegistry;
   private roadNetworkSystem?: RoadNetworkSystem;
+  private roadEventsSubscribed = false;
   private _cachedRoadTileX = Number.NaN;
   private _cachedRoadTileZ = Number.NaN;
   private _cachedRoadSegments: ReadonlyArray<RoadTileSegment> = [];
@@ -267,11 +436,91 @@ export class TerrainSystem extends System {
   // Quad-tree LOD visual manager (client-only, when CONFIG.USE_QUADTREE_LOD is true)
   private quadTreeVisualManager: TerrainVisualManager | null = null;
   private waterVisualManager: WaterVisualManager | null = null;
+  private compactPondDressing: CompactPondDressingVisuals | null = null;
+  private compactPondMaterial: CompactTerrainPond | null = null;
+  private compactPondBankField: CompactPondBankField | null = null;
+  private compositionManifestLoaded = false;
+  private landscapeGrassSurface = {
+    exclusionPolygons: [] as GrassTerrainExclusionPolygon[],
+  };
+  private landscapeGrassExclusions: GrassTerrainExclusionPolygon[] = [];
+  private ownedGrassExclusions = new Map<
+    symbol,
+    GrassTerrainExclusionPolygon[]
+  >();
+  private grassSurfaceRevision = 0;
+  private grassSurfaceChanges: {
+    revision: number;
+    bounds: TerrainGridBounds | null;
+  }[] = [];
+  private grassSurfaceOperations = createGrassTerrainSurfaceOperations();
+  private compactMacroMaterial: CompactTerrainMacroField | null | undefined;
+  private pondServiceGround: CompactTerrainBankVerge | null | undefined;
+  private compactHabitatMaterial: CompactHabitatField | null | undefined;
+  /** Restart-owned visual selection; never part of authoritative terrain identity. */
+  private compactGrassColorGrade: CompactGrassColorGrade | null | undefined;
+  private compactDirtProjection: ReturnType<
+    typeof resolveCompactDirtProjectionCandidate
+  > | null;
+  private compactRockProjection: ReturnType<
+    typeof resolveCompactRockProjectionCandidate
+  > | null;
+  private compactRockSampling: ReturnType<
+    typeof resolveCompactRockSampling
+  > | null;
+  private compactGroundSampling: ReturnType<
+    typeof resolveCompactGroundSampling
+  > | null;
+  private compactTerrainTextureEncoding: ReturnType<
+    typeof resolveCompactTerrainTextureEncoding
+  > | null;
+  private compactTerrainTextureMatrix: ReturnType<
+    typeof resolveCompactTerrainTextureMatrix
+  > | null;
+  private compactTerrainTextureFiltering: ReturnType<
+    typeof resolveCompactTerrainTextureFiltering
+  > | null;
+  private compactTerrainBankEvaluation: ReturnType<
+    typeof resolveCompactTerrainBankEvaluation
+  > | null;
+  private compactDirtSurfaceCache: ReturnType<
+    typeof resolveCompactDirtSurfaceCache
+  > | null;
+  private compactSurfaceBlend: ReturnType<
+    typeof resolveCompactSurfaceBlendCandidate
+  > | null;
+  private compactPondBlend: ReturnType<
+    typeof resolveCompactPondBlendCandidate
+  > | null;
+  private compactCoastBlend: ReturnType<typeof resolveCompactCoastBlend> | null;
+  private grassVisualSelection:
+    | Readonly<{
+        profile: ReturnType<typeof resolveExplicitStreamingRenderProfile>;
+        appearance: ReturnType<typeof resolveGrassAppearanceCandidate>;
+        coverageTrial: ReturnType<typeof resolveGrassCoverageTrial>;
+        roadClearance?: ReturnType<typeof resolveGrassRoadClearance>;
+        lighting?: ReturnType<typeof resolveGrassLightingCandidate>;
+        geometry?: ReturnType<typeof resolveGrassGeometryCandidate>;
+        vergeEvaluation?: ReturnType<typeof resolveGrassVergeEvaluation>;
+        instancing?: ReturnType<typeof resolveGrassInstancingCandidate>;
+        submission?: ReturnType<typeof resolveGrassSubmissionCandidate>;
+        shadow?: ReturnType<typeof resolveGrassShadowCandidate>;
+        environment?: ReturnType<typeof resolveGrassEnvironmentCandidate>;
+        lightingModel?: ReturnType<typeof resolveGrassLightingModelCandidate>;
+        dynamics?: ReturnType<typeof resolveGrassDynamicsCandidate>;
+        palette?: ReturnType<typeof resolveGrassPaletteCandidate>;
+        groundingExecution?: ReturnType<typeof resolveGrassGroundingExecution>;
+        flowers?: ReturnType<typeof resolveRootedFlowerCandidate>;
+      }>
+    | undefined;
+  private compactPlantingMaterial:
+    readonly CompactTerrainPlantingLobe[] | undefined;
   private grassVisualManager: GrassVisualManager | null = null;
+  private rootedFlowerVisualManager: RootedFlowerVisualManager | null = null;
 
   // Unified terrain generator from @hyperforge/procgen
   // Provides deterministic height/biome calculation independent of rendering
-  private terrainGenerator!: TerrainGenerator;
+  private biomeSystem!: BiomeSystem;
 
   // PERFORMANCE: Template geometry and pre-allocated buffers for tile creation
   private templateGeometry: THREE.PlaneGeometry | null = null;
@@ -335,26 +584,68 @@ export class TerrainSystem extends System {
     return process.env.NODE_ENV === "production";
   })();
 
-  // Deterministic noise seeding
+  private activeTerrainProfile: WorldTerrainProfile | null = null;
+
+  /** Capture once: an existing world must never silently switch terrain profiles. */
+  public getWorldTerrainProfile(): WorldTerrainProfile {
+    if (!this.activeTerrainProfile) {
+      const profile = DataManager.getWorldTerrainProfile();
+      const config = DataManager.getWorldConfig();
+      if (!config)
+        throw new Error("Terrain requires loaded world configuration");
+      this.CONFIG.TILE_SIZE = profile.terrainTileSize;
+      this.CONFIG.WORLD_SIZE =
+        (profile.bounds.maxX - profile.bounds.minX) / profile.terrainTileSize;
+      this.CONFIG.TILE_RESOLUTION = config.terrain.tileResolution;
+      this.CONFIG.QUADTREE_RESOLUTION = config.terrain.tileResolution;
+      this.CONFIG.QUADTREE_MIN_SIZE = profile.terrainTileSize;
+      this.CONFIG.WATER_THRESHOLD = profile.water.threshold;
+      this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES = this.CONFIG.WORLD_SIZE;
+      this.CONFIG.ISLAND_FALLOFF_TILES =
+        profile.island.falloff / profile.terrainTileSize;
+      this.tileSize = profile.terrainTileSize;
+      this.activeTerrainProfile = profile;
+    }
+    return this.activeTerrainProfile;
+  }
+
+  private get maxHeightParameter(): number {
+    return this.getWorldTerrainProfile().height.maxHeightParameter;
+  }
+
+  private get waterLevelNormalized(): number {
+    const profile = this.getWorldTerrainProfile();
+    return profile.water.threshold / profile.height.maxHeightParameter;
+  }
+
+  private get shorelineParameters(): WorldTerrainProfile["shoreline"] {
+    return this.getWorldTerrainProfile().shoreline;
+  }
+
+  // Explicit overrides may confirm the manifest, never select a different seed.
   private computeSeedFromWorldId(): number {
-    // Check for explicit seed in world config or environment
+    const seed = this.getWorldTerrainProfile().seed;
     const worldConfig = (this.world as { config?: { terrainSeed?: number } })
       .config;
-    if (worldConfig?.terrainSeed !== undefined) {
-      return worldConfig.terrainSeed;
+    if (
+      worldConfig?.terrainSeed !== undefined &&
+      worldConfig.terrainSeed !== seed
+    ) {
+      throw new Error(
+        "World terrainSeed conflicts with admitted terrain profile",
+      );
     }
-
-    // Check environment variable
-    if (typeof process !== "undefined" && process.env?.TERRAIN_SEED) {
-      const envSeed = parseInt(process.env.TERRAIN_SEED, 10);
-      if (!isNaN(envSeed)) {
-        return envSeed;
+    if (typeof process !== "undefined") {
+      const raw = process.env?.TERRAIN_SEED;
+      if (
+        raw !== undefined &&
+        raw !== "" &&
+        (!/^(0|[1-9][0-9]*)$/.test(raw) || Number(raw) !== seed)
+      ) {
+        throw new Error("TERRAIN_SEED conflicts with admitted terrain profile");
       }
     }
-
-    // Always use fixed seed of 0 for deterministic terrain on both client and server
-    const FIXED_SEED = 0;
-    return FIXED_SEED;
+    return seed;
   }
 
   private resolveRuntimeRole(): { isServer: boolean; isClient: boolean } {
@@ -373,12 +664,10 @@ export class TerrainSystem extends System {
   }
 
   private getActiveWorldSizeTiles(): number {
-    if (!this.CONFIG.ISLAND_MASK_ENABLED) {
-      return this.CONFIG.WORLD_SIZE;
-    }
-
-    const maxTiles = this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES;
-    return maxTiles > 0 ? maxTiles : this.CONFIG.WORLD_SIZE;
+    const profile = this.getWorldTerrainProfile();
+    return (
+      (profile.bounds.maxX - profile.bounds.minX) / profile.terrainTileSize
+    );
   }
 
   private getActiveWorldSizeMeters(): number {
@@ -387,15 +676,60 @@ export class TerrainSystem extends System {
 
   /**
    * Load terrain textures and create the shared terrain material.
-   * Automatically uses KTX2 GPU-compressed textures when available.
+   * Compact terrain uses six channel-packed PBR maps; legacy defaults are kept.
    *
    * This material includes road influence support via the roadInfluence vertex attribute.
    * No fallback material - roads require the full shader to render correctly.
    */
   private initTerrainMaterial(): void {
-    // Create the shared terrain material (uses procedural classic MMORPG-style colors, no textures needed)
-    // This material reads the roadInfluence attribute and blends road colors
-    this.terrainMaterial = createTerrainMaterial();
+    const profile = this.getWorldTerrainProfile();
+    const textureEncoding = this.getCompactTerrainTextureEncoding();
+    let textureRenderer: THREE.WebGPURenderer | undefined;
+    if (textureEncoding) {
+      const graphics = this.world.getSystem<ClientGraphics>("graphics");
+      if (!graphics || graphics !== this.world.graphics || !graphics.renderer)
+        throw new Error(
+          "Compressed terrain requires its registered graphics renderer",
+        );
+      textureRenderer = graphics.renderer;
+    }
+    const material = createTerrainMaterial(undefined, {
+      compactPbr: isCompactSculptProfile(profile),
+      compactDirtProjection: this.getCompactDirtProjection(),
+      compactRockProjection: this.getCompactRockProjection(),
+      compactRockSampling: this.getCompactRockSampling(),
+      compactGroundSampling: this.getCompactGroundSampling(),
+      compactTerrainTextureMatrix: this.getCompactTerrainTextureMatrix(),
+      compactTerrainTextureFiltering: this.getCompactTerrainTextureFiltering(),
+      compactTerrainBankEvaluation: this.getCompactTerrainBankEvaluation(),
+      compactDirtSurfaceCache: this.getCompactDirtSurfaceCache(),
+      ...(textureEncoding
+        ? {
+            compactTerrainTextureEncoding: textureEncoding,
+            compactTextureRenderer: textureRenderer,
+          }
+        : {}),
+      compactSurfaceBlend: this.getCompactSurfaceBlend(),
+      compactPondBlend: this.getCompactPondBlend(),
+      compactCoastBlend: this.getCompactCoastBlend(),
+      compactPond: this.getCompactPondMaterial(),
+      ...(this.getCompactPondBlend() === "composition-v1"
+        ? { compactPondBankField: this.bindCompactPondBankField() }
+        : {}),
+      compactPlantingLobes: this.getCompactPlantingMaterial(),
+      compactProfile: profile,
+      compactHabitat: this.getCompactHabitatMaterial(),
+      compactGrassColorGrade: this.getCompactGrassColorGrade(),
+      ...(this.getPondServiceGround()
+        ? { pondServiceGround: this.getPondServiceGround()! }
+        : {}),
+    });
+    // The generator initializes before this client-only material exists. Apply
+    // profile-owned options here so the actual published material is configured
+    // before shadow setup or any terrain mesh can consume it.
+    material.terrainUniforms.surfaceDetailStrength.value =
+      isCompactSculptProfile(profile) ? 1 : 0;
+    this.terrainMaterial = material;
 
     // Setup for CSM shadows
     if (this.world.setupMaterial) {
@@ -405,6 +739,446 @@ export class TerrainSystem extends System {
     console.log(
       "[TerrainSystem] Terrain material created with road influence support",
     );
+  }
+
+  private getCompactPondMaterial(): CompactTerrainPond | null {
+    if (!isCompactSculptProfile(this.getWorldTerrainProfile())) return null;
+    if (this.compactPondMaterial) return this.compactPondMaterial;
+    const ponds = ALL_WORLD_AREAS.haven_pond?.waterBodies;
+    if (ponds?.length !== 1 || ponds[0].id !== "haven_pond_water")
+      throw new Error(
+        "Compact terrain requires the single admitted Haven pond",
+      );
+    this.compactPondMaterial = compactTerrainColorOperations.validatePond(
+      ponds[0],
+    );
+    return this.compactPondMaterial;
+  }
+
+  /** Restart-owned material/grass field; never changes authoritative height. */
+  private getCompactMacroMaterial(): CompactTerrainMacroField | null {
+    if (this.compactMacroMaterial === undefined)
+      this.compactMacroMaterial = compactTerrainColorOperations.macroField(
+        this.getWorldTerrainProfile(),
+        this.getCompactCoastBlend(),
+        this.getCompactPondBlend(),
+        this.getCompactPondBlend() === "composition-v1"
+          ? this.bindCompactPondBankField()
+          : undefined,
+        this.getPondServiceGround() ?? undefined,
+      );
+    return this.compactMacroMaterial;
+  }
+
+  /** Restart-owned appearance; authoritative service/landing owners admit it. */
+  private getPondServiceGround(): CompactTerrainBankVerge | null {
+    if (this.pondServiceGround === undefined)
+      this.pondServiceGround = this.getCompactGrassColorGrade()
+        ? createCompactPondServiceGround(
+            this.getWorldTerrainProfile(),
+            DataManager.getWorldConfig(),
+            ALL_WORLD_AREAS,
+          )
+        : null;
+    return this.pondServiceGround;
+  }
+
+  /** Bind only registered, canonical geometry. Preview edits require restart:
+   * a fresh snapshot alone cannot refresh an already compiled shader graph. */
+  private bindCompactPondBankField(): CompactPondBankField {
+    if (this.compactPondBankField) return this.compactPondBankField;
+    const zone = this.flatZones.get("haven_pond_floor");
+    const ponds = this.waterBodyRegistry
+      ?.getAllBodies()
+      .filter((body) => body.id === "haven_pond_water");
+    if (!zone || ponds?.length !== 1)
+      throw new Error("Pond composition requires registered terrain and water");
+    const pond = compactTerrainColorOperations.validatePond(ponds[0]);
+    const expected = this.getCompactPondMaterial();
+    if (
+      !pond ||
+      !expected ||
+      (["id", "centerX", "centerZ", "radius", "surfaceY"] as const).some(
+        (key) => pond[key] !== expected[key],
+      )
+    )
+      throw new Error(
+        "Pond composition registered water differs from material",
+      );
+    const field = compactTerrainColorOperations.pondBankField(zone, pond);
+    if (!field) throw new Error("Pond composition requires a bound field");
+    compactTerrainColorOperations.macroField(
+      this.getWorldTerrainProfile(),
+      this.getCompactCoastBlend(),
+      "composition-v1",
+      field,
+    );
+    this.waterBodyRegistry.seal();
+    this.compactPondBankField = field;
+    return field;
+  }
+
+  private assertPondCompositionZoneEditable(zone: FlatZone): void {
+    const field = this.compactPondBankField;
+    if (!field) return;
+    const reach = field.pond.radius + COMPACT_TERRAIN_COMPOSITION.pondBankReach;
+    // Masked terrain cores can extend beyond their rectangular description.
+    // Use the same conservative support union as canonical ground leases.
+    const radius = zone.radialPond?.bankOuterRadius;
+    let minX = zone.centerX - (radius ?? zone.width / 2);
+    let maxX = zone.centerX + (radius ?? zone.width / 2);
+    let minZ = zone.centerZ - (radius ?? zone.depth / 2);
+    let maxZ = zone.centerZ + (radius ?? zone.depth / 2);
+    const includeTile = (x: number, z: number) => {
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x + 1);
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z + 1);
+    };
+    for (const key of zone.tileMask ?? []) {
+      const [x, z] = key.split(",").map(Number);
+      includeTile(x, z);
+    }
+    for (const tile of zone.tileMaskTiles ?? []) includeTile(tile.x, tile.z);
+    minX -= zone.blendRadius;
+    maxX += zone.blendRadius;
+    minZ -= zone.blendRadius;
+    maxZ += zone.blendRadius;
+    if (
+      minX <= field.centerX + reach &&
+      maxX >= field.centerX - reach &&
+      minZ <= field.centerZ + reach &&
+      maxZ >= field.centerZ - reach
+    )
+      throw new Error("Bound pond composition terrain changes require restart");
+  }
+
+  /** Capture absence as well as selection; later URL edits require a new owner. */
+  private getCompactDirtProjection(): ReturnType<
+    typeof resolveCompactDirtProjectionCandidate
+  > {
+    if (this.compactDirtProjection === undefined) {
+      const selection = resolveCompactDirtProjectionCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Dirt projection requires compact sculpt terrain");
+      this.compactDirtProjection = selection ?? null;
+    }
+    return this.compactDirtProjection ?? undefined;
+  }
+
+  /** Independent restart-owned rock preview; no authoritative world identity. */
+  private getCompactRockProjection(): ReturnType<
+    typeof resolveCompactRockProjectionCandidate
+  > {
+    if (this.compactRockProjection === undefined) {
+      const selection = resolveCompactRockProjectionCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Rock projection requires compact sculpt terrain");
+      this.compactRockProjection = selection ?? null;
+    }
+    return this.compactRockProjection ?? undefined;
+  }
+
+  /** Shader-only sampling choice, pinned to this owner's captured dependencies. */
+  private getCompactRockSampling(): ReturnType<
+    typeof resolveCompactRockSampling
+  > {
+    if (this.compactRockSampling === undefined) {
+      const selection = resolveCompactRockSampling();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Rock sampling requires compact sculpt terrain");
+        if (
+          !this.getCompactGrassColorGrade() ||
+          this.getCompactRockProjection() !== "stochastic-v1" ||
+          this.getCompactDirtProjection() !== "stochastic-v1" ||
+          this.getCompactSurfaceBlend() !== "height-v1" ||
+          this.getCompactPondBlend() !== "composition-v1" ||
+          this.getCompactCoastBlend() === "cavity-v1"
+        )
+          throw new Error(
+            "Rock sampling requires compatible captured material selections",
+          );
+      }
+      this.compactRockSampling = selection ?? null;
+    }
+    return this.compactRockSampling ?? undefined;
+  }
+
+  /** Capture once; the existing rock owner admits every material dependency. */
+  private getCompactGroundSampling(): ReturnType<
+    typeof resolveCompactGroundSampling
+  > {
+    if (this.compactGroundSampling === undefined) {
+      const selection = resolveCompactGroundSampling();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Ground sampling requires compact sculpt terrain");
+        if (this.getCompactRockSampling() !== "exact-zero-v1")
+          throw new Error(
+            "Ground sampling requires captured exact-zero-v1 rock sampling",
+          );
+      }
+      this.compactGroundSampling = selection ?? null;
+    }
+    return this.compactGroundSampling ?? undefined;
+  }
+
+  private getCompactTerrainTextureEncoding(): ReturnType<
+    typeof resolveCompactTerrainTextureEncoding
+  > {
+    if (this.compactTerrainTextureEncoding === undefined)
+      this.compactTerrainTextureEncoding =
+        resolveCompactTerrainTextureEncoding() ?? null;
+    const selection = this.compactTerrainTextureEncoding ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain texture encoding requires compact sculpt terrain",
+      );
+    return selection;
+  }
+
+  private getCompactTerrainTextureMatrix(): ReturnType<
+    typeof resolveCompactTerrainTextureMatrix
+  > {
+    if (this.compactTerrainTextureMatrix === undefined)
+      this.compactTerrainTextureMatrix =
+        resolveCompactTerrainTextureMatrix() ?? null;
+    const selection = this.compactTerrainTextureMatrix ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error("Terrain texture matrix requires compact sculpt terrain");
+    return selection;
+  }
+
+  private getCompactTerrainTextureFiltering(): ReturnType<
+    typeof resolveCompactTerrainTextureFiltering
+  > {
+    if (this.compactTerrainTextureFiltering === undefined)
+      this.compactTerrainTextureFiltering =
+        resolveCompactTerrainTextureFiltering() ?? null;
+    const selection = this.compactTerrainTextureFiltering ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain texture filtering requires compact sculpt terrain",
+      );
+    return selection;
+  }
+
+  /** Capture both absence and selection once, independently of dirt projection. */
+  private getCompactTerrainBankEvaluation(): ReturnType<
+    typeof resolveCompactTerrainBankEvaluation
+  > {
+    if (this.compactTerrainBankEvaluation === undefined)
+      this.compactTerrainBankEvaluation =
+        resolveCompactTerrainBankEvaluation() ?? null;
+    const selection = this.compactTerrainBankEvaluation ?? undefined;
+    if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      throw new Error(
+        "Terrain bank evaluation requires compact sculpt terrain",
+      );
+    return selection;
+  }
+
+  private getCompactDirtSurfaceCache(): ReturnType<
+    typeof resolveCompactDirtSurfaceCache
+  > {
+    if (this.compactDirtSurfaceCache === undefined) {
+      const selection = resolveCompactDirtSurfaceCache();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error(
+            "Dirt surface caching requires compact sculpt terrain",
+          );
+        if (this.getCompactDirtProjection() !== "stochastic-v1")
+          throw new Error("Dirt surface caching requires stochastic dirt");
+      }
+      this.compactDirtSurfaceCache = selection ?? null;
+    }
+    return this.compactDirtSurfaceCache ?? undefined;
+  }
+
+  /** Capture both absence and selection once, independently of dirt projection. */
+  private getCompactSurfaceBlend(): ReturnType<
+    typeof resolveCompactSurfaceBlendCandidate
+  > {
+    if (this.compactSurfaceBlend === undefined) {
+      const selection = resolveCompactSurfaceBlendCandidate();
+      if (selection && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+        throw new Error("Terrain blend requires compact sculpt terrain");
+      this.compactSurfaceBlend = selection ?? null;
+    }
+    return this.compactSurfaceBlend ?? undefined;
+  }
+
+  /** Capture this pond-only visual choice without changing authored terrain. */
+  private getCompactPondBlend(): ReturnType<
+    typeof resolveCompactPondBlendCandidate
+  > {
+    if (this.compactPondBlend === undefined) {
+      const selection = resolveCompactPondBlendCandidate();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Pond blend requires compact sculpt terrain");
+        if (this.getCompactSurfaceBlend() !== "height-v1")
+          throw new Error(
+            "Pond blend requires captured height-v1 terrain blend",
+          );
+        if (!this.getCompactPondMaterial())
+          throw new Error("Pond blend requires the actual admitted pond");
+      }
+      this.compactPondBlend = selection ?? null;
+    }
+    return this.compactPondBlend ?? undefined;
+  }
+
+  /** Capture coastal material/grass composition without changing terrain shape. */
+  private getCompactCoastBlend(): ReturnType<typeof resolveCompactCoastBlend> {
+    if (this.compactCoastBlend === undefined) {
+      const selection = resolveCompactCoastBlend();
+      if (selection) {
+        if (!isCompactSculptProfile(this.getWorldTerrainProfile()))
+          throw new Error("Coast blend requires compact sculpt terrain");
+        if (this.getCompactSurfaceBlend() !== "height-v1")
+          throw new Error(
+            "Coast blend requires captured height-v1 terrain blend",
+          );
+        // Validate raw profile admission without the mode-dependent cached
+        // field: that field calls this getter and must not recurse.
+        if (
+          !compactTerrainColorOperations.macroField(
+            this.getWorldTerrainProfile(),
+          )?.coastalMeadow
+        )
+          throw new Error("Coast blend requires the admitted coastal meadow");
+      }
+      this.compactCoastBlend = selection ?? null;
+    }
+    return this.compactCoastBlend ?? undefined;
+  }
+
+  private getCompactGrassColorGrade(): CompactGrassColorGrade | undefined {
+    if (this.compactGrassColorGrade === undefined) {
+      // Capture the explicit visual selection once. A later URL mutation must
+      // not recolour, resample or change road clearance of an owned grass field.
+      const appearance = resolveGrassAppearanceCandidate();
+      const profile = resolveExplicitStreamingRenderProfile();
+      const coverageTrial = resolveGrassCoverageTrial();
+      const roadClearance = resolveGrassRoadClearance();
+      const lighting = resolveGrassLightingCandidate();
+      const geometry = resolveGrassGeometryCandidate();
+      const vergeEvaluation = resolveGrassVergeEvaluation();
+      const instancing = resolveGrassInstancingCandidate();
+      const submission = resolveGrassSubmissionCandidate();
+      const shadow = resolveGrassShadowCandidate();
+      const environment = resolveGrassEnvironmentCandidate();
+      const lightingModel = resolveGrassLightingModelCandidate();
+      const dynamics = resolveGrassDynamicsCandidate();
+      const palette = resolveGrassPaletteCandidate();
+      const groundingExecution = resolveGrassGroundingExecution();
+      const flowers = resolveRootedFlowerCandidate();
+      const fine = appearance === "fine-meadow-v1";
+      if (
+        fine !== (profile?.grassProfile === "fine-meadow-v1") ||
+        (fine && !isCompactSculptProfile(this.getWorldTerrainProfile()))
+      )
+        throw new Error("Grass color grade requires the compact fine meadow");
+      this.grassVisualSelection = Object.freeze({
+        appearance,
+        profile,
+        coverageTrial,
+        ...(roadClearance ? { roadClearance } : {}),
+        ...(lighting ? { lighting } : {}),
+        ...(geometry ? { geometry } : {}),
+        ...(vergeEvaluation ? { vergeEvaluation } : {}),
+        ...(instancing ? { instancing } : {}),
+        ...(submission ? { submission } : {}),
+        ...(shadow ? { shadow } : {}),
+        ...(environment ? { environment } : {}),
+        ...(lightingModel ? { lightingModel } : {}),
+        ...(dynamics ? { dynamics } : {}),
+        ...(palette ? { palette } : {}),
+        ...(groundingExecution ? { groundingExecution } : {}),
+        ...(flowers ? { flowers } : {}),
+      });
+      this.compactGrassColorGrade = fine
+        ? compactTerrainColorOperations.getGrassColorGrade(
+            palette === "regional-v1" ? "fine-meadow-regional-v1" : undefined,
+          ).id
+        : null;
+    }
+    return this.compactGrassColorGrade ?? undefined;
+  }
+
+  /** Restart-owned art descriptor; no resource, terrain or worker mutation. */
+  private getCompactHabitatMaterial(
+    selection = resolveHabitatCompositionCandidate(),
+  ): CompactHabitatField | null {
+    if (this.compactHabitatMaterial !== undefined)
+      return this.compactHabitatMaterial;
+    if (!selection) return (this.compactHabitatMaterial = null);
+    const profile = this.getWorldTerrainProfile();
+    if (
+      selection !== habitatCompositionData.id ||
+      profile.id !== habitatCompositionData.terrainProfileId ||
+      !profile.havenShoulder
+    )
+      throw new Error(
+        "Habitat composition requires its admitted Haven profile",
+      );
+    if (
+      profile.havenShoulder.toe.length !==
+        habitatCompositionData.toeAnchors.length ||
+      profile.havenShoulder.toe.some(
+        (point, i) =>
+          point[0] !== habitatCompositionData.toeAnchors[i][0] ||
+          point[1] !== habitatCompositionData.toeAnchors[i][1],
+      )
+    )
+      throw new Error("Habitat toe anchors differ from the admitted landform");
+    const resources = Object.values(ALL_WORLD_AREAS).flatMap(
+      (area) => area.resources ?? [],
+    );
+    for (const anchor of habitatCompositionData.treeAnchors) {
+      const matches = resources.filter(
+        (r) => r.instanceId === anchor.instanceId,
+      );
+      if (
+        matches.length !== 1 ||
+        matches[0].type !== "tree" ||
+        matches[0].position.x !== anchor.x ||
+        matches[0].position.z !== anchor.z
+      )
+        throw new Error(
+          "Habitat tree anchor differs from the authoritative resource",
+        );
+    }
+    const rocks =
+      DataManager.getWorldConfig()?.compactLandscapeRocks?.rocks ?? [];
+    for (const anchor of habitatCompositionData.rockAnchors) {
+      const matches = rocks.filter((r) => r.id === anchor.id);
+      if (
+        matches.length !== 1 ||
+        matches[0].x !== anchor.x ||
+        matches[0].z !== anchor.z
+      )
+        throw new Error(
+          "Habitat rock anchor differs from the admitted landscape",
+        );
+    }
+    return (this.compactHabitatMaterial = validateCompactHabitatComposition(
+      habitatCompositionData.composition,
+      habitatCompositionData.bounds,
+    ));
+  }
+
+  private getCompactPlantingMaterial(): readonly CompactTerrainPlantingLobe[] {
+    const descriptor = DataManager.getWorldConfig()?.compactServicePlanting;
+    this.compactPlantingMaterial ??= createCompactServiceSoil(
+      descriptor?.terrainProfileId === this.getWorldTerrainProfile().id
+        ? descriptor
+        : undefined,
+    );
+    return this.compactPlantingMaterial;
   }
 
   /**
@@ -432,17 +1206,13 @@ export class TerrainSystem extends System {
    * Get the terrain material with uniforms for external access (e.g., minimap fog control)
    * Returns null on server since server uses a basic material without uniforms.
    */
-  public getTerrainMaterialWithUniforms():
-    | (THREE.Material & {
-        terrainUniforms: TerrainUniforms;
-      })
-    | null {
+  public getTerrainMaterialWithUniforms(): ReturnType<
+    typeof createTerrainMaterial
+  > | null {
     if (!this.terrainMaterial) return null;
     // Check if material has terrainUniforms (client-only)
     if ("terrainUniforms" in this.terrainMaterial) {
-      return this.terrainMaterial as THREE.Material & {
-        terrainUniforms: TerrainUniforms;
-      };
+      return this.terrainMaterial as ReturnType<typeof createTerrainMaterial>;
     }
     return null;
   }
@@ -491,25 +1261,52 @@ export class TerrainSystem extends System {
   private enqueueTileForGeneration(
     tileX: number,
     tileZ: number,
-    _generateContent = true,
+    generateContent = true,
   ): void {
+    if (this.destroyed) return;
     const key = `${tileX}_${tileZ}`;
-    if (this.terrainTiles.has(key) || this.pendingTileSet.has(key)) return;
-    this.pendingTileSet.add(key);
-    this.pendingTileKeys.push(key);
-
-    // Also queue for worker pre-computation if enabled (client-side only)
-    if (
-      this.runtimeIsClient &&
-      this.CONFIG.USE_WORKERS &&
-      !this.pendingWorkerResults.has(key)
-    ) {
-      this.pendingWorkerTiles.push({ tileX, tileZ });
+    const resident = this.terrainTiles.get(key);
+    if (resident) {
+      if (generateContent && resident.contentGenerated === false)
+        this.pendingContentPromotions.set(key, resident);
+      return;
     }
+    if (this.pendingTileSet.has(key)) {
+      // A core/ring request upgrades an earlier horizon-only request.
+      if (generateContent) this.pendingTileContent.set(key, true);
+      return;
+    }
+    this.pendingTileSet.add(key);
+    this.pendingTileGenerations.set(key, {});
+    this.pendingTileKeys.push(key);
+    this.pendingTileContent.set(key, generateContent);
+
+    this.queueTileForWorker(tileX, tileZ);
   }
 
   /** Tiles waiting to be sent to workers for pre-computation */
   private pendingWorkerTiles: Array<{ tileX: number; tileZ: number }> = [];
+  /** Tiles queued for or currently executing in a worker. */
+  private pendingWorkerTileKeys = new Set<string>();
+  /** Tiles whose worker job failed or could not start and may use sync fallback. */
+  private workerFallbackTileKeys = new Set<string>();
+
+  private queueTileForWorker(tileX: number, tileZ: number): void {
+    const key = `${tileX}_${tileZ}`;
+    if (
+      !this.runtimeIsClient ||
+      !this.CONFIG.USE_WORKERS ||
+      this.terrainTiles.has(key) ||
+      this.pendingWorkerResults.has(key) ||
+      this.pendingWorkerTileKeys.has(key)
+    ) {
+      return;
+    }
+
+    this.pendingWorkerTileKeys.add(key);
+    this.workerFallbackTileKeys.delete(key);
+    this.pendingWorkerTiles.push({ tileX, tileZ });
+  }
 
   /**
    * Public API: Request prefetch of a tile for speculative loading.
@@ -526,22 +1323,7 @@ export class TerrainSystem extends System {
       return;
     }
 
-    // Add to worker pre-computation queue first (background processing)
-    if (
-      this.runtimeIsClient &&
-      this.CONFIG.USE_WORKERS &&
-      !this.pendingWorkerResults.has(key)
-    ) {
-      // Check if not already in worker queue
-      const alreadyQueued = this.pendingWorkerTiles.some(
-        (t) => t.tileX === tileX && t.tileZ === tileZ,
-      );
-      if (!alreadyQueued) {
-        this.pendingWorkerTiles.push({ tileX, tileZ });
-      }
-    }
-
-    // Enqueue for generation (will be processed when budget allows)
+    // Enqueue once for worker pre-computation and main-thread assembly.
     this.enqueueTileForGeneration(tileX, tileZ, true);
   }
 
@@ -550,26 +1332,94 @@ export class TerrainSystem extends System {
    * Prefers using pre-computed worker data when available
    */
   private processTileGenerationQueue(): void {
-    if (this.pendingTileKeys.length === 0) return;
+    if (this.destroyed) return;
+    if (
+      this.pendingTileKeys.length === 0 &&
+      this.pendingContentPromotions.size === 0
+    )
+      return;
     const nowFn =
       typeof performance !== "undefined" && performance.now
         ? () => performance.now()
         : () => Date.now();
     const start = nowFn();
     let generated = 0;
-    while (this.pendingTileKeys.length > 0) {
+    // Promotions share the geometry queue's existing per-frame work budget.
+    // They do not rebuild terrain, collision, or any previously generated content.
+    for (const [key, tile] of this.pendingContentPromotions) {
+      if (this.destroyed) return;
+      if (
+        generated >= this.maxTilesPerFrame ||
+        nowFn() - start > this.generationBudgetMsPerFrame
+      )
+        break;
+      this.pendingContentPromotions.delete(key);
+      if (this.promoteTileContent(tile)) generated++;
+    }
+    // Inspect each entry at most once per frame. Worker-backed entries rotate
+    // to the tail until their result or an explicit fallback arrives.
+    const inspectionLimit = this.pendingTileKeys.length;
+    let inspected = 0;
+    while (this.pendingTileKeys.length > 0 && inspected < inspectionLimit) {
+      if (this.destroyed) return;
       if (generated >= this.maxTilesPerFrame) break;
       if (nowFn() - start > this.generationBudgetMsPerFrame) break;
       const key = this.pendingTileKeys.shift()!;
+      inspected++;
+
+      const resident = this.terrainTiles.get(key);
+      if (resident) {
+        // Synchronous startup can satisfy a prefetch before its worker is
+        // dispatched. Retire that request before testing worker readiness;
+        // otherwise its skipped worker leaves this queue waiting forever.
+        const generateContent = this.pendingTileContent.get(key) ?? true;
+        this.pendingTileSet.delete(key);
+        this.pendingTileContent.delete(key);
+        this.pendingTileGenerations.delete(key);
+        this.pendingWorkerResults.delete(key);
+        this.pendingWorkerTileKeys.delete(key);
+        this.workerFallbackTileKeys.delete(key);
+        const queuedWorker = this.pendingWorkerTiles.findIndex(
+          (tile) => tile.tileX === resident.x && tile.tileZ === resident.z,
+        );
+        if (queuedWorker !== -1)
+          this.pendingWorkerTiles.splice(queuedWorker, 1);
+        if (generateContent && resident.contentGenerated === false)
+          this.pendingContentPromotions.set(key, resident);
+        // Retirement occupies an existing work slot. Content promotion stays
+        // in its normal budgeted queue, never rebuilding the resident mesh.
+        generated++;
+        continue;
+      }
+
+      const workerData = this.pendingWorkerResults.get(key);
+      const waitingForWorker =
+        this.runtimeIsClient &&
+        this.CONFIG.USE_WORKERS &&
+        this.pendingWorkerTileKeys.has(key) &&
+        !this.workerFallbackTileKeys.has(key) &&
+        !workerData;
+      if (waitingForWorker) {
+        this.pendingTileKeys.push(key);
+        continue;
+      }
+
       this.pendingTileSet.delete(key);
+      const generateContent = this.pendingTileContent.get(key) ?? true;
+      this.pendingTileContent.delete(key);
+      this.pendingTileGenerations.delete(key);
       const [x, z] = key.split("_").map(Number);
 
       // Check if we have pre-computed worker data for this tile
-      const workerData = this.pendingWorkerResults.get(key);
       const _tStart = performance.now();
       if (workerData) {
         const geometry = this.createTileGeometryFromWorkerData(workerData);
-        this.createTileFromGeometryWithResources(x, z, geometry);
+        this.createTileFromGeometryWithResources(
+          x,
+          z,
+          geometry,
+          generateContent,
+        );
         this.pendingWorkerResults.delete(key);
         if (TERRAIN_TIMING_DEBUG) {
           console.debug(
@@ -577,14 +1427,57 @@ export class TerrainSystem extends System {
           );
         }
       } else {
-        this.generateTile(x, z);
+        this.generateTile(x, z, generateContent);
         if (TERRAIN_TIMING_DEBUG) {
           console.debug(
             `[TerrainTiming] sync tile ${key}: ${(performance.now() - _tStart).toFixed(1)}ms`,
           );
         }
       }
+      this.pendingWorkerTileKeys.delete(key);
+      this.workerFallbackTileKeys.delete(key);
       generated++;
+    }
+  }
+
+  /**
+   * Drop queued terrain work that no active terrain center still needs.
+   * Duel teleports can invalidate hundreds of queued tiles before generation;
+   * retaining them makes the server generate, populate, and immediately unload
+   * obsolete world regions for minutes after the camera has moved on.
+   */
+  private prunePendingTileQueue(
+    neededTiles: ReadonlySet<string>,
+    contentTiles: ReadonlySet<string> = neededTiles,
+  ): void {
+    for (const [key, tile] of this.pendingContentPromotions) {
+      if (!contentTiles.has(key) || this.terrainTiles.get(key) !== tile)
+        this.pendingContentPromotions.delete(key);
+    }
+    if (this.pendingTileKeys.length === 0) return;
+
+    const retainedKeys: string[] = [];
+    for (const key of this.pendingTileKeys) {
+      if (neededTiles.has(key)) {
+        // A pending worker computes geometry only. Its current content intent
+        // must follow the latest core, not the center that dispatched it.
+        this.pendingTileContent.set(key, contentTiles.has(key));
+        retainedKeys.push(key);
+        continue;
+      }
+      this.pendingTileSet.delete(key);
+      this.pendingTileContent.delete(key);
+      this.pendingTileGenerations.delete(key);
+      this.pendingWorkerResults.delete(key);
+      this.pendingWorkerTileKeys.delete(key);
+      this.workerFallbackTileKeys.delete(key);
+    }
+    this.pendingTileKeys = retainedKeys;
+
+    if (this.pendingWorkerTiles.length > 0) {
+      this.pendingWorkerTiles = this.pendingWorkerTiles.filter((tile) =>
+        neededTiles.has(`${tile.tileX}_${tile.tileZ}`),
+      );
     }
   }
 
@@ -770,6 +1663,82 @@ export class TerrainSystem extends System {
     }
   }
 
+  /** Shared sync/worker/promotion content path. Geometry and collision are untouched. */
+  private generateTileContent(tile: TerrainTile): void {
+    if (tile.contentGenerated === true) return;
+    const isServer =
+      this.runtimeIsServer || this.world.network?.isServer === true;
+    if (isServer || this.runtimeIsClient) this.generateTileResources(tile);
+    if (this.runtimeIsClient) {
+      this.generateVisualFeatures(tile);
+      if (!this.CONFIG.USE_QUADTREE_LOD) this.generateWaterMeshes(tile);
+      if (tile.resources.length > 0) this.queueResourceInstances(tile);
+    }
+    // Publish once, including empty full-content batches. Re-entrant requests
+    // cannot initialize resource state again after an event listener runs.
+    tile.contentGenerated = true;
+  }
+
+  private emitTileGenerated(tile: TerrainTile): void {
+    if (this.destroyed || this.terrainTiles.get(tile.key) !== tile) return;
+    const originX = tile.x * this.CONFIG.TILE_SIZE;
+    const originZ = tile.z * this.CONFIG.TILE_SIZE;
+    const spawnPoints = tile.resources.map(
+      (resource): TerrainResourceSpawnPoint => ({
+        id: resource.id,
+        type: resource.type,
+        subType:
+          resource.subType ?? (resource.type === "tree" ? "normal" : undefined),
+        position: {
+          x: originX + resource.position.x,
+          y: resource.position.y,
+          z: originZ + resource.position.z,
+        },
+        scale: resource.scale,
+        rotation: resource.rotation,
+      }),
+    );
+    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
+      tileId: `${tile.x},${tile.z}`,
+      position: { x: originX, z: originZ },
+      tileX: tile.x,
+      tileZ: tile.z,
+      biome: (tile.biome as BiomeType) || DEFAULT_BIOME,
+      contentGenerated: tile.contentGenerated === true,
+      resources: spawnPoints.map(({ id, type, position }) => ({
+        id: id!,
+        type,
+        position,
+      })),
+    });
+    // A synchronous tile listener can unload/destroy the owner. Never publish a
+    // resource batch after its corresponding unload event has already retired it.
+    if (
+      !this.destroyed &&
+      this.terrainTiles.get(tile.key) === tile &&
+      tile.contentGenerated === true &&
+      (this.runtimeIsServer ||
+        this.runtimeIsClient ||
+        this.world.network?.isServer)
+    )
+      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
+        owner: { tileX: tile.x, tileZ: tile.z },
+        spawnPoints,
+      });
+  }
+
+  private promoteTileContent(tile: TerrainTile): boolean {
+    if (
+      this.destroyed ||
+      this.terrainTiles.get(tile.key) !== tile ||
+      tile.contentGenerated !== false
+    )
+      return false;
+    this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+    return true;
+  }
+
   /**
    * Pre-compute terrain data for multiple tiles using web workers
    *
@@ -803,30 +1772,24 @@ export class TerrainSystem extends System {
     }
 
     this.workerBatchInProgress = true;
+    const batchLease = {};
+    this.workerBatchLease = batchLease;
+    const generations = new Map(
+      tilesToProcess.map(({ tileX, tileZ }) => {
+        const key = `${tileX}_${tileZ}`;
+        return [key, this.pendingTileGenerations.get(key)] as const;
+      }),
+    );
+    const isCurrent = (key: string) =>
+      this.isCurrentTileRequest(key, generations.get(key));
 
     try {
       // Build worker config from current CONFIG
       // MUST match TerrainWorkerConfig interface exactly
-      const workerConfig: TerrainWorkerConfig = {
-        TILE_SIZE: this.CONFIG.TILE_SIZE,
-        TILE_RESOLUTION: this.CONFIG.TILE_RESOLUTION,
-        MAX_HEIGHT: MAX_HEIGHT,
-        // Biome calculation - MUST match getBiomeInfluencesAtPosition()
-        BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-        BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-        BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-        WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-        WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-        SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-        SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-        SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-        SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-        SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-        SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-        UNDERWATER_DEPTH_MULTIPLIER:
-          SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-      };
+      const workerConfig: TerrainWorkerConfig = createTerrainWorkerConfig(
+        this.getWorldTerrainProfile(),
+        this.CONFIG.TILE_RESOLUTION,
+      );
 
       // Build simplified biome data for worker
       const biomeData: Record<
@@ -847,18 +1810,23 @@ export class TerrainSystem extends System {
         tilesToProcess,
         workerConfig,
         this.computeSeedFromWorldId(),
-        this.terrainGenerator
-          .getBiomeSystem()
-          .getBiomeCenters() as BiomeCenter[],
+        this.biomeSystem.getBiomeCenters() as BiomeCenter[],
         biomeData,
       );
+      if (this.destroyed) return;
 
-      // Check if workers were actually available
+      // Only an explicit worker failure permits synchronous fallback. Normal
+      // in-flight work remains queued without blocking the render thread.
       if (!batchResult.workersAvailable) {
         console.warn(
           "[TerrainSystem] Workers not available, tiles will use synchronous generation",
         );
-        // Tiles will be generated synchronously via the normal queue
+        for (const tile of tilesToProcess) {
+          const key = `${tile.tileX}_${tile.tileZ}`;
+          if (!isCurrent(key)) continue;
+          this.pendingWorkerTileKeys.delete(key);
+          this.workerFallbackTileKeys.add(key);
+        }
         return;
       }
 
@@ -871,13 +1839,58 @@ export class TerrainSystem extends System {
 
       // Store successful results for later geometry creation
       for (const result of batchResult.results) {
-        this.pendingWorkerResults.set(result.tileKey, result);
+        this.acceptTerrainWorkerResult(result, generations.get(result.tileKey));
+      }
+
+      if (batchResult.failedCount > 0) {
+        const completedKeys = new Set(
+          batchResult.results.map((result) => result.tileKey),
+        );
+        for (const tile of tilesToProcess) {
+          const key = `${tile.tileX}_${tile.tileZ}`;
+          if (!isCurrent(key)) continue;
+          if (completedKeys.has(key)) continue;
+          this.pendingWorkerTileKeys.delete(key);
+          this.workerFallbackTileKeys.add(key);
+        }
       }
     } catch (error) {
+      if (this.destroyed) return;
       console.error("[TerrainSystem] Worker batch failed:", error);
+      for (const tile of tilesToProcess) {
+        const key = `${tile.tileX}_${tile.tileZ}`;
+        if (!isCurrent(key)) continue;
+        this.pendingWorkerTileKeys.delete(key);
+        this.workerFallbackTileKeys.add(key);
+      }
     } finally {
-      this.workerBatchInProgress = false;
+      if (this.workerBatchLease === batchLease) {
+        this.workerBatchLease = null;
+        this.workerBatchInProgress = false;
+      }
     }
+  }
+
+  private isCurrentTileRequest(
+    key: string,
+    generation: object | undefined,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      generation !== undefined &&
+      this.pendingTileGenerations.get(key) === generation &&
+      this.pendingTileSet.has(key)
+    );
+  }
+
+  private acceptTerrainWorkerResult(
+    result: TerrainWorkerOutput,
+    generation: object | undefined,
+  ): void {
+    if (!this.isCurrentTileRequest(result.tileKey, generation)) return;
+    this.pendingWorkerTileKeys.delete(result.tileKey);
+    if (!this.terrainTiles.has(result.tileKey))
+      this.pendingWorkerResults.set(result.tileKey, result);
   }
 
   /**
@@ -1049,12 +2062,14 @@ export class TerrainSystem extends System {
     tileX: number,
     tileZ: number,
     geometry: THREE.PlaneGeometry,
+    generateContent = true,
   ): TerrainTile {
     const key = `${tileX}_${tileZ}`;
 
     // Check if tile already exists
     if (this.terrainTiles.has(key)) {
       geometry.dispose();
+      this.enqueueTileForGeneration(tileX, tileZ, generateContent);
       return this.terrainTiles.get(key)!;
     }
 
@@ -1090,6 +2105,7 @@ export class TerrainSystem extends System {
       resources: [],
       roads: [],
       generated: true,
+      contentGenerated: false,
       lastActiveTime: new Date(),
       playerCount: 0,
       needsSave: true,
@@ -1182,99 +2198,12 @@ export class TerrainSystem extends System {
       this.terrainContainer.add(mesh);
     }
 
-    // Generate content (resources, visual features, water)
-    const isServer =
-      this.runtimeIsServer || this.world.network?.isServer || false;
-    const isClient = this.runtimeIsClient;
-
-    if (isServer) {
-      this.generateTileResources(tile);
-    }
-
-    if (isClient) {
-      if (!isServer && tile.resources.length === 0) {
-        this.generateTileResources(tile);
-      }
-      this.generateVisualFeatures(tile);
-      if (!this.CONFIG.USE_QUADTREE_LOD) {
-        this.generateWaterMeshes(tile);
-      }
-
-      // Queue resource instances for deferred creation (spreads work across frames)
-      if (tile.resources.length > 0 && tile.mesh) {
-        this.queueResourceInstances(tile);
-      }
-    }
-
-    // Emit tile generated event
-    const originX = tileX * this.CONFIG.TILE_SIZE;
-    const originZ = tileZ * this.CONFIG.TILE_SIZE;
-    const resourcesPayload = tile.resources.map((r) => ({
-      id: r.id,
-      type: r.type,
-      position: {
-        x: originX + r.position.x,
-        y: r.position.y,
-        z: originZ + r.position.z,
-      },
-    }));
-    const genericBiome = (tile.biome as BiomeType) || DEFAULT_BIOME;
-    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
-      tileId: `${tileX},${tileZ}`,
-      position: { x: originX, z: originZ },
-      tileX,
-      tileZ,
-      biome: genericBiome,
-      resources: resourcesPayload,
-    });
-
-    // Register resource spawn points (same as generateTile)
-    if (isServer && tile.resources.length > 0) {
-      const spawnPoints = tile.resources.map((r) => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-      });
-    } else if (tile.resources.length > 0 && isClient && !isServer) {
-      const spawnPoints = tile.resources.map((r) => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-      });
-    }
-
     this.terrainTiles.set(key, tile);
     this.activeChunks.add(key);
+    if (generateContent) this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+
+    if (this.destroyed || this.terrainTiles.get(key) !== tile) return tile;
 
     // Store height data NOW that the tile is in the map.
     // createTileGeometryFromWorkerData attaches heightData to geometry.userData
@@ -1287,17 +2216,14 @@ export class TerrainSystem extends System {
     // Synchronously bake WATER and STEEP_SLOPE collision flags (server-only).
     // Must match generateTile() — worker-generated tiles need the same
     // walkability baking (WATER flags, bridge collision overrides, etc.).
-    if (isServer) {
+    if (this.runtimeIsServer || this.world.network?.isServer) {
       this.bakeWalkabilityFlags(tileX, tileZ);
     }
 
     return tile;
   }
 
-  /**
-   * Initialize the unified TerrainGenerator from @hyperforge/procgen
-   * This creates a standalone generator that matches this system's configuration
-   */
+  /** Initialize shared biome placement using the admitted compact terrain profile. */
   private initializeTerrainGenerator(): void {
     const seed = this.computeSeedFromWorldId();
     const worldSizeMeters = this.getActiveWorldSizeMeters();
@@ -1317,101 +2243,50 @@ export class TerrainSystem extends System {
       };
     }
 
-    // Create configuration that matches this system's CONFIG
-    const terrainConfig: Partial<TerrainConfig> = {
+    const profile = this.getWorldTerrainProfile();
+    const influence = profile.island.radius * 0.6;
+    const centers = BiomeSystem.computePolygonCenters(
+      isCompactSculptProfile(profile)
+        ? [BiomeType.Forest]
+        : (BIOME_LIST as string[]),
+      profile.island.radius * 0.45,
+      influence,
+    ).map((center) => ({
+      ...center,
+      x: center.x + profile.island.centerX,
+      z: center.z + profile.island.centerZ,
+    }));
+    // Retain the shared biome implementation, not a second terrain-height
+    // generator with an independent island mask and origin-centered bounds.
+    this.biomeSystem = new BiomeSystem(
       seed,
-      tileSize: this.CONFIG.TILE_SIZE,
-      worldSize: this.CONFIG.WORLD_SIZE,
-      tileResolution: this.CONFIG.TILE_RESOLUTION,
-      maxHeight: MAX_HEIGHT,
-      waterThreshold: this.CONFIG.WATER_THRESHOLD,
-      noise: {
-        continent: {
-          scale: 0.0008,
-          weight: 0.4,
-          octaves: 5,
-          persistence: 0.7,
-          lacunarity: 2.0,
-        },
-        ridge: { scale: 0.003, weight: 0.1 },
-        hill: {
-          scale: 0.012,
-          weight: 0.12,
-          octaves: 4,
-          persistence: 0.5,
-          lacunarity: 2.2,
-        },
-        erosion: { scale: 0.005, weight: 0.08, octaves: 3 },
-        detail: {
-          scale: 0.04,
-          weight: 0.03,
-          octaves: 2,
-          persistence: 0.3,
-          lacunarity: 2.5,
-        },
-      },
-      biomes: {
+      worldSizeMeters,
+      {
         gridSize: 3,
         jitter: 0,
-        minInfluence: BIOME_CONFIG.influenceRadius,
-        maxInfluence: BIOME_CONFIG.influenceRadius,
+        minInfluence: influence,
+        maxInfluence: influence,
         gaussianCoeff: BIOME_CONFIG.gaussianCoeff,
         boundaryNoiseScale: BIOME_CONFIG.boundaryNoiseScale,
         boundaryNoiseAmount: BIOME_CONFIG.boundaryNoiseAmount,
-        explicitCenters: BiomeSystem.computePolygonCenters(
-          BIOME_LIST as string[],
-          BIOME_CONFIG.placementRadius,
-          BIOME_CONFIG.influenceRadius,
-        ),
+        explicitCenters: centers,
       },
-      island: {
-        enabled: this.CONFIG.ISLAND_MASK_ENABLED,
-        maxWorldSizeTiles: this.CONFIG.ISLAND_MAX_WORLD_SIZE_TILES,
-        falloffTiles: this.CONFIG.ISLAND_FALLOFF_TILES,
-        edgeNoiseScale: this.CONFIG.ISLAND_EDGE_NOISE_SCALE,
-        edgeNoiseStrength: this.CONFIG.ISLAND_EDGE_NOISE_STRENGTH,
-      },
-      shoreline: {
-        waterLevelNormalized: WATER_LEVEL_NORMALIZED,
-        threshold: SHORELINE_CONFIG.THRESHOLD,
-        colorStrength: SHORELINE_CONFIG.STRENGTH,
-        minSlope: SHORELINE_CONFIG.MIN_SLOPE,
-        slopeSampleDistance: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-        landBand: SHORELINE_CONFIG.LAND_BAND,
-        landMaxMultiplier: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        underwaterBand: SHORELINE_CONFIG.UNDERWATER_BAND,
-        underwaterDepthMultiplier: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-      },
-    };
-
-    this.terrainGenerator = new TerrainGenerator(
-      terrainConfig,
       biomeDefinitions,
     );
-
     console.log(
-      `[TerrainSystem] Initialized unified TerrainGenerator with seed ${seed}, ` +
-        `world size ${worldSizeMeters}m, ${Object.keys(biomeDefinitions).length} biomes`,
+      `[TerrainSystem] Initialized profile ${profile.id}, seed ${seed}, ${worldSizeMeters}m envelope`,
     );
-  }
-
-  /**
-   * Get the unified terrain generator for external use
-   * Useful for systems that need standalone terrain queries
-   */
-  public getTerrainGenerator(): TerrainGenerator {
-    return this.terrainGenerator;
   }
 
   // World Configuration - Your Specifications
   // classic MMORPG-STYLE: Rolling terrain with visible hills
   private readonly CONFIG = {
     // Core World Specs
-    TILE_SIZE: TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE,
-    WORLD_SIZE: 100, // 100x100 grid = 10km x 10km world
+    TILE_SIZE: Number(TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE),
+    WORLD_SIZE: 0, // Resolved from the required admitted terrain profile.
     TILE_RESOLUTION: 64, // 64x64 vertices per tile for smooth terrain
     SERVER_COLLISION_RESOLUTION: 16, // 16x16 vertices for PhysX collision (server only)
-    WATER_THRESHOLD: TERRAIN_CONSTANTS.WATER_THRESHOLD,
+    WATER_THRESHOLD: Number(TERRAIN_CONSTANTS.WATER_THRESHOLD),
 
     // LOD (Level of Detail) - Resolution tiers based on distance
     LOD_DISTANCES: [200, 400, 700], // Distance thresholds
@@ -1451,8 +2326,8 @@ export class TerrainSystem extends System {
 
     // Island Mask (default for main world)
     ISLAND_MASK_ENABLED: true,
-    ISLAND_MAX_WORLD_SIZE_TILES: 100, // 10km x 10km island
-    ISLAND_FALLOFF_TILES: 4, // Coastline falloff width in tiles
+    ISLAND_MAX_WORLD_SIZE_TILES: 0, // Resolved before any terrain work.
+    ISLAND_FALLOFF_TILES: 0,
     ISLAND_EDGE_NOISE_SCALE: 0.0015, // Noise scale for coastline irregularity
     ISLAND_EDGE_NOISE_STRENGTH: 0.03, // Radius variance as fraction of radius
 
@@ -1495,22 +2370,86 @@ export class TerrainSystem extends System {
     super(world);
   }
 
-  async init(): Promise<void> {
-    console.log("[TerrainSystem] init() v2 — river valley carving enabled");
+  override getDependencies() {
+    // PNG startup keeps its original dependency graph. Only the explicit client
+    // candidate waits for its registered renderer; servers never require GPU.
+    if (this.resolveRuntimeRole().isClient) {
+      if (this.compactTerrainTextureEncoding === undefined)
+        this.compactTerrainTextureEncoding =
+          resolveCompactTerrainTextureEncoding() ?? null;
+      if (
+        this.compactTerrainTextureEncoding &&
+        this.world.getSystem("graphics")
+      )
+        return { required: ["graphics"] };
+    }
+    return {};
+  }
+
+  init(): Promise<void> {
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
+    // Start synchronously through the existing first await; concurrent callers
+    // share one owner rather than replacing a still-initializing WaterSystem.
+    return (this.initialization ??= this.initialize().catch(
+      (error: unknown) => {
+        this.failReadiness(error);
+        throw error;
+      },
+    ));
+  }
+
+  private async initialize(): Promise<void> {
+    // Manifest loading is also used by other init waves; its in-flight promise
+    // is shared. Do not generate terrain or create GPU work from fallback data.
+    const dataManager = DataManager.getInstance();
+    // System registration normally admits the manifests first. Do not yield
+    // that already-ready path before synchronous terrain sampling is installed:
+    // other systems in the same init wave can request terrain immediately.
+    if (!dataManager.isReady()) await dataManager.initialize();
+    if (this.destroyed)
+      throw new Error("Terrain destroyed during manifest admission");
+    this.getCompactPondMaterial();
+    this.landscapeGrassExclusions = createCompactLandscapeRockFootprints(
+      DataManager.getWorldConfig()?.compactLandscapeRocks,
+    );
+    this.refreshGrassExclusionPolygons();
+    console.log(
+      "[TerrainSystem] Initializing admitted compact terrain profile",
+    );
     // Initialize tile size
     this.tileSize = this.CONFIG.TILE_SIZE;
     const runtimeRole = this.resolveRuntimeRole();
     this.runtimeIsServer = runtimeRole.isServer;
     this.runtimeIsClient = runtimeRole.isClient;
+    this.getCompactDirtProjection();
+    this.getCompactRockProjection();
+    this.getCompactSurfaceBlend();
+    this.getCompactPondBlend();
+    this.getCompactCoastBlend();
+    this.getCompactGrassColorGrade();
+    this.getCompactRockSampling();
+    this.getCompactGroundSampling();
+    this.getCompactTerrainTextureFiltering();
 
     // Initialize deterministic noise from world id + per-biome noise sets
     this.ensureNoiseInitialized();
 
-    // Initialize the unified terrain generator from @hyperforge/procgen
+    // Initialize the shared biome generator; height sampling stays profile-owned.
     this.initializeTerrainGenerator();
 
     // Water body registry — ocean level only (no manual rivers/ponds)
     this.waterBodyRegistry = new WaterBodyRegistry(this.CONFIG.WATER_THRESHOLD);
+
+    // This explicit preview needs registered terrain before material creation.
+    // Historical startup timing remains unchanged when it is not selected.
+    if (this.getCompactPondBlend() === "composition-v1") {
+      this.loadWaterBodiesFromManifest();
+      this.loadFlatZonesFromManifest();
+      this.bindCompactPondBankField();
+      this.compositionManifestLoaded = true;
+    }
 
     // Cache optional TownSystem for difficulty falloff and boss placement
     this.townSystem = this.world.getSystem<TownSystem>("towns") ?? null;
@@ -1524,6 +2463,24 @@ export class TerrainSystem extends System {
     // Initialize terrain material (client-side only)
     if (this.runtimeIsClient) {
       this.initTerrainMaterial();
+      const material = this.terrainMaterial as ReturnType<
+        typeof createTerrainMaterial
+      >;
+      if (material.compactTerrainSurface) {
+        try {
+          // Generator/height sampling already exists. Admit all actual PBR maps
+          // before this client init can become ready; placeholders are not proof.
+          await material.compactTerrainSurface.load();
+          if (this.destroyed)
+            throw new Error("Terrain destroyed during material admission");
+        } catch (error) {
+          if (this.terrainMaterial === material) {
+            this.terrainMaterial = undefined;
+            material.dispose();
+          }
+          throw error;
+        }
+      }
 
       // TEMPORARILY DISABLED - rock system disabled
       // setProcgenRockWorld(this.world);
@@ -1565,19 +2522,41 @@ export class TerrainSystem extends System {
     }
 
     // Initialize water system
-    this.waterSystem = new WaterSystem(this.world);
-    await this.waterSystem.init();
-
-    // Add water system to scene (required for reflector and debug view)
-    if (this.world.stage?.scene) {
-      this.waterSystem.addToScene(this.world.stage.scene);
+    const water = new WaterSystem(this.world);
+    this.waterSystem = water;
+    this.initializingWater = water;
+    try {
+      await water.init();
+      if (this.destroyed || this.waterSystem !== water) {
+        throw new Error("Terrain destroyed during water initialization");
+      }
+      // Keep the owner lease during Three's synchronous childadded events too:
+      // parent retirement must not dispose resources while addToScene uses them.
+      if (this.world.stage?.scene) water.addToScene(this.world.stage.scene);
+      if (this.destroyed || this.waterSystem !== water) {
+        throw new Error("Terrain destroyed during water publication");
+      }
+    } catch (error) {
+      if (this.waterSystem === water) this.waterSystem = undefined;
+      // destroy() cannot cancel texture loading/procedural work. Retire this
+      // exact owner after initialization/publication has settled, including errors.
+      try {
+        water.destroy();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Water initialization and retirement failed",
+        );
+      }
+      throw error;
+    } finally {
+      if (this.initializingWater === water) this.initializingWater = null;
     }
-
     // Sync water reflections setting from prefs (client-side only)
     if (typeof window !== "undefined" && this.world.prefs) {
       // Set initial value from prefs
       const waterReflectionsEnabled = this.world.prefs.waterReflections ?? true;
-      this.waterSystem.setReflectionsEnabled(waterReflectionsEnabled);
+      water.setReflectionsEnabled(waterReflectionsEnabled);
 
       // Listen for prefs changes
       this.world.prefs.on("change", this.onPrefsChange);
@@ -1586,8 +2565,7 @@ export class TerrainSystem extends System {
     // Get systems references
     // Check if database system exists and has the required method
     const dbSystem = this.world.getSystem("database") as
-      | { saveWorldChunk(chunkData: WorldChunkData): void }
-      | undefined;
+      { saveWorldChunk(chunkData: WorldChunkData): void } | undefined;
     if (dbSystem) {
       this.databaseSystem = dbSystem;
     }
@@ -1610,9 +2588,31 @@ export class TerrainSystem extends System {
     } else {
       // Environment not yet determined
     }
+    this.canonicalGroundInitialized = true;
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
+    if (this.startup) return this.startup;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    // Publish before synchronous tile events can re-enter start. The server
+    // still assembles its initial tiles synchronously before this method returns.
+    this.startup = new Promise<void>((onReady, onFailure) => {
+      resolve = onReady;
+      reject = onFailure;
+    });
+    void this.startTerrain().then(resolve, (error: unknown) => {
+      this.failReadiness(error);
+      reject(error);
+    });
+    return this.startup;
+  }
+
+  private async startTerrain(): Promise<void> {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
     this.ensureNoiseInitialized();
 
     // CRITICAL: Wait for DataManager to initialize BIOMES data before generating terrain
@@ -1628,6 +2628,7 @@ export class TerrainSystem extends System {
       Date.now() - startTime < maxWait
     ) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.destroyed) throw new Error("Terrain destroyed during startup");
     }
 
     // Final check - verify BIOMES data is actually loaded
@@ -1643,8 +2644,13 @@ export class TerrainSystem extends System {
       `[TerrainSystem] DataManager initialized, ${Object.keys(BIOMES).length} biomes loaded, proceeding with terrain generation`,
     );
 
-    // Load flat zones from manifest (now that DataManager has loaded world-areas.json and stations.json)
-    this.loadFlatZonesFromManifest();
+    // Load explicit ponds/lakes before terrain collision or visual tiles are
+    // generated so water, shore discovery, and movement share one registry.
+    if (!this.compositionManifestLoaded) {
+      this.loadWaterBodiesFromManifest();
+      // Geometry precedes collision, visuals, and vegetation on both roles.
+      this.loadFlatZonesFromManifest();
+    }
 
     // Final environment detection. world.isClient can be transiently true during
     // server bootstrap, so prefer runtime detection to avoid loading client-only
@@ -1657,6 +2663,17 @@ export class TerrainSystem extends System {
       this.setupServerTerrain();
     } else if (isClient) {
       this.setupClientTerrain();
+      if (this.getWorldTerrainProfile().kind === "compact-candidate") {
+        const water = this.waterSystem;
+        if (!water) throw new Error("Compact terrain requires its water owner");
+        // All manifest grades are loaded, and setup has established sea level.
+        // Cooperative construction does not depend on the not-yet-started tick.
+        await water.configureCoastalBathymetry(() =>
+          this.captureCanonicalGroundLease(),
+        );
+        if (this.destroyed || this.waterSystem !== water)
+          throw new Error("Terrain retired during coastal field construction");
+      }
     } else {
       console.warn(
         "[TerrainSystem] Runtime role unresolved, defaulting to server terrain mode",
@@ -1681,38 +2698,38 @@ export class TerrainSystem extends System {
     // Road influence can be refreshed later when the road network finishes.
     // This keeps first entry into the world off the critical path for roads/towns.
     if (!this._initialTilesReady) {
-      this.loadInitialTiles();
+      const initialTiles = this.loadInitialTiles();
+      if (initialTiles) await initialTiles;
+    }
+    if (
+      this.runtimeIsClient &&
+      isStreamingLikeViewport() &&
+      this.quadTreeVisualManager &&
+      this.world.graphics?.precompileObject
+    ) {
+      const center = this.getTerrainCenters()[0]?.position;
+      if (center) {
+        const precompileObject = this.world.graphics.precompileObject.bind(
+          this.world.graphics,
+        );
+        await this.quadTreeVisualManager.precompileRepresentativeChunk(
+          center.x,
+          center.z,
+          precompileObject,
+        );
+        if (this.destroyed)
+          throw new Error("Terrain destroyed during precompilation");
+        if (this.grassVisualManager) {
+          await this.grassVisualManager.precompileRepresentativeChunk(
+            precompileObject,
+          );
+          if (this.destroyed)
+            throw new Error("Terrain destroyed during precompilation");
+        }
+      }
     }
 
-    // Refresh road influence after the road network becomes available.
-    this.world.on(EventType.ROADS_GENERATED, (...args: unknown[]) => {
-      // Extract road data from event args
-      const data = (args[0] ?? {}) as {
-        roadCount?: number;
-        townCount?: number;
-      };
-      console.log(
-        `[TerrainSystem] ROADS_GENERATED event received: ${data.roadCount ?? 0} roads, ${data.townCount ?? 0} towns`,
-      );
-
-      this.roadNetworkSystem = this.world.getSystem("roads") as
-        | RoadNetworkSystem
-        | undefined;
-
-      // Tiles already exist by this point in normal client flow. Refresh them
-      // so roads appear without making road generation block first terrain.
-      if (this.terrainTiles.size > 0) {
-        console.log(
-          "[TerrainSystem] Roads ready, refreshing road influence on loaded tiles...",
-        );
-        this.refreshRoadInfluence();
-      }
-
-      // Rebuild grass chunks so road influence is reflected
-      if (this.grassVisualManager) {
-        this.grassVisualManager.rebuildAllChunks();
-      }
-    });
+    this.subscribeRoadNetworkEvents();
 
     // Start player-based terrain update loop
     // On server, getTerrainCenters() filters out agent players to prevent 25+ agents
@@ -1768,12 +2785,137 @@ export class TerrainSystem extends System {
    * height/biome/road/flat-zone queries to the quad-tree chunk generator.
    */
   private buildChunkTerrainProvider(): VisualManagerTerrainProvider {
+    const terrain = this;
+    const providerProfile = this.getWorldTerrainProfile();
+    const providerTileSize = this.CONFIG.TILE_SIZE;
+    const configs = COMPILED_TERRAIN_BIOME_CONFIGS;
+    const noise = this.noise;
+    const noiseSets = this.biomeNoiseSets;
+    const noiseSnapshots = Object.entries(noiseSets).map(([name, set]) => ({
+      name,
+      owner: set,
+      main: set.main,
+      variation: set.variation,
+      erosion: set.erosion,
+    }));
     const biomeColorCache = new Map<
       string,
-      { r: number; g: number; b: number }
+      { source: number | undefined; color: { r: number; g: number; b: number } }
     >();
 
     return {
+      capturePreparationLease: (workerCenters, workerBiomes) => {
+        const ground = this.captureCanonicalGroundLease();
+        const roads = this.world.getSystem("roads") as
+          RoadNetworkSystem | undefined;
+        const roadLease = roads?.captureTerrainPreparationLease();
+        // A previous synchronous query may have retained an old publication,
+        // including an empty tile captured before this road owner was ready.
+        this.roadNetworkSystem = roads;
+        this._cachedRoadTileX = Number.NaN;
+        this._cachedRoadTileZ = Number.NaN;
+        this._cachedRoadSegments = [];
+        const biome = this.biomeSystem;
+        const centers = biome.getBiomeCenters();
+        const centerSnapshots = centers.map((center) => ({ ...center }));
+        const colors = Object.entries(BIOMES).map(([name, data]) => ({
+          name,
+          owner: data,
+          color: data.color,
+          linear: new THREE.Color(data.color),
+        }));
+        const matches = (): boolean => {
+          if (
+            !ground.isCurrent() ||
+            ground.profile !== providerProfile ||
+            this.CONFIG.TILE_SIZE !== providerTileSize ||
+            this.world.getSystem("terrain") !== this ||
+            this.world.getSystem("roads") !== roads ||
+            this.roadNetworkSystem !== roads ||
+            (roadLease && !roadLease.isCurrent()) ||
+            this.biomeSystem !== biome ||
+            biome.getBiomeCenters() !== centers ||
+            centers.length !== centerSnapshots.length ||
+            workerCenters.length !== centerSnapshots.length ||
+            this.noise !== noise ||
+            this.biomeNoiseSets !== noiseSets ||
+            BIOME_CONFIG.gaussianCoeff !==
+              COMPILED_BIOME_PLACEMENT.gaussianCoeff ||
+            BIOME_CONFIG.boundaryNoiseScale !==
+              COMPILED_BIOME_PLACEMENT.boundaryNoiseScale ||
+            BIOME_CONFIG.boundaryNoiseAmount !==
+              COMPILED_BIOME_PLACEMENT.boundaryNoiseAmount
+          )
+            return false;
+          for (let i = 0; i < centers.length; i++) {
+            const center = centers[i],
+              before = centerSnapshots[i],
+              worker = workerCenters[i];
+            if (
+              center.x !== before.x ||
+              center.z !== before.z ||
+              center.type !== before.type ||
+              center.influence !== before.influence ||
+              worker.x !== before.x ||
+              worker.z !== before.z ||
+              worker.type !== before.type ||
+              worker.influence !== before.influence
+            )
+              return false;
+          }
+          let colorCount = 0,
+            workerColorCount = 0,
+            configCount = 0,
+            noiseCount = 0;
+          for (const _name in BIOMES) colorCount++;
+          for (const _name in workerBiomes) workerColorCount++;
+          for (const _name in BIOME_CONFIGS) configCount++;
+          for (const _name in noiseSets) noiseCount++;
+          if (
+            colorCount !== colors.length ||
+            workerColorCount !== colors.length ||
+            configCount !== configs.length ||
+            noiseCount !== noiseSnapshots.length
+          )
+            return false;
+          for (const color of colors) {
+            const workerColor = workerBiomes[color.name]?.color;
+            if (
+              BIOMES[color.name] !== color.owner ||
+              color.owner.color !== color.color ||
+              workerColor?.r !== color.linear.r ||
+              workerColor?.g !== color.linear.g ||
+              workerColor?.b !== color.linear.b
+            )
+              return false;
+          }
+          for (const snapshot of configs) {
+            const config = BIOME_CONFIGS[snapshot.name];
+            if (config !== snapshot.owner) return false;
+            let count = 0;
+            for (const _key in config) count++;
+            if (count !== snapshot.fields.length) return false;
+            for (const field of snapshot.fields)
+              if (config[field.key] !== field.value) return false;
+          }
+          for (const snapshot of noiseSnapshots) {
+            const set = noiseSets[snapshot.name];
+            if (
+              set !== snapshot.owner ||
+              set.main !== snapshot.main ||
+              set.variation !== snapshot.variation ||
+              set.erosion !== snapshot.erosion
+            )
+              return false;
+          }
+          return true;
+        };
+        // Once observed stale, restoration of an old reference/value cannot
+        // revive work that may already contain samples from both versions.
+        let current = matches();
+        return Object.freeze({ isCurrent: () => (current &&= matches()) });
+      },
+
       getHeightAtComputed: (worldX: number, worldZ: number) =>
         this.getHeightAtComputed(worldX, worldZ),
 
@@ -1794,26 +2936,100 @@ export class TerrainSystem extends System {
 
       getBiomeColor: (biomeName: string) => {
         let cached = biomeColorCache.get(biomeName);
-        if (!cached) {
-          const biomeData = BIOMES[biomeName];
-          if (biomeData) {
-            const c = new THREE.Color(biomeData.color);
-            cached = { r: c.r, g: c.g, b: c.b };
-          } else {
-            cached = { r: 0.3, g: 0.55, b: 0.15 };
-          }
+        const source = BIOMES[biomeName]?.color;
+        if (!cached || cached.source !== source) {
+          const c = source === undefined ? null : new THREE.Color(source);
+          cached = {
+            source,
+            color: Object.freeze(
+              c ? { r: c.r, g: c.g, b: c.b } : { r: 0.3, g: 0.55, b: 0.15 },
+            ),
+          };
           biomeColorCache.set(biomeName, cached);
         }
-        return cached;
+        return cached.color;
       },
 
       getFlatZoneHeight: (worldX: number, worldZ: number) =>
         this.getFlatZoneHeight(worldX, worldZ),
 
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      MAX_HEIGHT: MAX_HEIGHT,
+      // Candidate-only until the complete contact/native gates are qualified.
+      // Resolve current owned floors at assembly time: this adapter is created
+      // before manifest loading, and floor owners can later be replaced.
+      get surfaceRefinementZones() {
+        if (!terrain.getWorldTerrainProfile().southernMeadow) return undefined;
+        const ids = [...terrain.arenaFloorZoneIds];
+        // Plural bank courts bind existing station pads, not a new height
+        // field. Their max-axis blend corners need the same explicit crease
+        // partitions as arena floors. Only publish loaded canonical owners;
+        // this adapter can exist before manifest loading. Historical singular
+        // courts keep the original arena-only geometry byte-for-byte.
+        for (const court of DataManager.getWorldConfig()?.compactServiceCourts
+          ?.courts ?? []) {
+          if (!isCompactBankCourt(court)) continue;
+          for (const stationId of court.stationIds) {
+            const id = `station_${stationId}`;
+            if (terrain.flatZones.has(id)) ids.push(id);
+          }
+        }
+        return ids.map((id) => {
+          const zone = terrain.flatZones.get(id);
+          if (!zone) throw new Error("Missing owned terrain refinement floor");
+          return {
+            minX: zone.centerX - zone.width / 2,
+            maxX: zone.centerX + zone.width / 2,
+            minZ: zone.centerZ - zone.depth / 2,
+            maxZ: zone.centerZ + zone.depth / 2,
+            blendRadius: zone.blendRadius,
+          };
+        });
+      },
+
+      // The curved bank shares the final terrain owner and retained mesh. This
+      // envelope covers the steep radial ramp and its maximum shoreline warp.
+      // Explicit paired outer shoulders need additional angular support to the
+      // existing effect radius; keep the old full inner annulus unchanged.
+      // Refinement does not introduce a separate height or collision field.
+      get surfaceRefinementAnnuli() {
+        if (!terrain.getWorldTerrainProfile().southernMeadow) return undefined;
+        return [...terrain.flatZones.values()].flatMap((zone) => {
+          const pond = zone.radialPond;
+          if (!pond) return [];
+          const amplitude = pond.shorelineAmplitude ?? 0;
+          return [
+            {
+              centerX: zone.centerX,
+              centerZ: zone.centerZ,
+              innerRadius: Math.max(0, pond.bedRadius - amplitude),
+              outerRadius: pond.bankInnerRadius + amplitude,
+            },
+            ...(pond.bankSectors ?? []).flatMap((sector) =>
+              sector.outerRadius === undefined ||
+              sector.outerHeight === undefined
+                ? []
+                : [
+                    {
+                      centerX: zone.centerX,
+                      centerZ: zone.centerZ,
+                      innerRadius: pond.bankInnerRadius + amplitude,
+                      outerRadius: pond.bankOuterRadius + zone.blendRadius,
+                      bearing: sector.bearing,
+                      halfWidth: sector.halfWidth,
+                    },
+                  ],
+            ),
+          ];
+        });
+      },
+
+      terrainProfileIdentity: worldTerrainProfileIdentity(
+        this.getWorldTerrainProfile(),
+      ),
+
+      WATER_LEVEL_NORMALIZED: this.waterLevelNormalized,
+      SHORELINE_THRESHOLD: this.shorelineParameters.THRESHOLD,
+      SHORELINE_STRENGTH: this.shorelineParameters.STRENGTH,
+      MAX_HEIGHT: this.maxHeightParameter,
       TILE_SIZE: this.CONFIG.TILE_SIZE,
     };
   }
@@ -1843,26 +3059,12 @@ export class TerrainSystem extends System {
 
     const provider = this.buildChunkTerrainProvider();
 
-    const workerConfig: QuadChunkWorkerConfig = {
-      MAX_HEIGHT: MAX_HEIGHT,
-      BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-      BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-      BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-      WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-      SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-      SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-      SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-      SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-      UNDERWATER_DEPTH_MULTIPLIER: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-    };
+    const workerConfig: QuadChunkWorkerConfig = createTerrainWorkerConfig(
+      this.getWorldTerrainProfile(),
+      this.CONFIG.TILE_RESOLUTION,
+    );
 
-    const biomeCenters = [
-      ...this.terrainGenerator.getBiomeSystem().getBiomeCenters(),
-    ].map((c) => ({
+    const biomeCenters = [...this.biomeSystem.getBiomeCenters()].map((c) => ({
       x: c.x,
       z: c.z,
       type: c.type,
@@ -1904,14 +3106,39 @@ export class TerrainSystem extends System {
       workerBiomes[name] = { color: cached };
     }
 
+    const isStreamingViewport = isStreamingLikeViewport();
+    const maxSyncChunksPerFrame = isStreamingViewport
+      ? Math.min(1, this.CONFIG.QUADTREE_MAX_SYNC_PER_FRAME)
+      : this.CONFIG.QUADTREE_MAX_SYNC_PER_FRAME;
+    const maxAssembliesPerFrame = isStreamingViewport
+      ? Math.min(2, this.CONFIG.QUADTREE_MAX_ASSEMBLIES_PER_FRAME)
+      : this.CONFIG.QUADTREE_MAX_ASSEMBLIES_PER_FRAME;
+    const quadTreeResolution = isStreamingViewport
+      ? STREAMING_TERRAIN_QUADTREE_RESOLUTION
+      : this.CONFIG.QUADTREE_RESOLUTION;
+
     this.quadTreeVisualManager = new TerrainVisualManager(
       {
         minSize: this.CONFIG.QUADTREE_MIN_SIZE,
         maxDepth: this.CONFIG.QUADTREE_MAX_DEPTH,
         splitRatio: this.CONFIG.QUADTREE_SPLIT_RATIO,
         unsplitMultiplier: this.CONFIG.QUADTREE_UNSPLIT_MULTIPLIER,
-        resolution: this.CONFIG.QUADTREE_RESOLUTION,
+        resolution: quadTreeResolution,
+        fineDetailRegions: createCompactPreparationDetailRegions(
+          this.getWorldTerrainProfile(),
+          DataManager.getInstance().getAllWorldAreas(),
+          this.CONFIG.QUADTREE_RESOLUTION,
+        ),
         skirtDrop: this.CONFIG.QUADTREE_SKIRT_DROP,
+        // A normal compact player also uses one root only when the complete
+        // authored island envelope plus camera clearance fits inside it.
+        // General/straddled profiles retain their exploration root ring.
+        rootChunkRadius: resolveTerrainVisualRootRadius(
+          this.getWorldTerrainProfile(),
+          this.CONFIG.QUADTREE_MIN_SIZE,
+          this.CONFIG.QUADTREE_MAX_DEPTH,
+          isStreamingViewport,
+        ),
       },
       provider,
       qtContainer,
@@ -1923,9 +3150,28 @@ export class TerrainSystem extends System {
       this.CONFIG.QUADTREE_DEBUG_WIREFRAME,
       this.CONFIG.TERRAIN_RECEIVE_SHADOW && !isCsmEnabled(),
       this.CONFIG.TERRAIN_CAST_SHADOW,
-      this.CONFIG.QUADTREE_MAX_SYNC_PER_FRAME,
-      this.CONFIG.QUADTREE_MAX_ASSEMBLIES_PER_FRAME,
+      maxSyncChunksPerFrame,
+      maxAssembliesPerFrame,
     );
+
+    const pondPlacements = createCompactPondDressing(
+      this.getWorldTerrainProfile(),
+      DataManager.getInstance().getAllWorldAreas(),
+      (x, z) => this.getHeightAtComputed(x, z),
+      DataManager.getWorldConfig()?.compactPondDocks,
+    );
+    if (pondPlacements.length) {
+      this.compactPondDressing = new CompactPondDressingVisuals(
+        containerParent,
+        Object.freeze([
+          ...pondPlacements,
+          ...createCompactServicePlanting(
+            DataManager.getWorldConfig()?.compactServicePlanting,
+          ),
+        ]),
+      );
+      void this.compactPondDressing.load(this.world);
+    }
 
     // Water quad-tree visual manager — flat water meshes aligned with terrain chunks
     if (this.waterSystem) {
@@ -1943,6 +3189,12 @@ export class TerrainSystem extends System {
         (x: number, z: number) => this.getHeightAt(x, z),
         (x: number, z: number) => this.getIslandMask(x, z),
         this.CONFIG.WATER_THRESHOLD,
+        this.waterBodyRegistry.getAllBodies(),
+        this.getWorldTerrainProfile(),
+        this.quadTreeVisualManager,
+        // Elevated basins follow authored ground, never deck overrides or
+        // resident tile caches. Keep ocean staging's existing sampler unchanged.
+        (x: number, z: number) => this.getResourceGroundHeight(x, z),
       );
 
       const grassContainer = new THREE.Group();
@@ -1951,16 +3203,130 @@ export class TerrainSystem extends System {
         this.terrainContainer.parent?.add(grassContainer);
       }
       const grassWorkerSetup = this.buildGrassWorkerSetup();
+      const grassSelection = this.grassVisualSelection!;
+      const terrainShade =
+        this.getTerrainMaterialWithUniforms()?.terrainUniforms.shade;
+      if (!terrainShade) {
+        throw new Error(
+          "Terrain shading must be initialized before grass materials",
+        );
+      }
       this.grassVisualManager = new GrassVisualManager(
+        worldTerrainProfileIdentity(this.getWorldTerrainProfile()),
         grassContainer,
-        (x: number, z: number) => this.getHeightAt(x, z),
+        (node) => this.quadTreeVisualManager!.getRetainedSurface(node),
+        (x: number, z: number) => this.getHeightAtComputed(x, z),
         this.CONFIG.WATER_THRESHOLD,
         (wx: number, wz: number) =>
           this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
-        (wx: number, wz: number) => this.isInFlatZone(wx, wz),
-        (wx: number, wz: number) => this.getTerrainColorAt(wx, wz),
+        (wx: number, wz: number) => this.isGrassExcludedAt(wx, wz),
+        (wx: number, wz: number, eligibility?: GrassSurfaceEligibility) =>
+          this.getTerrainColorAt(wx, wz, true, eligibility),
         grassWorkerSetup,
+        grassSelection.profile?.grassProfile === "fine-meadow-v1"
+          ? grassSelection.coverageTrial || grassSelection.roadClearance
+            ? {
+                ...FINE_MEADOW_GRASS_VISUAL_PROFILE,
+                ...(grassSelection.coverageTrial
+                  ? { coverageTrial: grassSelection.coverageTrial }
+                  : {}),
+                ...(grassSelection.roadClearance
+                  ? { roadClearance: grassSelection.roadClearance }
+                  : {}),
+              }
+            : FINE_MEADOW_GRASS_VISUAL_PROFILE
+          : grassSelection.profile?.grassProfile === "compact-meadow-v2"
+            ? DENSE_MEADOW_GRASS_VISUAL_PROFILE
+            : grassSelection.profile?.grassProfile === "compact-island-v1"
+              ? COMPACT_ISLAND_GRASS_VISUAL_PROFILE
+              : isStreamingViewport
+                ? STREAMING_GRASS_VISUAL_PROFILE
+                : undefined,
+        terrainShade,
+        (wx: number, wz: number) =>
+          this.waterBodyRegistry.getWaterSurfaceAt(wx, wz),
+        (bounds: TerrainGridBounds) =>
+          this.quadTreeVisualManager!.captureRetainedSurfaceRegion(
+            bounds,
+            GRASS_BLADE_GROUNDING_LIMITS.maxSurfaces,
+          ),
+        grassSelection.appearance,
+        this.getCompactHabitatMaterial(),
+        grassSelection.lighting,
+        grassSelection.groundingExecution
+          ? {
+              mode: grassSelection.groundingExecution,
+              createPort: createGrassGroundingWorker,
+              isSurfaceCurrent: (surface) =>
+                this.quadTreeVisualManager!.isRetainedSurfaceCurrent(surface),
+            }
+          : undefined,
+        grassSelection.geometry,
+        grassSelection.vergeEvaluation,
+        grassSelection.instancing,
+        grassSelection.submission,
+        grassSelection.shadow,
+        grassSelection.environment,
+        grassSelection.lightingModel,
+        grassSelection.dynamics,
       );
+      if (grassSelection.dynamics) {
+        const manager = this.grassVisualManager;
+        const graphics = this.world.graphics;
+        if (!graphics) throw new Error("Grass dynamics requires graphics");
+        void graphics
+          .prepareRenderer(() => {
+            if (
+              this.destroyed ||
+              this.grassVisualManager !== manager ||
+              this.world.graphics !== graphics
+            )
+              return;
+            return manager.prepareClumpFrameCache(graphics.renderer);
+          })
+          .catch((error: unknown) => {
+            manager.failClumpFramePreparation(
+              error instanceof Error ? error.message : String(error),
+            );
+            console.warn(
+              "[TerrainSystem] Grass frame preparation retained original dynamics",
+              error,
+            );
+          });
+      }
+      if (grassSelection.submission && this.world.graphics)
+        this.grassVisualManager.setAdaptiveGrassRenderer(
+          this.world.graphics.renderer,
+        );
+      this.grassVisualManager.setReflectionGrassCuller(
+        this.waterSystem.intersectsReflectionGrassBounds,
+      );
+      if (grassSelection.instancing)
+        this.registerGrassClumpInvariantPreparation(this.grassVisualManager);
+
+      if (grassSelection.flowers) {
+        if (!grassWorkerSetup.prepareGroundingInputs)
+          throw new Error(
+            "Rooted flowers require retained terrain input leases",
+          );
+        this.rootedFlowerVisualManager = new RootedFlowerVisualManager({
+          world: this.world,
+          parent: containerParent,
+          seed: this.computeSeedFromWorldId(),
+          oceanLevel: this.CONFIG.WATER_THRESHOLD,
+          captureRegion: (bounds, maximumSurfaces) =>
+            this.quadTreeVisualManager!.captureRetainedSurfaceRegion(
+              bounds,
+              maximumSurfaces,
+            ),
+          // Every flower job gets a NEW input iterator. Grass keeps exclusive
+          // ownership of its own generator, scheduling allowance and RNG.
+          prepareInputs: (bounds) =>
+            grassWorkerSetup.prepareGroundingInputs!(bounds),
+          grassPlacement: (x, z) =>
+            this.getTerrainColorAt(x, z, true, "compact-pbr-v1").grassPlacement,
+        });
+      }
 
       // Wire terrain, water, grass managers to the same quad-tree via composite
       const composite = new CompositeQuadTreeListener();
@@ -1973,29 +3339,89 @@ export class TerrainSystem extends System {
     console.log(
       "[TerrainSystem] Quad-tree LOD visual manager initialized " +
         `(minSize=${this.CONFIG.QUADTREE_MIN_SIZE}, maxDepth=${this.CONFIG.QUADTREE_MAX_DEPTH}, ` +
-        `resolution=${this.CONFIG.QUADTREE_RESOLUTION}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
+        `resolution=${quadTreeResolution}, splitRatio=${this.CONFIG.QUADTREE_SPLIT_RATIO})`,
     );
   }
 
+  /** Ordinary players do not run the streaming-only representative warmup.
+   * Both routes still prepare selected caches through the same graphics queue. */
+  private registerGrassClumpInvariantPreparation(
+    manager: GrassVisualManager,
+  ): void {
+    const graphics = this.world.graphics;
+    if (!graphics) throw new Error("Grass preparation requires graphics");
+    manager.setClumpInvariantPreparation((cache) =>
+      graphics.prepareRenderer(() => {
+        if (
+          this.destroyed ||
+          this.grassVisualManager !== manager ||
+          this.world.graphics !== graphics
+        )
+          throw new Error(
+            "Terrain owner retired before grass invariant preparation",
+          );
+        return cache.prepare(
+          graphics.renderer,
+          this.world.camera,
+          this.world.stage.scene,
+        );
+      }),
+    );
+  }
+
+  private readonly onRoadsGenerated = (): void => {
+    if (this.destroyed) return;
+    this.roadNetworkSystem = this.world.getSystem("roads") as
+      RoadNetworkSystem | undefined;
+    // A quadtree-only stream may never have terrainTiles. Always invalidate
+    // cached empty pre-road segments before grass or geometry asks again.
+    this._cachedRoadTileX = Number.NaN;
+    this._cachedRoadTileZ = Number.NaN;
+    this._cachedRoadSegments = [];
+    void this.refreshRoadInfluence().catch((error) => {
+      console.error("[TerrainSystem] Failed to refresh road influence", error);
+    });
+    this.grassVisualManager?.rebuildAllChunks();
+    this.rootedFlowerVisualManager?.invalidate();
+  };
+
+  private readonly onRoadMaskReady = (): void => {
+    if (this.destroyed || !this.runtimeIsClient) return;
+    this.rootedFlowerVisualManager?.invalidate();
+    // Read the registered producer rather than trusting an unrelated event payload.
+    const roads = this.world.getSystem("roads") as
+      RoadNetworkSystem | undefined;
+    const mask = roads?.getRoadInfluenceTextureData();
+    if (!mask) return;
+    setRoadInfluenceTextureData(
+      mask.data,
+      mask.width,
+      mask.height,
+      mask.worldSize,
+      mask.centerX,
+      mask.centerZ,
+      this,
+    );
+  };
+
+  private subscribeRoadNetworkEvents(): void {
+    if (this.roadEventsSubscribed) return;
+    this.roadEventsSubscribed = true;
+    if (this.runtimeIsClient) {
+      setRoadInfluenceTextureData(new Float32Array([0]), 1, 1, 1, 0, 0, this);
+    }
+    this.world.on(EventType.ROADS_GENERATED, this.onRoadsGenerated);
+    this.world.on(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
+    // Admit an already-generated network too, independent of start ordering.
+    if (this.world.getSystem("roads")) this.onRoadsGenerated();
+    this.onRoadMaskReady();
+  }
+
   private buildGrassWorkerSetup(): GrassWorkerSetup {
-    const workerConfig: TerrainWorkerConfig = {
-      TILE_SIZE: this.CONFIG.TILE_SIZE,
-      TILE_RESOLUTION: this.CONFIG.TILE_RESOLUTION,
-      MAX_HEIGHT: MAX_HEIGHT,
-      BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
-      BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
-      BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
-      WATER_THRESHOLD: this.CONFIG.WATER_THRESHOLD,
-      WATER_LEVEL_NORMALIZED: WATER_LEVEL_NORMALIZED,
-      SHORELINE_THRESHOLD: SHORELINE_CONFIG.THRESHOLD,
-      SHORELINE_STRENGTH: SHORELINE_CONFIG.STRENGTH,
-      SHORELINE_MIN_SLOPE: SHORELINE_CONFIG.MIN_SLOPE,
-      SHORELINE_SLOPE_SAMPLE_DISTANCE: SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE,
-      SHORELINE_LAND_BAND: SHORELINE_CONFIG.LAND_BAND,
-      SHORELINE_LAND_MAX_MULTIPLIER: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-      SHORELINE_UNDERWATER_BAND: SHORELINE_CONFIG.UNDERWATER_BAND,
-      UNDERWATER_DEPTH_MULTIPLIER: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
-    };
+    const workerConfig: TerrainWorkerConfig = createTerrainWorkerConfig(
+      this.getWorldTerrainProfile(),
+      this.CONFIG.TILE_RESOLUTION,
+    );
 
     const biomeData: Record<
       string,
@@ -2009,9 +3435,7 @@ export class TerrainSystem extends System {
       };
     }
 
-    const biomeCenters = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeCenters() as BiomeCenter[];
+    const biomeCenters = this.biomeSystem.getBiomeCenters() as BiomeCenter[];
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
     const fCfg = getGrassConfigForBiome(BiomeType.Forest);
@@ -2054,6 +3478,31 @@ export class TerrainSystem extends System {
 
     return {
       terrainConfig: workerConfig,
+      ...(this.getPondServiceGround()
+        ? { pondServiceGround: this.getPondServiceGround()! }
+        : {}),
+      ...(this.getCompactGrassColorGrade()
+        ? { compactGrassColorGrade: this.getCompactGrassColorGrade() }
+        : {}),
+      ...(this.getCompactCoastBlend() === "distribution-v1"
+        ? { compactCoastBlend: "distribution-v1" as const }
+        : {}),
+      ...(this.getCompactPondBlend() === "shore-contact-v1"
+        ? { compactPondBlend: "shore-contact-v1" as const }
+        : {}),
+      ...(this.getCompactPondBlend() === "composition-v1"
+        ? {
+            compactPondBlend: "composition-v1" as const,
+            compactPondBankField: this.bindCompactPondBankField(),
+          }
+        : {}),
+      compactPlantingLobes: this.getCompactPlantingMaterial(),
+      isGrassObstacleAt: (x, z) =>
+        this.grassSurfaceOperations.isGrassExcluded(
+          this.landscapeGrassSurface,
+          x,
+          z,
+        ),
       seed: this.computeSeedFromWorldId(),
       biomeCenters: biomeCenters.map((c) => ({
         x: c.x,
@@ -2070,12 +3519,47 @@ export class TerrainSystem extends System {
         maxX: number,
         maxZ: number,
       ) => this.getWorldSpaceRoadSegmentsForRegion(minX, minZ, maxX, maxZ),
-      getFlatZonesForRegion: (
+      getTerrainSurfaceForRegion: (
         minX: number,
         minZ: number,
         maxX: number,
         maxZ: number,
-      ) => this.getFlatZonesForRegion(minX, minZ, maxX, maxZ),
+      ) => this.getTerrainSurfaceForRegion(minX, minZ, maxX, maxZ),
+      prepareGroundingInputs: (
+        bounds: TerrainGridBounds,
+      ): GrassGroundingInputLease => {
+        const water = this.waterBodyRegistry.captureRegion(
+          bounds,
+          COMPACT_TERRAIN_COMPOSITION.pondBankReach,
+        );
+        let revision = this.grassSurfaceRevision;
+        const region = { ...bounds };
+        return {
+          isCurrent: () => {
+            if (this.destroyed || !water.isCurrent()) return false;
+            if (revision === this.grassSurfaceRevision) return true;
+            // A bounded journal keeps ordinary remote edits O(1) between
+            // changes. An input older than the retained history retires safely.
+            const oldest = this.grassSurfaceChanges[0];
+            if (!oldest || revision < oldest.revision - 1) return false;
+            for (const change of this.grassSurfaceChanges) {
+              if (change.revision <= revision) continue;
+              const changed = change.bounds;
+              if (
+                !changed ||
+                (changed.minX <= region.maxX &&
+                  changed.maxX >= region.minX &&
+                  changed.minZ <= region.maxZ &&
+                  changed.maxZ >= region.minZ)
+              )
+                return false;
+            }
+            revision = this.grassSurfaceRevision;
+            return true;
+          },
+          steps: this.grassGroundingInputSteps(region),
+        };
+      },
     };
   }
 
@@ -2088,16 +3572,23 @@ export class TerrainSystem extends System {
     minZ: number,
     maxX: number,
     maxZ: number,
-  ): Array<{
-    startX: number;
-    startZ: number;
-    endX: number;
-    endZ: number;
-    width: number;
-  }> {
+  ): GrassGroundingRoadSegment[] {
+    const steps = this.worldSpaceRoadSegmentSteps(minX, minZ, maxX, maxZ);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  private *worldSpaceRoadSegmentSteps(
+    minX: number,
+    minZ: number,
+    maxX: number,
+    maxZ: number,
+    maximumSegments = Infinity,
+  ): Generator<string, GrassGroundingRoadSegment[], void> {
+    yield "road_region_header";
     this.roadNetworkSystem ??= this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
     if (!this.roadNetworkSystem) return [];
 
     const ts = this.CONFIG.TILE_SIZE;
@@ -2106,13 +3597,7 @@ export class TerrainSystem extends System {
     const maxTX = Math.floor(maxX / ts);
     const maxTZ = Math.floor(maxZ / ts);
 
-    const result: Array<{
-      startX: number;
-      startZ: number;
-      endX: number;
-      endZ: number;
-      width: number;
-    }> = [];
+    const result: GrassGroundingRoadSegment[] = [];
 
     for (let tx = minTX; tx <= maxTX; tx++) {
       for (let tz = minTZ; tz <= maxTZ; tz++) {
@@ -2120,12 +3605,21 @@ export class TerrainSystem extends System {
         const originX = tx * ts;
         const originZ = tz * ts;
         for (const seg of segs) {
+          yield "road_region_segment";
+          if (result.length >= maximumSegments)
+            throw new Error("Grass road-region capacity exceeded");
           result.push({
             startX: originX + seg.start.x,
             startZ: originZ + seg.start.z,
             endX: originX + seg.end.x,
             endZ: originZ + seg.end.z,
             width: seg.width,
+            ...(seg.blendWidth !== undefined
+              ? { blendWidth: seg.blendWidth }
+              : {}),
+            ...(seg.maxInfluence !== undefined
+              ? { maxInfluence: seg.maxInfluence }
+              : {}),
           });
         }
       }
@@ -2135,58 +3629,135 @@ export class TerrainSystem extends System {
   }
 
   /**
-   * Collect flat zones overlapping a world-space AABB, returned as simplified
-   * rectangles for the grass worker to exclude grass from buildings/arenas.
+   * Capture the full authored surface, not just exclusion rectangles. The caller
+   * includes the normal stencil halo. Preserve registration order so the worker
+   * can reconstruct the same ordered 3x3 spatial lookup as the main thread.
    */
-  private getFlatZonesForRegion(
+  private getTerrainSurfaceForRegion(
     minX: number,
     minZ: number,
     maxX: number,
     maxZ: number,
-  ): Array<{
-    centerX: number;
-    centerZ: number;
-    halfWidth: number;
-    halfDepth: number;
-    blendRadius: number;
-  }> {
-    if (this.flatZones.size === 0) return [];
+  ): GrassTerrainSurfaceSnapshot {
+    const steps = this.terrainSurfaceRegionSteps(minX, minZ, maxX, maxZ);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
 
+  private *terrainSurfaceRegionSteps(
+    minX: number,
+    minZ: number,
+    maxX: number,
+    maxZ: number,
+  ): Generator<string, GrassTerrainSurfaceSnapshot, void> {
+    yield "terrain_region_header";
+    if (
+      ![minX, minZ, maxX, maxZ].every(Number.isFinite) ||
+      minX > maxX ||
+      minZ > maxZ
+    ) {
+      throw new Error("Invalid grass surface query bounds");
+    }
     const tileSize = this.CONFIG.TILE_SIZE;
     const halfTile = tileSize / 2;
-    const minTX = Math.floor((minX + halfTile) / tileSize);
-    const minTZ = Math.floor((minZ + halfTile) / tileSize);
-    const maxTX = Math.floor((maxX + halfTile) / tileSize);
-    const maxTZ = Math.floor((maxZ + halfTile) / tileSize);
-
-    const seen = new Set<string>();
-    const result: Array<{
-      centerX: number;
-      centerZ: number;
-      halfWidth: number;
-      halfDepth: number;
-      blendRadius: number;
-    }> = [];
-
-    for (let tx = minTX; tx <= maxTX; tx++) {
-      for (let tz = minTZ; tz <= maxTZ; tz++) {
-        const zones = this.flatZonesByTile.get(`${tx}_${tz}`);
-        if (!zones) continue;
-        for (const zone of zones) {
-          if (seen.has(zone.id)) continue;
-          seen.add(zone.id);
-          result.push({
-            centerX: zone.centerX,
-            centerZ: zone.centerZ,
-            halfWidth: zone.width / 2,
-            halfDepth: zone.depth / 2,
-            blendRadius: zone.blendRadius,
-          });
-        }
+    const minTX = Math.floor((minX + halfTile) / tileSize) - 1;
+    const minTZ = Math.floor((minZ + halfTile) / tileSize) - 1;
+    const maxTX = Math.floor((maxX + halfTile) / tileSize) + 1;
+    const maxTZ = Math.floor((maxZ + halfTile) / tileSize) + 1;
+    if (![minTX, minTZ, maxTX, maxTZ].every(Number.isSafeInteger)) {
+      throw new Error("Grass surface query exceeds safe spatial index bounds");
+    }
+    // Bound work by registered zones, never by an arbitrarily large query AABB.
+    // Match registerFlatZone's conservative square indexing, including neighbors
+    // that may change first-candidate tie ordering at a tile boundary.
+    const operations = createGrassTerrainSurfaceOperations();
+    const zones: FlatZone[] = [];
+    for (const zone of this.flatZones.values()) {
+      yield "terrain_region_zone";
+      const radius = Math.max(zone.width, zone.depth) / 2 + zone.blendRadius;
+      const zoneMinTX = Math.floor(
+        (zone.centerX - radius + halfTile) / tileSize,
+      );
+      const zoneMaxTX = Math.floor(
+        (zone.centerX + radius + halfTile) / tileSize,
+      );
+      const zoneMinTZ = Math.floor(
+        (zone.centerZ - radius + halfTile) / tileSize,
+      );
+      const zoneMaxTZ = Math.floor(
+        (zone.centerZ + radius + halfTile) / tileSize,
+      );
+      if (
+        zone.id === this.compactPondBankField?.zoneId ||
+        (zoneMinTX <= maxTX &&
+          zoneMaxTX >= minTX &&
+          zoneMinTZ <= maxTZ &&
+          zoneMaxTZ >= minTZ)
+      ) {
+        if (zones.length >= operations.limits.maxZones)
+          throw new Error("Grass zone-region capacity exceeded");
+        zones.push(zone);
       }
     }
+    const seen = new Set(zones.map((zone) => zone.id));
+    const waterBodies: GrassTerrainSurfaceSnapshot["waterBodies"] = [];
+    for (const body of this.waterBodyRegistry.getAllBodies()) {
+      yield "terrain_region_water";
+      const dx = body.centerX - Math.max(minX, Math.min(maxX, body.centerX));
+      const dz = body.centerZ - Math.max(minZ, Math.min(maxZ, body.centerZ));
+      const radius =
+        body.radius +
+        (body.id === this.compactPondMaterial?.id
+          ? COMPACT_TERRAIN_COMPOSITION.pondBankReach
+          : 0);
+      if (
+        body.id === this.compactPondBankField?.pond.id ||
+        dx * dx + dz * dz <= radius * radius
+      ) {
+        if (waterBodies.length >= operations.limits.maxWaterBodies)
+          throw new Error("Grass water-region capacity exceeded");
+        waterBodies.push(body);
+      }
+    }
+    const exclusionPolygons: GrassTerrainExclusionPolygon[] = [];
+    for (const polygon of this.landscapeGrassSurface.exclusionPolygons) {
+      yield "terrain_region_exclusion";
+      if (
+        polygon.minX <= maxX &&
+        polygon.maxX >= minX &&
+        polygon.minZ <= maxZ &&
+        polygon.maxZ >= minZ
+      )
+        exclusionPolygons.push(polygon);
+    }
+    return yield* operations.cloneSnapshotSteps({
+      schemaVersion: 1,
+      zones,
+      arenaFloorIds: [...this.arenaFloorZoneIds].filter((id) => seen.has(id)),
+      arenaGradeHeight: this.arenaGradeHeight,
+      waterBodies,
+      ...(exclusionPolygons.length ? { exclusionPolygons } : {}),
+    });
+  }
 
-    return result;
+  private *grassGroundingInputSteps(
+    bounds: TerrainGridBounds,
+  ): GrassGroundingInputLease["steps"] {
+    const terrainSurface = yield* this.terrainSurfaceRegionSteps(
+      bounds.minX,
+      bounds.minZ,
+      bounds.maxX,
+      bounds.maxZ,
+    );
+    const roadSegments = yield* this.worldSpaceRoadSegmentSteps(
+      bounds.minX,
+      bounds.minZ,
+      bounds.maxX,
+      bounds.maxZ,
+      GRASS_BLADE_GROUNDING_LIMITS.maxRoadSegments,
+    );
+    return { terrainSurface, roadSegments };
   }
 
   private registerInstancedMeshes(): void {
@@ -2274,6 +3845,34 @@ export class TerrainSystem extends System {
     // Initial tiles will be loaded in start() method
   }
 
+  private getServerLaunchPreparationAreas() {
+    return SERVER_LAUNCH_PREPARATION_AREA_IDS.map(
+      (areaId) => ALL_WORLD_AREAS[areaId],
+    ).filter((area) => area !== undefined);
+  }
+
+  private addServerLaunchPreparationTiles(tileKeys: Set<string>): void {
+    if (
+      !this.runtimeIsServer ||
+      typeof process === "undefined" ||
+      process.env.STREAMING_DUEL_ENABLED !== "true"
+    ) {
+      return;
+    }
+
+    for (const area of this.getServerLaunchPreparationAreas()) {
+      const minTileX = this.worldToTerrainTileIndex(area.bounds.minX);
+      const maxTileX = this.worldToTerrainTileIndex(area.bounds.maxX);
+      const minTileZ = this.worldToTerrainTileIndex(area.bounds.minZ);
+      const maxTileZ = this.worldToTerrainTileIndex(area.bounds.maxZ);
+      for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+        for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+          tileKeys.add(`${tileX}_${tileZ}`);
+        }
+      }
+    }
+  }
+
   /**
    * Resolve terrain focus centers for streaming.
    *
@@ -2286,6 +3885,117 @@ export class TerrainSystem extends System {
     if (this.runtimeIsClient) {
       const localPlayer = this.world.getPlayer?.();
       if (!localPlayer) {
+        // The broadcast page must keep terrain and LOD residency centered on
+        // the active duel ring. The scheduler teleports contestants home while
+        // the delayed public renderer is still completing RESOLUTION; following
+        // either remote avatar here would rebuild far-away terrain even though
+        // the cinematic camera intentionally remains at the arena.
+        if (
+          isStreamPageRoute() &&
+          resolveExplicitStreamingWorldProfile() !== "preparation-v1"
+        ) {
+          const streamState =
+            typeof window === "undefined"
+              ? null
+              : (
+                  window as Window & {
+                    __HYPERIA_STREAM_STATE__?: {
+                      cycle?: {
+                        phase?: string;
+                        agent1?: { id?: string | null } | null;
+                        agent2?: { id?: string | null } | null;
+                        arenaPositions?: {
+                          agent1?: unknown;
+                          agent2?: unknown;
+                        } | null;
+                      } | null;
+                    } | null;
+                  }
+                ).__HYPERIA_STREAM_STATE__;
+          const cycle = streamState?.cycle;
+          const arenaPositions = cycle?.arenaPositions;
+          const first = arenaPositions?.agent1;
+          const second = arenaPositions?.agent2;
+          if (
+            Array.isArray(first) &&
+            first.length === 3 &&
+            first.every((value) =>
+              Number.isFinite(typeof value === "number" ? value : Number.NaN),
+            ) &&
+            Array.isArray(second) &&
+            second.length === 3 &&
+            second.every((value) =>
+              Number.isFinite(typeof value === "number" ? value : Number.NaN),
+            )
+          ) {
+            this._spectatorFocusPos.set(
+              ((first[0] as number) + (second[0] as number)) / 2,
+              ((first[1] as number) + (second[1] as number)) / 2,
+              ((first[2] as number) + (second[2] as number)) / 2,
+            );
+            this._hasStreamingArenaFocus = true;
+          } else if (!this._hasStreamingArenaFocus) {
+            const arena = getDuelArenaConfig();
+            this._spectatorFocusPos.set(
+              arena.baseX + arena.arenaWidth / 2,
+              arena.baseY,
+              arena.baseZ + arena.arenaLength / 2,
+            );
+            this._hasStreamingArenaFocus = true;
+          }
+
+          const participantIds = [cycle?.agent1?.id, cycle?.agent2?.id].filter(
+            (participantId): participantId is string =>
+              typeof participantId === "string" && participantId.length > 0,
+          );
+          const equipmentVisuals = this.world.getSystem?.(
+            "equipment-visual",
+          ) as
+            | {
+                isStreamingPreparationPresentationActive?: (
+                  playerId: string,
+                ) => boolean;
+              }
+            | undefined;
+          const preparationFocus = resolveStreamingPreparationFocus({
+            phase: cycle?.phase,
+            participantIds,
+            resolveEntity: (participantId) =>
+              this.world.entities?.get(participantId) as
+                StreamingPreparationEntity | undefined,
+            isParticipantActive: (participantId, entity) =>
+              equipmentVisuals?.isStreamingPreparationPresentationActive?.(
+                participantId,
+              ) === true || hasActiveStreamingPreparationPresentation(entity),
+          });
+          if (preparationFocus) {
+            this._streamingPreparationFocusPos.set(
+              preparationFocus.position.x,
+              preparationFocus.position.y,
+              preparationFocus.position.z,
+            );
+            // Keep the arena resident as a secondary center so the transition
+            // from preparation into announcement cannot expose terrain pop-in.
+            return [
+              {
+                id: "streaming-preparation-focus",
+                position: this._streamingPreparationFocusPos,
+              },
+              {
+                id: "streaming-arena-focus",
+                position: this._spectatorFocusPos,
+              },
+            ];
+          }
+
+          return [
+            {
+              id: "streaming-arena-focus",
+              position: this._spectatorFocusPos,
+            },
+          ];
+        }
+
         // Prefer server-assigned spectator target (snapshot/stream updates),
         // then fall back to URL config hints.
         const followEntityId = (() => {
@@ -2318,8 +4028,7 @@ export class TerrainSystem extends System {
             this.world.entities?.items?.get(followEntityId) ||
             this.world.entities?.players?.get(followEntityId);
           const followedPos = followedEntity?.position as
-            | { x: number; y: number; z: number }
-            | undefined;
+            { x: number; y: number; z: number } | undefined;
           if (
             followedPos &&
             Number.isFinite(followedPos.x) &&
@@ -2416,27 +4125,157 @@ export class TerrainSystem extends System {
     const players = this.world.getPlayers() || [];
     const centers: Array<{ id: string; position: THREE.Vector3 }> = [];
 
+    // The authoritative duel arena must stay resident even while scripted
+    // fighters return to their ordinary spawn points between cycles. Without
+    // this fixed center, every phase transition swaps the server between two
+    // terrain regions and the generation queue never reaches idle.
+    if (
+      this.runtimeIsServer &&
+      typeof process !== "undefined" &&
+      process.env.STREAMING_DUEL_ENABLED === "true"
+    ) {
+      const lobby = getDuelArenaConfig().lobbySpawnPoint;
+      this._spectatorFocusPos.set(lobby.x, lobby.y, lobby.z);
+      centers.push({
+        id: "server-arena-lobby",
+        position: this._spectatorFocusPos,
+      });
+    }
+
     for (const player of players) {
       if (!player?.node?.position) continue;
+
+      // Server-owned agents are transient simulation actors, not independent
+      // terrain viewers. One fixed arena center covers duel simulation while
+      // human players retain normal position-based terrain streaming.
+      const playerFlags = player as unknown as {
+        isAgent?: boolean;
+        isEmbeddedAgent?: boolean;
+        data?: { isAgent?: boolean; isEmbeddedAgent?: boolean };
+      };
+      const isAgent =
+        playerFlags.isAgent === true ||
+        playerFlags.isEmbeddedAgent === true ||
+        playerFlags.data?.isAgent === true ||
+        playerFlags.data?.isEmbeddedAgent === true;
+      if (this.runtimeIsServer && isAgent) continue;
+
       centers.push({
         id: player.id || "player",
         position: player.node.position,
       });
     }
 
+    // Map insertion order can place a remote player before the local owner.
+    // Visual terrain/water consume centers[0]; retain other centers for content.
+    if (this.runtimeIsClient) {
+      const local = this.world.getPlayer();
+      prioritizeLocalTerrainCenter(
+        centers,
+        local?.node?.position
+          ? { id: local.id || "player", position: local.node.position }
+          : null,
+      );
+    }
+
     // If no players at all (spectator on server, or empty world), use arena lobby.
-    if (centers.length === 0 && this.runtimeIsClient) {
+    if (centers.length === 0) {
       const lobby = getDuelArenaConfig().lobbySpawnPoint;
       this._spectatorFocusPos.set(lobby.x, lobby.y, lobby.z);
       return [
-        { id: "spectator-arena-lobby", position: this._spectatorFocusPos },
+        {
+          id: this.runtimeIsClient
+            ? "spectator-arena-lobby"
+            : "server-arena-lobby",
+          position: this._spectatorFocusPos,
+        },
       ];
     }
 
     return centers;
   }
 
-  private loadInitialTiles(): void {
+  private loadInitialTiles(): void | Promise<void> {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
+    if (this._initialTilesReady) return;
+    if (this.initialTileLoading) return this.initialTileLoading;
+    const steps = this.generateInitialTileSteps();
+    if (!this.runtimeIsClient) {
+      // Authoritative walkability and content remain synchronous on the server.
+      try {
+        for (const _step of steps) {
+          // Drain the same ordered tile assembly without introducing task yields.
+        }
+      } catch (error) {
+        this.failReadiness(error);
+        throw error;
+      }
+      return;
+    }
+
+    // Publish the owner before assembly can emit re-entrant tile events.
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const loading = new Promise<void>((resolveLoading, rejectLoading) => {
+      resolve = resolveLoading;
+      reject = rejectLoading;
+    });
+    this.initialTileLoading = loading;
+    void this.loadInitialTilesCooperatively(steps).then(
+      resolve,
+      (error: unknown) => {
+        this.failReadiness(error);
+        reject(error);
+      },
+    );
+    return loading;
+  }
+
+  private async loadInitialTilesCooperatively(
+    steps: Generator<void, void, unknown>,
+  ): Promise<void> {
+    const maxTiles = this.maxTilesPerFrame;
+    const budgetMs = this.generationBudgetMsPerFrame;
+    let processed = 0;
+    let sliceStart = performance.now();
+    try {
+      for (;;) {
+        if (steps.next().done) return;
+        processed++;
+        if (
+          processed >= maxTiles ||
+          performance.now() - sliceStart >= budgetMs
+        ) {
+          // A task boundary lets worker messages, input and retirement run.
+          // One tile stays atomic; its geometry/physics publication is unchanged.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          processed = 0;
+          sliceStart = performance.now();
+        }
+      }
+    } finally {
+      steps.return();
+    }
+  }
+
+  private *generateInitialTileSteps(): Generator<void, void, unknown> {
+    const profile = this.activeTerrainProfile;
+    const revision = this.canonicalHeightRevision;
+    const tileSize = this.CONFIG.TILE_SIZE;
+    const tileResolution = this.CONFIG.TILE_RESOLUTION;
+    const assertCurrent = () => {
+      if (this.destroyed)
+        throw new Error("Terrain destroyed during initial tile generation");
+      if (
+        this.activeTerrainProfile !== profile ||
+        this.canonicalHeightRevision !== revision ||
+        this.CONFIG.TILE_SIZE !== tileSize ||
+        this.CONFIG.TILE_RESOLUTION !== tileResolution
+      ) {
+        throw new Error("Terrain changed during initial tile generation");
+      }
+    };
+    assertCurrent();
     let _tilesGenerated = 0;
 
     // Generate initial grid around the active terrain center.
@@ -2446,8 +4285,8 @@ export class TerrainSystem extends System {
       this.world.camera?.position ??
       new THREE.Vector3(0, 0, 0);
 
-    const centerTileX = Math.floor(centerPos.x / this.CONFIG.TILE_SIZE);
-    const centerTileZ = Math.floor(centerPos.z / this.CONFIG.TILE_SIZE);
+    const centerTileX = this.worldToTerrainTileIndex(centerPos.x);
+    const centerTileZ = this.worldToTerrainTileIndex(centerPos.z);
 
     // Full-content core range + terrain-only ring (preload around player)
     const coreRange = this.coreChunkRange;
@@ -2458,6 +4297,7 @@ export class TerrainSystem extends System {
 
     for (let dx = -ringRange; dx <= ringRange; dx++) {
       for (let dz = -ringRange; dz <= ringRange; dz++) {
+        assertCurrent();
         const generateContent =
           Math.abs(dx) <= coreRange && Math.abs(dz) <= coreRange;
         const tile = this.generateTile(
@@ -2468,13 +4308,42 @@ export class TerrainSystem extends System {
         _tilesGenerated++;
         if (generateContent) fullTiles++;
         else terrainOnlyTiles++;
+        assertCurrent();
+        yield;
       }
     }
 
+    // External-value duel agents must be able to bank, train, and gather as
+    // soon as the authoritative server becomes ready. The arena is hundreds
+    // of metres from the compact preparation complex, so its initial 5x5 grid
+    // does not bake the preparation pond. Generate every manifest tile that
+    // intersects the launch preparation areas before ResourceSystem starts;
+    // the explicit resident-tile set in updatePlayerBasedTerrain keeps them.
+    let launchPreparationTiles = 0;
+    const preparationTileKeys = new Set<string>();
+    this.addServerLaunchPreparationTiles(preparationTileKeys);
+    for (const key of preparationTileKeys) {
+      assertCurrent();
+      const resident = this.terrainTiles.get(key);
+      if (resident) {
+        this.enqueueTileForGeneration(resident.x, resident.z, true);
+        continue;
+      }
+      const [tileX, tileZ] = key.split("_").map(Number);
+      this.generateTile(tileX, tileZ, true);
+      _tilesGenerated++;
+      fullTiles++;
+      launchPreparationTiles++;
+      assertCurrent();
+      yield;
+    }
+
     // Debug: Log flat zone statistics
+    assertCurrent();
     console.log(
       `[TerrainSystem] Initial tiles generated around (${centerTileX}, ${centerTileZ}). ` +
         `Tiles: ${_tilesGenerated} (full=${fullTiles}, terrain-only=${terrainOnlyTiles}). ` +
+        `Launch preparation tiles: ${launchPreparationTiles}. ` +
         `Flat zones: ${this.flatZones.size} zones, ` +
         `${this.flatZonesByTile.size} tile keys, ` +
         `${this._flatZoneHitCount} height lookups used flat zones`,
@@ -2483,6 +4352,9 @@ export class TerrainSystem extends System {
     // Mark initial tiles as ready
     this.lastPlayerTile = { x: centerTileX, z: centerTileZ };
     this._initialTilesReady = true;
+    if (this.isReady()) {
+      for (const settle of this.readinessWaiters) settle();
+    }
   }
 
   private generateTile(
@@ -2494,6 +4366,7 @@ export class TerrainSystem extends System {
 
     // Check if tile already exists
     if (this.terrainTiles.has(key)) {
+      this.enqueueTileForGeneration(tileX, tileZ, generateContent);
       return this.terrainTiles.get(key)!;
     }
 
@@ -2552,6 +4425,7 @@ export class TerrainSystem extends System {
       resources: [],
       roads: [],
       generated: true,
+      contentGenerated: false,
       lastActiveTime: new Date(),
       playerCount: 0,
       needsSave: true,
@@ -2661,110 +4535,12 @@ export class TerrainSystem extends System {
       this.terrainContainer.add(mesh);
     }
 
-    if (generateContent) {
-      const isServer =
-        this.runtimeIsServer || this.world.network?.isServer || false;
-      const isClient = this.runtimeIsClient;
-
-      // Server generates authoritative resources
-      if (isServer) {
-        this.generateTileResources(tile);
-      }
-
-      // Client visual path
-      if (isClient) {
-        // If no server-generated resources are present (e.g., single-player/dev), generate locally for visuals only
-        if (!isServer && tile.resources.length === 0) {
-          this.generateTileResources(tile);
-        }
-
-        // Generate visual features and water meshes
-        this.generateVisualFeatures(tile);
-        if (!this.CONFIG.USE_QUADTREE_LOD) {
-          this.generateWaterMeshes(tile);
-        }
-        // NOTE: Grass rendering is handled by ProceduralGrassSystem
-
-        // Queue resource instances for deferred creation (spreads work across frames)
-        if (tile.resources.length > 0 && tile.mesh) {
-          this.queueResourceInstances(tile);
-        }
-      }
-    }
-
-    // Emit typed event for other systems (resources, AI nav, etc.)
-    const originX = tile.x * this.CONFIG.TILE_SIZE;
-    const originZ = tile.z * this.CONFIG.TILE_SIZE;
-    const resourcesPayload = tile.resources.map((r) => {
-      const pos = {
-        x: originX + r.position.x,
-        y: r.position.y,
-        z: originZ + r.position.z,
-      };
-      return { id: r.id, type: r.type, position: pos };
-    });
-    const genericBiome = (tile.biome as BiomeType) || DEFAULT_BIOME;
-    this.world.emit(EventType.TERRAIN_TILE_GENERATED, {
-      tileId: `${tileX},${tileZ}`,
-      position: { x: originX, z: originZ },
-      biome: genericBiome,
-      tileX,
-      tileZ,
-      resources: resourcesPayload,
-    });
-
-    // Also emit resource spawn points for ResourceSystem (server-only authoritative)
-    if (tile.resources.length > 0 && this.world.network?.isServer) {
-      const spawnPoints = tile.resources.map((r) => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-      });
-    } else if (
-      tile.resources.length > 0 &&
-      this.runtimeIsClient &&
-      !this.world.network?.isServer
-    ) {
-      const spawnPoints = tile.resources.map((r) => {
-        const worldPos = {
-          x: originX + r.position.x,
-          y: r.position.y,
-          z: originZ + r.position.z,
-        };
-        return {
-          id: r.id,
-          type: r.type,
-          // Use actual subType from resource node, or derive from type
-          subType: r.subType ?? (r.type === "tree" ? "normal" : undefined),
-          position: worldPos,
-          // Pass scale and rotation for visual variation
-          scale: r.scale,
-          rotation: r.rotation,
-        };
-      });
-      this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, {
-        spawnPoints,
-      });
-    }
-
-    // Store tile
     this.terrainTiles.set(key, tile);
     this.activeChunks.add(key);
+    if (generateContent) this.generateTileContent(tile);
+    this.emitTileGenerated(tile);
+
+    if (this.destroyed || this.terrainTiles.get(key) !== tile) return tile;
 
     // Store height data NOW that the tile is in the map.
     // createTileGeometry attaches heightData to geometry.userData because
@@ -2961,8 +4737,7 @@ export class TerrainSystem extends System {
   ): number {
     // Lazy-load road system reference
     this.roadNetworkSystem ??= this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
     if (!this.roadNetworkSystem) return 0;
 
     // Convert world coordinates to road tile coordinates
@@ -3003,38 +4778,27 @@ export class TerrainSystem extends System {
     const localX = worldX - roadTileX * this.CONFIG.TILE_SIZE;
     const localZ = worldZ - roadTileZ * this.CONFIG.TILE_SIZE;
 
-    // Find minimum distance and width to any road segment
-    let minDistanceSq = Infinity;
-    let closestWidth = this.CONFIG.ROAD_WIDTH;
-
+    // Union actual path widths; a nearer narrow spur must not erase a wider
+    // path at their junction. This is also used by the worker and road mask.
+    let influence = 0;
     for (const segment of segments) {
-      const distanceSq = this.distanceToLineSegmentLocalSq(
-        localX,
-        localZ,
-        segment.start.x,
-        segment.start.z,
-        segment.end.x,
-        segment.end.z,
+      influence = Math.max(
+        influence,
+        roadInfluenceOperations.sampleSegment(
+          localX,
+          localZ,
+          segment.start.x,
+          segment.start.z,
+          segment.end.x,
+          segment.end.z,
+          segment.width,
+          segment.blendWidth ?? ROAD_BLEND_WIDTH,
+          segment.maxInfluence ?? 1,
+        ),
       );
-      if (distanceSq < minDistanceSq) {
-        minDistanceSq = distanceSq;
-        closestWidth = segment.width;
-      }
+      if (influence === 1) return 1;
     }
-
-    // Calculate influence based on distance
-    const halfWidth = closestWidth / 2;
-    const totalInfluenceWidth = halfWidth + ROAD_BLEND_WIDTH;
-    const halfWidthSq = halfWidth * halfWidth;
-    const totalInfluenceWidthSq = totalInfluenceWidth * totalInfluenceWidth;
-
-    if (minDistanceSq >= totalInfluenceWidthSq) return 0;
-    if (minDistanceSq <= halfWidthSq) return 1.0;
-
-    // In blend zone - apply smoothstep falloff
-    const minDistance = Math.sqrt(minDistanceSq);
-    const t = 1.0 - (minDistance - halfWidth) / ROAD_BLEND_WIDTH;
-    return t * t * (3 - 2 * t); // smoothstep
+    return influence;
   }
 
   /**
@@ -3126,8 +4890,7 @@ export class TerrainSystem extends System {
   ): Promise<Float32Array | null> {
     // Get road segments
     this.roadNetworkSystem ??= this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
     if (!this.roadNetworkSystem) return null;
 
     const segments = this.roadNetworkSystem.getRoadSegmentsForTile(
@@ -3155,6 +4918,12 @@ export class TerrainSystem extends System {
           endX: seg.end.x,
           endZ: seg.end.z,
           width: seg.width,
+          ...(seg.blendWidth !== undefined
+            ? { blendWidth: seg.blendWidth }
+            : {}),
+          ...(seg.maxInfluence !== undefined
+            ? { maxInfluence: seg.maxInfluence }
+            : {}),
         }));
 
         const tileOffset = {
@@ -3195,6 +4964,8 @@ export class TerrainSystem extends System {
       start: { x: number; z: number };
       end: { x: number; z: number };
       width: number;
+      blendWidth?: number;
+      maxInfluence?: number;
     }>,
   ): Float32Array {
     const vertexCount = vertices.length / 2;
@@ -3204,39 +4975,25 @@ export class TerrainSystem extends System {
       const localX = vertices[i * 2];
       const localZ = vertices[i * 2 + 1];
 
-      let minDistanceSq = Infinity;
-      let closestWidth = this.CONFIG.ROAD_WIDTH;
-
+      let influence = 0;
       for (const segment of segments) {
-        const distanceSq = this.distanceToLineSegmentLocalSq(
-          localX,
-          localZ,
-          segment.start.x,
-          segment.start.z,
-          segment.end.x,
-          segment.end.z,
+        influence = Math.max(
+          influence,
+          roadInfluenceOperations.sampleSegment(
+            localX,
+            localZ,
+            segment.start.x,
+            segment.start.z,
+            segment.end.x,
+            segment.end.z,
+            segment.width,
+            segment.blendWidth ?? ROAD_BLEND_WIDTH,
+            segment.maxInfluence ?? 1,
+          ),
         );
-        if (distanceSq < minDistanceSq) {
-          minDistanceSq = distanceSq;
-          closestWidth = segment.width;
-        }
+        if (influence === 1) break;
       }
-
-      // Calculate influence
-      const halfWidth = closestWidth / 2;
-      const totalInfluenceWidth = halfWidth + ROAD_BLEND_WIDTH;
-      const halfWidthSq = halfWidth * halfWidth;
-      const totalInfluenceWidthSq = totalInfluenceWidth * totalInfluenceWidth;
-
-      if (minDistanceSq >= totalInfluenceWidthSq) {
-        influences[i] = 0;
-      } else if (minDistanceSq <= halfWidthSq) {
-        influences[i] = 1.0;
-      } else {
-        const minDistance = Math.sqrt(minDistanceSq);
-        const t = 1.0 - (minDistance - halfWidth) / ROAD_BLEND_WIDTH;
-        influences[i] = t * t * (3 - 2 * t); // smoothstep
-      }
+      influences[i] = influence;
     }
 
     return influences;
@@ -3259,34 +5016,59 @@ export class TerrainSystem extends System {
    * MAIN THREAD PROTECTION: Processes tiles in batches with yielding.
    */
   private async refreshRoadInfluence(): Promise<void> {
-    if (!this.roadNetworkSystem) {
+    const generation = ++this.roadInfluenceRefreshGeneration;
+    if (this.destroyed) return;
+    const roadNetwork = this.roadNetworkSystem;
+    if (!roadNetwork) {
       console.warn(
         "[TerrainSystem] Cannot refresh road influence - road system not available",
       );
       return;
     }
+    const isCurrent = (): boolean =>
+      !this.destroyed &&
+      generation === this.roadInfluenceRefreshGeneration &&
+      this.roadNetworkSystem === roadNetwork;
 
     // Invalidate per-tile road segment lookup cache before recomputing attributes.
     this._cachedRoadTileX = Number.NaN;
     this._cachedRoadTileZ = Number.NaN;
     this._cachedRoadSegments = [];
 
-    const roads = this.roadNetworkSystem.getRoads();
+    const roads = roadNetwork.getRoads();
     console.log(
       `[TerrainSystem] Refreshing road influence for ${this.terrainTiles.size} tiles (${roads.length} roads in network)`,
     );
 
-    const tiles = Array.from(this.terrainTiles.values());
+    // Capture mesh/geometry ownership as well as the map entry: a tile can be
+    // regenerated in place while a batch is yielding.
+    const tiles = Array.from(this.terrainTiles, ([key, tile]) => ({
+      key,
+      tile,
+      mesh: tile.mesh,
+      geometry: tile.mesh?.geometry,
+      parent: tile.mesh?.parent,
+    }));
     const TILES_PER_BATCH = 4; // Process 4 tiles per batch
     let tilesUpdated = 0;
     let totalVerticesWithRoads = 0;
 
     for (let tileIdx = 0; tileIdx < tiles.length; tileIdx += TILES_PER_BATCH) {
+      if (!isCurrent()) return;
       const batchEnd = Math.min(tileIdx + TILES_PER_BATCH, tiles.length);
 
       for (let t = tileIdx; t < batchEnd; t++) {
-        const tile = tiles[t];
-        if (!tile.mesh) continue;
+        const { key, tile, mesh, geometry, parent } = tiles[t];
+        if (
+          !isCurrent() ||
+          this.terrainTiles.get(key) !== tile ||
+          !mesh ||
+          tile.mesh !== mesh ||
+          mesh.geometry !== geometry ||
+          mesh.parent !== parent ||
+          !geometry
+        )
+          continue;
 
         const tileX = tile.x;
         const tileZ = tile.z;
@@ -3317,20 +5099,13 @@ export class TerrainSystem extends System {
             rz <= roadTileMaxZ && !hasRoadSegments;
             rz++
           ) {
-            const segments = this.roadNetworkSystem.getRoadSegmentsForTile(
-              rx,
-              rz,
-            );
+            const segments = roadNetwork.getRoadSegmentsForTile(rx, rz);
             if (segments.length > 0) hasRoadSegments = true;
           }
         }
         if (!hasRoadSegments) continue;
 
         // Get geometry and roadInfluence attribute
-        const geometry = (tile.mesh as THREE.Mesh)
-          .geometry as THREE.BufferGeometry;
-        if (!geometry) continue;
-
         const positions = geometry.attributes.position;
         const roadInfluenceAttr = geometry.getAttribute("roadInfluence");
         if (!positions || !(roadInfluenceAttr instanceof THREE.BufferAttribute))
@@ -3367,28 +5142,48 @@ export class TerrainSystem extends System {
       // Yield to main thread between batches
       if (batchEnd < tiles.length) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (!isCurrent()) return;
       }
     }
+
+    if (!isCurrent()) return;
 
     console.log(
       `[TerrainSystem] Road influence refresh (tiles): ${tilesUpdated}/${tiles.length} tiles updated, ${totalVerticesWithRoads} vertices with road influence`,
     );
 
     // Also refresh quad-tree LOD chunks if enabled
-    if (this.quadTreeVisualManager) {
+    const visualManager = this.quadTreeVisualManager;
+    if (visualManager) {
       let quadChunksUpdated = 0;
       let quadVerticesWithRoads = 0;
-      const chunks = this.quadTreeVisualManager.getChunks();
-      const chunkEntries = Array.from(chunks.values());
+      const chunks = visualManager.getChunks();
+      const chunkEntries = Array.from(chunks, ([key, chunk]) => ({
+        key,
+        chunk,
+        mesh: chunk.mesh,
+        geometry: chunk.mesh.geometry,
+        parent: chunk.mesh.parent,
+      }));
       const CHUNKS_PER_BATCH = 4;
 
       for (let ci = 0; ci < chunkEntries.length; ci += CHUNKS_PER_BATCH) {
+        if (!isCurrent() || this.quadTreeVisualManager !== visualManager)
+          return;
         const batchEnd = Math.min(ci + CHUNKS_PER_BATCH, chunkEntries.length);
 
         for (let c = ci; c < batchEnd; c++) {
-          const chunk = chunkEntries[c];
-          const geometry = chunk.mesh.geometry as THREE.BufferGeometry;
-          if (!geometry) continue;
+          const { key, chunk, mesh, geometry, parent } = chunkEntries[c];
+          if (
+            !isCurrent() ||
+            this.quadTreeVisualManager !== visualManager ||
+            chunks.get(key) !== chunk ||
+            chunk.mesh !== mesh ||
+            mesh.geometry !== geometry ||
+            !parent ||
+            mesh.parent !== parent
+          )
+            continue;
 
           const positions = geometry.attributes.position;
           const roadInfluenceAttr = geometry.getAttribute("roadInfluence");
@@ -3400,8 +5195,8 @@ export class TerrainSystem extends System {
 
           const posArray = positions.array as Float32Array;
           const roadArray = roadInfluenceAttr.array as Float32Array;
-          const cx = chunk.mesh.position.x;
-          const cz = chunk.mesh.position.z;
+          const cx = mesh.position.x;
+          const cz = mesh.position.z;
           let vertsWithRoad = 0;
 
           for (let i = 0; i < positions.count; i++) {
@@ -3426,6 +5221,8 @@ export class TerrainSystem extends System {
 
         if (batchEnd < chunkEntries.length) {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          if (!isCurrent() || this.quadTreeVisualManager !== visualManager)
+            return;
         }
       }
 
@@ -3448,35 +5245,13 @@ export class TerrainSystem extends System {
   }
 
   private getIslandMask(worldX: number, worldZ: number): number {
-    if (!this.CONFIG.ISLAND_MASK_ENABLED) return 1;
-
-    const maxRadiusMeters = this.getActiveWorldSizeMeters() / 2;
-    if (maxRadiusMeters <= 0) return 1;
-
-    const falloffMeters = Math.max(
-      this.CONFIG.ISLAND_FALLOFF_TILES * this.CONFIG.TILE_SIZE,
-      this.CONFIG.TILE_SIZE,
+    this.ensureNoiseInitialized();
+    return computeIslandMask(
+      worldX,
+      worldZ,
+      this.noise,
+      this.getWorldTerrainProfile(),
     );
-    const noiseScale = this.CONFIG.ISLAND_EDGE_NOISE_SCALE;
-    const noiseStrength = this.CONFIG.ISLAND_EDGE_NOISE_STRENGTH;
-    const edgeNoise =
-      noiseScale > 0 && noiseStrength > 0
-        ? this.noise.simplex2D(worldX * noiseScale, worldZ * noiseScale)
-        : 0;
-    const radiusVariance = maxRadiusMeters * noiseStrength * edgeNoise;
-    const adjustedRadius = Math.max(
-      falloffMeters,
-      maxRadiusMeters + radiusVariance,
-    );
-    const falloffStart = adjustedRadius - falloffMeters;
-
-    const distance = Math.sqrt(worldX * worldX + worldZ * worldZ);
-    if (distance <= falloffStart) return 1;
-    if (distance >= adjustedRadius) return 0;
-
-    const t = (distance - falloffStart) / falloffMeters;
-    const smooth = t * t * (3 - 2 * t);
-    return 1 - smooth;
   }
 
   /**
@@ -3513,6 +5288,7 @@ export class TerrainSystem extends System {
       this.noise,
       this.biomeNoiseSets,
       weights,
+      this.getWorldTerrainProfile(),
     );
   }
 
@@ -3535,7 +5311,7 @@ export class TerrainSystem extends System {
     worldZ: number,
     centerHeight: number,
   ): number {
-    const checkDistance = SHORELINE_CONFIG.SLOPE_SAMPLE_DISTANCE;
+    const checkDistance = this.shorelineParameters.SLOPE_SAMPLE_DISTANCE;
     const northHeight = this.getHeightAtWithoutShore(
       worldX,
       worldZ + checkDistance,
@@ -3569,11 +5345,13 @@ export class TerrainSystem extends System {
     if (!this._shorelineConfig) {
       this._shorelineConfig = {
         waterThreshold: this.CONFIG.WATER_THRESHOLD,
-        shorelineLandBand: SHORELINE_CONFIG.LAND_BAND,
-        shorelineUnderwaterBand: SHORELINE_CONFIG.UNDERWATER_BAND,
-        shorelineMinSlope: SHORELINE_CONFIG.MIN_SLOPE,
-        shorelineLandMaxMultiplier: SHORELINE_CONFIG.LAND_MAX_MULTIPLIER,
-        underwaterDepthMultiplier: SHORELINE_CONFIG.UNDERWATER_DEPTH_MULTIPLIER,
+        shorelineLandBand: this.shorelineParameters.LAND_BAND,
+        shorelineUnderwaterBand: this.shorelineParameters.UNDERWATER_BAND,
+        shorelineMinSlope: this.shorelineParameters.MIN_SLOPE,
+        shorelineLandMaxMultiplier:
+          this.shorelineParameters.LAND_MAX_MULTIPLIER,
+        underwaterDepthMultiplier:
+          this.shorelineParameters.UNDERWATER_DEPTH_MULTIPLIER,
       };
     }
     return this._shorelineConfig;
@@ -3599,9 +5377,7 @@ export class TerrainSystem extends System {
    * Tile N's geometry spans world [(N-0.5)*SIZE, (N+0.5)*SIZE).
    */
   private worldToTerrainTileIndex(worldCoord: number): number {
-    return Math.floor(
-      (worldCoord + this.CONFIG.TILE_SIZE * 0.5) / this.CONFIG.TILE_SIZE,
-    );
+    return centeredTerrainTileIndex(worldCoord, this.CONFIG.TILE_SIZE);
   }
 
   /**
@@ -3700,6 +5476,81 @@ export class TerrainSystem extends System {
     return this.getHeightAtComputedSkipFlatZone(worldX, worldZ);
   }
 
+  /** Stable authored ground for resources, independent of resident mesh caches/decks. */
+  getResourceGroundHeight(worldX: number, worldZ: number): number {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldZ)) {
+      throw new Error("Resource grounding requires finite world coordinates");
+    }
+    return this.getHeightAtComputed(worldX, worldZ);
+  }
+
+  /** A staged consumer must never combine samples from different authored grades. */
+  captureCanonicalGroundLease(): CanonicalGroundLease {
+    if (
+      this.destroyed ||
+      !this.canonicalGroundInitialized ||
+      !this.activeTerrainProfile
+    ) {
+      throw new Error("Canonical ground requires an initialized live terrain");
+    }
+    const profile = this.activeTerrainProfile;
+    const revision = this.canonicalHeightRevision;
+    const supportBounds = Object.freeze(
+      [...this.flatZones.values()].map((zone) => {
+        const radius = zone.radialPond?.bankOuterRadius;
+        let minX = zone.centerX - (radius ?? zone.width / 2);
+        let maxX = zone.centerX + (radius ?? zone.width / 2);
+        let minZ = zone.centerZ - (radius ?? zone.depth / 2);
+        let maxZ = zone.centerZ + (radius ?? zone.depth / 2);
+        // Masked cores/blends may reach beyond the rectangular description.
+        // Include actual tiles, not the grass-only exclusion rectangle.
+        const includeTile = (x: number, z: number) => {
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x + 1);
+          minZ = Math.min(minZ, z);
+          maxZ = Math.max(maxZ, z + 1);
+        };
+        for (const key of zone.tileMask ?? []) {
+          const [x, z] = key.split(",").map(Number);
+          includeTile(x, z);
+        }
+        for (const tile of zone.tileMaskTiles ?? [])
+          includeTile(tile.x, tile.z);
+        return Object.freeze({
+          minX: minX - zone.blendRadius,
+          maxX: maxX + zone.blendRadius,
+          minZ: minZ - zone.blendRadius,
+          maxZ: maxZ + zone.blendRadius,
+        });
+      }),
+    );
+    let current = true;
+    const isCurrent = () => {
+      current &&=
+        !this.destroyed &&
+        this.canonicalGroundInitialized &&
+        this.activeTerrainProfile === profile &&
+        this.CONFIG.WATER_THRESHOLD === profile.water.threshold &&
+        this.canonicalHeightRevision === revision;
+      return current;
+    };
+    return Object.freeze({
+      profile,
+      revision,
+      supportBounds,
+      isCurrent,
+      sampleHeight: (x: number, z: number) => {
+        if (!isCurrent()) throw new Error("Canonical ground lease is stale");
+        return this.getResourceGroundHeight(x, z);
+      },
+    });
+  }
+
+  private recordCanonicalHeightChange(): void {
+    this.canonicalHeightRevision++;
+    this.waterSystem?.invalidateCoastalBathymetry();
+  }
+
   /**
    * Compute height using noise (expensive). Skips flat zone check — caller must check first.
    * PERF: Avoids redundant getFlatZoneHeight() when called from getHeightAt().
@@ -3710,8 +5561,8 @@ export class TerrainSystem extends System {
   ): number {
     const baseHeight = this.getHeightAtWithoutShore(worldX, worldZ);
     const waterThreshold = this.CONFIG.WATER_THRESHOLD;
-    const landBand = SHORELINE_CONFIG.LAND_BAND;
-    const underwaterBand = SHORELINE_CONFIG.UNDERWATER_BAND;
+    const landBand = this.shorelineParameters.LAND_BAND;
+    const underwaterBand = this.shorelineParameters.UNDERWATER_BAND;
 
     if (
       baseHeight >= waterThreshold + landBand ||
@@ -3777,6 +5628,11 @@ export class TerrainSystem extends System {
     return this.waterBodyRegistry;
   }
 
+  /** Unknown/loading reflection owners require full-detail geometry. */
+  areWaterReflectionsEnabled(): boolean {
+    return this.waterSystem?.reflectionsEnabled ?? true;
+  }
+
   // ============================================================================
   // FLAT ZONE SYSTEM (Terrain Flattening for Stations)
   // ============================================================================
@@ -3789,244 +5645,344 @@ export class TerrainSystem extends System {
    */
   // Debug counter to avoid log spam
   private _flatZoneHitCount = 0;
-  private _flatZoneLoggedZones = new Set<string>();
+  private readonly arenaFloorZoneIds = new Set<string>();
+  private arenaGradeHeight: number | null = null;
 
   /**
-   * Classify a single flat zone relative to a world position.
-   * Calls onCore or onBlend if the zone affects this point.
+   * One owned, reusable tile neighborhood, not an unbounded world cache.
+   * Repeated normal stencils share this exact ordered candidate set. Callers
+   * still consume synchronously: querying another tile reuses the same array.
    */
-  private classifyZone(
-    zone: FlatZone,
+  private getAuthoredSurfaceCandidates(
     worldX: number,
     worldZ: number,
-    bestCoreDist: number,
-    bestBlendFactor: number,
-    onCore: (zone: FlatZone, dist: number) => void,
-    onBlend: (zone: FlatZone, factor: number) => void,
-  ): void {
-    if (zone.tileMask) {
-      const tileX = Math.floor(worldX);
-      const tileZ = Math.floor(worldZ);
-      const key = `${tileX},${tileZ}`;
-      if (zone.tileMask.has(key)) {
-        const dx = Math.abs(worldX - zone.centerX);
-        const dz = Math.abs(worldZ - zone.centerZ);
-        const halfWidth = zone.width / 2;
-        const halfDepth = zone.depth / 2;
-        const dist = Math.max(
-          halfWidth > 0 ? dx / halfWidth : 0,
-          halfDepth > 0 ? dz / halfDepth : 0,
-        );
-        if (dist < bestCoreDist) {
-          onCore(zone, dist);
-        }
-        return;
-      }
-
-      const blend = this.getTileMaskBlendFactor(zone, worldX, worldZ);
-      if (blend !== null && blend < bestBlendFactor) {
-        onBlend(zone, blend);
-      }
-      return;
-    }
-
-    const dx = Math.abs(worldX - zone.centerX);
-    const dz = Math.abs(worldZ - zone.centerZ);
-    const halfWidth = zone.width / 2;
-    const halfDepth = zone.depth / 2;
-
-    if (dx <= halfWidth && dz <= halfDepth) {
-      const dist = Math.max(
-        halfWidth > 0 ? dx / halfWidth : 0,
-        halfDepth > 0 ? dz / halfDepth : 0,
-      );
-      if (dist < bestCoreDist) {
-        onCore(zone, dist);
-      }
-    } else if (
-      dx <= halfWidth + zone.blendRadius &&
-      dz <= halfDepth + zone.blendRadius
-    ) {
-      const blendX = dx > halfWidth ? (dx - halfWidth) / zone.blendRadius : 0;
-      const blendZ = dz > halfDepth ? (dz - halfDepth) / zone.blendRadius : 0;
-      const blend = Math.max(blendX, blendZ);
-      if (blend < bestBlendFactor) {
-        onBlend(zone, blend);
-      }
-    }
-  }
-
-  private getTileMaskBlendFactor(
-    zone: FlatZone,
-    worldX: number,
-    worldZ: number,
-  ): number | null {
-    if (!zone.tileMaskTiles || zone.tileMaskTiles.length === 0) {
-      return null;
-    }
-    if (zone.blendRadius <= 0) {
-      return null;
-    }
-
-    const bounds = zone.tileMaskBounds;
-    if (bounds) {
-      const minX = bounds.minX;
-      const maxX = bounds.maxX + 1;
-      const minZ = bounds.minZ;
-      const maxZ = bounds.maxZ + 1;
-      const radius = zone.blendRadius;
-      if (
-        worldX < minX - radius ||
-        worldX > maxX + radius ||
-        worldZ < minZ - radius ||
-        worldZ > maxZ + radius
-      ) {
-        return null;
-      }
-    }
-
-    let bestDist = Infinity;
-    for (const tile of zone.tileMaskTiles) {
-      const tileMinX = tile.x;
-      const tileMaxX = tile.x + 1;
-      const tileMinZ = tile.z;
-      const tileMaxZ = tile.z + 1;
-
-      const dx =
-        worldX < tileMinX
-          ? tileMinX - worldX
-          : worldX > tileMaxX
-            ? worldX - tileMaxX
-            : 0;
-      const dz =
-        worldZ < tileMinZ
-          ? tileMinZ - worldZ
-          : worldZ > tileMaxZ
-            ? worldZ - tileMaxZ
-            : 0;
-
-      const dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist < bestDist) {
-        bestDist = dist;
-        if (bestDist === 0) {
-          break;
-        }
-      }
-    }
-
-    if (bestDist <= zone.blendRadius) {
-      return bestDist / zone.blendRadius;
-    }
-
-    return null;
-  }
-
-  private getFlatZoneHeight(worldX: number, worldZ: number): number | null {
-    if (this.flatZones.size === 0) {
-      return null;
-    }
-
-    // Use spatial index: check the terrain tile containing this point
-    // and its 8 neighbors (zones can span tile boundaries via blend radius).
+  ): readonly FlatZone[] {
+    const candidates = this.authoredSurfaceCandidates;
     const tileSize = this.CONFIG.TILE_SIZE;
     const halfTile = tileSize / 2;
     const terrainTileX = Math.floor((worldX + halfTile) / tileSize);
     const terrainTileZ = Math.floor((worldZ + halfTile) / tileSize);
-
-    // Collect candidate zones from this tile and neighbors (3x3 grid)
-    // PERF: reuse class-level Set to avoid allocation per call
+    if (
+      terrainTileX === this.authoredSurfaceCandidateTileX &&
+      terrainTileZ === this.authoredSurfaceCandidateTileZ &&
+      tileSize === this.authoredSurfaceCandidateTileSize
+    )
+      return candidates;
+    candidates.length = 0;
     this._flatZoneChecked.clear();
-    const checked = this._flatZoneChecked;
-    const result = {
-      coreZone: null as FlatZone | null,
-      coreDist: Infinity,
-      blendZone: null as FlatZone | null,
-      blendFactor: Infinity,
-    };
-
+    this.authoredSurfaceCandidateTileX = terrainTileX;
+    this.authoredSurfaceCandidateTileZ = terrainTileZ;
+    this.authoredSurfaceCandidateTileSize = tileSize;
+    if (this.flatZones.size === 0) return candidates;
     for (let dtx = -1; dtx <= 1; dtx++) {
       for (let dtz = -1; dtz <= 1; dtz++) {
         const key = `${terrainTileX + dtx}_${terrainTileZ + dtz}`;
         const zones = this.flatZonesByTile.get(key);
         if (!zones) continue;
-
         for (const zone of zones) {
-          // Deduplicate zones that span multiple terrain tiles
-          if (checked.has(zone.id)) continue;
-          checked.add(zone.id);
-
-          this.classifyZone(
-            zone,
-            worldX,
-            worldZ,
-            result.coreDist,
-            result.blendFactor,
-            (coreZone, coreDist) => {
-              result.coreZone = coreZone;
-              result.coreDist = coreDist;
-            },
-            (blendZone, blendFactor) => {
-              result.blendZone = blendZone;
-              result.blendFactor = blendFactor;
-            },
-          );
+          if (this._flatZoneChecked.has(zone.id)) continue;
+          this._flatZoneChecked.add(zone.id);
+          candidates.push(zone);
         }
       }
     }
-
-    const bestCoreZone = result.coreZone;
-    const bestBlendZone = result.blendZone;
-    const bestBlendFactor = result.blendFactor;
-
-    // If in a core area, return that zone's flat height.
-    if (bestCoreZone) {
-      // Retain first-hit bookkeeping for diagnostics without per-zone console spam.
-      if (!this._flatZoneLoggedZones.has(bestCoreZone.id)) {
-        this._flatZoneLoggedZones.add(bestCoreZone.id);
-      }
-      this._flatZoneHitCount++;
-      return bestCoreZone.height;
-    }
-
-    // If in a blend area, smoothly interpolate
-    if (bestBlendZone) {
-      const proceduralHeight = this.getProceduralHeightAt(worldX, worldZ);
-
-      // Smoothstep: t² × (3 - 2t) for C1 continuous transition
-      const t = bestBlendFactor * bestBlendFactor * (3 - 2 * bestBlendFactor);
-
-      // Interpolate from flat height (t=0) to procedural height (t=1)
-      return (
-        bestBlendZone.height + (proceduralHeight - bestBlendZone.height) * t
-      );
-    }
-
-    return null;
+    return candidates;
   }
 
-  /**
-   * Check if a world position is inside a flat zone's core area.
-   * Used by ProceduralGrassSystem to exclude grass from artificial flat areas (buildings, arenas, etc.)
-   *
-   * @param worldX - World X coordinate
-   * @param worldZ - World Z coordinate
-   * @returns true if position is in a flat zone's core area (not blend area)
-   */
+  private invalidateAuthoredSurfaceCandidates(): void {
+    // Same-height/grass-only replacements change owned zone objects without
+    // advancing canonical height identity. Invalidate on index writes instead.
+    this.authoredSurfaceCandidateTileX = undefined;
+    this.authoredSurfaceCandidateTileZ = undefined;
+    this.authoredSurfaceCandidateTileSize = undefined;
+    this.authoredSurfaceCandidates.length = 0;
+    this._flatZoneChecked.clear();
+  }
+
+  private getFlatZoneHeight(worldX: number, worldZ: number): number | null {
+    const height = this.authoredSurface.resolveHeight(
+      this.getAuthoredSurfaceCandidates(worldX, worldZ),
+      worldX,
+      worldZ,
+      () => this.getProceduralHeightAt(worldX, worldZ),
+      this.arenaFloorZoneIds,
+      this.arenaGradeHeight,
+    );
+    if (height !== null) this._flatZoneHitCount++;
+    return height;
+  }
+
+  /** Whether authored shaping affects this point, including its blend region. */
   isInFlatZone(worldX: number, worldZ: number): boolean {
-    // PERF: delegate to getFlatZoneHeight instead of duplicating the spatial lookup logic
     return this.getFlatZoneHeight(worldX, worldZ) !== null;
   }
 
-  /**
-   * Register a flat zone and update spatial index.
-   * Spatial index uses terrain tiles (100m each) for efficient lookup.
-   *
-   * IMPORTANT: Also regenerates affected terrain tile meshes so that
-   * the visual terrain reflects the flat zone heights. This is critical
-   * because terrain tiles may have been generated before flat zones
-   * were registered (e.g., building flat zones registered after terrain init).
-   */
+  /** Grass exclusion is independent of terrain shaping on broad natural grades. */
+  private isGrassExcludedAt(worldX: number, worldZ: number): boolean {
+    return this.authoredSurface.isGrassExcluded(
+      this.getAuthoredSurfaceCandidates(worldX, worldZ),
+      worldX,
+      worldZ,
+    );
+  }
+
+  /** Lifecycle-owned vegetation silhouettes, independent of terrain/collision. */
+  acquireGrassExclusionPolygons(
+    polygons: readonly GrassTerrainExclusionPolygon[],
+  ): { release(): void } {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
+    if (
+      !Array.isArray(polygons) ||
+      polygons.length === 0 ||
+      polygons.length + this.landscapeGrassSurface.exclusionPolygons.length >
+        this.grassSurfaceOperations.limits.maxExclusionPolygons
+    )
+      throw new Error("Invalid grass exclusion contribution size");
+    // Validate the complete union before acquiring anything, including ID
+    // collisions with existing landscape silhouettes and other live owners.
+    const combined = this.cloneGrassExclusionPolygons([
+      ...this.landscapeGrassSurface.exclusionPolygons,
+      ...polygons,
+    ]);
+    const owned = combined.slice(combined.length - polygons.length);
+    const identity = Symbol("grass-exclusion-owner");
+    this.ownedGrassExclusions.set(identity, owned);
+    this.landscapeGrassSurface.exclusionPolygons = combined;
+    this.invalidateGrassExclusionPolygons(owned);
+    return {
+      release: () => {
+        if (!this.ownedGrassExclusions.delete(identity)) return;
+        this.refreshGrassExclusionPolygons(false);
+        this.invalidateGrassExclusionPolygons(owned);
+      },
+    };
+  }
+
+  private cloneGrassExclusionPolygons(
+    polygons: GrassTerrainExclusionPolygon[],
+  ): GrassTerrainExclusionPolygon[] {
+    return this.grassSurfaceOperations.cloneSnapshot({
+      schemaVersion: 1,
+      zones: [],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+      exclusionPolygons: polygons,
+    }).exclusionPolygons!;
+  }
+
+  private refreshGrassExclusionPolygons(invalidateAll = true): void {
+    this.landscapeGrassSurface.exclusionPolygons =
+      this.cloneGrassExclusionPolygons([
+        ...this.landscapeGrassExclusions,
+        ...[...this.ownedGrassExclusions.values()].flat(),
+      ]);
+    if (invalidateAll) this.recordGrassSurfaceChange(null);
+  }
+
+  private recordGrassSurfaceChange(bounds: TerrainGridBounds | null): void {
+    this.grassSurfaceChanges.push({
+      revision: ++this.grassSurfaceRevision,
+      bounds: bounds
+        ? {
+            minX: bounds.minX,
+            minZ: bounds.minZ,
+            maxX: bounds.maxX,
+            maxZ: bounds.maxZ,
+          }
+        : null,
+    });
+    // No retained input can grow history or register persistent subscriptions.
+    if (this.grassSurfaceChanges.length > 64) this.grassSurfaceChanges.shift();
+  }
+
+  private invalidateGrassExclusionPolygons(
+    polygons: readonly GrassTerrainExclusionPolygon[],
+  ): void {
+    for (const polygon of polygons) {
+      this.recordGrassSurfaceChange(polygon);
+      this.grassVisualManager?.invalidateRegion(
+        polygon.minX,
+        polygon.minZ,
+        polygon.maxX,
+        polygon.maxZ,
+      );
+    }
+  }
+
+  /** Copy the validated wire fields; no caller-owned grading data is retained. */
+  private copyFlatZone(zone: FlatZone, freeze = false): FlatZone {
+    const copy = this.grassSurfaceOperations.cloneSnapshot({
+      schemaVersion: 1,
+      zones: [zone],
+      arenaFloorIds: [],
+      arenaGradeHeight: null,
+      waterBodies: [],
+    }).zones[0];
+    if (freeze) {
+      if (copy.radialPond) {
+        if (copy.radialPond.bankSectors) {
+          for (const sector of copy.radialPond.bankSectors)
+            Object.freeze(sector);
+          Object.freeze(copy.radialPond.bankSectors);
+        }
+        if (copy.radialPond.bankComposition) {
+          for (const row of copy.radialPond.bankComposition.sectors) {
+            if (row.groundCover) Object.freeze(row.groundCover);
+            Object.freeze(row);
+          }
+          Object.freeze(copy.radialPond.bankComposition.sectors);
+          Object.freeze(copy.radialPond.bankComposition);
+        }
+        Object.freeze(copy.radialPond);
+      }
+      if (copy.tileMaskBounds) Object.freeze(copy.tileMaskBounds);
+      if (copy.grassExclusionBounds) Object.freeze(copy.grassExclusionBounds);
+      if (copy.tileMaskTiles) {
+        for (const tile of copy.tileMaskTiles) Object.freeze(tile);
+        Object.freeze(copy.tileMaskTiles);
+      }
+      // A frozen Set still permits mutation. This detached Set stays private;
+      // public zone queries copy it again rather than exposing this reference.
+      Object.freeze(copy);
+    }
+    return copy;
+  }
+
+  private sameCanonicalFlatZone(a: FlatZone, b: FlatZone): boolean {
+    if (
+      (
+        [
+          "id",
+          "centerX",
+          "centerZ",
+          "width",
+          "depth",
+          "height",
+          "blendRadius",
+          "blendShape",
+          "blendComposition",
+        ] as const
+      ).some((key) => a[key] !== b[key])
+    )
+      return false;
+    if (Boolean(a.radialPond) !== Boolean(b.radialPond)) return false;
+    if (
+      a.radialPond &&
+      b.radialPond &&
+      (
+        [
+          "bedRadius",
+          "bankInnerRadius",
+          "bankOuterRadius",
+          "bankHeight",
+          "shorelineAmplitude",
+        ] as const
+      ).some((key) => a.radialPond![key] !== b.radialPond![key])
+    )
+      return false;
+    const sectorsA = a.radialPond?.bankSectors;
+    const sectorsB = b.radialPond?.bankSectors;
+    if (Boolean(sectorsA) !== Boolean(sectorsB)) return false;
+    if (
+      sectorsA &&
+      sectorsB &&
+      (sectorsA.length !== sectorsB.length ||
+        sectorsA.some((sector, index) =>
+          (
+            [
+              "bearing",
+              "halfWidth",
+              "innerRadius",
+              "innerHeight",
+              "outerRadius",
+              "outerHeight",
+            ] as const
+          ).some((key) => sector[key] !== sectorsB[index][key]),
+        ))
+    )
+      return false;
+    const compositionA = a.radialPond?.bankComposition;
+    const compositionB = b.radialPond?.bankComposition;
+    if (Boolean(compositionA) !== Boolean(compositionB)) return false;
+    if (
+      compositionA &&
+      compositionB &&
+      (compositionA.schemaVersion !== compositionB.schemaVersion ||
+        compositionA.sectors.length !== compositionB.sectors.length ||
+        compositionA.sectors.some(
+          (row, index) =>
+            row.sectorIndex !== compositionB.sectors[index].sectorIndex ||
+            row.surface !== compositionB.sectors[index].surface ||
+            row.groundCover?.emergenceHeight !==
+              compositionB.sectors[index].groundCover?.emergenceHeight ||
+            row.groundCover?.fullHeight !==
+              compositionB.sectors[index].groundCover?.fullHeight,
+        ))
+    )
+      return false;
+    if (Boolean(a.tileMask) !== Boolean(b.tileMask)) return false;
+    if (
+      a.tileMask &&
+      b.tileMask &&
+      (a.tileMask.size !== b.tileMask.size ||
+        [...a.tileMask].some((key) => !b.tileMask!.has(key)))
+    )
+      return false;
+    if (Boolean(a.tileMaskTiles) !== Boolean(b.tileMaskTiles)) return false;
+    if (
+      a.tileMaskTiles &&
+      b.tileMaskTiles &&
+      (a.tileMaskTiles.length !== b.tileMaskTiles.length ||
+        a.tileMaskTiles.some(
+          (tile, index) =>
+            tile.x !== b.tileMaskTiles![index].x ||
+            tile.z !== b.tileMaskTiles![index].z,
+        ))
+    )
+      return false;
+    if (Boolean(a.tileMaskBounds) !== Boolean(b.tileMaskBounds)) return false;
+    return (
+      !a.tileMaskBounds ||
+      !b.tileMaskBounds ||
+      (["minX", "maxX", "minZ", "maxZ"] as const).every(
+        (key) => a.tileMaskBounds![key] === b.tileMaskBounds![key],
+      )
+    );
+  }
+
+  private sameFlatZoneGrassExclusion(a: FlatZone, b: FlatZone): boolean {
+    if (a.excludeGrass !== b.excludeGrass) return false;
+    if (Boolean(a.grassExclusionBounds) !== Boolean(b.grassExclusionBounds))
+      return false;
+    return (
+      !a.grassExclusionBounds ||
+      !b.grassExclusionBounds ||
+      (["minX", "maxX", "minZ", "maxZ"] as const).every(
+        (key) => a.grassExclusionBounds![key] === b.grassExclusionBounds![key],
+      )
+    );
+  }
+
+  private setCanonicalArenaGrade(
+    ids: ReadonlySet<string>,
+    height: number | null,
+  ): void {
+    if (
+      height === this.arenaGradeHeight &&
+      ids.size === this.arenaFloorZoneIds.size &&
+      [...ids].every((id) => this.arenaFloorZoneIds.has(id))
+    )
+      return;
+    this.arenaFloorZoneIds.clear();
+    for (const id of ids) this.arenaFloorZoneIds.add(id);
+    this.arenaGradeHeight = height;
+    this.recordCanonicalHeightChange();
+  }
+
+  /** Register owned grading and regenerate only the consumers whose inputs changed. */
   registerFlatZone(zone: FlatZone): void {
+    if (this.destroyed) throw new Error("Terrain is destroyed");
     // Validate zone data
     if (!zone || !zone.id || typeof zone.id !== "string") {
       throw new Error(
@@ -4058,7 +6014,46 @@ export class TerrainSystem extends System {
         `[TerrainSystem] registerFlatZone "${zone.id}": invalid blendRadius ${zone.blendRadius}`,
       );
     }
+    this.grassSurfaceOperations.validateBlendShape(zone);
+    this.grassSurfaceOperations.validateGrassExclusionBounds(zone);
+    if (zone.blendShape !== undefined && this.arenaFloorZoneIds.has(zone.id))
+      throw new Error(
+        "Owned arena floors require unmodified rectangular geometry",
+      );
+    if (
+      zone.excludeGrass !== undefined &&
+      typeof zone.excludeGrass !== "boolean"
+    ) {
+      throw new Error(
+        `[TerrainSystem] registerFlatZone "${zone.id}": excludeGrass must be boolean`,
+      );
+    }
+    const radialProfileError = validateRadialPondTerrainProfile(zone);
+    if (radialProfileError) {
+      throw new Error(
+        `[TerrainSystem] registerFlatZone "${zone.id}": ${radialProfileError}`,
+      );
+    }
+    zone = this.copyFlatZone(zone, true);
+    const previous = this.flatZones.get(zone.id);
+    const heightChanged =
+      !previous || !this.sameCanonicalFlatZone(previous, zone);
+    const geometryChanged =
+      heightChanged || previous?.carveInset !== zone.carveInset;
+    const grassChanged =
+      heightChanged ||
+      !previous ||
+      !this.sameFlatZoneGrassExclusion(previous, zone);
 
+    if (geometryChanged || grassChanged) {
+      if (previous) this.assertPondCompositionZoneEditable(previous);
+      this.assertPondCompositionZoneEditable(zone);
+    }
+
+    // A replacement must remove the previous bounds before indexing the new
+    // zone, including when an authored layout is rebuilt with the same IDs.
+    if (previous && heightChanged) this.unregisterFlatZone(zone.id);
+    this.invalidateAuthoredSurfaceCandidates();
     this.flatZones.set(zone.id, zone);
 
     // Calculate affected terrain tiles
@@ -4076,6 +6071,14 @@ export class TerrainSystem extends System {
     const zoneMaxX = zone.centerX + totalRadius;
     const zoneMinZ = zone.centerZ - totalRadius;
     const zoneMaxZ = zone.centerZ + totalRadius;
+    if (grassChanged) {
+      this.recordGrassSurfaceChange({
+        minX: zoneMinX,
+        maxX: zoneMaxX,
+        minZ: zoneMinZ,
+        maxZ: zoneMaxZ,
+      });
+    }
 
     const minTileX = Math.floor((zoneMinX + halfTile) / this.CONFIG.TILE_SIZE);
     const maxTileX = Math.floor((zoneMaxX + halfTile) / this.CONFIG.TILE_SIZE);
@@ -4092,14 +6095,25 @@ export class TerrainSystem extends System {
           zones = [];
           this.flatZonesByTile.set(key, zones);
         }
-        zones.push(zone);
+        if (previous && !heightChanged) {
+          // Preserve strict-distance tie priority and arena-floor membership.
+          // Grass-only changes cannot reorder canonical height candidates.
+          const index = zones.indexOf(previous);
+          if (index < 0)
+            throw new Error("Owned flat-zone index is inconsistent");
+          zones[index] = zone;
+        } else {
+          zones.push(zone);
+        }
 
         // Track tiles that need regeneration (if they already exist)
-        if (this.terrainTiles.has(key)) {
+        if (geometryChanged && this.terrainTiles.has(key)) {
           tilesToRegenerate.push({ x: tx, z: tz });
         }
       }
     }
+
+    if (heightChanged) this.recordCanonicalHeightChange();
 
     // Regenerate any existing terrain tiles to apply flat zone heights
     // This ensures terrain meshes reflect the flat zone even if they were
@@ -4135,7 +6149,7 @@ export class TerrainSystem extends System {
     // Invalidate quad-tree visual chunks so they regenerate with flat zone heights.
     // Without this, chunks generated before the flat zone was registered would
     // show the procedural height instead of the flat zone height.
-    if (this.quadTreeVisualManager) {
+    if (geometryChanged && this.quadTreeVisualManager) {
       this.quadTreeVisualManager.invalidateRegion(
         zoneMinX,
         zoneMinZ,
@@ -4143,7 +6157,7 @@ export class TerrainSystem extends System {
         zoneMaxZ,
       );
     }
-    if (this.grassVisualManager) {
+    if (grassChanged && this.grassVisualManager) {
       this.grassVisualManager.invalidateRegion(
         zoneMinX,
         zoneMinZ,
@@ -4256,22 +6270,27 @@ export class TerrainSystem extends System {
   unregisterFlatZone(id: string): void {
     const zone = this.flatZones.get(id);
     if (!zone) return;
+    this.assertPondCompositionZoneEditable(zone);
 
+    this.invalidateAuthoredSurfaceCandidates();
     this.flatZones.delete(id);
+    this.arenaFloorZoneIds.delete(id);
+    if (this.arenaFloorZoneIds.size === 0) this.arenaGradeHeight = null;
 
     // Remove from spatial index
     const totalRadius = Math.max(zone.width, zone.depth) / 2 + zone.blendRadius;
+    const halfTile = this.CONFIG.TILE_SIZE / 2;
     const minTileX = Math.floor(
-      (zone.centerX - totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerX - totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const maxTileX = Math.floor(
-      (zone.centerX + totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerX + totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const minTileZ = Math.floor(
-      (zone.centerZ - totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerZ - totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
     const maxTileZ = Math.floor(
-      (zone.centerZ + totalRadius) / this.CONFIG.TILE_SIZE,
+      (zone.centerZ + totalRadius + halfTile) / this.CONFIG.TILE_SIZE,
     );
 
     for (let tx = minTileX; tx <= maxTileX; tx++) {
@@ -4294,6 +6313,8 @@ export class TerrainSystem extends System {
     const maxX = zone.centerX + totalRadius;
     const minZ = zone.centerZ - totalRadius;
     const maxZ = zone.centerZ + totalRadius;
+    this.recordCanonicalHeightChange();
+    this.recordGrassSurfaceChange({ minX, minZ, maxX, maxZ });
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.invalidateRegion(minX, minZ, maxX, maxZ);
     }
@@ -4306,8 +6327,9 @@ export class TerrainSystem extends System {
    * Get a flat zone at a position (if any).
    */
   getFlatZoneAt(worldX: number, worldZ: number): FlatZone | null {
-    const tileX = Math.floor(worldX / this.CONFIG.TILE_SIZE);
-    const tileZ = Math.floor(worldZ / this.CONFIG.TILE_SIZE);
+    const halfTile = this.CONFIG.TILE_SIZE / 2;
+    const tileX = Math.floor((worldX + halfTile) / this.CONFIG.TILE_SIZE);
+    const tileZ = Math.floor((worldZ + halfTile) / this.CONFIG.TILE_SIZE);
     const key = `${tileX}_${tileZ}`;
 
     const zones = this.flatZonesByTile.get(key);
@@ -4320,11 +6342,61 @@ export class TerrainSystem extends System {
       const halfDepth = zone.depth / 2 + zone.blendRadius;
 
       if (dx <= halfWidth && dz <= halfDepth) {
-        return zone;
+        return this.copyFlatZone(zone);
       }
     }
 
     return null;
+  }
+
+  /**
+   * Load explicit elevated water bodies from world-areas.json.
+   *
+   * These are registered after DataManager is ready but before any terrain
+   * tile is generated. The same registry drives collision baking, rendered
+   * water, vegetation exclusion, and dynamic fishing-shore discovery.
+   */
+  private loadWaterBodiesFromManifest(): void {
+    const seenIds = new Set<string>();
+    let loadedCount = 0;
+
+    for (const [areaId, area] of Object.entries(ALL_WORLD_AREAS)) {
+      for (const body of area.waterBodies ?? []) {
+        const values = [body.centerX, body.centerZ, body.radius, body.surfaceY];
+        if (
+          typeof body.id !== "string" ||
+          body.id.trim().length === 0 ||
+          !values.every(Number.isFinite) ||
+          body.radius <= 0
+        ) {
+          throw new Error(
+            `[TerrainSystem] Invalid water body in area ${areaId}: ${JSON.stringify(body)}`,
+          );
+        }
+        if (seenIds.has(body.id)) {
+          throw new Error(
+            `[TerrainSystem] Duplicate water body ID ${body.id} in world-areas.json`,
+          );
+        }
+        seenIds.add(body.id);
+        this.waterBodyRegistry.register({
+          id: body.id,
+          centerX: body.centerX,
+          centerZ: body.centerZ,
+          radius: body.radius,
+          radiusSq: body.radius * body.radius,
+          surfaceY: body.surfaceY,
+          sourceType: "explicit",
+        });
+        loadedCount++;
+      }
+    }
+
+    if (loadedCount > 0) {
+      console.log(
+        `[TerrainSystem] Registered ${loadedCount} explicit water bodies from world-areas.json`,
+      );
+    }
   }
 
   /**
@@ -4335,6 +6407,11 @@ export class TerrainSystem extends System {
    * Terrain tiles are 100m each, used only for spatial indexing.
    */
   private loadFlatZonesFromManifest(): void {
+    // Admit the shared floor datum before installing authored grades. Invalid
+    // arena metadata must not leave partially registered terrain surfaces.
+    const admittedArenaGradeHeight = ALL_WORLD_AREAS.duel_arena
+      ? getDuelArenaGradeHeight()
+      : null;
     // Movement tile size (1m) - used for station footprints
     const MOVEMENT_TILE_SIZE = 1.0;
 
@@ -4349,28 +6426,97 @@ export class TerrainSystem extends System {
       console.warn(`[TerrainSystem] duel_arena NOT in ALL_WORLD_AREAS!`);
     }
 
-    for (const [areaId, area] of Object.entries(ALL_WORLD_AREAS)) {
-      // Check for both stations and explicit flatZones
-      const areaConfig = area as {
-        stations?: typeof area.stations;
-        flatZones?: Array<{
-          id: string;
-          centerX: number;
-          centerZ: number;
-          width: number;
-          depth: number;
-          height?: number;
-          heightOffset?: number;
-          blendRadius: number;
-        }>;
-      };
+    const areaConfigs = Object.values(ALL_WORLD_AREAS).map(
+      (area) =>
+        area as {
+          stations?: typeof area.stations;
+          flatZones?: Array<{
+            id: string;
+            centerX: number;
+            centerZ: number;
+            width: number;
+            depth: number;
+            height?: number;
+            heightOffset?: number;
+            blendRadius: number;
+            blendShape?: FlatZone["blendShape"];
+            blendComposition?: FlatZone["blendComposition"];
+            excludeGrass?: boolean;
+            grassExclusionBounds?: FlatZone["grassExclusionBounds"];
+            radialPond?: RadialPondTerrainProfile;
+          }>;
+        },
+    );
 
-      // Skip areas with neither stations nor flatZones
-      if (!areaConfig.stations?.length && !areaConfig.flatZones?.length) {
-        continue;
+    // Establish authored grading across ALL areas before sampling station pads.
+    // A station may sit on a plaza or pond declared in a different, later area.
+    for (const areaConfig of areaConfigs) {
+      for (const zoneConfig of areaConfig.flatZones ?? []) {
+        // Reject malformed/inherited blend metadata before selective copying.
+        this.grassSurfaceOperations.validateBlendShape(zoneConfig as FlatZone);
+        const proceduralHeight = this.getProceduralHeightAt(
+          zoneConfig.centerX,
+          zoneConfig.centerZ,
+        );
+        const flatHeight =
+          zoneConfig.height !== undefined
+            ? zoneConfig.height
+            : proceduralHeight + (zoneConfig.heightOffset ?? 0);
+
+        this.registerFlatZone({
+          id: zoneConfig.id,
+          centerX: zoneConfig.centerX,
+          centerZ: zoneConfig.centerZ,
+          width: zoneConfig.width,
+          depth: zoneConfig.depth,
+          height: flatHeight,
+          blendRadius: zoneConfig.blendRadius,
+          ...(Object.prototype.hasOwnProperty.call(zoneConfig, "blendShape")
+            ? { blendShape: zoneConfig.blendShape }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(
+            zoneConfig,
+            "blendComposition",
+          )
+            ? { blendComposition: zoneConfig.blendComposition }
+            : {}),
+          excludeGrass: zoneConfig.excludeGrass,
+          ...(Object.prototype.hasOwnProperty.call(
+            zoneConfig,
+            "grassExclusionBounds",
+          )
+            ? { grassExclusionBounds: zoneConfig.grassExclusionBounds }
+            : {}),
+          radialPond: zoneConfig.radialPond
+            ? { ...zoneConfig.radialPond }
+            : undefined,
+        });
+        loadedCount++;
       }
+    }
 
-      // Process stations (if any)
+    // Terrain owns these surfaces on BOTH roles before meshes/navigation bake.
+    // Rendering borrows the same base; it must not register client-only grades.
+    const nextArenaFloorIds = new Set<string>();
+    let nextArenaGradeHeight: number | null = null;
+    if (admittedArenaGradeHeight !== null) {
+      const baseHeight = admittedArenaGradeHeight;
+      for (const zone of createDuelArenaFloorZones(
+        getDuelArenaConfig(),
+        baseHeight,
+      )) {
+        this.registerFlatZone(zone);
+        nextArenaFloorIds.add(zone.id);
+        loadedCount++;
+      }
+      nextArenaGradeHeight = baseHeight;
+    }
+    this.setCanonicalArenaGrade(nextArenaFloorIds, nextArenaGradeHeight);
+
+    // Collect every pad before registering any of them. Sampling and registering
+    // sequentially would let an earlier station's pad change a later one's grade.
+    const stationZones: FlatZone[] = [];
+    for (const areaConfig of areaConfigs) {
       if (areaConfig.stations) {
         for (const station of areaConfig.stations) {
           const stationData = stationDataProvider.getStationData(station.type);
@@ -4394,11 +6540,11 @@ export class TerrainSystem extends System {
           const width = size.x * MOVEMENT_TILE_SIZE + padding * 2;
           const depth = size.z * MOVEMENT_TILE_SIZE + padding * 2;
 
-          // Get procedural height at station center (what terrain would be without flattening)
-          const flatHeight = this.getProceduralHeightAt(
-            station.position.x,
-            station.position.z,
-          );
+          // Use explicit-only grading, preserving radial pond/core/blend
+          // precedence. Stations outside authored grading retain raw terrain.
+          const flatHeight =
+            this.getFlatZoneHeight(station.position.x, station.position.z) ??
+            this.getProceduralHeightAt(station.position.x, station.position.z);
 
           const zone: FlatZone = {
             id: `station_${station.id}`,
@@ -4409,41 +6555,20 @@ export class TerrainSystem extends System {
             height: flatHeight,
             blendRadius,
           };
-
-          this.registerFlatZone(zone);
-          loadedCount++;
-        }
-      }
-
-      // Also load explicit flatZones defined in the area config (e.g., duel arenas, special platforms)
-      if (areaConfig.flatZones) {
-        for (const zoneConfig of areaConfig.flatZones) {
-          // Calculate base height from procedural terrain
-          const proceduralHeight = this.getProceduralHeightAt(
-            zoneConfig.centerX,
-            zoneConfig.centerZ,
+          const grassBounds = stationDataProvider.getGrassExclusionBounds(
+            station.type,
+            station.position.x,
+            station.position.z,
           );
+          if (grassBounds) zone.grassExclusionBounds = grassBounds;
 
-          // Use explicit height if provided, otherwise procedural + offset
-          const flatHeight =
-            zoneConfig.height !== undefined
-              ? zoneConfig.height
-              : proceduralHeight + (zoneConfig.heightOffset ?? 0);
-
-          const zone: FlatZone = {
-            id: zoneConfig.id,
-            centerX: zoneConfig.centerX,
-            centerZ: zoneConfig.centerZ,
-            width: zoneConfig.width,
-            depth: zoneConfig.depth,
-            height: flatHeight,
-            blendRadius: zoneConfig.blendRadius,
-          };
-
-          this.registerFlatZone(zone);
-          loadedCount++;
+          stationZones.push(zone);
         }
       }
+    }
+    for (const zone of stationZones) {
+      this.registerFlatZone(zone);
+      loadedCount++;
     }
 
     console.log(
@@ -4726,27 +6851,29 @@ export class TerrainSystem extends System {
   }
 
   private getBiomeAt(tileX: number, tileZ: number): string {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeForTile(tileX, tileZ, this.CONFIG.TILE_SIZE);
+    return this.biomeSystem.getBiomeForTile(
+      tileX,
+      tileZ,
+      this.CONFIG.TILE_SIZE,
+    );
   }
 
   private getBiomeInfluencesAtPosition(
     worldX: number,
     worldZ: number,
   ): Array<{ type: string; weight: number }> {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    return this.biomeSystem.getBiomeInfluencesAtPosition(worldX, worldZ, 0);
   }
 
   private computeBiomeWeightsAtPosition(
     worldX: number,
     worldZ: number,
   ): { biomeWeightMap: Map<string, number>; totalWeight: number } {
-    const influences = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    const influences = this.biomeSystem.getBiomeInfluencesAtPosition(
+      worldX,
+      worldZ,
+      0,
+    );
     const biomeWeightMap = new Map<string, number>();
     let totalWeight = 0;
     for (const inf of influences) {
@@ -4765,12 +6892,16 @@ export class TerrainSystem extends System {
   getTerrainColorAt(
     wx: number,
     wz: number,
+    computedSurface = false,
+    grassEligibility?: GrassSurfaceEligibility,
   ): {
     r: number;
     g: number;
     b: number;
     grassWeight: number;
     grassPlacement: number;
+    grassPlacementBeforeCoast?: number;
+    grassEstablishment?: true;
     grassHeightScale: number;
     tintR: number;
     tintG: number;
@@ -4780,13 +6911,22 @@ export class TerrainSystem extends System {
     ny: number;
     nz: number;
   } {
-    const height = this.getHeightAt(wx, wz);
+    const eligibility = compactTerrainColorOperations.grassEligibility(
+      grassEligibility,
+      this.getWorldTerrainProfile().algorithm,
+    );
+    // Grass uses the worker's computed authored surface, independent of loaded
+    // tile interpolation. Other callers retain their existing cached sampler.
+    const sampleHeight = computedSurface
+      ? this.getHeightAtComputed
+      : this.getHeightAt;
+    const height = sampleHeight.call(this, wx, wz);
 
-    const sd = 0.5;
-    const hL = this.getHeightAt(wx - sd, wz);
-    const hR = this.getHeightAt(wx + sd, wz);
-    const hD = this.getHeightAt(wx, wz - sd);
-    const hU = this.getHeightAt(wx, wz + sd);
+    const sd = GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE;
+    const hL = sampleHeight.call(this, wx - sd, wz);
+    const hR = sampleHeight.call(this, wx + sd, wz);
+    const hD = sampleHeight.call(this, wx, wz - sd);
+    const hU = sampleHeight.call(this, wx, wz + sd);
     const dhdx = (hR - hL) / (2 * sd);
     const dhdz = (hU - hD) / (2 * sd);
     const gradMag = Math.sqrt(dhdx * dhdx + dhdz * dhdz);
@@ -4816,6 +6956,72 @@ export class TerrainSystem extends System {
       forestW,
       canyonW,
     );
+    let coastalGroundCover = 0;
+    let coastDistributionSupport: number | undefined;
+    let pondMarginScale = 1;
+    let grassEstablishment = false;
+    let grassEstablishmentWeight = 0;
+    if (isCompactSculptProfile(this.getWorldTerrainProfile())) {
+      // Match the compact diffuse palette, not the superseded biome colors.
+      // Legacy ecology remains independent of colour. The explicit compact
+      // candidate instead uses physical layer support, before road suppression.
+      const paletteInput = {
+        grassColorGrade: this.getCompactGrassColorGrade(),
+        noiseValue: sampleNoiseCPU(
+          wx,
+          wz,
+          TERRAIN_SHADER_CONSTANTS.NOISE_SCALE,
+        ),
+        meadowNoise: sampleNoiseCPU(
+          wx,
+          wz,
+          COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale,
+        ),
+        distortNoise: sampleNoiseCPU(
+          wx,
+          wz,
+          TERRAIN_SHADER_CONSTANTS.DISTORT_NOISE_SCALE,
+        ),
+        slope,
+        roadInfluence: this.calculateRoadInfluenceAtVertex(wx, wz, 0, 0),
+        surface: {
+          x: wx,
+          z: wz,
+          height,
+          pond: this.compactPondMaterial,
+          macroField: this.getCompactMacroMaterial(),
+          plantingLobes: this.getCompactPlantingMaterial(),
+        },
+      };
+      Object.assign(color, compactTerrainColorOperations.sample(paletteInput));
+      if (this.getCompactPondBlend() === "shore-contact-v1")
+        pondMarginScale =
+          compactTerrainColorOperations.pondMarginAt(paletteInput).clumpScale;
+      if (eligibility === "compact-pbr-v1") {
+        color.grassWeight =
+          compactTerrainColorOperations.grassSupportBeforeCoast(paletteInput);
+        if (
+          this.getCompactCoastBlend() === "distribution-v1" ||
+          this.getCompactPondBlend() === "shore-contact-v1" ||
+          this.getCompactPondBlend() === "composition-v1"
+        )
+          coastDistributionSupport =
+            compactTerrainColorOperations.grassSupport(paletteInput);
+        if (this.getCompactPondBlend() === "composition-v1") {
+          grassEstablishmentWeight =
+            compactTerrainColorOperations.bankCompositionAt(
+              paletteInput,
+            ).groundCoverWeight;
+          grassEstablishment = grassEstablishmentWeight > 0;
+        }
+      }
+      coastalGroundCover = compactTerrainColorOperations.coastalGroundCover({
+        height,
+        noiseValue: paletteInput.noiseValue,
+        distortNoise: paletteInput.distortNoise,
+        field: paletteInput.surface.macroField,
+      });
+    }
 
     const tCfg = getGrassConfigForBiome(BiomeType.Tundra);
     const fCfg = getGrassConfigForBiome(BiomeType.Forest);
@@ -4845,15 +7051,53 @@ export class TerrainSystem extends System {
       cCfg.patchScale * canyonW;
 
     const slopeOk = slope <= maxSlope ? 1.0 : 0.0;
-    const weightOk = color.grassWeight >= minGW ? 1.0 : 0.0;
+    const weightOk = (
+      eligibility === "compact-pbr-v1"
+        ? color.grassWeight > 0
+        : color.grassWeight >= minGW
+    )
+      ? 1.0
+      : 0.0;
 
     // Noise-based patch mask: patchiness 0 = uniform, 1 = tight clusters
     const patchThreshold = patchiness * 2 - 1; // maps [0,1] -> [-1,1]
     const noiseVal = this.noise.simplex2D(wx * patchScale, wz * patchScale);
     const patchMask = noiseVal > patchThreshold ? 1.0 : 0.0;
 
-    const grassPlacement =
+    // Use the original biome acceptance threshold before the candidate-only
+    // coastal filter, matching the worker's unrephased seeded generation.
+    const grassPlacementBeforeCoast =
       color.grassWeight * density * slopeOk * weightOk * patchMask;
+    color.grassWeight =
+      coastDistributionSupport ?? color.grassWeight * (1 - coastalGroundCover);
+    let grassPlacement =
+      coastDistributionSupport === undefined
+        ? grassPlacementBeforeCoast * (1 - coastalGroundCover)
+        : coastDistributionSupport *
+          density *
+          slopeOk *
+          (grassEstablishment
+            ? coastDistributionSupport > 0
+              ? 1
+              : 0
+            : weightOk) *
+          patchMask;
+    if (grassEstablishment)
+      grassPlacement = compactTerrainColorOperations.bankEstablishmentPlacement(
+        grassPlacement,
+        grassPlacementBeforeCoast * (1 - coastalGroundCover),
+        grassEstablishmentWeight,
+      );
+    // Older modes retain their historical cap. Authored groundCover releases
+    // it smoothly only within that sector's normalized support, not globally.
+    if (
+      this.getCompactPondBlend() === "shore-contact-v1" ||
+      (this.getCompactPondBlend() === "composition-v1" && !grassEstablishment)
+    )
+      grassPlacement = Math.min(
+        grassPlacement,
+        grassPlacementBeforeCoast * (1 - coastalGroundCover),
+      );
 
     // Biome-blended grass tint (returned separately for tip-only application)
     const tintStrength =
@@ -4885,7 +7129,13 @@ export class TerrainSystem extends System {
     return {
       ...color,
       grassPlacement,
-      grassHeightScale,
+      ...(grassEstablishment ? { grassEstablishment: true as const } : {}),
+      ...(coastalGroundCover > 0 || coastDistributionSupport !== undefined
+        ? { grassPlacementBeforeCoast }
+        : {}),
+      // Consumed only after historical acceptance/rotation in the manager.
+      // The existing bank-verge factor remains a separate, single application.
+      grassHeightScale: grassHeightScale * pondMarginScale,
       tintR,
       tintG,
       tintB,
@@ -4900,9 +7150,11 @@ export class TerrainSystem extends System {
     worldX: number,
     worldZ: number,
   ): Record<string, number> {
-    const influences = this.terrainGenerator
-      .getBiomeSystem()
-      .getBiomeInfluencesAtPosition(worldX, worldZ, 0);
+    const influences = this.biomeSystem.getBiomeInfluencesAtPosition(
+      worldX,
+      worldZ,
+      0,
+    );
     const result: Record<string, number> = {};
     for (const inf of influences) {
       result[inf.type] = inf.weight;
@@ -4914,9 +7166,7 @@ export class TerrainSystem extends System {
   }
 
   private getBiomeAtWorldPosition(worldX: number, worldZ: number): string {
-    return this.terrainGenerator
-      .getBiomeSystem()
-      .getDominantBiome(worldX, worldZ, 0);
+    return this.biomeSystem.getDominantBiome(worldX, worldZ, 0);
   }
 
   private generateTileResources(tile: TerrainTile): void {
@@ -4931,7 +7181,7 @@ export class TerrainSystem extends System {
     }
 
     // Re-enabled: tree spawning with optimized LOD system
-    this.generateTreesForTile(tile, biomeData);
+    this.generateTreesForTile(tile);
 
     // Re-enabled for ore LOD testing
     // this.generateOtherResourcesForTile(tile, biomeData);
@@ -5051,37 +7301,78 @@ export class TerrainSystem extends System {
    * Uses the extracted BiomeResourceGenerator for the actual algorithm.
    * getTreeConfigForBiome always returns a config (falls back to forest).
    */
-  private generateTreesForTile(tile: TerrainTile, biomeData: BiomeData): void {
-    const treeConfig = biomeData.trees ?? getTreeConfigForBiome(tile.biome);
-    if (!treeConfig.enabled) {
-      return;
-    }
-
+  private createTreeGenerationSource(
+    tileX: number,
+    tileZ: number,
+  ): TreeGenerationSource {
+    const biome = this.getBiomeAt(tileX, tileZ);
+    const treeConfig = BIOMES[biome]?.trees ?? getTreeConfigForBiome(biome);
     // Create context for resource generation.
     // getDominantBiome lets generateTrees() resolve the actual biome at each
     // tree position instead of using the single tile-center biome, which
     // prevents wrong tree types appearing near biome boundaries.
-    const biomeSystem = this.terrainGenerator.getBiomeSystem();
+    const biomeSystem = this.biomeSystem;
     const ctx: ResourceGenerationContext = {
-      tileX: tile.x,
-      tileZ: tile.z,
-      tileKey: tile.key,
+      tileX,
+      tileZ,
+      tileKey: `${tileX}_${tileZ}`,
       tileSize: this.CONFIG.TILE_SIZE,
       waterThreshold: this.CONFIG.WATER_THRESHOLD,
-      getHeightAt: (worldX, worldZ) => this.getHeightAt(worldX, worldZ),
+      // Placement must not depend on which neighbouring mesh is resident.
+      getHeightAt: (worldX, worldZ) =>
+        this.getResourceGroundHeight(worldX, worldZ),
       getWaterSurfaceAt: (worldX, worldZ) =>
         this.waterBodyRegistry.getWaterSurfaceAt(worldX, worldZ),
       isOnRoad: this.roadNetworkSystem
         ? (worldX, worldZ) => this.roadNetworkSystem!.isOnRoad(worldX, worldZ)
         : undefined,
-      createRng: (salt) => this.createTileRng(tile.x, tile.z, salt),
+      createRng: (salt) => this.createTileRng(tileX, tileZ, salt),
       getDominantBiome: (worldX, worldZ) =>
         biomeSystem.getDominantBiome(worldX, worldZ, 0),
     };
 
-    // Generate trees using the extracted algorithm
-    const trees = generateTrees(ctx, treeConfig);
-    tile.resources.push(...trees);
+    return { context: ctx, config: treeConfig };
+  }
+
+  private generateTreesForTile(tile: TerrainTile): void {
+    const result = generateCenteredTrees(
+      { tileX: tile.x, tileZ: tile.z },
+      this.CONFIG.TILE_SIZE,
+      (x, z) => this.createTreeGenerationSource(x, z),
+      isPositionInsideDuelArenaZone,
+    );
+    const layout = DataManager.getWorldConfig()?.compactResourceGroves;
+    if (!layout) {
+      tile.resources.push(...result.resources);
+      return;
+    }
+    const reservedIds = new Set(
+      result.resources.map(
+        ({ position }) =>
+          `tree_${(tile.x * this.CONFIG.TILE_SIZE + position.x).toFixed(0)}_${(tile.z * this.CONFIG.TILE_SIZE + position.z).toFixed(0)}`,
+      ),
+    );
+    for (const area of Object.values(ALL_WORLD_AREAS)) {
+      for (const point of area.resources ?? []) {
+        if (point.type !== "tree") continue;
+        const x = Math.floor(point.position.x) + 0.5;
+        const z = Math.floor(point.position.z) + 0.5;
+        // A relocated authored actor reserves both its durable old ID and its
+        // actual occupied anchor, which can have a different coordinate ID.
+        reservedIds.add(`tree_${x.toFixed(0)}_${z.toFixed(0)}`);
+        if (point.instanceId) reservedIds.add(point.instanceId);
+      }
+    }
+    const groves = createCompactResourceGroveNodes(
+      layout,
+      { tileX: tile.x, tileZ: tile.z },
+      this.createTreeGenerationSource(tile.x, tile.z),
+      reservedIds,
+      isPositionInsideDuelArenaZone,
+    );
+    // Publish only after the entire frozen owner passes. Never backfill/drop an
+    // unsafe anchor or replace the existing seeded candidate population.
+    tile.resources.push(...result.resources, ...groves);
   }
 
   /**
@@ -5210,6 +7501,7 @@ export class TerrainSystem extends System {
       resources: [],
       roads: [],
       generated: false,
+      contentGenerated: false,
       playerCount: 0,
       needsSave: false,
       collision: null,
@@ -5406,10 +7698,19 @@ export class TerrainSystem extends System {
         }
 
         this.quadTreeVisualManager.update(pos.x, pos.z);
+        // Publish matching water edges only after the actual visible terrain
+        // frontier has advanced; split/merge callbacks merely request work.
+        this.waterVisualManager?.update();
+        this.compactPondDressing?.update(
+          _deltaTime,
+          (x, z) =>
+            this.quadTreeVisualManager?.getRetainedSurfaceAt(x, z) ?? null,
+        );
 
         if (this.grassVisualManager) {
           this.grassVisualManager.update(pos.x, pos.z, this.world.camera);
         }
+        this.rootedFlowerVisualManager?.update(pos.x, pos.z);
       }
     }
 
@@ -5672,6 +7973,9 @@ export class TerrainSystem extends System {
   }
 
   private unloadTile(tile: TerrainTile): void {
+    if (this.terrainTiles.get(tile.key) !== tile) return;
+    if (this.pendingContentPromotions.get(tile.key) === tile)
+      this.pendingContentPromotions.delete(tile.key);
     // Cancel any pending/in-progress walkability baking for this tile
     if (this.runtimeIsServer) {
       this.pendingWalkabilityTiles = this.pendingWalkabilityTiles.filter(
@@ -5688,17 +7992,18 @@ export class TerrainSystem extends System {
     // Clear baked terrain walkability flags (server-only)
     if (this.runtimeIsServer && this.world?.collision) {
       const tileSize = this.CONFIG.TILE_SIZE;
-      const originX = tile.x * tileSize;
-      const originZ = tile.z * tileSize;
+      const originX = tile.x * tileSize - tileSize * 0.5;
+      const originZ = tile.z * tileSize - tileSize * 0.5;
       const tilesPerSide = Math.floor(tileSize / 1.0);
       const terrainFlagsMask = CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE;
-      for (let lx = 0; lx < tilesPerSide; lx++) {
-        const mx = Math.floor(originX + lx + 0.5);
-        for (let lz = 0; lz < tilesPerSide; lz++) {
-          const mz = Math.floor(originZ + lz + 0.5);
-          this.world.collision.removeFlags(mx, mz, terrainFlagsMask);
-        }
-      }
+      this.world.collision.replaceFlagsInRegion(
+        Math.floor(originX),
+        Math.floor(originZ),
+        tilesPerSide,
+        tilesPerSide,
+        terrainFlagsMask,
+        new Int32Array(tilesPerSide * tilesPerSide),
+      );
     }
 
     // Clean up road meshes
@@ -5941,6 +8246,19 @@ export class TerrainSystem extends System {
   }
 
   /**
+   * Whether server walkability flags have been baked for the terrain containing
+   * this world position. Generated tiles bake WATER/STEEP_SLOPE synchronously,
+   * so movement can trust CollisionMatrix instead of recomputing procedural
+   * height, biome, water, and slope data in its hot path.
+   */
+  hasBakedWalkabilityAt(worldX: number, worldZ: number): boolean {
+    return this.isTerrainTileGenerated(
+      this.worldToTerrainTileIndex(worldX),
+      this.worldToTerrainTileIndex(worldZ),
+    );
+  }
+
+  /**
    * Pre-compute WATER and STEEP_SLOPE collision flags for all movement tiles
    * within a terrain tile. Called once when terrain is generated.
    *
@@ -5969,20 +8287,26 @@ export class TerrainSystem extends System {
     const tilesPerSide = Math.floor(tileSize / 1.0); // 100 movement tiles per side
     const wt = this.CONFIG.WATER_THRESHOLD;
 
-    // World origin of this terrain tile's movement tiles
-    const originX = terrainTileX * tileSize;
-    const originZ = terrainTileZ * tileSize;
+    // Terrain geometry is centered on tileIndex * tileSize. Its movement grid
+    // therefore begins half a tile before the mesh position.
+    const originX = terrainTileX * tileSize - tileSize * 0.5;
+    const originZ = terrainTileZ * tileSize - tileSize * 0.5;
     const originXInt = Math.floor(originX);
     const originZInt = Math.floor(originZ);
 
-    // Clear stale terrain flags first (handles re-baking after flat zone regeneration)
     const terrainFlagsMask = CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE;
-    for (let lx = 0; lx < tilesPerSide; lx++) {
-      const moveTileX = originXInt + lx;
-      for (let lz = 0; lz < tilesPerSide; lz++) {
-        collision.removeFlags(moveTileX, originZInt + lz, terrainFlagsMask);
-      }
-    }
+    const terrainFlags = new Int32Array(tilesPerSide * tilesPerSide);
+
+    // A deck lease overlays terrain flags; its removal must reveal the actual
+    // bank/water underneath, even after a rebake while the deck is active.
+    // Movement heights intentionally include decks, so they cannot be this
+    // opt-in world's terrain baseline. Authored building/arena grades remain
+    // part of canonical ground. Preserve the legacy bridge/bake path otherwise.
+    const canonicalDockGround =
+      DataManager.getWorldConfig()?.compactPondDocks !== undefined;
+    const sampleTerrainHeight = canonicalDockGround
+      ? (x: number, z: number) => this.getResourceGroundHeight(x, z)
+      : (x: number, z: number) => this.getHeightAt(x, z);
 
     // ---- PASS 1: Water flags (aligned with visual water mesh) ----
     //
@@ -6008,7 +8332,7 @@ export class TerrainSystem extends System {
       const iStride = i * gridPoints;
       for (let j = 0; j < gridPoints; j++) {
         const wz = gridStartZ + j * cellSize;
-        heights[iStride + j] = this.getHeightAt(wx, wz);
+        heights[iStride + j] = sampleTerrainHeight(wx, wz);
       }
     }
 
@@ -6056,11 +8380,7 @@ export class TerrainSystem extends System {
             const flagIdx = flagRow + tz;
             if (!waterTileFlags[flagIdx]) {
               waterTileFlags[flagIdx] = 1;
-              collision.addFlags(
-                originXInt + tx,
-                originZInt + tz,
-                CollisionFlag.WATER,
-              );
+              terrainFlags[flagIdx] |= CollisionFlag.WATER;
             }
           }
         }
@@ -6117,11 +8437,7 @@ export class TerrainSystem extends System {
               const flagIdx = flagRow + tz;
               if (!waterTileFlags[flagIdx]) {
                 waterTileFlags[flagIdx] = 1;
-                collision.addFlags(
-                  originXInt + tx,
-                  originZInt + tz,
-                  CollisionFlag.WATER,
-                );
+                terrainFlags[flagIdx] |= CollisionFlag.WATER;
               }
             }
           }
@@ -6130,39 +8446,158 @@ export class TerrainSystem extends System {
     }
 
     // ---- PASS 2: Biome + slope flags (non-water tiles only) ----
-    for (let lx = 0; lx < tilesPerSide; lx++) {
-      const worldX = originX + lx + 0.5;
-      const moveTileX = originXInt + lx;
-      const flagRow = lx * tilesPerSide;
+    // Sample a one-meter grid once and reuse neighboring samples. The prior
+    // path called calculateSlope() for each of 10,000 movement tiles, causing
+    // up to 90,000 cached-height queries and 100ms+ authoritative tick stalls.
+    const biome = this.getBiomeAt(terrainTileX, terrainTileZ);
+    const biomeData = BIOMES[biome];
+    const slopeDistance = this.CONFIG.SLOPE_CHECK_DISTANCE;
+    const integerSlopeDistance = Number.isInteger(slopeDistance)
+      ? slopeDistance
+      : null;
+    let slopeHeights: Float64Array | null = null;
+    let slopeGridSide = 0;
 
-      for (let lz = 0; lz < tilesPerSide; lz++) {
-        if (waterTileFlags[flagRow + lz]) continue; // Already water
-
-        const worldZ = originZ + lz + 0.5;
-
-        // Biome check — "lakes" biome is always impassable
-        const biomeTerrainTileX = Math.floor(worldX / tileSize);
-        const biomeTerrainTileZ = Math.floor(worldZ / tileSize);
-        const biome = this.getBiomeAt(biomeTerrainTileX, biomeTerrainTileZ);
-
-        if (biome === "lakes") {
-          collision.addFlags(moveTileX, originZInt + lz, CollisionFlag.WATER);
-        } else {
-          // Slope check — slope exceeds biome's maxSlope
-          const biomeData = BIOMES[biome];
-          if (biomeData) {
-            const slope = this.calculateSlope(worldX, worldZ);
-            if (slope > biomeData.maxSlope) {
-              collision.addFlags(
-                moveTileX,
-                originZInt + lz,
-                CollisionFlag.STEEP_SLOPE,
-              );
-            }
-          }
+    if (biome !== "lakes" && biomeData && integerSlopeDistance !== null) {
+      slopeGridSide = tilesPerSide + integerSlopeDistance * 2;
+      slopeHeights = new Float64Array(slopeGridSide * slopeGridSide);
+      for (let gx = 0; gx < slopeGridSide; gx++) {
+        const worldX = originX + gx - integerSlopeDistance + 0.5;
+        const rowOffset = gx * slopeGridSide;
+        for (let gz = 0; gz < slopeGridSide; gz++) {
+          const worldZ = originZ + gz - integerSlopeDistance + 0.5;
+          slopeHeights[rowOffset + gz] = sampleTerrainHeight(worldX, worldZ);
         }
       }
     }
+
+    const inverseSlopeDistance = 1 / slopeDistance;
+    const inverseDiagonalDistance = 1 / (slopeDistance * Math.SQRT2);
+    for (let lx = 0; lx < tilesPerSide; lx++) {
+      const worldX = originX + lx + 0.5;
+      const flagRow = lx * tilesPerSide;
+
+      for (let lz = 0; lz < tilesPerSide; lz++) {
+        const flagIndex = flagRow + lz;
+        if (waterTileFlags[flagIndex]) continue; // Already water
+
+        const worldZ = originZ + lz + 0.5;
+
+        if (biome === "lakes") {
+          terrainFlags[flagIndex] |= CollisionFlag.WATER;
+          continue;
+        }
+        if (!biomeData) continue;
+
+        let slope: number;
+        if (slopeHeights && integerSlopeDistance !== null) {
+          const gx = lx + integerSlopeDistance;
+          const gz = lz + integerSlopeDistance;
+          const center = slopeHeights[gx * slopeGridSide + gz];
+          const north =
+            Math.abs(
+              slopeHeights[gx * slopeGridSide + gz + integerSlopeDistance] -
+                center,
+            ) * inverseSlopeDistance;
+          const south =
+            Math.abs(
+              slopeHeights[gx * slopeGridSide + gz - integerSlopeDistance] -
+                center,
+            ) * inverseSlopeDistance;
+          const east =
+            Math.abs(
+              slopeHeights[(gx + integerSlopeDistance) * slopeGridSide + gz] -
+                center,
+            ) * inverseSlopeDistance;
+          const west =
+            Math.abs(
+              slopeHeights[(gx - integerSlopeDistance) * slopeGridSide + gz] -
+                center,
+            ) * inverseSlopeDistance;
+          const northEast =
+            Math.abs(
+              slopeHeights[
+                (gx + integerSlopeDistance) * slopeGridSide +
+                  gz +
+                  integerSlopeDistance
+              ] - center,
+            ) * inverseDiagonalDistance;
+          const northWest =
+            Math.abs(
+              slopeHeights[
+                (gx - integerSlopeDistance) * slopeGridSide +
+                  gz +
+                  integerSlopeDistance
+              ] - center,
+            ) * inverseDiagonalDistance;
+          const southEast =
+            Math.abs(
+              slopeHeights[
+                (gx + integerSlopeDistance) * slopeGridSide +
+                  gz -
+                  integerSlopeDistance
+              ] - center,
+            ) * inverseDiagonalDistance;
+          const southWest =
+            Math.abs(
+              slopeHeights[
+                (gx - integerSlopeDistance) * slopeGridSide +
+                  gz -
+                  integerSlopeDistance
+              ] - center,
+            ) * inverseDiagonalDistance;
+          slope = Math.max(
+            north,
+            south,
+            east,
+            west,
+            northEast,
+            northWest,
+            southEast,
+            southWest,
+          );
+        } else if (canonicalDockGround) {
+          // The uncommon non-integer stencil must use the same terrain-only
+          // datum as the cached grid, not calculateSlope's movement heights.
+          const center = sampleTerrainHeight(worldX, worldZ);
+          slope = 0;
+          for (let dx = -1; dx <= 1; dx++)
+            for (let dz = -1; dz <= 1; dz++) {
+              if (dx === 0 && dz === 0) continue;
+              const delta = Math.abs(
+                sampleTerrainHeight(
+                  worldX + dx * slopeDistance,
+                  worldZ + dz * slopeDistance,
+                ) - center,
+              );
+              slope = Math.max(
+                slope,
+                delta *
+                  (dx !== 0 && dz !== 0
+                    ? inverseDiagonalDistance
+                    : inverseSlopeDistance),
+              );
+            }
+        } else {
+          slope = this.calculateSlope(worldX, worldZ);
+        }
+
+        if (slope > biomeData.maxSlope) {
+          terrainFlags[flagIndex] |= CollisionFlag.STEEP_SLOPE;
+        }
+      }
+    }
+
+    // Apply the complete terrain result in one zone-oriented batch. This also
+    // clears stale WATER/STEEP_SLOPE flags while preserving every other flag.
+    collision.replaceFlagsInRegion(
+      originXInt,
+      originZInt,
+      tilesPerSide,
+      tilesPerSide,
+      terrainFlagsMask,
+      terrainFlags,
+    );
 
     // ---- PASS 3: Bridge collision (overrides WATER → walkable) ----
     const bridgeSystem = this.world.getSystem("bridges") as BridgeSystem | null;
@@ -6186,11 +8621,7 @@ export class TerrainSystem extends System {
       ): void;
     } | null;
     if (dockSystem?.reapplyCollisionForTile) {
-      dockSystem.reapplyCollisionForTile(
-        terrainTileX * tileSize,
-        terrainTileZ * tileSize,
-        tileSize,
-      );
+      dockSystem.reapplyCollisionForTile(originX, originZ, tileSize);
     }
   }
 
@@ -6512,6 +8943,7 @@ export class TerrainSystem extends System {
   }> {
     const biome = this.getBiomeAt(tileX, tileZ);
     const biomeData = BIOMES[biome];
+    const rng = this.createTileRng(tileX, tileZ, "mob-spawn-positions");
 
     // Don't spawn mobs in safe zones
     if (biomeData.difficulty === 0 || biomeData.mobTypes.length === 0) {
@@ -6535,10 +8967,10 @@ export class TerrainSystem extends System {
       // Random position within tile
       const worldX =
         tileX * this.CONFIG.TILE_SIZE +
-        (Math.random() - 0.5) * this.CONFIG.TILE_SIZE * 0.8;
+        (rng() - 0.5) * this.CONFIG.TILE_SIZE * 0.8;
       const worldZ =
         tileZ * this.CONFIG.TILE_SIZE +
-        (Math.random() - 0.5) * this.CONFIG.TILE_SIZE * 0.8;
+        (rng() - 0.5) * this.CONFIG.TILE_SIZE * 0.8;
 
       // Check if position is suitable for mob spawning
       const terrainInfo = this.getTerrainInfoAt(worldX, worldZ);
@@ -6834,8 +9266,7 @@ export class TerrainSystem extends System {
 
     this.ensureNoiseInitialized();
 
-    const worldSizeMeters = this.getActiveWorldSizeMeters();
-    const halfWorld = worldSizeMeters / 2;
+    const bounds = this.getWorldTerrainProfile().bounds;
     const step = this.CONFIG.BOSS_HOTSPOT_GRID_STEP;
     const minScalar = this.CONFIG.BOSS_HOTSPOT_MIN_SCALAR;
     const candidates: Array<{
@@ -6845,11 +9276,16 @@ export class TerrainSystem extends System {
       seed: number;
     }> = [];
 
-    const start = -halfWorld + step * 0.5;
-    const end = halfWorld - step * 0.5;
-
-    for (let x = start; x <= end; x += step) {
-      for (let z = start; z <= end; z += step) {
+    for (
+      let x = bounds.minX + step * 0.5;
+      x <= bounds.maxX - step * 0.5;
+      x += step
+    ) {
+      for (
+        let z = bounds.minZ + step * 0.5;
+        z <= bounds.maxZ - step * 0.5;
+        z += step
+      ) {
         const sample = this.getDifficultyAtWorldPosition(x, z);
         if (sample.isSafe || sample.scalar < minScalar) continue;
 
@@ -7000,6 +9436,27 @@ export class TerrainSystem extends System {
   }
 
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.failReadiness(new Error("Terrain is destroyed"));
+    this.canonicalGroundInitialized = false;
+    this.recordCanonicalHeightChange();
+    this.grassSurfaceRevision++;
+    this.grassSurfaceChanges = [];
+    this.ownedGrassExclusions.clear();
+    this.landscapeGrassExclusions = [];
+    this.landscapeGrassSurface.exclusionPolygons = [];
+    this._terrainInitialized = false;
+    this.workerBatchLease = null;
+    this.roadInfluenceRefreshGeneration++;
+    this.world.off(EventType.ROADS_GENERATED, this.onRoadsGenerated);
+    this.world.off(EventType.ROADS_MASK_READY, this.onRoadMaskReady);
+    this.roadEventsSubscribed = false;
+    clearRoadInfluenceTexture(this);
+    this.compactPondDressing?.destroy();
+    this.compactPondDressing = null;
+    this.rootedFlowerVisualManager?.destroy();
+    this.rootedFlowerVisualManager = null;
     // Dispose quad-tree visual manager
     if (this.quadTreeVisualManager) {
       this.quadTreeVisualManager.dispose();
@@ -7007,9 +9464,16 @@ export class TerrainSystem extends System {
     }
 
     if (this.waterVisualManager) {
-      this.waterVisualManager.destroy();
+      const visuals = this.waterVisualManager;
       this.waterVisualManager = null;
+      visuals.destroy();
     }
+
+    const water = this.waterSystem;
+    this.waterSystem = undefined;
+    // Visual meshes borrow these materials. Unregister and retire their
+    // geometry first; an initializing owner is retired by initialize() later.
+    if (water && water !== this.initializingWater) water.destroy();
 
     if (this.grassVisualManager) {
       this.grassVisualManager.destroy();
@@ -7021,8 +9485,11 @@ export class TerrainSystem extends System {
     terminateQuadChunkWorkerPool();
     terminateGrassWorkerPool();
 
-    // Clear pending worker results
+    // Clear pending worker state
     this.pendingWorkerResults.clear();
+    this.pendingWorkerTiles.length = 0;
+    this.pendingWorkerTileKeys.clear();
+    this.workerFallbackTileKeys.clear();
 
     // Remove prefs listener
     if (this.world.prefs) {
@@ -7076,6 +9543,16 @@ export class TerrainSystem extends System {
     this._pendingTileRegeneration.clear();
     this.terrainBoundingBoxes.clear();
     this.pendingSerializationData.clear();
+    this.pendingTileKeys.length = 0;
+    this.pendingTileSet.clear();
+    this.pendingTileContent.clear();
+    this.pendingContentPromotions.clear();
+    this.pendingTileGenerations.clear();
+    this.flatZones.clear();
+    this.flatZonesByTile.clear();
+    this.invalidateAuthoredSurfaceCandidates();
+    this.arenaFloorZoneIds.clear();
+    this.arenaGradeHeight = null;
 
     // Cleanup GPU compute context
     if (this.terrainComputeContext) {
@@ -7083,6 +9560,9 @@ export class TerrainSystem extends System {
       this.terrainComputeContext = null;
       this.gpuComputeAvailable = false;
     }
+    // Also cancels pending compact texture admission and rejects late loads.
+    this.terrainMaterial?.dispose();
+    this.terrainMaterial = undefined;
   }
 
   private emitTileUnloaded(tileId: string, tileX: number, tileZ: number): void {
@@ -7138,6 +9618,8 @@ export class TerrainSystem extends System {
    * Get comprehensive terrain statistics for testing
    */
   getTerrainStats(): {
+    terrainProfileId: string;
+    worldContentIdentity: string;
     tileSize: string;
     worldSize: string;
     totalArea: string;
@@ -7158,6 +9640,8 @@ export class TerrainSystem extends System {
     const worldSizeKm = worldSizeMeters / 1000;
     const activeChunks = Array.from(this.terrainTiles.keys());
     return {
+      terrainProfileId: this.getWorldTerrainProfile().id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       tileSize: `${this.CONFIG.TILE_SIZE}x${this.CONFIG.TILE_SIZE}m`,
       worldSize: `${worldSizeTiles}x${worldSizeTiles}`,
       totalArea: `${worldSizeKm}km x ${worldSizeKm}km`,
@@ -7167,8 +9651,14 @@ export class TerrainSystem extends System {
       biomeCount: Object.keys(BIOMES).length,
       chunkSize: this.CONFIG.TILE_SIZE,
       worldBounds: {
-        min: { x: -worldSizeMeters / 2, z: -worldSizeMeters / 2 },
-        max: { x: worldSizeMeters / 2, z: worldSizeMeters / 2 },
+        min: {
+          x: this.getWorldTerrainProfile().bounds.minX,
+          z: this.getWorldTerrainProfile().bounds.minZ,
+        },
+        max: {
+          x: this.getWorldTerrainProfile().bounds.maxX,
+          z: this.getWorldTerrainProfile().bounds.maxZ,
+        },
       },
       activeBiomes: Array.from(
         new Set(Array.from(this.terrainTiles.values()).map((t) => t.biome)),
@@ -7203,30 +9693,25 @@ export class TerrainSystem extends System {
    * Initialize chunk loading system with 9 core + ring strategy
    */
   private initializeChunkLoadingSystem(): void {
-    const isEmbeddedSpectator = (() => {
-      if (typeof window === "undefined") return false;
-      const win = window as Window & {
-        __HYPERIA_EMBEDDED__?: boolean;
-        __HYPERIA_CONFIG__?: { mode?: string };
-      };
-      return (
-        win.__HYPERIA_EMBEDDED__ === true &&
-        win.__HYPERIA_CONFIG__?.mode === "spectator"
-      );
-    })();
+    const isStreamingViewport = isStreamingLikeViewport();
     // world.isServer can be false during early bootstrap (before network mode
     // is finalized). Resolve runtime role explicitly so server startup always
     // uses tight headless chunk ranges.
     const { isServer: isServerRuntime } = this.resolveRuntimeRole();
 
-    // Embedded spectator prioritizes first-frame time over long-range preload.
+    // Streaming viewports prioritize first-frame time over gameplay travel
+    // preload. Quad-tree visuals retain the horizon independently of these
+    // flat-grid simulation/content tiles.
     if (isServerRuntime) {
-      this.coreChunkRange = 3; // 7x7 core grid (full simulation)
-      this.ringChunkRange = 5; // 11x11 ring — resource content generated here
-      this.terrainOnlyChunkRange = 0; // No render-only tiles on server
-      this.maxTilesPerFrame = 4;
+      // The authoritative server does not render a horizon. A 3x3 simulation
+      // core plus one-tile preload ring covers movement/network interest while
+      // avoiding 121 full terrain tiles per player or duel teleport.
+      this.coreChunkRange = 1;
+      this.ringChunkRange = 2;
+      this.terrainOnlyChunkRange = 2;
+      this.maxTilesPerFrame = 1;
       this.generationBudgetMsPerFrame = 6;
-    } else if (isEmbeddedSpectator) {
+    } else if (isStreamingViewport) {
       this.coreChunkRange = 1; // 3x3 core grid
       this.ringChunkRange = 2; // Preload ring up to 5x5
       this.terrainOnlyChunkRange = 2; // Avoid far-horizon churn in embedded stream view
@@ -7261,13 +9746,8 @@ export class TerrainSystem extends System {
    * Initialize bounding box verification system
    */
   private initializeBoundingBoxSystem(): void {
-    // Set world bounds based on active world size
-    const halfWorldMeters = this.getActiveWorldSizeMeters() / 2;
     this.worldBounds = {
-      minX: -halfWorldMeters,
-      maxX: halfWorldMeters,
-      minZ: -halfWorldMeters,
-      maxZ: halfWorldMeters,
+      ...this.getWorldTerrainProfile().bounds,
       minY: -50,
       maxY: 100,
     };
@@ -7279,7 +9759,7 @@ export class TerrainSystem extends System {
    * Player-based terrain update with 9 core + ring strategy
    */
   private updatePlayerBasedTerrain(): void {
-    if (this.isGenerating) return;
+    if (this.destroyed || this.isGenerating) return;
 
     // Resolve terrain centers (local players, or spectator camera target).
     const centers = this.getTerrainCenters();
@@ -7300,10 +9780,10 @@ export class TerrainSystem extends System {
       const z = playerPos.z;
 
       // Calculate tile position
-      const tileX = Math.floor(x / this.CONFIG.TILE_SIZE);
-      const tileZ = Math.floor(z / this.CONFIG.TILE_SIZE);
+      const tileX = this.worldToTerrainTileIndex(x);
+      const tileZ = this.worldToTerrainTileIndex(z);
 
-      // 9 core chunks (5x5 grid) - these get full simulation
+      // Core chunks get content and simulation; the outer ring is terrain-only.
       const coreChunks = new Set<string>();
       for (let dx = -this.coreChunkRange; dx <= this.coreChunkRange; dx++) {
         for (let dz = -this.coreChunkRange; dz <= this.coreChunkRange; dz++) {
@@ -7369,6 +9849,13 @@ export class TerrainSystem extends System {
       }
     }
 
+    // Launch preparation is a compact authoritative service region, not a
+    // second terrain viewer. Retain only the exact manifest-intersecting tiles
+    // so banking/gathering stays live without generating another 5x5 horizon.
+    const contentTiles = new Set(simulationTiles);
+    this.addServerLaunchPreparationTiles(contentTiles);
+    for (const key of contentTiles) neededTiles.add(key);
+
     // Update simulated chunks - only chunks with players get simulation
     this.simulatedChunks.clear();
     for (const chunkKey of simulationTiles) {
@@ -7382,32 +9869,22 @@ export class TerrainSystem extends System {
     for (const center of centers) {
       const playerPos = center.position;
       if (playerPos) {
-        const tileX = Math.floor(playerPos.x / this.CONFIG.TILE_SIZE);
-        const tileZ = Math.floor(playerPos.z / this.CONFIG.TILE_SIZE);
+        const tileX = this.worldToTerrainTileIndex(playerPos.x);
+        const tileZ = this.worldToTerrainTileIndex(playerPos.z);
         playerCenters.push({ x: tileX, z: tileZ });
       }
     }
 
-    // Queue missing tiles for smooth generation
+    // A duel teleport or camera retarget invalidates queued work immediately.
+    // Prune before adding current requests so old regions never compete with
+    // the arena for the authoritative loop.
+    this.prunePendingTileQueue(neededTiles, contentTiles);
+
+    // Queue missing geometry and exact resident promotions. Full-content tiles
+    // are never regenerated when centers move or requests repeat.
     for (const tileKey of neededTiles) {
-      if (!this.terrainTiles.has(tileKey)) {
-        const [x, z] = tileKey.split("_").map(Number);
-
-        let generateContent = true;
-
-        if (playerCenters.length > 0) {
-          let minChebyshev = Infinity;
-          for (const c of playerCenters) {
-            const d = Math.max(Math.abs(x - c.x), Math.abs(z - c.z));
-            if (d < minChebyshev) minChebyshev = d;
-          }
-          if (minChebyshev > this.ringChunkRange) {
-            generateContent = false;
-          }
-        }
-
-        this.enqueueTileForGeneration(x, z, generateContent);
-      }
+      const [x, z] = tileKey.split("_").map(Number);
+      this.enqueueTileForGeneration(x, z, contentTiles.has(tileKey));
     }
 
     // Remove tiles that are no longer needed, with hysteresis padding
@@ -7693,7 +10170,120 @@ export class TerrainSystem extends System {
    * Check if terrain system is ready for players to spawn
    */
   public isReady(): boolean {
-    return this._initialTilesReady && this.noise !== undefined;
+    return (
+      !this.destroyed &&
+      !this.readinessFailure &&
+      this._initialTilesReady &&
+      this.noise !== undefined
+    );
+  }
+
+  /** Observe startup without starting it; cancellation belongs only to this caller. */
+  public waitUntilReady(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.destroyed)
+      return Promise.reject(new Error("Terrain is destroyed"));
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
+    if (this.isReady()) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        this.readinessWaiters.delete(settle);
+        signal?.removeEventListener("abort", abort);
+      };
+      const settle = (error?: Error) => {
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+      const abort = () => {
+        cleanup();
+        reject(signal?.reason);
+      };
+      this.readinessWaiters.add(settle);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  private failReadiness(error: unknown): Error {
+    this.readinessFailure ??=
+      error instanceof Error ? error : new Error(String(error));
+    for (const settle of this.readinessWaiters) settle(this.readinessFailure);
+    return this.readinessFailure;
+  }
+
+  /**
+   * A stricter client-stream gate than isReady(): the gameplay height field
+   * may be usable while visible quad terrain and grass are still arriving.
+   */
+  public getStreamingVisualReadiness(criticalRadius = 250): {
+    ready: boolean;
+    terrain: ReturnType<TerrainVisualManager["getStreamingReadiness"]> | null;
+    grass: ReturnType<GrassVisualManager["getStreamingReadiness"]> | null;
+    water: ReturnType<WaterSystem["getCoastalBathymetryReadiness"]> | null;
+    waterTopology: ReturnType<
+      WaterVisualManager["getConformingReadiness"]
+    > | null;
+    flowers?: ReturnType<RootedFlowerVisualManager["getReceipt"]>;
+  } {
+    const terrain =
+      this.quadTreeVisualManager?.getStreamingReadiness(criticalRadius) ?? null;
+    const grass =
+      this.grassVisualManager && this.quadTreeVisualManager
+        ? this.grassVisualManager.getStreamingReadiness(
+            this.quadTreeVisualManager.getQuadTree().getFinalNodes(),
+            criticalRadius,
+          )
+        : null;
+    const water = this.waterSystem?.getCoastalBathymetryReadiness() ?? null;
+    const waterTopology =
+      this.waterVisualManager?.getConformingReadiness() ?? null;
+    const flowers = this.rootedFlowerVisualManager?.getReceipt();
+    return {
+      ready: Boolean(
+        terrain?.ready &&
+        (!this.grassVisualManager || grass?.ready) &&
+        (!water?.required || water.ready) &&
+        (!waterTopology?.required || waterTopology.ready) &&
+        (!flowers || flowers.ready) &&
+        (!this.compactPondDressing ||
+          this.compactPondDressing.getReceipt().ready),
+      ),
+      terrain,
+      grass,
+      water,
+      waterTopology,
+      ...(flowers ? { flowers } : {}),
+    };
+  }
+
+  public getCompactPondDressingReceipt() {
+    return this.compactPondDressing?.getReceipt() ?? null;
+  }
+
+  public getGrassProfileReceipt() {
+    return this.grassVisualManager?.getProfileReceipt() ?? null;
+  }
+
+  public getRootedFlowerReceipt() {
+    return this.rootedFlowerVisualManager?.getReceipt() ?? null;
+  }
+
+  /** Primary render pose only; grass generation remains in the update budget. */
+  public prepareGrassForRender(camera: THREE.Camera): void {
+    this.grassVisualManager?.capturePrimaryView(camera);
+    if (this.grassVisualSelection?.dynamics && this.world.graphics)
+      this.grassVisualManager?.prepareClumpFrameForRender(
+        this.world.graphics.renderer,
+        this.world.graphics.isPrecompileIdle() &&
+          this.world.graphics.getOpaqueLoadingCoverStatus().state ===
+            "uncovered",
+      );
+    this.rootedFlowerVisualManager?.prepareForRender(camera);
+  }
+
+  /** Restore only adaptive owners touched by this render or precompile scope. */
+  public finishGrassForRender(): void {
+    this.grassVisualManager?.finishGrassForRender();
   }
 
   public getTileSize(): number {
@@ -7737,8 +10327,7 @@ export class TerrainSystem extends System {
 
     // Ensure road system reference is current
     this.roadNetworkSystem = this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
 
     if (!this.roadNetworkSystem) {
       console.error("[TerrainSystem] Road system not found!");
@@ -7775,8 +10364,7 @@ export class TerrainSystem extends System {
 
     // Ensure road system reference is current
     this.roadNetworkSystem = this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
 
     // Clear the logged tiles set to see fresh logs
     this._loggedTileSegments.clear();
@@ -7828,8 +10416,7 @@ export class TerrainSystem extends System {
 
     // Check road system
     this.roadNetworkSystem ??= this.world.getSystem("roads") as
-      | RoadNetworkSystem
-      | undefined;
+      RoadNetworkSystem | undefined;
 
     if (!this.roadNetworkSystem) {
       console.log("  Road system: NOT FOUND");

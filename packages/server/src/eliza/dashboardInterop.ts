@@ -4,6 +4,7 @@ import type {
   AgentQuestProgress,
   NearbyEntityData,
 } from "./types.js";
+import { isStartableAgentQuest } from "./types.js";
 import type { EmbeddedHyperiaService } from "./EmbeddedHyperiaService.js";
 import { ServerNetwork } from "../systems/ServerNetwork/index.js";
 import { agentThoughts as agentThoughtsTable } from "../database/schema.js";
@@ -17,6 +18,36 @@ type DashboardThought = {
   decisionPath?: "short-circuit" | "llm" | "scripted" | "planner" | "curiosity";
   providers?: string[];
 };
+
+const DASHBOARD_THOUGHT_TYPES = new Set<DashboardThought["type"]>([
+  "situation",
+  "evaluation",
+  "thinking",
+  "decision",
+  "action",
+]);
+const DASHBOARD_DECISION_PATHS = new Set<
+  NonNullable<DashboardThought["decisionPath"]>
+>(["short-circuit", "llm", "scripted", "planner", "curiosity"]);
+
+function normalizeDashboardThoughtType(
+  value: string,
+): DashboardThought["type"] {
+  return DASHBOARD_THOUGHT_TYPES.has(value as DashboardThought["type"])
+    ? (value as DashboardThought["type"])
+    : "thinking";
+}
+
+function normalizeDashboardDecisionPath(
+  value: string | null,
+): DashboardThought["decisionPath"] {
+  return value &&
+    DASHBOARD_DECISION_PATHS.has(
+      value as NonNullable<DashboardThought["decisionPath"]>,
+    )
+    ? (value as NonNullable<DashboardThought["decisionPath"]>)
+    : undefined;
+}
 
 // ── Thought persistence (batch writes to DB) ──────────────────────────
 type PendingThoughtRow = {
@@ -109,10 +140,10 @@ export async function hydrateThoughtsFromDb(
       if (!existingIds.has(id)) {
         existing.push({
           id,
-          type: r.type,
+          type: normalizeDashboardThoughtType(r.type),
           content: r.content,
           timestamp: r.timestamp,
-          decisionPath: r.decisionPath ?? undefined,
+          decisionPath: normalizeDashboardDecisionPath(r.decisionPath),
         });
       }
     }
@@ -134,10 +165,14 @@ export async function hydrateThoughtsFromDb(
 type CommandData = {
   target?: [number, number, number];
   runMode?: boolean;
+  description?: string;
   targetId?: string;
   resourceId?: string;
   itemId?: string;
   quantity?: number;
+  questId?: string;
+  recipe?: string;
+  slot?: string;
   message?: string;
   npcId?: string;
   interaction?: string;
@@ -241,7 +276,17 @@ export function recordAgentThought(
 
 /** Snapshot of embedded AgentBehaviorTicker.goal (avoid circular import of AgentInstance). */
 export type EmbeddedTickerGoalSnapshot = {
-  type: "questing" | "combat" | "gathering" | "idle";
+  type:
+    | "questing"
+    | "combat"
+    | "gathering"
+    | "banking"
+    | "cooking"
+    | "smelting"
+    | "smithing"
+    | "provisioning"
+    | "exploring"
+    | "idle";
   description: string;
   questId?: string;
   questName?: string;
@@ -304,6 +349,18 @@ function mapEmbeddedGoalTypeToDashboard(
       return "gathering";
     case "questing":
       return "questing";
+    case "banking":
+      return "banking";
+    case "cooking":
+      return "cooking";
+    case "smelting":
+      return "smelting";
+    case "smithing":
+      return "smithing";
+    case "provisioning":
+      return "shopping";
+    case "exploring":
+      return "exploration";
     default:
       return "idle";
   }
@@ -389,7 +446,7 @@ export function syncEmbeddedAgentDashboardForTick(
   }
 
   const availableGoals = availableQuestDefinitions
-    .filter((q) => q.status === "not_started")
+    .filter(isStartableAgentQuest)
     .slice(0, 16)
     .map((q, i) => ({
       id: q.questId,
@@ -982,10 +1039,10 @@ export function findWorldMapMoveTarget(
   service: EmbeddedHyperiaService,
   playerPosition: [number, number, number] | null,
 ): [number, number, number] | null {
-  type ServiceWithWorldMap = EmbeddedHyperiaService & {
+  type ServiceWithWorldMap = {
     getWorldMap?: () => Record<string, unknown>;
   };
-  const worldMap = (service as ServiceWithWorldMap).getWorldMap?.();
+  const worldMap = (service as unknown as ServiceWithWorldMap).getWorldMap?.();
   if (!worldMap) return null;
   const n = normalizeText(moveTargetPhrase);
 
@@ -1158,10 +1215,10 @@ function findGlobalResourceTarget(
       position?: { x: number; y: number; z: number };
     };
   };
-  type ServiceWithWorld = EmbeddedHyperiaService & {
+  type ServiceWithWorld = {
     getWorld?: () => { entities?: { items?: Map<string, WorldEntity> } };
   };
-  const world = (service as ServiceWithWorld).getWorld?.();
+  const world = (service as unknown as ServiceWithWorld).getWorld?.();
   const items = world?.entities?.items;
   if (!items) return null;
   const kws = typeKeywords.map((k) => k.toLowerCase());
@@ -1232,10 +1289,10 @@ function findGlobalMobTarget(
     mobType?: string;
     position?: { x: number; y: number; z: number };
   };
-  type ServiceWithWorld = EmbeddedHyperiaService & {
+  type ServiceWithWorld = {
     getWorld?: () => { entities?: { items?: Map<string, WorldEntity> } };
   };
-  const world = (service as ServiceWithWorld).getWorld?.();
+  const world = (service as unknown as ServiceWithWorld).getWorld?.();
   const items = world?.entities?.items;
   if (!items) return null;
   const tokens = tokenizeTarget(targetPhrase);
@@ -1639,13 +1696,11 @@ export function resolveDashboardIntent(
       };
     }
     // No specific item found, try any raw food
-    const anyRaw = inventoryEntries.find((e) =>
-      e.item?.itemId?.startsWith("raw_"),
-    );
+    const anyRaw = inventoryEntries.find((e) => e.itemId.startsWith("raw_"));
     if (anyRaw) {
       return {
         command: "cook",
-        data: { itemId: anyRaw.item!.itemId! },
+        data: { itemId: anyRaw.itemId },
         text: `Cooking ${anyRaw.name}.`,
         thought: `Operator requested cooking. Found ${anyRaw.name} in inventory.`,
         targetName: anyRaw.name,
@@ -1793,8 +1848,7 @@ export function resolveDashboardIntent(
       .trim();
 
     const availableQuests = service.getAvailableQuests();
-    // Only match quests the agent can actually start (not_started)
-    const startable = availableQuests.filter((q) => q.status === "not_started");
+    const startable = availableQuests.filter(isStartableAgentQuest);
 
     if (startable.length > 0 && questPhrase) {
       const questTokens = questPhrase
@@ -1820,7 +1874,7 @@ export function resolveDashboardIntent(
       if (bestQuest && bestScore > 0) {
         return {
           command: "questAccept",
-          data: { questId: bestQuest.id },
+          data: { questId: bestQuest.questId },
           text: `Accepting quest "${bestQuest.name}".`,
           thought: `Operator asked to begin quest. Matched "${bestQuest.name}" from available quests.`,
           targetName: bestQuest.name,
@@ -1833,7 +1887,7 @@ export function resolveDashboardIntent(
       const first = startable[0];
       return {
         command: "questAccept",
-        data: { questId: first.id },
+        data: { questId: first.questId },
         text: `Accepting quest "${first.name}".`,
         thought: `Operator asked to begin a quest. No specific match — picking first available: "${first.name}".`,
         targetName: first.name,
@@ -2179,7 +2233,10 @@ export function tryResolveDashboardLlmAction(
       typeof parsed.questId === "string" ? parsed.questId.trim() : "";
     if (!questId) return null;
     const available = service.getAvailableQuests();
-    if (!available.some((q) => q.questId === questId)) return null;
+    if (
+      !available.some((q) => q.questId === questId && isStartableAgentQuest(q))
+    )
+      return null;
     return {
       command: "questAccept",
       data: { questId },

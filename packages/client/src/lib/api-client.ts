@@ -60,6 +60,11 @@ function getAuthToken(): string | null {
   }
 }
 
+export function getApiAuthorizationHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 /**
  * Async token provider type for fresh token retrieval
  * Use this with components that have access to Privy's usePrivy() hook

@@ -1229,6 +1229,9 @@ export class Physics extends SystemBase implements IPhysics {
     if (!this.initialized || !this.scene) {
       return null;
     }
+    // An empty application group mask means no hits. PhysX instead treats an
+    // all-zero query filter as unfiltered, so do not submit that special case.
+    if (layerMask === 0) return null;
     // Validate inputs and normalize direction to satisfy PhysX requirement (unit vector)
     if (
       !Number.isFinite(origin.x) ||
@@ -1263,15 +1266,16 @@ export class Physics extends SystemBase implements IPhysics {
     const dirNormalized = _raycastDirNormalized;
 
     if (this.queryFilterData) {
-      // Set both word0 (query group) and word1 (query mask) to the desired layer mask
-      // This satisfies standard PhysX query checks:
-      // (query.word0 & shape.word1) && (shape.word0 & query.word1)
-      const filterData = this.queryFilterData as {
-        data: { word0: number; word1: number };
-      };
-      if (filterData.data) {
-        filterData.data.word0 = layerMask;
-        filterData.data.word1 = layerMask;
+      // Scene queries OR the same-word intersections, unlike simulation's
+      // crossed group/mask rule. Match only shape.word0 (its group), otherwise
+      // an excluded shape's broad word1 can hide a later environment hit.
+      // This object is shared with sweeps/overlaps: reset every extra word.
+      const data = this.queryFilterData.data;
+      if (data) {
+        data.word0 = layerMask;
+        data.word1 = 0;
+        data.word2 = 0;
+        data.word3 = 0;
       }
     }
 

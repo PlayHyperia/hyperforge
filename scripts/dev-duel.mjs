@@ -15,6 +15,10 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  assertMinimumConnectedDuelBots,
+  resolveDevDuelAgentMode,
+} from "./dev-duel-policy.mjs";
 
 function readEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
@@ -123,6 +127,13 @@ for (const [k, v] of Object.entries(serverEnv)) {
   }
 }
 
+if (
+  resolveDevDuelAgentMode(process.env) === "deterministic" &&
+  process.env.LOAD_TEST_MODE === undefined
+) {
+  process.env.LOAD_TEST_MODE = "true";
+}
+
 // Node environments used by the duel harness do not expose WebGPU globals.
 // Provide minimal constants so Three's WebGPU bundle can initialize.
 if (!globalThis.GPUShaderStage) {
@@ -166,9 +177,9 @@ const configuredLogLevel = (
   .toLowerCase();
 const normalizedLogLevel =
   configuredLogLevel === "debug" ||
-    configuredLogLevel === "info" ||
-    configuredLogLevel === "warn" ||
-    configuredLogLevel === "error"
+  configuredLogLevel === "info" ||
+  configuredLogLevel === "warn" ||
+  configuredLogLevel === "error"
     ? configuredLogLevel
     : "warn";
 const infoLogsEnabled =
@@ -236,7 +247,9 @@ function resolveHealthUrl(apiUrl, rawWsUrl) {
       parsed.search = "";
       parsed.hash = "";
       return parsed.toString();
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
   // Derive from PORT env var (Fastify HTTP port, default 5555)
@@ -275,7 +288,7 @@ async function waitForServer() {
         }
         return true;
       }
-    } catch { }
+    } catch {}
     if (infoLogsEnabled) {
       process.stdout.write(".");
     }
@@ -318,7 +331,23 @@ async function startDev() {
   return dev;
 }
 
-async function loadMatchmaker() {
+async function loadMatchmaker(preferredMode) {
+  // Headless duel clients instantiate shared player/render classes even though
+  // they never draw a frame. Install the repository's minimal DOM/canvas and
+  // WebSocket shims before importing either matchmaker.
+  process.env.LOG_LEVEL ||= normalizedLogLevel;
+  await import("../packages/server/src/shared/polyfills.ts");
+
+  if (preferredMode === "deterministic") {
+    const mod = await import("../packages/shared/src/testing/index.ts");
+    if (!mod?.DuelMatchmaker) {
+      throw new Error(
+        "Deterministic local DuelMatchmaker is unavailable in the shared package",
+      );
+    }
+    return { Matchmaker: mod.DuelMatchmaker, mode: "deterministic" };
+  }
+
   // Import ElizaDuelMatchmaker from the server package.
   // This uses real ElizaOS agents with different AI models instead of
   // hardcoded DuelBot scripts.
@@ -331,7 +360,7 @@ async function loadMatchmaker() {
     try {
       const mod = await import(entry);
       if (mod?.ElizaDuelMatchmaker) {
-        return mod;
+        return { Matchmaker: mod.ElizaDuelMatchmaker, mode: "model" };
       }
     } catch (err) {
       console.warn(`[dev-duel] Failed to import ${entry}:`, err.message);
@@ -341,27 +370,35 @@ async function loadMatchmaker() {
   // Fallback: try the compiled server build
   try {
     const mod = await import("@hyperforge/server/eliza");
-    if (mod?.ElizaDuelMatchmaker) return mod;
+    if (mod?.ElizaDuelMatchmaker) {
+      return { Matchmaker: mod.ElizaDuelMatchmaker, mode: "model" };
+    }
   } catch (err) {
-    console.warn(`[dev-duel] Failed to import @hyperforge/server/eliza:`, err.message);
+    console.warn(
+      `[dev-duel] Failed to import @hyperforge/server/eliza:`,
+      err.message,
+    );
   }
 
   // Final fallback: try loading the old DuelMatchmaker from shared
   try {
     const mod = await import("../packages/shared/src/testing/index.ts");
     if (mod?.DuelMatchmaker) {
-      warn("[dev-duel] Falling back to old DuelMatchmaker (no LLM)");
-      return { ElizaDuelMatchmaker: mod.DuelMatchmaker };
+      warn(
+        "[dev-duel] ElizaOS matchmaker unavailable; using deterministic local test agents",
+      );
+      return { Matchmaker: mod.DuelMatchmaker, mode: "deterministic" };
     }
   } catch (err) {
-    console.warn(`[dev-duel] Failed to import old DuelMatchmaker:`, err.message);
+    console.warn(
+      `[dev-duel] Failed to import old DuelMatchmaker:`,
+      err.message,
+    );
   }
 
-  console.error("Cannot load ElizaDuelMatchmaker.");
-  console.error(
-    "Tried ../packages/server/src/eliza/ElizaDuelMatchmaker.ts",
+  throw new Error(
+    "Cannot load either the ElizaOS or deterministic local duel matchmaker",
   );
-  process.exit(1);
 }
 
 function formatTime(ms) {
@@ -382,9 +419,9 @@ async function runMatchmaker() {
     process.env.HYPERIA_SERVER_URL = opts.url;
   }
 
-  const { ElizaDuelMatchmaker } = await loadMatchmaker();
-
   const botCount = Math.max(2, parseInt(opts.bots, 10));
+  const preferredMode = resolveDevDuelAgentMode(process.env);
+  const { Matchmaker, mode } = await loadMatchmaker(preferredMode);
   const matchIntervalMs = parseInt(opts["match-interval"], 10);
   const rampUpDelayMs = parseInt(opts["ramp-delay"], 10);
   const connectOnly = opts["connect-only"] === true;
@@ -394,13 +431,21 @@ async function runMatchmaker() {
 
   info(`
 ====================================================
-        ELIZA AI DUEL MATCHMAKER
+        ${mode === "model" ? "ELIZA AI" : "DETERMINISTIC LOCAL"} DUEL MATCHMAKER
 ====================================================
-  Bots: ${botCount} (capped to available API keys)
+  Bots: ${botCount}${mode === "model" ? " (capped to available model configurations)" : " (model-free local test agents)"}
   Match Interval: ${connectOnly ? "server-owned" : `${matchIntervalMs}ms`}
   Server: ${opts.url}
   Duration: ${duration ? formatTime(duration) : "Continuous"}
-  Mode: ${connectOnly ? "ElizaOS LLM agents (connect-only; server schedules duels)" : "ElizaOS LLM agents (each bot = different AI model)"}
+  Mode: ${
+    mode === "model"
+      ? connectOnly
+        ? "ElizaOS agents (connect-only; server schedules duels)"
+        : "ElizaOS agents"
+      : connectOnly
+        ? "deterministic local agents (connect-only; server schedules duels)"
+        : "deterministic local agents"
+  }
 ====================================================
 
   Spectator Mode (for streaming):
@@ -414,7 +459,7 @@ async function runMatchmaker() {
 ====================================================
 `);
 
-  const matchmaker = new ElizaDuelMatchmaker({
+  const matchmaker = new Matchmaker({
     wsUrl: opts.url,
     botCount,
     rampUpDelayMs,
@@ -426,7 +471,9 @@ async function runMatchmaker() {
   // Event handlers
   matchmaker.on("ready", (data) => {
     if (!infoLogsEnabled) return;
-    console.log(`\n[Matchmaker] Ready! ${data.connectedBots}/${data.totalBots} bots connected`);
+    console.log(
+      `\n[Matchmaker] Ready! ${data.connectedBots}/${data.totalBots} bots connected`,
+    );
     if (connectOnly) {
       console.log("[Matchmaker] Waiting for server-side duel scheduling...\n");
     } else {
@@ -438,16 +485,26 @@ async function runMatchmaker() {
     if (!infoLogsEnabled) return;
     const p1 = data.bot1Personality ? ` [${data.bot1Personality}]` : "";
     const p2 = data.bot2Personality ? ` [${data.bot2Personality}]` : "";
-    console.log(`\n[Match] ${data.matchId}: ${data.bot1Name}${p1} vs ${data.bot2Name}${p2}`);
-    console.log(`  ${data.bot1Name}: ${data.bot1Stats.wins}W-${data.bot1Stats.losses}L`);
-    console.log(`  ${data.bot2Name}: ${data.bot2Stats.wins}W-${data.bot2Stats.losses}L`);
+    console.log(
+      `\n[Match] ${data.matchId}: ${data.bot1Name}${p1} vs ${data.bot2Name}${p2}`,
+    );
+    console.log(
+      `  ${data.bot1Name}: ${data.bot1Stats.wins}W-${data.bot1Stats.losses}L`,
+    );
+    console.log(
+      `  ${data.bot2Name}: ${data.bot2Stats.wins}W-${data.bot2Stats.losses}L`,
+    );
 
     if (opts["show-spectator-urls"]) {
       const clientUrl = opts["client-url"];
       const wsUrl = encodeURIComponent(opts.url);
       console.log(`\n  [Spectator URLs]`);
-      console.log(`  Watch ${data.bot1Name}: ${clientUrl}/?embedded=true&mode=spectator&followEntity=${data.bot1Id}&wsUrl=${wsUrl}`);
-      console.log(`  Watch ${data.bot2Name}: ${clientUrl}/?embedded=true&mode=spectator&followEntity=${data.bot2Id}&wsUrl=${wsUrl}`);
+      console.log(
+        `  Watch ${data.bot1Name}: ${clientUrl}/?embedded=true&mode=spectator&followEntity=${data.bot1Id}&wsUrl=${wsUrl}`,
+      );
+      console.log(
+        `  Watch ${data.bot2Name}: ${clientUrl}/?embedded=true&mode=spectator&followEntity=${data.bot2Id}&wsUrl=${wsUrl}`,
+      );
     }
   });
 
@@ -455,7 +512,9 @@ async function runMatchmaker() {
     if (!infoLogsEnabled) return;
     const wp = result.winnerPersonality ? ` [${result.winnerPersonality}]` : "";
     const lp = result.loserPersonality ? ` [${result.loserPersonality}]` : "";
-    console.log(`\n[Result] ${result.winnerName}${wp} defeated ${result.loserName}${lp}!`);
+    console.log(
+      `\n[Result] ${result.winnerName}${wp} defeated ${result.loserName}${lp}!`,
+    );
     console.log(`  Duration: ${Math.round(result.durationMs / 1000)}s`);
 
     // Show leaderboard
@@ -465,7 +524,7 @@ async function runMatchmaker() {
       const medal = i === 0 ? "🏆" : i === 1 ? "🥈" : i === 2 ? "🥉" : "  ";
       const personality = entry.personality ? ` [${entry.personality}]` : "";
       console.log(
-        `  ${medal} ${entry.name}${personality}: ${entry.wins}W-${entry.losses}L (${entry.winRate.toFixed(0)}%)`
+        `  ${medal} ${entry.name}${personality}: ${entry.wins}W-${entry.losses}L (${entry.winRate.toFixed(0)}%)`,
       );
     });
   });
@@ -476,6 +535,12 @@ async function runMatchmaker() {
 
   // Start matchmaker
   await matchmaker.start();
+  try {
+    assertMinimumConnectedDuelBots(matchmaker.getStats(), 2);
+  } catch (error) {
+    await matchmaker.stop();
+    throw error;
+  }
 
   // Handle shutdown
   let stopping = false;
@@ -502,7 +567,7 @@ async function runMatchmaker() {
         const medal = i === 0 ? "🏆" : i === 1 ? "🥈" : i === 2 ? "🥉" : "  ";
         const personality = entry.personality ? ` [${entry.personality}]` : "";
         console.log(
-          `  ${medal} ${entry.name}${personality}: ${entry.wins}W-${entry.losses}L (${entry.winRate.toFixed(0)}%)`
+          `  ${medal} ${entry.name}${personality}: ${entry.wins}W-${entry.losses}L (${entry.winRate.toFixed(0)}%)`,
         );
       });
     }
@@ -523,14 +588,14 @@ async function runMatchmaker() {
 
   // Run indefinitely
   info("[Matchmaker] Running continuously. Press Ctrl+C to stop.\n");
-  await new Promise(() => { }); // Never resolves
+  await new Promise(() => {}); // Never resolves
 }
 
 async function main() {
   let devProcess = null;
 
   const cleanup = (codeOrSignal) => {
-    const exitCode = typeof codeOrSignal === 'number' ? codeOrSignal : 0;
+    const exitCode = typeof codeOrSignal === "number" ? codeOrSignal : 0;
     if (devProcess) {
       info("\nStopping dev server...");
       try {
@@ -574,7 +639,9 @@ async function main() {
     info("Checking if server is running...");
     const ready = await waitForServer();
     if (!ready) {
-      console.error("Server not running. Start with 'bun run dev' or remove --skip-dev");
+      console.error(
+        "Server not running. Start with 'bun run dev' or remove --skip-dev",
+      );
       process.exit(1);
     }
   }

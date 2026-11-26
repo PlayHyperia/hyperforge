@@ -25,9 +25,6 @@ export const DEFAULT_SMALL_MODELS: Record<string, string> = {
   openai: "gpt-5-nano",
   anthropic: "claude-haiku-4-5-20251001",
   groq: "qwen/qwen3-32b",
-  xai: "grok-2-mini",
-  openrouter: "meta-llama/llama-3.1-8b-instruct",
-  elizacloud: "openai/gpt-4o-mini",
 };
 
 /** Provider-specific setting keys for model routing */
@@ -49,21 +46,6 @@ export const MODEL_SETTING_KEYS: Record<
     small: "GROQ_SMALL_MODEL",
     large: "GROQ_LARGE_MODEL",
     apiKey: "GROQ_API_KEY",
-  },
-  xai: {
-    small: "XAI_SMALL_MODEL",
-    large: "XAI_LARGE_MODEL",
-    apiKey: "XAI_API_KEY",
-  },
-  openrouter: {
-    small: "OPENROUTER_SMALL_MODEL",
-    large: "OPENROUTER_LARGE_MODEL",
-    apiKey: "OPENROUTER_API_KEY",
-  },
-  elizacloud: {
-    small: "ELIZAOS_CLOUD_SMALL_MODEL",
-    large: "ELIZAOS_CLOUD_LARGE_MODEL",
-    apiKey: "ELIZAOS_CLOUD_API_KEY",
   },
 };
 

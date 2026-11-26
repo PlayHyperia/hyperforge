@@ -1,0 +1,1613 @@
+import { afterEach, describe, expect, it } from "vitest";
+import THREE from "../../../../extras/three/three";
+import { World } from "../../../../core/World";
+import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
+import { EntityType, ResourceType } from "../../../../types/entities";
+import { createRootedFlowerGeometry } from "../../../../../../procgen/src/flowers/RootedFlowerGeometry";
+import type {
+  GrassTerrainExclusionPolygon,
+  GrassTerrainSurfaceSnapshot,
+  GrassTerrainSurfaceZone,
+} from "../../../../utils/workers/GrassTerrainSurfaceSnapshot";
+import { createStorageInstancedMesh } from "../../../../utils/rendering/createStorageInstancedMesh";
+import { captureFlowerResourceClearance } from "../FlowerResourceClearance";
+import { getRootedFlowerWindBounds } from "../RootedFlowerMaterial";
+import type { GrassGroundingInputLease } from "../GrassGroundingPipeline";
+import type { GrassGroundingRoadSegment } from "../GrassBladeGrounding";
+import {
+  RetainedTerrainSurface,
+  type TerrainGridBounds,
+  type TerrainGridSample,
+} from "../TerrainGridSurface";
+import type { RetainedTerrainRegion } from "../TerrainVisualManager";
+import {
+  ROOTED_FLOWER_PLACEMENT_LIMITS,
+  createRootedFlowerPlacementSteps,
+  getRootedFlowerCandidatePosition,
+  getRootedFlowerPlacementBounds,
+  type RootedFlowerPlacementRequest,
+  type RootedFlowerPlacementResult,
+} from "../RootedFlowerPlacement";
+import { gridGeometry } from "./terrain-grid.fixture";
+
+// Real retained terrain admission, actual flower geometry and live resource
+// snapshots; no renderer, worker, owner-method replacement or GPU execution.
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+  for (const dispose of cleanups.splice(0)) dispose();
+});
+const empty = (): GrassTerrainSurfaceSnapshot => ({
+  schemaVersion: 1,
+  zones: [],
+  arenaFloorIds: [],
+  arenaGradeHeight: null,
+  waterBodies: [],
+});
+
+function fixture(
+  height: (x: number, z: number) => number = (x, z) => 10 + x * 0.01 + z * 0.02,
+  offset = 0,
+) {
+  const world = new World();
+  const geometry = createRootedFlowerGeometry();
+  const terrain = gridGeometry(128, 5, height);
+  const surface = new RetainedTerrainSurface(
+    1,
+    "flower-placement-test",
+    offset,
+    offset,
+    128,
+    5,
+    terrain,
+  );
+  const state = { region: true, inputs: true, inputStarts: 0, inputCloses: 0 };
+  const region: RetainedTerrainRegion = {
+    bounds: {
+      minX: offset - 100,
+      maxX: offset + 100,
+      minZ: offset - 100,
+      maxZ: offset + 100,
+    },
+    surfaces: [surface],
+    isCurrent: () => state.region && surface.matchesGeometry(terrain),
+  };
+  const input = (
+    snapshot = empty(),
+    roadSegments: GrassGroundingRoadSegment[] = [],
+  ): GrassGroundingInputLease => ({
+    isCurrent: () => state.inputs,
+    steps: (function* () {
+      state.inputStarts++;
+      try {
+        yield "actual-input-step-0";
+        yield "actual-input-step-1";
+        return { terrainSurface: snapshot, roadSegments };
+      } finally {
+        state.inputCloses++;
+      }
+    })(),
+  });
+  const resources = captureFlowerResourceClearance(world);
+  const request = (
+    overrides: Partial<RootedFlowerPlacementRequest> = {},
+  ): RootedFlowerPlacementRequest => ({
+    origin: { x: offset + 4, z: offset + 4 },
+    seed: 1728,
+    geometry,
+    region,
+    inputs: input(),
+    resources,
+    grassPlacement: () => 1,
+    oceanLevel: 0,
+    ...overrides,
+  });
+  cleanups.push(() => {
+    geometry.dispose();
+    terrain.dispose();
+    world.destroy();
+  });
+  return { world, geometry, terrain, surface, region, state, input, request };
+}
+
+function drain(request: RootedFlowerPlacementRequest) {
+  const steps = createRootedFlowerPlacementSteps(request);
+  const phases: string[] = [];
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return { result: next.value, phases };
+    phases.push(next.value);
+    if (phases.length > ROOTED_FLOWER_PLACEMENT_LIMITS.maxSteps)
+      throw new Error("Test step bound exceeded");
+  }
+}
+
+function rows(result: RootedFlowerPlacementResult) {
+  return Array.from({ length: result.count }, (_, index) =>
+    Array.from(result.matrices.slice(index * 16, index * 16 + 16)),
+  );
+}
+
+function exclusionZone(
+  id: string,
+  box: TerrainGridBounds,
+): GrassTerrainSurfaceZone {
+  return {
+    id,
+    centerX: (box.minX + box.maxX) / 2,
+    centerZ: (box.minZ + box.maxZ) / 2,
+    width: box.maxX - box.minX + 2,
+    depth: box.maxZ - box.minZ + 2,
+    height: 10,
+    blendRadius: 0,
+    grassExclusionBounds: { ...box },
+  };
+}
+
+function exclusionPolygon(
+  id: string,
+  box: TerrainGridBounds,
+): GrassTerrainExclusionPolygon {
+  return {
+    id,
+    ...box,
+    vertices: [
+      { x: box.minX, z: box.minZ },
+      { x: box.maxX, z: box.minZ },
+      { x: box.maxX, z: box.maxZ },
+      { x: box.minX, z: box.maxZ },
+    ],
+  };
+}
+
+// Frozen original hash arithmetic, independent of the production helper.
+// Distribution changes retain acceptance/yaw/scale keys, not historical roots.
+function originalFlowerHash(seed: number, x: number, z: number, lane: number) {
+  let value =
+    (seed ^
+      Math.imul(x, 0x9e3779b1) ^
+      Math.imul(z, 0x85ebca77) ^
+      Math.imul(lane, 0xc2b2ae3d)) >>>
+    0;
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
+  return ((value ^ (value >>> 16)) >>> 0) / 0x100000000;
+}
+
+// Design oracle: one point in each [1,3]/[5,7] quadrant interval. Do not use
+// the production position helper to construct expected placement matrices.
+function meadowPosition(seed: number, cx: number, cz: number, ordinal: number) {
+  return {
+    x: Math.fround(
+      cx * 8 +
+        [1, 5, 1, 5][ordinal] +
+        2 * originalFlowerHash(seed, cx, cz, ordinal * 8),
+    ),
+    z: Math.fround(
+      cz * 8 +
+        [1, 1, 5, 5][ordinal] +
+        2 * originalFlowerHash(seed, cx, cz, ordinal * 8 + 1),
+    ),
+  };
+}
+
+function addTree(world: World, x: number, z: number) {
+  const entity = new ResourceEntity(world, {
+    id: "flower-test-tree",
+    name: "Flower test tree",
+    type: EntityType.RESOURCE,
+    position: { x, y: 10, z },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+    scale: { x: 1, y: 1, z: 1 },
+    visible: true,
+    interactable: true,
+    interactionType: null,
+    interactionDistance: 3,
+    description: "Actual flower placement resource fixture",
+    model: null,
+    resourceType: ResourceType.TREE,
+    resourceId: "tree_general",
+    harvestSkill: "woodcutting",
+    requiredLevel: 1,
+    harvestTime: 3000,
+    respawnTime: 60000,
+    harvestYield: [],
+    depleted: false,
+    lastHarvestTime: 0,
+    footprint: "standard",
+    properties: {
+      movementComponent: null,
+      combatComponent: null,
+      healthComponent: null,
+      visualComponent: null,
+      health: { current: 0, max: 0 },
+      level: 1,
+      resourceType: ResourceType.TREE,
+      harvestable: true,
+      respawnTime: 60000,
+      toolRequired: "none",
+      skillRequired: "none",
+      xpReward: 0,
+    },
+  });
+  world.entities.set(entity.id, entity);
+  cleanups.unshift(() => entity.destroy());
+  return entity;
+}
+
+describe("bounded rooted flower placement", () => {
+  it.each([0.12, 0.2, 0.38, 0.55, 0.75, 0.8])(
+    "retains complete root transforms and clearance decisions for the two-head sprig at height %s",
+    (height) => {
+      const f = fixture();
+      const original = createRootedFlowerGeometry({ height });
+      const sprig = createRootedFlowerGeometry({
+        height,
+        variant: "meadow-sprig-v1",
+      });
+      cleanups.push(() => {
+        original.dispose();
+        sprig.dispose();
+      });
+      const road: GrassGroundingRoadSegment = {
+        startX: -40,
+        startZ: 0,
+        endX: 40,
+        endZ: 0,
+        width: 3,
+        blendWidth: 1,
+      };
+      const run = (geometry: THREE.BufferGeometry) =>
+        drain(
+          f.request({
+            geometry,
+            inputs: f.input(empty(), [road]),
+          }),
+        ).result;
+      const baseline = run(original);
+      const candidate = run(sprig);
+      expect(baseline.count).toBeGreaterThan(0);
+      expect(baseline.diagnostics.rejected.road).toBeGreaterThan(0);
+      expect(getRootedFlowerPlacementBounds(sprig, { x: 4, z: 4 })).toEqual(
+        getRootedFlowerPlacementBounds(original, { x: 4, z: 4 }),
+      );
+      expect(candidate.count).toBe(baseline.count);
+      expect(candidate.matrices).toEqual(baseline.matrices);
+      expect(candidate.diagnostics.maximumHorizontalReach).toBe(
+        baseline.diagnostics.maximumHorizontalReach,
+      );
+      expect(candidate.diagnostics.maximumRootYRoundingError).toBe(
+        baseline.diagnostics.maximumRootYRoundingError,
+      );
+      expect(candidate.diagnostics.rejected).toEqual(
+        baseline.diagnostics.rejected,
+      );
+      expect(candidate.diagnostics.steps).toBeLessThanOrEqual(
+        baseline.diagnostics.steps,
+      );
+      expect(candidate.isCurrent()).toBe(true);
+    },
+  );
+
+  it("rejects candidate keys outside the continuation's admitted cell domain", () => {
+    for (const [seed, cx, cz, ordinal] of [
+      [NaN, 0, 0, 0],
+      [-2147483649, 0, 0, 0],
+      [0x100000000, 0, 0, 0],
+      [0, 0.5, 0, 0],
+      [0, -(2 ** 17) - 6, 0, 0],
+      [0, 0, 2 ** 17 + 5, 0],
+      [0, 0, 0, -1],
+      [0, 0, 0, 4],
+    ]) {
+      expect(() =>
+        getRootedFlowerCandidatePosition(seed, cx, cz, ordinal),
+      ).toThrow(/bounded rooted flower candidate/);
+    }
+  });
+
+  it("distributes four roots across each cell with separated factory wind envelopes, including extreme Float32 cells", () => {
+    let maximumFactoryReach = 0;
+    for (const requestedHeight of [0.12, 0.38, 0.5, 0.75, 0.8]) {
+      const geometry = createRootedFlowerGeometry({ height: requestedHeight });
+      cleanups.push(() => geometry.dispose());
+      const position = geometry.getAttribute("position");
+      const height = geometry.getAttribute("flowerHeight").getY(0);
+      let radius = 0;
+      for (let vertex = 0; vertex < position.count; vertex++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(vertex), position.getZ(vertex)),
+        );
+      const scale = Math.fround(ROOTED_FLOWER_PLACEMENT_LIMITS.maxScale);
+      const wind = getRootedFlowerWindBounds(height, scale);
+      const reach =
+        radius * scale * (1 + 2e-6) + Math.hypot(wind.x, wind.z) + 1e-5;
+      maximumFactoryReach = Math.max(maximumFactoryReach, reach);
+      expect(
+        getRootedFlowerPlacementBounds(geometry, { x: 4, z: 4 }).maxX - 48,
+      ).toBeCloseTo(reach, 12);
+    }
+    // All factory positions scale linearly with requested height. Below 0.8m,
+    // the uncapped wind envelope is monotone, so 0.8m bounds intermediate sizes.
+    // Generic admitted geometry can be wider: this is not a new placement gate.
+    // All interval endpoints are exactly representable integers, and Float32
+    // rounding is monotone. Thus rounding cannot reduce the 2m separation.
+    expect(2).toBeGreaterThan(2 * maximumFactoryReach);
+    const cells = [
+      [0, 0],
+      [-1, -1],
+      [55, 51],
+      [-(2 ** 17) - 5, -(2 ** 17) - 5],
+      [2 ** 17 + 4, 2 ** 17 + 4],
+      [-(2 ** 17) - 5, 2 ** 17 + 4],
+      [2 ** 17 + 4, -(2 ** 17) - 5],
+      [2 ** 17 - 1, 2 ** 17],
+    ] as const;
+    for (const seed of [-2147483648, -1, 0, 1, 1728, 0xffffffff])
+      for (const [cx, cz] of cells) {
+        const candidates = Array.from({ length: 4 }, (_, ordinal) =>
+          getRootedFlowerCandidatePosition(seed, cx, cz, ordinal),
+        );
+        for (const [ordinal, candidate] of candidates.entries()) {
+          expect(candidate).toEqual(meadowPosition(seed, cx, cz, ordinal));
+          const minX = cx * 8 + [1, 5, 1, 5][ordinal];
+          const minZ = cz * 8 + [1, 1, 5, 5][ordinal];
+          expect(candidate.x).toBeGreaterThanOrEqual(minX);
+          expect(candidate.x).toBeLessThanOrEqual(minX + 2);
+          expect(candidate.z).toBeGreaterThanOrEqual(minZ);
+          expect(candidate.z).toBeLessThanOrEqual(minZ + 2);
+          for (const other of candidates.slice(ordinal + 1)) {
+            const distance = Math.hypot(
+              candidate.x - other.x,
+              candidate.z - other.z,
+            );
+            expect(distance).toBeGreaterThanOrEqual(2);
+            expect(distance).toBeLessThanOrEqual(6 * Math.SQRT2);
+            expect(distance).toBeGreaterThan(2 * maximumFactoryReach);
+          }
+          for (const [dx, dz] of [
+            [1, 0],
+            [0, 1],
+            [1, 1],
+            [-1, 0],
+            [0, -1],
+            [-1, -1],
+            [-1, 1],
+            [1, -1],
+          ]) {
+            if (
+              cx + dx < -(2 ** 17) - 5 ||
+              cx + dx > 2 ** 17 + 4 ||
+              cz + dz < -(2 ** 17) - 5 ||
+              cz + dz > 2 ** 17 + 4
+            )
+              continue;
+            for (let neighbor = 0; neighbor < 4; neighbor++) {
+              const other = getRootedFlowerCandidatePosition(
+                seed,
+                cx + dx,
+                cz + dz,
+                neighbor,
+              );
+              const separation = Math.hypot(
+                candidate.x - other.x,
+                candidate.z - other.z,
+              );
+              expect(separation).toBeGreaterThanOrEqual(
+                dx && dz ? 2 * Math.SQRT2 : 2,
+              );
+              expect(separation).toBeGreaterThan(2 * maximumFactoryReach);
+            }
+          }
+        }
+      }
+  });
+
+  it.each([0, 0.63, 1])(
+    "matches independent meadow placement, hash lanes and rejection accounting with habitat %s",
+    (habitat) => {
+      const f = fixture(() => 10);
+      const seed = 1728;
+      const actual = drain(f.request({ seed, grassPlacement: () => habitat }));
+      const expected: number[] = [];
+      let previousAdmissionCount = 0;
+      let horizonRejected = 0;
+      let habitatRejected = 0;
+      let groupedCells = 0;
+      let newlyPopulatedGroups = 0;
+      for (let cx = -5; cx <= 5; cx++)
+        for (let cz = -5; cz <= 5; cz++) {
+          const patch = originalFlowerHash(
+            seed,
+            Math.floor(cx / 3),
+            Math.floor(cz / 3),
+            100,
+          );
+          let acceptedInCell = 0;
+          for (let ordinal = 0; ordinal < 4; ordinal++) {
+            const { x, z } = meadowPosition(seed, cx, cz, ordinal);
+            if (Math.hypot(x - 4, z - 4) > 40) {
+              horizonRejected++;
+              continue;
+            }
+            const acceptance = originalFlowerHash(
+              seed,
+              cx,
+              cz,
+              ordinal * 8 + 2,
+            );
+            const previousAdmission =
+              acceptance < habitat * (0.6 + 0.35 * (1 - patch));
+            const accepted = acceptance < habitat * (0.9 + 0.1 * (1 - patch));
+            // This isolates admission at the CURRENT candidate roots. Relocated
+            // roots encounter different exclusions; historical matrices differ.
+            if (previousAdmission) {
+              previousAdmissionCount++;
+              expect(accepted).toBe(true);
+            }
+            if (!accepted) {
+              habitatRejected++;
+              continue;
+            }
+            const yaw =
+              originalFlowerHash(seed, cx, cz, ordinal * 8 + 3) * Math.PI * 2;
+            const scale =
+              0.85 + originalFlowerHash(seed, cx, cz, ordinal * 8 + 4) * 0.3;
+            const transform = new THREE.Matrix4().compose(
+              new THREE.Vector3(x, 10, z),
+              new THREE.Quaternion().setFromAxisAngle(
+                new THREE.Vector3(0, 1, 0),
+                yaw,
+              ),
+              new THREE.Vector3(scale, scale, scale),
+            ).elements;
+            expected.push(...transform);
+            acceptedInCell++;
+          }
+          if (acceptedInCell >= 2) groupedCells++;
+          if (patch > 0.42 && acceptedInCell >= 2) newlyPopulatedGroups++;
+        }
+      if (habitat > 0) {
+        expect(groupedCells).toBeGreaterThan(20);
+        expect(newlyPopulatedGroups).toBeGreaterThan(10);
+        expect(previousAdmissionCount).toBeGreaterThan(0);
+        expect(actual.result.count).toBeGreaterThan(previousAdmissionCount);
+      } else expect(actual.result.count).toBe(0);
+      expect(actual.result.matrices).toEqual(new Float32Array(expected));
+      expect(actual.result.diagnostics.rejected.horizon).toBe(horizonRejected);
+      expect(actual.result.diagnostics.rejected.habitat).toBe(habitatRejected);
+      expect(actual.result.count + horizonRejected + habitatRejected).toBe(484);
+      expect(actual.result.diagnostics.candidates).toBe(484);
+      expect(
+        actual.phases.filter((phase) => phase === "flower_candidate"),
+      ).toHaveLength(484);
+      expect(actual.result.count).toBe(expected.length / 16);
+      expect(ROOTED_FLOWER_PLACEMENT_LIMITS.candidatesPerCell).toBe(4);
+      expect(actual.result.count).toBeLessThanOrEqual(
+        ROOTED_FLOWER_PLACEMENT_LIMITS.maxCandidates,
+      );
+    },
+  );
+
+  it("is deterministic, broadly populated, detached, and forwards each fresh input step once", () => {
+    const f = fixture();
+    const before = Array.from(f.geometry.getAttribute("position").array);
+    const a = drain(f.request()),
+      b = drain(f.request());
+    expect(a.result.count).toBeGreaterThan(200);
+    expect(a.result.diagnostics.candidates).toBe(484);
+    expect(a.result.count).toBeLessThanOrEqual(484);
+    expect(a.result.matrices.length).toBe(a.result.count * 16);
+    expect(a.result.matrices).not.toBe(b.result.matrices);
+    expect(a.result.matrices).toEqual(b.result.matrices);
+    expect(a.phases).toEqual(b.phases);
+    expect(
+      a.phases.filter((phase) => phase.startsWith("actual-input")),
+    ).toEqual(["actual-input-step-0", "actual-input-step-1"]);
+    expect(f.state.inputStarts).toBe(2);
+    expect(f.state.inputCloses).toBe(2);
+    expect(a.result.isCurrent()).toBe(true);
+    expect(a.result.diagnostics.deferredTerrain).toBe(0);
+    expect(Object.isFrozen(a.result.diagnostics)).toBe(true);
+    expect(Object.isFrozen(a.result.diagnostics.rejected)).toBe(true);
+    expect(Reflect.set(a.result.diagnostics, "deferredTerrain", 99)).toBe(
+      false,
+    );
+    expect(Array.from(f.geometry.getAttribute("position").array)).toEqual(
+      before,
+    );
+  });
+
+  it.each([
+    [12, 4],
+    [4, 12],
+    [-4, -4],
+  ])(
+    "keeps retained world-cell matrices identical when the horizon moves to %s/%s",
+    (x, z) => {
+      const f = fixture();
+      const a = drain(f.request()).result;
+      const b = drain(f.request({ origin: { x, z } })).result;
+      const byPoint = new Map(
+        rows(b).map((row) => [`${row[12]},${row[14]}`, row]),
+      );
+      let retained = 0;
+      for (const row of rows(a)) {
+        if (Math.hypot(row[12] - x, row[14] - z) > 40) continue;
+        expect(byPoint.get(`${row[12]},${row[14]}`)).toEqual(row);
+        retained++;
+      }
+      expect(retained).toBeGreaterThan(0);
+      expect(drain(f.request({ seed: 1729 })).result.matrices).not.toEqual(
+        a.matrices,
+      );
+    },
+  );
+
+  it("samples the actual retained face at Float32 XZ and reports only root-center rounding", () => {
+    const f = fixture((x, z) => 10.123456 + x * 0.0321 + z * 0.0143);
+    const result = drain(f.request()).result;
+    const sample: TerrainGridSample = {
+      height: 0,
+      nx: 0,
+      ny: 0,
+      nz: 0,
+      faceIndex: -1,
+    };
+    let error = 0;
+    for (const row of rows(result)) {
+      expect(f.surface.sample(row[12], row[14], sample)).toBe(true);
+      expect(row[13]).toBe(Math.fround(sample.height));
+      error = Math.max(error, Math.abs(row[13] - sample.height));
+      expect(row[5]).toBeGreaterThanOrEqual(0.85);
+      expect(row[5]).toBeLessThanOrEqual(1.15);
+      expect([row[1], row[3], row[4], row[6], row[7], row[9], row[11]]).toEqual(
+        [0, 0, 0, 0, 0, 0, 0],
+      );
+      expect(row[15]).toBe(1);
+      expect(Math.hypot(row[0], row[2])).toBeCloseTo(row[5], 6);
+    }
+    expect(result.diagnostics.maximumRootYRoundingError).toBe(error);
+    expect(error).toBeGreaterThan(0);
+  });
+
+  it("uses the same complete capture bounds and preserves registered storage", () => {
+    const f = fixture();
+    const material = new THREE.MeshStandardNodeMaterial();
+    const mesh = createStorageInstancedMesh(f.geometry, material, 512);
+    cleanups.push(() => {
+      mesh.dispose();
+      material.dispose();
+    });
+    const storage = mesh.instanceMatrix;
+    const before = Array.from(storage.array);
+    const bounds = getRootedFlowerPlacementBounds(f.geometry, { x: 4, z: 4 });
+    expect(bounds.maxX - 4).toBeGreaterThan(44);
+    expect(bounds.maxX - 4).toBeLessThan(45);
+    const region = { ...f.region, bounds };
+    expect(drain(f.request({ region })).result.count).toBeGreaterThan(0);
+    expect(mesh.instanceMatrix).toBe(storage);
+    expect(Array.from(storage.array)).toEqual(before);
+    expect(() =>
+      drain(
+        f.request({
+          region: {
+            ...region,
+            bounds: { ...bounds, maxX: bounds.maxX - 0.001 },
+          },
+        }),
+      ),
+    ).toThrow(/swept horizon/);
+  });
+
+  it("rejects steep faces, ocean, and zero grass eligibility without a height fallback", () => {
+    const steep = fixture((x) => 100 + x * 0.8);
+    const slope = drain(steep.request()).result;
+    expect(slope.count).toBe(0);
+    expect(slope.diagnostics.rejected.slope).toBeGreaterThan(0);
+    const flat = fixture();
+    const water = drain(flat.request({ oceanLevel: 20 })).result;
+    expect(water.count).toBe(0);
+    expect(water.diagnostics.rejected.water).toBeGreaterThan(0);
+    const habitat = drain(flat.request({ grassPlacement: () => 0 })).result;
+    expect(habitat.count).toBe(0);
+    expect(habitat.diagnostics.deferredTerrain).toBe(0);
+    expect(habitat.diagnostics.rejected.habitat).toBeGreaterThan(0);
+  });
+
+  it("defers holes and overlapping owners, but proves known exclusions first", () => {
+    const f = fixture();
+    const missing: RetainedTerrainRegion = { ...f.region, surfaces: [] };
+    const holes = drain(f.request({ region: missing })).result;
+    expect(holes.count).toBe(0);
+    expect(holes.diagnostics.deferredTerrain).toBeGreaterThan(0);
+    const otherGeometry = gridGeometry(128, 5, () => 10);
+    cleanups.push(() => otherGeometry.dispose());
+    const other = new RetainedTerrainSurface(
+      2,
+      "flower-placement-test",
+      0,
+      0,
+      128,
+      5,
+      otherGeometry,
+    );
+    const overlap = drain(
+      f.request({ region: { ...f.region, surfaces: [f.surface, other] } }),
+    ).result;
+    expect(overlap.count).toBe(0);
+    expect(overlap.diagnostics.rejected.overlap).toBeGreaterThan(0);
+    expect(overlap.diagnostics.deferredTerrain).toBe(
+      overlap.diagnostics.rejected.overlap,
+    );
+    const road = {
+      startX: 4,
+      startZ: 4,
+      endX: 4,
+      endZ: 4,
+      width: 200,
+      blendWidth: 1,
+    };
+    const excluded = drain(
+      f.request({ region: missing, inputs: f.input(empty(), [road]) }),
+    ).result;
+    expect(excluded.count).toBe(0);
+    expect(excluded.diagnostics.rejected.road).toBeGreaterThan(0);
+    expect(excluded.diagnostics.deferredTerrain).toBe(0);
+  });
+
+  it("validates every distant road once without repeating it for each flower", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request());
+    const distant = Array.from({ length: 800 }, (_, index) => {
+      const offset = 1000 + index;
+      const x = index % 2 === 0 ? offset : -offset;
+      const z = index % 4 < 2 ? offset : -offset;
+      return { startX: x, startZ: z, endX: x + 1, endZ: z + 1, width: 2 };
+    });
+    const before = distant.map((road) => ({ ...road }));
+    const actual = drain(f.request({ inputs: f.input(empty(), distant) }));
+    expect(actual.result.matrices).toEqual(baseline.result.matrices);
+    expect(actual.result.diagnostics.rejected).toEqual(
+      baseline.result.diagnostics.rejected,
+    );
+    expect(actual.result.diagnostics.inputSteps).toBe(
+      baseline.result.diagnostics.inputSteps,
+    );
+    expect(actual.result.diagnostics.steps).toBe(
+      baseline.result.diagnostics.steps + distant.length,
+    );
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(distant.length);
+    expect(actual.phases.filter((phase) => phase === "flower_road")).toEqual(
+      [],
+    );
+    expect(distant).toEqual(before);
+    expect(actual.result.isCurrent()).toBe(true);
+  });
+
+  it.each([0.5, 0.75])(
+    "matches an independent all-road distance oracle at flower height %s without reordering retained roads",
+    (height) => {
+      const f = fixture(() => 10);
+      const geometry = createRootedFlowerGeometry({ height });
+      cleanups.push(() => geometry.dispose());
+      const baseline = drain(f.request({ geometry })).result;
+      const candidates = rows(baseline);
+      expect(candidates.length).toBeGreaterThan(100);
+      const first = candidates[0];
+      const near: GrassGroundingRoadSegment[] = [
+        {
+          startX: -100,
+          startZ: -100,
+          endX: 100,
+          endZ: 100,
+          width: 0.2,
+          blendWidth: 0.2,
+        },
+        { startX: 100, startZ: 8, endX: -100, endZ: 8, width: 0.5 },
+        // A zero-length capsule at an actual accepted root.
+        {
+          startX: first[12],
+          startZ: first[14],
+          endX: first[12],
+          endZ: first[14],
+          width: 0,
+          blendWidth: 0,
+        },
+        // Neither centerline enters the horizon; width/blend still affect it.
+        {
+          startX: 100,
+          startZ: -100,
+          endX: 100,
+          endZ: 100,
+          width: 130,
+          blendWidth: 0,
+        },
+        {
+          startX: -100,
+          startZ: 4,
+          endX: -100,
+          endZ: 4,
+          width: 0,
+          blendWidth: 70,
+          maxInfluence: 0,
+        },
+      ];
+      const far: GrassGroundingRoadSegment = {
+        startX: 1000,
+        startZ: 1000,
+        endX: 2000,
+        endZ: 2000,
+        width: 20,
+      };
+      const position = geometry.getAttribute("position");
+      let radius = 0;
+      for (let i = 0; i < position.count; i++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(i), position.getZ(i)),
+        );
+      // No production AABB/distance helper is used by this oracle. Start from
+      // the real no-road population and evaluate every original road capsule.
+      const blocked = (row: number[], road: GrassGroundingRoadSegment) => {
+        const dx = road.endX - road.startX;
+        const dz = road.endZ - road.startZ;
+        const lengthSquared = dx * dx + dz * dz;
+        const t =
+          lengthSquared === 0
+            ? 0
+            : Math.max(
+                0,
+                Math.min(
+                  1,
+                  ((row[12] - road.startX) * dx +
+                    (row[14] - road.startZ) * dz) /
+                    lengthSquared,
+                ),
+              );
+        const wind = getRootedFlowerWindBounds(
+          geometry.getAttribute("flowerHeight").getY(0),
+          row[5],
+        );
+        const horizontalScale = Math.max(
+          Math.hypot(row[0], row[2]),
+          Math.hypot(row[8], row[10]),
+        );
+        const reach =
+          radius * horizontalScale * (1 + 2e-6) +
+          Math.hypot(wind.x, wind.z) +
+          1e-5;
+        return (
+          Math.hypot(
+            row[12] - road.startX - t * dx,
+            row[14] - road.startZ - t * dz,
+          ) <=
+          road.width / 2 + (road.blendWidth ?? 0.5) + reach
+        );
+      };
+      const expected = candidates.filter(
+        (row) => ![far, ...near].some((road) => blocked(row, road)),
+      );
+      expect(expected.length).toBeGreaterThan(0);
+      expect(expected.length).toBeLessThan(candidates.length);
+      expect(expected).not.toContainEqual(first);
+      for (const ordered of [near, [...near].reverse()]) {
+        const supplied = [far, ...ordered, far];
+        const actual = drain(
+          f.request({ geometry, inputs: f.input(empty(), supplied) }),
+        );
+        // Enumerate actual cell-box intersections, independently of the
+        // production ceil/floor indexing, including closed edge contact.
+        const relevant = ordered.map((road) => {
+          const padding = road.width / 2 + (road.blendWidth ?? 0.5) + 1;
+          const touches = (cx: number, cz: number) =>
+            cx * 8 <= Math.max(road.startX, road.endX) + padding &&
+            (cx + 1) * 8 >= Math.min(road.startX, road.endX) - padding &&
+            cz * 8 <= Math.max(road.startZ, road.endZ) + padding &&
+            (cz + 1) * 8 >= Math.min(road.startZ, road.endZ) - padding;
+          let cells = 0;
+          for (let cx = -5; cx <= 5; cx++)
+            for (let cz = -5; cz <= 5; cz++) if (touches(cx, cz)) cells++;
+          return (row: number[]) =>
+            cells > 16 ||
+            touches(Math.floor(row[12] / 8), Math.floor(row[14] / 8));
+        });
+        let expectedRoadSteps = 0;
+        for (const row of candidates)
+          for (let index = 0; index < ordered.length; index++) {
+            if (!relevant[index](row)) continue;
+            expectedRoadSteps++;
+            if (blocked(row, ordered[index])) break;
+          }
+        expect(rows(actual.result)).toEqual(expected);
+        expect(actual.result.diagnostics.rejected.road).toBe(
+          candidates.length - expected.length,
+        );
+        expect(
+          actual.phases.filter((phase) => phase === "flower_road_admission"),
+        ).toHaveLength(supplied.length);
+        expect(
+          actual.phases.filter((phase) => phase === "flower_road").length,
+        ).toBe(expectedRoadSteps);
+      }
+    },
+  );
+
+  it("keeps closed AABB contact on every side and culls only strictly distant roads", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request()).result;
+    const needed = getRootedFlowerPlacementBounds(f.geometry, { x: 4, z: 4 });
+    const contact: GrassGroundingRoadSegment[] = [
+      {
+        startX: needed.minX,
+        startZ: 4,
+        endX: needed.minX,
+        endZ: 4,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: needed.maxX,
+        startZ: 4,
+        endX: needed.maxX,
+        endZ: 4,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: 4,
+        startZ: needed.minZ,
+        endX: 4,
+        endZ: needed.minZ,
+        width: 0,
+        blendWidth: 0,
+      },
+      {
+        startX: 4,
+        startZ: needed.maxZ,
+        endX: 4,
+        endZ: needed.maxZ,
+        width: 0,
+        blendWidth: 0,
+      },
+    ];
+    const outside = contact.map((road, index) => ({
+      ...road,
+      startX: road.startX + (index === 0 ? -1e-6 : index === 1 ? 1e-6 : 0),
+      endX: road.endX + (index === 0 ? -1e-6 : index === 1 ? 1e-6 : 0),
+      startZ: road.startZ + (index === 2 ? -1e-6 : index === 3 ? 1e-6 : 0),
+      endZ: road.endZ + (index === 2 ? -1e-6 : index === 3 ? 1e-6 : 0),
+    }));
+    const actual = drain(
+      f.request({ inputs: f.input(empty(), [...contact, ...outside]) }),
+    );
+    expect(actual.result.matrices).toEqual(baseline.matrices);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_index"),
+    ).toHaveLength(4);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_bucket").length,
+    ).toBeGreaterThan(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road").length,
+    ).toBeLessThanOrEqual(baseline.count * 4);
+  });
+
+  it("shortlists dense local roads without changing the all-capsule layout", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request()).result;
+    const roads = Array.from({ length: 638 }, (_, index) => {
+      const x = ((index * 37) % 880) / 10 - 40;
+      const z = ((index * 53) % 880) / 10 - 40;
+      return {
+        startX: x,
+        startZ: z,
+        endX: x + 2,
+        endZ: z + 1,
+        width: 0.1,
+        blendWidth: 0.1,
+      };
+    });
+    const position = f.geometry.getAttribute("position");
+    let radius = 0;
+    for (let vertex = 0; vertex < position.count; vertex++)
+      radius = Math.max(
+        radius,
+        Math.hypot(position.getX(vertex), position.getZ(vertex)),
+      );
+    const expected = rows(baseline).filter((row) => {
+      const wind = getRootedFlowerWindBounds(
+        f.geometry.getAttribute("flowerHeight").getY(0),
+        row[5],
+      );
+      const reach =
+        radius *
+          Math.max(Math.hypot(row[0], row[2]), Math.hypot(row[8], row[10])) *
+          (1 + 2e-6) +
+        Math.hypot(wind.x, wind.z) +
+        1e-5;
+      return !roads.some((road) => {
+        const dx = road.endX - road.startX,
+          dz = road.endZ - road.startZ;
+        const t = Math.max(
+          0,
+          Math.min(
+            1,
+            ((row[12] - road.startX) * dx + (row[14] - road.startZ) * dz) /
+              (dx * dx + dz * dz),
+          ),
+        );
+        return (
+          Math.hypot(
+            row[12] - road.startX - t * dx,
+            row[14] - road.startZ - t * dz,
+          ) <=
+          road.width / 2 + road.blendWidth + reach
+        );
+      });
+    });
+    expect(expected.length).toBeGreaterThan(0);
+    expect(expected.length).toBeLessThan(baseline.count);
+    for (const ordered of [roads, [...roads].reverse()]) {
+      const actual = drain(f.request({ inputs: f.input(empty(), ordered) }));
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.road).toBe(
+        baseline.count - expected.length,
+      );
+      expect(
+        actual.phases.filter((phase) => phase === "flower_road_admission"),
+      ).toHaveLength(638);
+      expect(
+        actual.phases.filter((phase) => phase === "flower_road").length,
+      ).toBeLessThan((baseline.count * roads.length) / 10);
+      expect(actual.result.isCurrent()).toBe(true);
+    }
+  });
+
+  it("does not multiply island-spanning roads into every candidate cell", () => {
+    const f = fixture(() => 10);
+    const roads = Array.from({ length: 4096 }, () => ({
+      startX: 0,
+      startZ: 0,
+      endX: 0,
+      endZ: 0,
+      width: 1000,
+      blendWidth: 0,
+    }));
+    const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+    expect(actual.result.count).toBe(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_index"),
+    ).toHaveLength(4096);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_bucket"),
+    ).toHaveLength(0);
+    expect(actual.result.diagnostics.steps).toBeLessThan(10000);
+  });
+
+  it.each([-(2 ** 20) + 8, -80, 0, 2 ** 20 - 8])(
+    "preserves closed cell contact and all-road results at world offset %s",
+    (offset) => {
+      const f = fixture(() => 10, offset);
+      const baseline = drain(f.request()).result;
+      const roads = [
+        [7, 4],
+        [9, 4],
+        [4, 7],
+        [4, 9],
+      ].map(([x, z]) => ({
+        startX: offset + x,
+        startZ: offset + z,
+        endX: offset + x,
+        endZ: offset + z,
+        width: 0,
+        blendWidth: 0,
+      }));
+      const contact = drain(f.request({ inputs: f.input(empty(), roads) }));
+      // Each padded point touches exactly two closed 8m cells, not just one.
+      expect(
+        contact.phases.filter((phase) => phase === "flower_road_bucket"),
+      ).toHaveLength(8);
+      const first = rows(baseline)[0];
+      roads.push({
+        startX: first[12],
+        startZ: first[14],
+        endX: first[12],
+        endZ: first[14],
+        width: 0,
+        blendWidth: 0,
+      });
+      const position = f.geometry.getAttribute("position");
+      let radius = 0;
+      for (let i = 0; i < position.count; i++)
+        radius = Math.max(
+          radius,
+          Math.hypot(position.getX(i), position.getZ(i)),
+        );
+      const expected = rows(baseline).filter((row) => {
+        const wind = getRootedFlowerWindBounds(
+          f.geometry.getAttribute("flowerHeight").getY(0),
+          row[5],
+        );
+        const reach =
+          radius *
+            Math.max(Math.hypot(row[0], row[2]), Math.hypot(row[8], row[10])) *
+            (1 + 2e-6) +
+          Math.hypot(wind.x, wind.z) +
+          1e-5;
+        return roads.every(
+          (road) =>
+            Math.hypot(row[12] - road.startX, row[14] - road.startZ) > reach,
+        );
+      });
+      expect(expected).not.toContainEqual(first);
+      const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.road).toBe(
+        baseline.count - expected.length,
+      );
+    },
+  );
+
+  it("still validates distant roads and applies the raw input cap before culling", () => {
+    const f = fixture(() => 10);
+    const far = {
+      startX: 1000,
+      startZ: 1000,
+      endX: 1001,
+      endZ: 1001,
+      width: 1,
+    };
+    const roads = Array.from({ length: 4096 }, () => ({ ...far }));
+    const actual = drain(f.request({ inputs: f.input(empty(), roads) }));
+    expect(actual.result.count).toBeGreaterThan(0);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_road_admission"),
+    ).toHaveLength(4096);
+    expect(actual.phases.filter((phase) => phase === "flower_road")).toEqual(
+      [],
+    );
+    expect(() =>
+      drain(f.request({ inputs: f.input(empty(), [...roads, far]) })),
+    ).toThrow(/constraint inputs/);
+    for (const invalid of [
+      { ...far, startX: NaN },
+      { ...far, endZ: Infinity },
+      { ...far, width: -1 },
+      { ...far, blendWidth: -1 },
+      { ...far, startX: 2 ** 21 + 1 },
+    ])
+      expect(() =>
+        drain(f.request({ inputs: f.input(empty(), [far, invalid]) })),
+      ).toThrow(/road capsule/);
+    expect(() =>
+      drain(
+        f.request({
+          inputs: f.input(empty(), [
+            ...roads.slice(0, -1),
+            { ...far, width: -1 },
+          ]),
+        }),
+      ),
+    ).toThrow(/road capsule/);
+  });
+
+  it.each(["cancel", "invalidate"] as const)(
+    "preserves %s semantics while distant-road admission is suspended",
+    (action) => {
+      const f = fixture();
+      const far = {
+        startX: 1000,
+        startZ: 1000,
+        endX: 1001,
+        endZ: 1001,
+        width: 1,
+      };
+      let disposals = 0;
+      f.geometry.addEventListener("dispose", () => disposals++);
+      f.terrain.addEventListener("dispose", () => disposals++);
+      const steps = createRootedFlowerPlacementSteps(
+        f.request({ inputs: f.input(empty(), [far, far]) }),
+      );
+      let admitted = 0;
+      for (let count = 0; count < 2000 && admitted < 2; count++) {
+        const step = steps.next();
+        if (step.done) throw new Error("Expected suspended road admission");
+        if (step.value === "flower_road_admission") admitted++;
+      }
+      expect(admitted).toBe(2);
+      expect(f.state.inputCloses).toBe(1);
+      if (action === "cancel") steps.return(undefined as never);
+      else {
+        f.state.inputs = false;
+        expect(() => steps.next()).toThrow(/Stale/);
+      }
+      expect(f.state.inputCloses).toBe(1);
+      expect(disposals).toBe(0);
+      expect(f.region.isCurrent()).toBe(true);
+    },
+  );
+
+  it("validates distant zone and polygon workload once without repeating it per flower", () => {
+    const f = fixture(() => 10);
+    const baseline = drain(f.request());
+    const box = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const snapshot = {
+      ...empty(),
+      zones: Array.from({ length: 256 }, (_, i) =>
+        exclusionZone(`far-zone-${i}`, box),
+      ),
+      exclusionPolygons: Array.from({ length: 32 }, (_, i) =>
+        exclusionPolygon(`far-polygon-${i}`, box),
+      ),
+    };
+    const original = structuredClone(snapshot);
+    const actual = drain(f.request({ inputs: f.input(snapshot) }));
+    expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+      new Uint8Array(baseline.result.matrices.buffer),
+    );
+    expect(actual.result.diagnostics.rejected).toEqual(
+      baseline.result.diagnostics.rejected,
+    );
+    expect(snapshot).toEqual(original);
+    expect(actual.result.isCurrent()).toBe(true);
+    const exclusionSteps = actual.phases.filter(
+      (phase) => phase === "flower_exclusion",
+    ).length;
+    console.info(
+      "FLOWER_EXCLUSION_WORKLOAD",
+      JSON.stringify({
+        count: actual.result.count,
+        zones: snapshot.zones.length,
+        polygons: snapshot.exclusionPolygons.length,
+        baselineSteps: baseline.result.diagnostics.steps,
+        steps: actual.result.diagnostics.steps,
+        yieldedSteps: actual.phases.length,
+        exclusionSteps,
+        matricesByteExact: true,
+        timingClaimed: false,
+      }),
+    );
+    expect(
+      actual.phases.filter((phase) => phase === "flower_zone_admission"),
+    ).toHaveLength(256);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_polygon_envelope"),
+    ).toHaveLength(32);
+    expect(exclusionSteps).toBe(0);
+  });
+
+  it("matches the all-envelope oracle and retains exclusion order on actual flower geometry", () => {
+    const f = fixture(() => 10),
+      baseline = drain(f.request()).result;
+    const candidates = rows(baseline),
+      first = candidates[0],
+      last = candidates[candidates.length - 1];
+    const far = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const near = [first, last].map((row) => ({
+      minX: row[12] - 0.1,
+      maxX: row[12] + 0.1,
+      minZ: row[14] - 0.1,
+      maxZ: row[14] + 0.1,
+    }));
+    const position = f.geometry.getAttribute("position");
+    let radius = 0;
+    for (let i = 0; i < position.count; i++)
+      radius = Math.max(radius, Math.hypot(position.getX(i), position.getZ(i)));
+    const blocked = (row: number[], box: TerrainGridBounds) => {
+      const scale = Math.max(
+        Math.hypot(row[0], row[2]),
+        Math.hypot(row[8], row[10]),
+      );
+      const wind = getRootedFlowerWindBounds(
+        f.geometry.getAttribute("flowerHeight").getY(0),
+        row[5],
+      );
+      const reach =
+        radius * scale * (1 + 2e-6) + Math.hypot(wind.x, wind.z) + 1e-5;
+      return (
+        row[12] - reach <= box.maxX &&
+        row[12] + reach >= box.minX &&
+        row[14] - reach <= box.maxZ &&
+        row[14] + reach >= box.minZ
+      );
+    };
+    for (const ordered of [near, [...near].reverse()]) {
+      const all = [far, ...ordered, far];
+      const expected = candidates.filter(
+        (row) => !all.some((box) => blocked(row, box)),
+      );
+      expect(expected.length).toBeLessThan(candidates.length);
+      const actual = drain(
+        f.request({
+          inputs: f.input({
+            ...empty(),
+            zones: [
+              exclusionZone("far", far),
+              ...ordered.map((box, i) => exclusionZone(`near-${i}`, box)),
+            ],
+            exclusionPolygons: [exclusionPolygon("far-poly", far)],
+          }),
+        }),
+      );
+      expect(new Uint8Array(actual.result.matrices.buffer)).toEqual(
+        new Uint8Array(new Float32Array(expected.flat()).buffer),
+      );
+      expect(actual.result.diagnostics.rejected.zone).toBe(
+        candidates.length - expected.length,
+      );
+      let comparisons = 0;
+      for (const row of candidates)
+        for (const box of ordered) {
+          comparisons++;
+          if (blocked(row, box)) break;
+        }
+      expect(
+        actual.phases.filter((phase) => phase === "flower_exclusion"),
+      ).toHaveLength(comparisons);
+    }
+  });
+
+  it("keeps zone and polygon boundary contact on all four sides", () => {
+    const f = fixture(() => 10),
+      baseline = drain(f.request()).result;
+    const n = getRootedFlowerPlacementBounds(f.geometry, { x: 4, z: 4 });
+    const touching = [
+      { minX: n.minX - 1, maxX: n.minX, minZ: 3, maxZ: 5 },
+      { minX: n.maxX, maxX: n.maxX + 1, minZ: 3, maxZ: 5 },
+      { minX: 3, maxX: 5, minZ: n.minZ - 1, maxZ: n.minZ },
+      { minX: 3, maxX: 5, minZ: n.maxZ, maxZ: n.maxZ + 1 },
+    ];
+    const outside = touching.map((b, i) => ({
+      minX: b.minX + (i === 0 ? -1e-6 : i === 1 ? 1e-6 : 0),
+      maxX: b.maxX + (i === 0 ? -1e-6 : i === 1 ? 1e-6 : 0),
+      minZ: b.minZ + (i === 2 ? -1e-6 : i === 3 ? 1e-6 : 0),
+      maxZ: b.maxZ + (i === 2 ? -1e-6 : i === 3 ? 1e-6 : 0),
+    }));
+    const boxes = [...touching, ...outside];
+    const actual = drain(
+      f.request({
+        inputs: f.input({
+          ...empty(),
+          zones: boxes.map((box, i) => exclusionZone(`zone-${i}`, box)),
+          exclusionPolygons: boxes.map((box, i) =>
+            exclusionPolygon(`polygon-${i}`, box),
+          ),
+        }),
+      }),
+    );
+    expect(actual.result.matrices).toEqual(baseline.matrices);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_zone_admission"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_polygon_envelope"),
+    ).toHaveLength(8);
+    expect(
+      actual.phases.filter((phase) => phase === "flower_exclusion"),
+    ).toHaveLength(baseline.count * 8);
+  });
+
+  it("rejects invalid distant exclusions and raw count overflow before culling", () => {
+    const f = fixture(),
+      box = { minX: 1000, maxX: 1001, minZ: 1000, maxZ: 1001 };
+    const invalid: GrassTerrainSurfaceSnapshot[] = [
+      {
+        ...empty(),
+        zones: [{ ...exclusionZone("bad-height", box), height: NaN }],
+      },
+      {
+        ...empty(),
+        zones: [
+          {
+            ...exclusionZone("bad-mask", box),
+            tileMask: new Set(["1000,NaN"]),
+          },
+        ],
+      },
+      {
+        ...empty(),
+        exclusionPolygons: [
+          { ...exclusionPolygon("bad-bounds", box), maxX: 1002 },
+        ],
+      },
+      {
+        ...empty(),
+        exclusionPolygons: [
+          {
+            ...exclusionPolygon("bad-winding", box),
+            vertices: exclusionPolygon("x", box).vertices.reverse(),
+          },
+        ],
+      },
+      {
+        ...empty(),
+        zones: Array.from({ length: 513 }, (_, i) =>
+          exclusionZone(`zone-${i}`, box),
+        ),
+      },
+      {
+        ...empty(),
+        exclusionPolygons: Array.from({ length: 65 }, (_, i) =>
+          exclusionPolygon(`polygon-${i}`, box),
+        ),
+      },
+    ];
+    for (const snapshot of invalid)
+      expect(() => drain(f.request({ inputs: f.input(snapshot) }))).toThrow(
+        /Invalid grass terrain surface/,
+      );
+  });
+
+  it("clears full road blends and polygon/water envelopes beyond the root point", () => {
+    const f = fixture();
+    const baseline = drain(f.request()).result;
+    const row = rows(baseline)[0];
+    const x = row[12],
+      z = row[14];
+    const reach = baseline.diagnostics.maximumHorizontalReach;
+    const retains = (result: RootedFlowerPlacementResult) =>
+      rows(result).some(
+        (candidate) => candidate[12] === x && candidate[14] === z,
+      );
+    const road = {
+      startX: x + reach / 2 + 0.1,
+      endX: x + reach / 2 + 0.1,
+      startZ: z,
+      endZ: z,
+      width: 0.1,
+      blendWidth: 0.1,
+      maxInfluence: 0,
+    };
+    expect(
+      retains(drain(f.request({ inputs: f.input(empty(), [road]) })).result),
+    ).toBe(false);
+    const minX = x + 0.01,
+      maxX = x + 0.02,
+      minZ = z + 0.01,
+      maxZ = z + 0.02;
+    const polygon = {
+      id: "flower-pad",
+      minX,
+      maxX,
+      minZ,
+      maxZ,
+      vertices: [
+        { x: minX, z: minZ },
+        { x: maxX, z: minZ },
+        { x: maxX, z: maxZ },
+        { x: minX, z: maxZ },
+      ],
+    };
+    expect(
+      retains(
+        drain(
+          f.request({
+            inputs: f.input({ ...empty(), exclusionPolygons: [polygon] }),
+          }),
+        ).result,
+      ),
+    ).toBe(false);
+    expect(
+      retains(
+        drain(
+          f.request({
+            inputs: f.input({
+              ...empty(),
+              waterBodies: [
+                {
+                  id: "flower-water",
+                  centerX: x + 0.02,
+                  centerZ: z,
+                  radius: 0.005,
+                  surfaceY: 5,
+                },
+              ],
+            }),
+          }),
+        ).result,
+      ),
+    ).toBe(false);
+  });
+
+  it("admits an actual deterministic candidate exactly on an agreeing shared edge", () => {
+    const f = fixture(() => 10);
+    const target = rows(drain(f.request()).result)[0];
+    const seam = target[12];
+    const leftGeometry = gridGeometry(128, 5, () => 10);
+    const rightGeometry = gridGeometry(128, 5, () => 10);
+    const left = new RetainedTerrainSurface(
+      3,
+      "flower-placement-test",
+      seam - 64,
+      0,
+      128,
+      5,
+      leftGeometry,
+    );
+    const right = new RetainedTerrainSurface(
+      2,
+      "flower-placement-test",
+      seam + 64,
+      0,
+      128,
+      5,
+      rightGeometry,
+    );
+    cleanups.push(() => {
+      leftGeometry.dispose();
+      rightGeometry.dispose();
+    });
+    const current = () =>
+      left.matchesGeometry(leftGeometry) &&
+      right.matchesGeometry(rightGeometry);
+    const region = {
+      bounds: f.region.bounds,
+      surfaces: [left, right],
+      isCurrent: current,
+    };
+    const a = drain(f.request({ region })).result;
+    const b = drain(
+      f.request({ region: { ...region, surfaces: [right, left] } }),
+    ).result;
+    expect(a.diagnostics.deferredTerrain).toBe(0);
+    expect(a.diagnostics.rejected.overlap).toBe(0);
+    expect(
+      rows(a).find((row) => row[12] === target[12] && row[14] === target[14]),
+    ).toEqual(target);
+    expect(a.matrices).toEqual(b.matrices);
+  });
+
+  it.each(["steep", "cracked"] as const)(
+    "fails closed at a %s shared edge without picking the easy owner",
+    (kind) => {
+      const f = fixture(() => 10);
+      const target = rows(drain(f.request()).result)[0];
+      const seam = target[12];
+      const leftGeometry = gridGeometry(128, 5, () => 10);
+      const rightGeometry = gridGeometry(128, 5, (x) =>
+        kind === "steep" ? 10 + (x + 64) * 0.8 : 10.01,
+      );
+      const left = new RetainedTerrainSurface(
+        1,
+        "flower-placement-test",
+        seam - 64,
+        0,
+        128,
+        5,
+        leftGeometry,
+      );
+      const right = new RetainedTerrainSurface(
+        2,
+        "flower-placement-test",
+        seam + 64,
+        0,
+        128,
+        5,
+        rightGeometry,
+      );
+      cleanups.push(() => {
+        leftGeometry.dispose();
+        rightGeometry.dispose();
+      });
+      const region = {
+        bounds: f.region.bounds,
+        surfaces: [left, right],
+        isCurrent: () =>
+          left.matchesGeometry(leftGeometry) &&
+          right.matchesGeometry(rightGeometry),
+      };
+      const result = drain(f.request({ region })).result;
+      expect(
+        rows(result).some(
+          (row) => row[12] === target[12] && row[14] === target[14],
+        ),
+      ).toBe(false);
+      if (kind === "steep") {
+        expect(result.diagnostics.rejected.slope).toBeGreaterThan(0);
+        expect(result.diagnostics.deferredTerrain).toBe(0);
+      } else {
+        expect(result.diagnostics.rejected.surface).toBeGreaterThan(0);
+        expect(result.diagnostics.deferredTerrain).toBeGreaterThan(0);
+      }
+    },
+  );
+
+  it("rejects actual live resource envelopes and makes prior results stale on additions", () => {
+    const f = fixture();
+    const old = drain(f.request()).result;
+    const row = rows(old)[0];
+    const tree = addTree(f.world, row[12], row[14]);
+    expect(old.isCurrent()).toBe(false);
+    const resources = captureFlowerResourceClearance(f.world);
+    const result = drain(f.request({ resources })).result;
+    expect(result.diagnostics.rejected.resource).toBeGreaterThan(0);
+    expect(
+      rows(result).some(
+        (candidate) => candidate[12] === row[12] && candidate[14] === row[14],
+      ),
+    ).toBe(false);
+    tree.position.x += 1;
+    expect(result.isCurrent()).toBe(false);
+  });
+
+  it("guards borrowed-read boundaries and closes cancelled input without releasing owners", () => {
+    const f = fixture();
+    const input = f.input();
+    const steps = createRootedFlowerPlacementSteps(
+      f.request({ inputs: input }),
+    );
+    for (;;) {
+      const next = steps.next();
+      if (next.done) throw new Error("Expected suspended input");
+      if (next.value === "actual-input-step-0") break;
+    }
+    steps.return(undefined as never);
+    expect(f.state.inputCloses).toBe(1);
+    expect(f.region.isCurrent()).toBe(true);
+    const stale = createRootedFlowerPlacementSteps(f.request());
+    expect(stale.next().done).toBe(false);
+    f.state.inputs = false;
+    expect(() => {
+      for (let step = 0; step < 2000; step++) {
+        const next = stale.next();
+        if (next.done) throw new Error("Unexpected stale publication");
+        if (next.value === "flower_root_sample")
+          throw new Error("Unexpected stale sampling");
+      }
+    }).toThrow(/Stale/);
+    f.state.inputs = true;
+    const changed = createRootedFlowerPlacementSteps(f.request());
+    changed.next();
+    f.geometry.getAttribute("position").needsUpdate = true;
+    expect(() => changed.next()).toThrow(/Stale/);
+  });
+
+  it("rejects reuse and malformed bounded inputs", () => {
+    const f = fixture();
+    const input = f.input();
+    drain(f.request({ inputs: input }));
+    expect(() => drain(f.request({ inputs: input }))).toThrow(/reused/);
+    expect(() => drain(f.request({ seed: 1.5 }))).toThrow(/request/);
+    expect(() => drain(f.request({ origin: { x: 0, z: 0 } }))).toThrow(
+      /request/,
+    );
+    expect(() => drain(f.request({ grassPlacement: () => NaN }))).toThrow(
+      /eligibility/,
+    );
+    expect(() =>
+      drain(
+        f.request({
+          inputs: f.input(empty(), [
+            { startX: 0, startZ: 0, endX: 1, endZ: 0, width: NaN },
+          ]),
+        }),
+      ),
+    ).toThrow(/road capsule/);
+    expect(() =>
+      drain(
+        f.request({
+          inputs: f.input(
+            empty(),
+            Array.from({ length: 4097 }, () => ({
+              startX: 0,
+              startZ: 0,
+              endX: 1,
+              endZ: 0,
+              width: 1,
+            })),
+          ),
+        }),
+      ),
+    ).toThrow(/constraint inputs/);
+  });
+});

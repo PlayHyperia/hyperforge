@@ -1,0 +1,1302 @@
+import { BufferGeometry } from "three/src/core/BufferGeometry.js";
+import { BufferAttribute } from "three/src/core/BufferAttribute.js";
+import {
+  GRASS_BLADE_GROUNDING_JOB_LIMITS as jobLimits,
+  GrassGroundingContinuation,
+  groundGrassBladeSteps,
+  validateGrassGroundingConsumedWork,
+  captureGrassGroundingExecution,
+  grassGroundingTimeFailure,
+  type GrassBladeGroundingRequest,
+  type GrassBladeGroundingResult,
+  type GrassGroundingConsumedWork,
+  type GrassGroundingTiming,
+  type GrassGroundingTimingSpan,
+  type GrassGroundingExecution,
+} from "../../systems/shared/world/GrassBladeGrounding";
+import { getGrassBladeLayout } from "../../systems/shared/world/GrassBladeLayout";
+import { GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS } from "./GrassGroundingWorkerClock";
+import {
+  RetainedTerrainSurface,
+  type TerrainCellTopology,
+  type RetainedTerrainSurfaceSnapshot,
+} from "../../systems/shared/world/TerrainGridSurface";
+import {
+  GRASS_GROUNDING_WORKER_LIMITS as limits,
+  grassGroundingWorkerInputTransfers,
+  validateGrassGroundingDiagnosticSubcells,
+  type GrassGroundingWorkerRequest,
+  type GrassGroundingWorkerCachedRequest,
+  type GrassGroundingWorkerPrepareSurface,
+  type GrassGroundingWorkerCacheReceipt,
+  type GrassGroundingWorkerResponse,
+  type GrassGroundingWorkerResult,
+  type GrassGroundingWorkerClockSample,
+} from "./GrassGroundingWorkerWire";
+
+// The same browser bundle is exercised by the Node worker transport adapter.
+// No rendering, scene, DOM or game publication is owned by this entry.
+const scope = self as unknown as {
+  onmessage: ((event: MessageEvent<unknown>) => void) | null;
+  postMessage(
+    message: GrassGroundingWorkerResponse | GrassGroundingWorkerClockSample,
+    transfer?: ArrayBuffer[],
+  ): void;
+};
+
+function requireValue(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+function object(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[] = [],
+) {
+  requireValue(
+    value !== null &&
+      typeof value === "object" &&
+      (Object.getPrototypeOf(value) === Object.prototype ||
+        Object.getPrototypeOf(value) === null),
+    "Invalid grounding message object",
+  );
+  const keys = Reflect.ownKeys(value);
+  requireValue(
+    keys.length >= required.length &&
+      keys.length <= required.length + optional.length &&
+      keys.every(
+        (key) =>
+          typeof key === "string" &&
+          (required.includes(key) || optional.includes(key)),
+      ),
+    "Invalid grounding message fields",
+  );
+  for (const key of [...required, ...optional]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor && optional.includes(key)) continue;
+    requireValue(
+      descriptor && "value" in descriptor && descriptor.enumerable,
+      "Invalid grounding message property",
+    );
+  }
+  return value as Record<string, unknown>;
+}
+function integer(
+  value: unknown,
+  minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  );
+}
+function text(value: unknown, maximum: number): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.length <= maximum
+  );
+}
+function completeView(
+  value: unknown,
+): asserts value is Float32Array | Uint16Array | Uint32Array {
+  requireValue(
+    (value instanceof Float32Array ||
+      value instanceof Uint16Array ||
+      value instanceof Uint32Array) &&
+      value.buffer instanceof ArrayBuffer &&
+      value.byteOffset === 0 &&
+      value.byteLength === value.buffer.byteLength,
+    "Grounding transport requires complete owned typed-array views",
+  );
+}
+function floatView(
+  value: unknown,
+  length: number,
+): asserts value is Float32Array {
+  completeView(value);
+  requireValue(
+    value instanceof Float32Array && value.length === length,
+    "Invalid grounding float payload",
+  );
+}
+
+function admitSurface(value: unknown) {
+  const s = object(value, [
+    "schemaVersion",
+    "nodeId",
+    "terrainProfileIdentity",
+    "revision",
+    "centerX",
+    "centerZ",
+    "size",
+    "resolution",
+    "positions",
+    "indices",
+    "topology",
+    "positionVersion",
+    "indexVersion",
+    "positionCount",
+    "indexCount",
+    "payloadBytes",
+  ]);
+  requireValue(
+    s.schemaVersion === 1 &&
+      integer(s.nodeId) &&
+      text(s.revision, 128) &&
+      text(s.terrainProfileIdentity, 65536) &&
+      integer(s.resolution, 2, 256) &&
+      typeof s.centerX === "number" &&
+      Number.isFinite(s.centerX) &&
+      typeof s.centerZ === "number" &&
+      Number.isFinite(s.centerZ) &&
+      typeof s.size === "number" &&
+      Number.isFinite(s.size) &&
+      s.size > 0 &&
+      integer(s.positionVersion) &&
+      integer(s.indexVersion) &&
+      integer(s.positionCount) &&
+      integer(s.indexCount) &&
+      integer(s.payloadBytes, 0, limits.maximumInputBytes),
+    "Invalid grounding surface descriptor",
+  );
+  floatView(s.positions, s.positionCount * 3);
+  completeView(s.indices);
+  requireValue(
+    (s.indices instanceof Uint16Array || s.indices instanceof Uint32Array) &&
+      s.indices.length === s.indexCount,
+    "Invalid grounding index payload",
+  );
+  let inputBytes = s.positions.byteLength + s.indices.byteLength;
+  let derivedBytes = 0;
+  if (s.topology !== null) {
+    const topology = object(s.topology, [
+      "schemaVersion",
+      "resolution",
+      "surfaceVertexCount",
+      "cellIndexOffsets",
+    ]);
+    requireValue(
+      topology.schemaVersion === 1 &&
+        topology.resolution === s.resolution &&
+        integer(topology.surfaceVertexCount, s.resolution ** 2, 131072),
+      "Invalid grounding topology descriptor",
+    );
+    completeView(topology.cellIndexOffsets);
+    requireValue(
+      topology.cellIndexOffsets instanceof Uint32Array &&
+        topology.cellIndexOffsets.length === (s.resolution - 1) ** 2 + 1,
+      "Invalid grounding topology offset payload",
+    );
+    inputBytes += topology.cellIndexOffsets.byteLength;
+    // Conservative edge-index bound: parent plus both child bounds and one
+    // qualification byte per topology cell, including unqualified/small cells.
+    // Packed offsets and unpacked numeric slots are separate, not JS heap size.
+    derivedBytes =
+      (Math.ceil(s.indices.length / 24) + (s.resolution - 1) ** 2) * 96 +
+      topology.cellIndexOffsets.length * 12 +
+      (s.resolution - 1) ** 2;
+  }
+  requireValue(
+    inputBytes === s.payloadBytes,
+    "Grounding surface payload receipt mismatch",
+  );
+  return {
+    snapshot: value as RetainedTerrainSurfaceSnapshot,
+    inputBytes,
+    derivedBytes,
+  };
+}
+
+function surfaceTokens(value: unknown, allowEmpty = false): number[] {
+  requireValue(
+    Array.isArray(value) &&
+      value.length <= limits.maximumCachedSurfaces &&
+      (allowEmpty || value.length > 0),
+    "Invalid grounding surface count",
+  );
+  const seen = new Set<number>();
+  for (const token of value) {
+    requireValue(
+      integer(token, 1) && !seen.has(token),
+      "Invalid grounding surface token",
+    );
+    seen.add(token);
+  }
+  return value as number[];
+}
+
+/** Constant-count boundary checks reserve payload BEFORE any terrain rebuild.
+ * Detailed geometry/topology/constraint checks run in the real sliced core. */
+function admit(value: unknown, cached: boolean) {
+  const r = object(
+    value,
+    [
+      "type",
+      "schemaVersion",
+      "jobId",
+      "generation",
+      "ownSurfaceToken",
+      cached ? "surfaceTokens" : "surfaces",
+      "geometry",
+      "data",
+      "constraints",
+      "settings",
+      "consumed",
+    ],
+    ["execution"],
+  );
+  requireValue(
+    r.type === (cached ? "start_cached" : "start") &&
+      r.schemaVersion === 1 &&
+      integer(r.jobId, 1) &&
+      integer(r.generation, 1) &&
+      integer(r.ownSurfaceToken, 1),
+    "Invalid grounding job identity",
+  );
+  let derivedBytes = 0;
+  const tokens = new Set<number>();
+  let profile: string | undefined;
+  const acceptProfile = (next: string) => {
+    if (profile === undefined) profile = next;
+    requireValue(next === profile, "Mixed grounding terrain profiles");
+  };
+  if (cached) {
+    for (const token of surfaceTokens(r.surfaceTokens)) {
+      const owner = surfaceCache.get(token);
+      requireValue(owner, "Missing cached grounding surface");
+      tokens.add(token);
+      acceptProfile(owner.surface.terrainProfileIdentity);
+    }
+  } else {
+    requireValue(
+      Array.isArray(r.surfaces) &&
+        r.surfaces.length > 0 &&
+        r.surfaces.length <= limits.maximumCachedSurfaces,
+      "Invalid grounding surface count",
+    );
+    for (const row of r.surfaces) {
+      const surface = object(row, ["token", "snapshot"]);
+      requireValue(
+        integer(surface.token, 1) && !tokens.has(surface.token),
+        "Invalid grounding surface token",
+      );
+      tokens.add(surface.token);
+      const admitted = admitSurface(surface.snapshot);
+      acceptProfile(admitted.snapshot.terrainProfileIdentity);
+      derivedBytes += admitted.derivedBytes;
+    }
+  }
+  requireValue(tokens.has(r.ownSurfaceToken), "Missing own grounding surface");
+  const settings = object(
+    r.settings,
+    ["lod", "oceanLevel", "wind"],
+    [
+      "geometryLayout",
+      "roadClearance",
+      "diagnosticSubcells",
+      "bankVerge",
+      "pondServiceGround",
+      "maximumBaseError",
+      "workBudget",
+    ],
+  );
+  requireValue(
+    settings.diagnosticSubcells === undefined ||
+      settings.diagnosticSubcells === "world-grid-6.25m-v1",
+    "Invalid grounding diagnostic subcells selection",
+  );
+  const layout = getGrassBladeLayout(
+    settings.lod as number,
+    settings.geometryLayout as GrassGroundingWorkerRequest["settings"]["geometryLayout"],
+  );
+  object(settings.wind, ["x", "z"]);
+  const geometry = object(r.geometry, [
+    "position",
+    "normal",
+    "uv",
+    "index",
+    "drawCount",
+  ]);
+  floatView(geometry.position, layout.verticesPerClump * 3);
+  floatView(geometry.normal, layout.verticesPerClump * 3);
+  floatView(geometry.uv, layout.verticesPerClump * 2);
+  completeView(geometry.index);
+  requireValue(
+    (geometry.index instanceof Uint16Array ||
+      geometry.index instanceof Uint32Array) &&
+      geometry.index.length === layout.trianglesPerClump * 3 &&
+      (geometry.drawCount === Infinity ||
+        geometry.drawCount === geometry.index.length),
+    "Invalid grounding blade geometry payload",
+  );
+  const data = object(r.data, [
+    "count",
+    "offsets",
+    "rotScaleHash",
+    "groundColors",
+    "grassTints",
+    "groundNormals",
+  ]);
+  requireValue(
+    integer(data.count, 0, 4096),
+    "Invalid grounding instance capacity",
+  );
+  for (const key of [
+    "offsets",
+    "rotScaleHash",
+    "groundColors",
+    "groundNormals",
+  ])
+    floatView(data[key], data.count * 3);
+  floatView(data.grassTints, data.count * 4);
+  const constraints = object(r.constraints, ["terrainSurface", "roadSegments"]);
+  requireValue(
+    Array.isArray(constraints.roadSegments) &&
+      constraints.roadSegments.length <= 4096,
+    "Invalid grounding road capacity",
+  );
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  validateGrassGroundingConsumedWork(r.consumed, execution);
+  const request = value as
+    GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest;
+  const buffers = grassGroundingWorkerInputTransfers(request);
+  const inputBytes = buffers.reduce(
+    (sum, buffer) => sum + buffer.byteLength,
+    0,
+  );
+  assertReservation(inputBytes, derivedBytes);
+  return { request, inputBytes, derivedBytes, execution };
+}
+
+type CachedSurface = {
+  surface: RetainedTerrainSurface;
+  geometry: BufferGeometry;
+  inputBytes: number;
+  derivedBytes: number;
+};
+const surfaceCache = new Map<number, CachedSurface>();
+let lastAcceptedSurfaceToken = 0;
+
+function cacheReceipt(): GrassGroundingWorkerCacheReceipt {
+  let inputBytes = 0,
+    derivedBytesReserved = 0;
+  for (const owner of surfaceCache.values()) {
+    inputBytes += owner.inputBytes;
+    derivedBytesReserved += owner.derivedBytes;
+  }
+  return { owners: surfaceCache.size, inputBytes, derivedBytesReserved };
+}
+
+function assertReservation(inputBytes: number, derivedBytes: number): void {
+  const cache = cacheReceipt();
+  requireValue(
+    inputBytes + cache.inputBytes <= limits.maximumInputBytes &&
+      derivedBytes + cache.derivedBytesReserved <= limits.maximumDerivedBytes,
+    "Grounding worker payload reservation exceeded",
+  );
+}
+
+type SurfaceOwners = Map<
+  RetainedTerrainSurface,
+  { token: number; sourceRevision: string }
+>;
+type ActiveFit = ReturnType<typeof admit> & {
+  kind: "fit";
+  job: GrassGroundingContinuation;
+  owners: SurfaceOwners;
+  geometries: BufferGeometry[];
+  terrainRebuildWork: GrassGroundingConsumedWork | null;
+  sliceStartedAt: number | null;
+};
+type PreparationState =
+  | { status: "running" }
+  | { status: "prepared"; surface: RetainedTerrainSurface }
+  | {
+      status: "failed_budget";
+      reason: "operations" | "active_cpu" | "lifetime";
+    }
+  | { status: "failed_input"; error: unknown }
+  | { status: "cancelled"; reason: "caller" | "invalidated" };
+
+/** Same local span semantics as the fitting continuation. Only these two
+ * reusable records survive between slices; no phase history is retained. */
+class PreparationTimingSpan {
+  elapsedMs = -1;
+  startOperations = 0;
+  endOperations = 0;
+  startPhase: string | null = null;
+  endPhase: string | null = null;
+
+  capture(): GrassGroundingTimingSpan | null {
+    return this.elapsedMs < 0
+      ? null
+      : Object.freeze({
+          elapsedMs: this.elapsedMs,
+          startOperations: this.startOperations,
+          endOperations: this.endOperations,
+          startPhase: this.startPhase?.slice(0, 128) ?? null,
+          endPhase: this.endPhase?.slice(0, 128) ?? null,
+        });
+  }
+}
+
+/** Surface admission has its own real result type and ledger. It never pretends
+ * to be ready grass. The fitting continuation and its caps remain unchanged. */
+class SurfacePreparationContinuation {
+  private readonly execution: GrassGroundingExecution | undefined;
+  private iterator: Generator<string, RetainedTerrainSurface, void> | null;
+  private current: PreparationState = { status: "running" };
+  private readonly peakSlice = new PreparationTimingSpan();
+  private readonly peakClockInterval = new PreparationTimingSpan();
+  private clockMarkMs = 0;
+  private clockMarkOperations = 0;
+  private clockMarkPhase: string | null = null;
+  private sliceStartOperations = 0;
+  private sliceStartPhase: string | null = null;
+  operations: number;
+  activeMs: number;
+  maximumSliceMs: number;
+  lastPhase: string | null = null;
+
+  constructor(
+    steps: Generator<string, RetainedTerrainSurface, void>,
+    private readonly isCurrent: () => boolean,
+    consumed: GrassGroundingConsumedWork,
+    execution?: GrassGroundingExecution,
+  ) {
+    this.execution = captureGrassGroundingExecution(execution, "cross-realm");
+    const admitted = validateGrassGroundingConsumedWork(
+      consumed,
+      this.execution,
+    );
+    this.iterator = steps;
+    this.operations = admitted.operations;
+    this.activeMs = admitted.activeMs;
+    this.maximumSliceMs = admitted.maximumSliceMs;
+  }
+
+  get state(): PreparationState {
+    return this.current;
+  }
+
+  captureTiming(): GrassGroundingTiming {
+    return Object.freeze({
+      timeBasis: "slice-elapsed-including-preemption",
+      scope: "local-continuation",
+      peakSlice: this.peakSlice.capture(),
+      peakClockInterval: this.peakClockInterval.capture(),
+    });
+  }
+
+  private recordClockInterval(now: number): void {
+    const elapsed = now - this.clockMarkMs;
+    const peak = this.peakClockInterval;
+    if (elapsed > peak.elapsedMs) {
+      peak.elapsedMs = elapsed;
+      peak.startOperations = this.clockMarkOperations;
+      peak.endOperations = this.operations;
+      peak.startPhase = this.clockMarkPhase;
+      peak.endPhase = this.lastPhase;
+    }
+    this.clockMarkMs = now;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+  }
+
+  private close(state: PreparationState): void {
+    const iterator = this.iterator;
+    this.iterator = null;
+    this.current = state;
+    iterator?.return(undefined as never);
+  }
+
+  cancel(): void {
+    if (this.state.status === "running")
+      this.close({ status: "cancelled", reason: "caller" });
+  }
+
+  private recordSlice(started: number): void {
+    const now = performance.now();
+    const sliceMs = now - started;
+    this.recordClockInterval(now);
+    if (sliceMs > this.peakSlice.elapsedMs) {
+      this.peakSlice.elapsedMs = sliceMs;
+      this.peakSlice.startOperations = this.sliceStartOperations;
+      this.peakSlice.endOperations = this.operations;
+      this.peakSlice.startPhase = this.sliceStartPhase;
+      this.peakSlice.endPhase = this.lastPhase;
+    }
+    this.activeMs += sliceMs;
+    this.maximumSliceMs = Math.max(this.maximumSliceMs, sliceMs);
+    const failure = grassGroundingTimeFailure(
+      this.activeMs,
+      this.execution,
+      now,
+    );
+    if (
+      failure &&
+      (this.current.status === "running" || this.current.status === "prepared")
+    )
+      this.close({ status: "failed_budget", reason: failure });
+  }
+
+  advance(): void {
+    if (this.state.status !== "running") return;
+    const started = performance.now(),
+      deadline = started + jobLimits.targetSliceMs;
+    this.clockMarkMs = started;
+    this.clockMarkOperations = this.operations;
+    this.clockMarkPhase = this.lastPhase;
+    this.sliceStartOperations = this.operations;
+    this.sliceStartPhase = this.lastPhase;
+    let sliceOperations = 0;
+    try {
+      if (!this.isCurrent()) {
+        this.close({ status: "cancelled", reason: "invalidated" });
+        return;
+      }
+      while (
+        this.iterator &&
+        sliceOperations < jobLimits.maximumSliceOperations
+      ) {
+        if (this.operations >= jobLimits.maximumOperations) {
+          this.close({ status: "failed_budget", reason: "operations" });
+          return;
+        }
+        if (sliceOperations % jobLimits.clockInterval === 0) {
+          const now = performance.now();
+          this.recordClockInterval(now);
+          const failure = grassGroundingTimeFailure(
+            this.activeMs + now - started,
+            this.execution,
+            now,
+          );
+          if (failure) {
+            this.close({ status: "failed_budget", reason: failure });
+            return;
+          }
+          if (now >= deadline) break;
+        }
+        const step = this.iterator.next();
+        this.operations++;
+        sliceOperations++;
+        if (step.done) {
+          this.close({ status: "prepared", surface: step.value });
+          break;
+        }
+        this.lastPhase = step.value;
+      }
+      if (!this.isCurrent())
+        this.close({ status: "cancelled", reason: "invalidated" });
+    } catch (error) {
+      this.close({ status: "failed_input", error });
+    } finally {
+      this.recordSlice(started);
+    }
+  }
+}
+
+type ActivePreparation = {
+  kind: "prepare";
+  request: GrassGroundingWorkerPrepareSurface;
+  inputBytes: number;
+  derivedBytes: number;
+  geometries: BufferGeometry[];
+  job: SurfacePreparationContinuation;
+};
+type Active = ActiveFit | ActivePreparation;
+let active: Active | null = null;
+let lastAcceptedId = 0;
+let scheduled = false;
+const channel = new globalThis.MessageChannel();
+
+function* rebuildSurface(
+  s: RetainedTerrainSurfaceSnapshot,
+  geometries: BufferGeometry[],
+): Generator<string, RetainedTerrainSurface, void> {
+  yield "worker_surface_rebuild";
+  const geometry = new BufferGeometry();
+  geometries.push(geometry);
+  // UUID attests the borrowed source, not a new world owner. Main publication
+  // must still map token+revision to its exact held object and complete lease.
+  geometry.uuid = s.revision;
+  const position = new BufferAttribute(s.positions, 3),
+    index = new BufferAttribute(s.indices, 1);
+  position.version = s.positionVersion;
+  index.version = s.indexVersion;
+  geometry.setAttribute("position", position);
+  geometry.setIndex(index);
+  if (s.topology) {
+    const offsets: number[] = [];
+    for (
+      let start = 0;
+      start < s.topology.cellIndexOffsets.length;
+      start += 256
+    ) {
+      yield "worker_topology_unpack";
+      const end = Math.min(start + 256, s.topology.cellIndexOffsets.length);
+      for (let i = start; i < end; i++)
+        offsets.push(s.topology.cellIndexOffsets[i]);
+    }
+    const topology: TerrainCellTopology = Object.freeze({
+      schemaVersion: 1,
+      resolution: s.topology.resolution,
+      surfaceVertexCount: s.topology.surfaceVertexCount,
+      cellIndexOffsets: Object.freeze(offsets),
+    });
+    geometry.userData.terrainCellTopology = topology;
+  }
+  return yield* RetainedTerrainSurface.prepare(
+    s.nodeId,
+    s.terrainProfileIdentity,
+    s.centerX,
+    s.centerZ,
+    s.size,
+    s.resolution,
+    geometry,
+  );
+}
+
+function* prepareExecution(
+  request: GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest,
+  owners: SurfaceOwners,
+  geometries: BufferGeometry[],
+  rebuilt: () => void,
+): Generator<string, GrassBladeGroundingRequest, void> {
+  const surfaces: RetainedTerrainSurface[] = [];
+  let ownSurface: RetainedTerrainSurface | undefined;
+  if (request.type === "start_cached") {
+    for (const token of request.surfaceTokens) {
+      yield "worker_cached_surface";
+      const owner = surfaceCache.get(token);
+      requireValue(owner, "Missing cached grounding surface");
+      owners.set(owner.surface, {
+        token,
+        sourceRevision: owner.surface.revision,
+      });
+      surfaces.push(owner.surface);
+      if (token === request.ownSurfaceToken) ownSurface = owner.surface;
+    }
+  } else {
+    for (const row of request.surfaces) {
+      const surface = yield* rebuildSurface(row.snapshot, geometries);
+      owners.set(surface, {
+        token: row.token,
+        sourceRevision: row.snapshot.revision,
+      });
+      surfaces.push(surface);
+      if (row.token === request.ownSurfaceToken) ownSurface = surface;
+    }
+    rebuilt();
+  }
+  requireValue(ownSurface, "Missing rebuilt own surface");
+  yield "worker_blade_geometry";
+  const geometry = new BufferGeometry(),
+    source = request.geometry;
+  geometries.push(geometry);
+  geometry.setAttribute("position", new BufferAttribute(source.position, 3));
+  geometry.setAttribute("normal", new BufferAttribute(source.normal, 3));
+  geometry.setAttribute("uv", new BufferAttribute(source.uv, 2));
+  geometry.setIndex(new BufferAttribute(source.index, 1));
+  geometry.setDrawRange(0, source.drawCount);
+  return {
+    ...request.settings,
+    ...request.constraints,
+    data: request.data,
+    geometry,
+    ownSurface,
+    surfaces,
+  };
+}
+
+/** Keep setup's yields and lazy ownership unchanged, but forward the hot fit
+ * directly instead of resuming another native generator for every blade step.
+ * The continuation still charges every yield and the final next exactly once. */
+class GroundingWorkerExecution implements Generator<
+  string,
+  GrassBladeGroundingResult,
+  void
+> {
+  private active: Generator<string, unknown, void> | null;
+  private fitting = false;
+  private running = false;
+
+  constructor(setup: Generator<string, GrassBladeGroundingRequest, void>) {
+    this.active = setup;
+  }
+
+  [Symbol.iterator](): Generator<string, GrassBladeGroundingResult, void> {
+    return this;
+  }
+
+  next(): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("next");
+  }
+
+  return(
+    value: GrassBladeGroundingResult,
+  ): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("return", value);
+  }
+
+  throw(error: unknown): IteratorResult<string, GrassBladeGroundingResult> {
+    return this.resume("throw", error);
+  }
+
+  private resume(
+    method: "next" | "return" | "throw",
+    value?: unknown,
+  ): IteratorResult<string, GrassBladeGroundingResult> {
+    // A caught reentrant call must not close the still-running outer call.
+    if (this.running) throw new TypeError("Generator is already running");
+    this.running = true;
+    try {
+      if (!this.active) {
+        if (method === "throw") throw value;
+        return {
+          done: true,
+          value: (method === "return"
+            ? value
+            : undefined) as GrassBladeGroundingResult,
+        };
+      }
+      let step =
+        method === "return"
+          ? this.active.return(value)
+          : method === "throw"
+            ? this.active.throw(value)
+            : this.active.next();
+      // A delegated return may yield from finally. Keep that child suspended;
+      // the next normal next/throw/return is forwarded just like native yield*.
+      if (!step.done) return step;
+      if (method !== "return" && !this.fitting) {
+        this.fitting = true;
+        this.active = groundGrassBladeSteps(
+          step.value as GrassBladeGroundingRequest,
+        );
+        // No boundary yield: setup completion and the first fit step have
+        // always happened in this same charged continuation resumption.
+        step = this.active.next();
+        if (!step.done) return step;
+      }
+      this.active = null;
+      return step as IteratorReturnResult<GrassBladeGroundingResult>;
+    } catch (error) {
+      this.active = null;
+      throw error;
+    } finally {
+      this.running = false;
+    }
+  }
+}
+
+function execute(
+  request: GrassGroundingWorkerRequest | GrassGroundingWorkerCachedRequest,
+  owners: SurfaceOwners,
+  geometries: BufferGeometry[],
+  rebuilt: () => void,
+): Generator<string, GrassBladeGroundingResult, void> {
+  return new GroundingWorkerExecution(
+    prepareExecution(request, owners, geometries, rebuilt),
+  );
+}
+
+type ResultResponse = Extract<GrassGroundingWorkerResponse, { type: "result" }>;
+
+function failureResponse(row: ActiveFit, error: unknown): ResultResponse {
+  return {
+    type: "result",
+    jobId: row.request.jobId,
+    generation: row.request.generation,
+    state: {
+      status: "failed_input",
+      error: String(error instanceof Error ? error.message : error).slice(
+        0,
+        1024,
+      ),
+    },
+    work: {
+      operations: row.job.operations,
+      activeMs: row.job.activeMs,
+      maximumSliceMs: row.job.maximumSliceMs,
+    },
+    lastPhase: row.job.lastPhase,
+    terrainRebuildWork: row.terrainRebuildWork,
+    timing: row.job.captureTiming(),
+    inputBytes: row.inputBytes,
+    derivedBytesReserved: row.derivedBytes,
+    resultBytes: 0,
+    cache: cacheReceipt(),
+  };
+}
+
+function packResult(row: ActiveFit): {
+  response: ResultResponse;
+  transfers: ArrayBuffer[];
+} {
+  const state = row.job.state;
+  requireValue(state.status !== "running", "Grounding job is not terminal");
+  const transfers: ArrayBuffer[] = [];
+  let diagnosticBytes = 0;
+  let output: Extract<
+    GrassGroundingWorkerResponse,
+    { type: "result" }
+  >["state"];
+  if (state.status === "ready" || state.status === "waiting_support") {
+    const result: GrassGroundingWorkerResult = {
+      ...state.result,
+      dependencies: state.result.dependencies.map(({ surface, uses }) => {
+        const owner = row.owners.get(surface);
+        requireValue(owner, "Foreign grounding dependency");
+        return { ...owner, uses };
+      }),
+    };
+    if (result.status === "ready") {
+      diagnosticBytes = validateGrassGroundingDiagnosticSubcells(
+        result.diagnosticSubcells,
+        row.request.settings.diagnosticSubcells,
+        result.data.count,
+        result.sweptBounds,
+      );
+      const arrays = [
+        result.data.offsets,
+        result.data.rotScaleHash,
+        result.data.groundColors,
+        result.data.grassTints,
+        result.data.groundNormals,
+        result.rootDeltas,
+        result.sourceIndices,
+        ...(result.bladeVisibility ? [result.bladeVisibility] : []),
+      ];
+      const unique = new Set<ArrayBuffer>();
+      for (const array of arrays) {
+        requireValue(
+          array.buffer instanceof ArrayBuffer,
+          "Invalid grounding result buffer",
+        );
+        unique.add(array.buffer);
+      }
+      transfers.push(...unique);
+    }
+    output = { status: state.status, result };
+  } else if (state.status === "failed_input")
+    output = {
+      status: "failed_input",
+      error: String(
+        state.error instanceof Error ? state.error.message : state.error,
+      ).slice(0, 1024),
+    };
+  else output = state;
+  const resultBytes = transfers.reduce(
+    (sum, buffer) => sum + buffer.byteLength,
+    diagnosticBytes,
+  );
+  if (resultBytes > limits.maximumResultBytes) {
+    output = {
+      status: "failed_input",
+      error: "Grounding worker result reservation exceeded",
+    };
+    transfers.length = 0;
+  }
+  const response: ResultResponse = {
+    type: "result",
+    jobId: row.request.jobId,
+    generation: row.request.generation,
+    state: output,
+    work: {
+      operations: row.job.operations,
+      activeMs: row.job.activeMs,
+      maximumSliceMs: row.job.maximumSliceMs,
+    },
+    lastPhase: row.job.lastPhase,
+    terrainRebuildWork: row.terrainRebuildWork,
+    inputBytes: row.inputBytes,
+    derivedBytesReserved: row.derivedBytes,
+    resultBytes: output.status === "ready" ? resultBytes : 0,
+    ...(output.status === "failed_budget" || output.status === "failed_input"
+      ? { timing: row.job.captureTiming() }
+      : {}),
+    cache: cacheReceipt(),
+  };
+  return { response, transfers };
+}
+
+function terminalFit(row: ActiveFit): void {
+  if (row.job.state.status === "running") return;
+  try {
+    try {
+      const { response, transfers } = packResult(row);
+      scope.postMessage(response, transfers);
+    } catch (error) {
+      // A packing or structured-clone failure must not wedge the worker. This
+      // fallback has no transferable buffers and preserves cumulative work.
+      // If even the transport is unavailable, let the worker error surface;
+      // the finally still releases local ownership for supervisor teardown.
+      scope.postMessage(failureResponse(row, error));
+    }
+  } finally {
+    if (active === row) active = null;
+    row.owners.clear();
+    const geometries = row.geometries.splice(0);
+    for (const geometry of geometries) geometry.dispose();
+  }
+}
+
+function terminalPreparation(row: ActivePreparation): void {
+  const state = row.job.state;
+  if (state.status === "running") return;
+  type Response = Extract<
+    GrassGroundingWorkerResponse,
+    { type: "surface_prepared" }
+  >;
+  let committed = false;
+  let staged = false;
+  const response = (output: Response["state"]): Response => ({
+    type: "surface_prepared",
+    jobId: row.request.jobId,
+    generation: row.request.generation,
+    state: output,
+    work: {
+      operations: row.job.operations,
+      activeMs: row.job.activeMs,
+      maximumSliceMs: row.job.maximumSliceMs,
+    },
+    lastPhase: row.job.lastPhase,
+    inputBytes: row.inputBytes,
+    derivedBytesReserved: row.derivedBytes,
+    ...(output.status === "failed_budget" || output.status === "failed_input"
+      ? { timing: row.job.captureTiming() }
+      : {}),
+    cache: cacheReceipt(),
+  });
+  try {
+    try {
+      let output: Response["state"];
+      if (state.status === "prepared") {
+        requireValue(
+          row.geometries.length === 1 && !surfaceCache.has(row.request.token),
+          "Invalid prepared surface ownership",
+        );
+        surfaceCache.set(row.request.token, {
+          surface: state.surface,
+          geometry: row.geometries[0],
+          inputBytes: row.inputBytes,
+          derivedBytes: row.derivedBytes,
+        });
+        staged = true;
+        output = {
+          status: "prepared",
+          token: row.request.token,
+          sourceRevision: state.surface.revision,
+        };
+      } else if (state.status === "failed_input") {
+        output = {
+          status: "failed_input",
+          error: String(
+            state.error instanceof Error ? state.error.message : state.error,
+          ).slice(0, 1024),
+        };
+      } else output = state;
+      scope.postMessage(response(output));
+      committed = state.status === "prepared";
+    } catch (error) {
+      if (staged) surfaceCache.delete(row.request.token);
+      scope.postMessage(
+        response({
+          status: "failed_input",
+          error: String(error instanceof Error ? error.message : error).slice(
+            0,
+            1024,
+          ),
+        }),
+      );
+    }
+  } finally {
+    if (active === row) active = null;
+    if (staged && !committed) surfaceCache.delete(row.request.token);
+    const geometries = row.geometries.splice(0);
+    if (!committed) for (const geometry of geometries) geometry.dispose();
+  }
+}
+
+function terminal(row: Active): void {
+  if (row.kind === "prepare") terminalPreparation(row);
+  else terminalFit(row);
+}
+
+function admitPreparation(value: unknown) {
+  const r = object(
+    value,
+    [
+      "type",
+      "schemaVersion",
+      "jobId",
+      "generation",
+      "token",
+      "snapshot",
+      "consumed",
+    ],
+    ["execution"],
+  );
+  requireValue(
+    r.type === "prepare_surface" &&
+      r.schemaVersion === 1 &&
+      integer(r.jobId, 1) &&
+      integer(r.generation, 1) &&
+      integer(r.token, 1),
+    "Invalid grounding preparation identity",
+  );
+  requireValue(
+    r.token > lastAcceptedSurfaceToken,
+    "Stale grounding surface token",
+  );
+  requireValue(
+    surfaceCache.size < limits.maximumCachedSurfaces,
+    "Grounding surface cache capacity exceeded",
+  );
+  const admitted = admitSurface(r.snapshot);
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  validateGrassGroundingConsumedWork(r.consumed, execution);
+  const request = value as GrassGroundingWorkerPrepareSurface;
+  // The helper also rejects aliasing between individual snapshot fields.
+  grassGroundingWorkerInputTransfers(request);
+  assertReservation(admitted.inputBytes, admitted.derivedBytes);
+  return {
+    request,
+    inputBytes: admitted.inputBytes,
+    derivedBytes: admitted.derivedBytes,
+    execution,
+  };
+}
+
+function releaseSurfaces(value: unknown): void {
+  const r = object(
+    value,
+    ["type", "schemaVersion", "jobId", "generation", "surfaceTokens"],
+    ["execution"],
+  );
+  requireValue(
+    r.type === "release_surfaces" &&
+      r.schemaVersion === 1 &&
+      integer(r.jobId, 1) &&
+      integer(r.generation, 1),
+    "Invalid grounding release identity",
+  );
+  const tokens = surfaceTokens(r.surfaceTokens, true);
+  const execution = captureGrassGroundingExecution(r.execution, "cross-realm");
+  if (execution && grassGroundingTimeFailure(0, execution)) {
+    scope.postMessage({
+      type: "rejected",
+      jobId: r.jobId,
+      generation: r.generation,
+      reason: "stale",
+    });
+    return;
+  }
+  // Validate the entire command before releasing even one owner.
+  for (const token of tokens)
+    requireValue(surfaceCache.has(token), "Missing cached grounding surface");
+  const projected = cacheReceipt();
+  for (const token of tokens) {
+    const owner = surfaceCache.get(token)!;
+    projected.owners--;
+    projected.inputBytes -= owner.inputBytes;
+    projected.derivedBytesReserved -= owner.derivedBytes;
+  }
+  // A failed acknowledgement must leave the cache intact. The synchronous
+  // commit finishes before the worker can accept the next incoming message.
+  scope.postMessage({
+    type: "surfaces_released",
+    jobId: r.jobId,
+    generation: r.generation,
+    surfaceTokens: tokens,
+    cache: projected,
+  });
+  lastAcceptedId = r.jobId;
+  for (const token of tokens) {
+    const owner = surfaceCache.get(token)!;
+    surfaceCache.delete(token);
+    owner.geometry.dispose();
+  }
+}
+
+function schedule() {
+  if (!scheduled && active) {
+    scheduled = true;
+    channel.port2.postMessage(null);
+  }
+}
+channel.port1.onmessage = () => {
+  scheduled = false;
+  const row = active;
+  if (!row) return;
+  if (row.kind === "fit") row.sliceStartedAt = performance.now();
+  try {
+    row.job.advance();
+  } finally {
+    if (row.kind === "fit") row.sliceStartedAt = null;
+  }
+  if (row.job.state.status === "running") schedule();
+  else terminal(row);
+};
+let lastClockProbeId = 0;
+scope.onmessage = ({ data }) => {
+  let jobId: number | null = null,
+    generation: number | null = null;
+  try {
+    requireValue(
+      data !== null && typeof data === "object",
+      "Invalid grounding message",
+    );
+    const identity = data as Record<string, unknown>;
+    if (identity.type === "clock_probe") {
+      object(data, ["type", "schemaVersion", "probeId"]);
+      requireValue(
+        identity.schemaVersion === 1 &&
+          integer(
+            identity.probeId,
+            1,
+            GRASS_GROUNDING_CLOCK_MAXIMUM_ATTEMPTS,
+          ) &&
+          identity.probeId === lastClockProbeId + 1 &&
+          !active &&
+          lastAcceptedId === 0,
+        "Invalid grounding clock probe",
+      );
+      lastClockProbeId = identity.probeId;
+      scope.postMessage({
+        type: "clock_sample",
+        schemaVersion: 1,
+        probeId: lastClockProbeId,
+        workerEpochMs: performance.timeOrigin + performance.now(),
+      });
+      return;
+    }
+    if (integer(identity.jobId, 1)) jobId = identity.jobId;
+    if (integer(identity.generation, 1)) generation = identity.generation;
+    if (identity.type === "cancel") {
+      object(data, ["type", "schemaVersion", "jobId", "generation"]);
+      requireValue(
+        identity.schemaVersion === 1 && jobId !== null && generation !== null,
+        "Invalid grounding cancellation",
+      );
+      if (
+        !active ||
+        active.request.jobId !== jobId ||
+        active.request.generation !== generation
+      ) {
+        scope.postMessage({
+          type: "rejected",
+          jobId,
+          generation,
+          reason: "stale",
+        });
+        return;
+      }
+      const row = active;
+      row.job.cancel();
+      terminal(row);
+      return;
+    }
+    if (active) {
+      scope.postMessage({
+        type: "rejected",
+        jobId,
+        generation,
+        reason: "busy",
+      });
+      return;
+    }
+    requireValue(
+      jobId !== null && generation !== null,
+      "Invalid grounding identity",
+    );
+    if (jobId <= lastAcceptedId) {
+      scope.postMessage({
+        type: "rejected",
+        jobId,
+        generation,
+        reason: "stale",
+      });
+      return;
+    }
+    if (identity.type === "release_surfaces") {
+      releaseSurfaces(data);
+      return;
+    }
+    let row: Active;
+    if (identity.type === "prepare_surface") {
+      const admitted = admitPreparation(data);
+      const geometries: BufferGeometry[] = [];
+      const preparing: ActivePreparation = {
+        kind: "prepare",
+        ...admitted,
+        geometries,
+        job: new SurfacePreparationContinuation(
+          rebuildSurface(admitted.request.snapshot, geometries),
+          () => active === preparing,
+          admitted.request.consumed,
+          admitted.execution,
+        ),
+      };
+      lastAcceptedSurfaceToken = admitted.request.token;
+      row = preparing;
+    } else {
+      const admitted = admit(data, identity.type === "start_cached");
+      const owners: SurfaceOwners = new Map(),
+        geometries: BufferGeometry[] = [];
+      const fitting: ActiveFit = {
+        kind: "fit",
+        ...admitted,
+        owners,
+        geometries,
+        terrainRebuildWork: null,
+        sliceStartedAt: null,
+        job: new GrassGroundingContinuation(
+          execute(admitted.request, owners, geometries, () => {
+            const sliceMs = performance.now() - fitting.sliceStartedAt!;
+            fitting.terrainRebuildWork = {
+              operations: fitting.job.operations,
+              activeMs: fitting.job.activeMs + sliceMs,
+              maximumSliceMs: Math.max(fitting.job.maximumSliceMs, sliceMs),
+            };
+          }),
+          () => active === fitting,
+          admitted.request.consumed,
+          admitted.execution,
+          "cross-realm",
+        ),
+      };
+      row = fitting;
+    }
+    active = row;
+    lastAcceptedId = row.request.jobId;
+    try {
+      scope.postMessage({
+        type: "accepted",
+        jobId,
+        generation,
+        inputBytes: row.inputBytes,
+        derivedBytesReserved: row.derivedBytes,
+        cache: cacheReceipt(),
+      });
+    } catch (error) {
+      row.job.cancel();
+      active = null;
+      throw error;
+    }
+    schedule();
+  } catch (error) {
+    scope.postMessage({
+      type: "rejected",
+      jobId,
+      generation,
+      reason: "invalid_message",
+      error: String(error instanceof Error ? error.message : error).slice(
+        0,
+        1024,
+      ),
+    });
+  }
+};

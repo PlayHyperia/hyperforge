@@ -3,24 +3,22 @@
  *
  * Creates visual geometry for the duel arena without requiring external models.
  * Uses procedural Three.js geometry, InstancedMesh, and TSL shader materials:
- * - 6 arena floors with TSL stone tile textures and border trim
+ * - One arena plus lobby floor sharing weathered TSL limestone
  * - Stone pillar architecture at corners with TSL-animated brazier glow
- * - Continuous stone fences (fully enclosed, TSL procedural sandstone material)
+ * - Dressed-stone posts with chamfered timber rails and tapered stone caps
  * - Colored banners mounted on east/west arena fences
- * - Lobby with textured floor and corner braziers (TSL glow)
- * - Hospital with 3D cross and healing particle glow
- * - Decorative border pillars at lobby/hospital corners
+ * - Lobby with stone floor and corner braziers (TSL glow)
+ * - Decorative border pillars at lobby corners
  *
- * Performance: ~22 draw calls via InstancedMesh (down from ~846 individual meshes).
- * All 28 PointLights replaced with GPU-animated TSL emissive brazier materials.
+ * Repeated architecture uses InstancedMesh. Braziers use GPU-animated emissive
+ * surfaces instead of per-brazier PointLights; actual costs require measurement.
  *
  * Arena Layout (classic MMORPG-style):
- * - 6 rectangular arenas in a 2x3 grid
- * - Each arena is 20m wide x 24m long
- * - 4m gap between arenas
+ * - The admitted manifest owns the single arena's dimensions and placement
  * - Base coordinates: see arena-layout.ts (single source of truth)
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   MeshStandardNodeMaterial,
   uniform,
@@ -31,16 +29,12 @@ import {
   normalWorld,
   vec2,
   vec3,
-  vec4,
   float,
   floor as tslFloor,
   fract,
   sin,
   dot,
-  mix,
   smoothstep,
-  min as tslMin,
-  mod,
 } from "three/tsl";
 import { System } from "../shared/infrastructure/System";
 import type { World } from "../../core/World";
@@ -50,7 +44,15 @@ import { Layers } from "../../physics/Layers";
 import type { Physics } from "../shared/interaction/Physics";
 import type { PxRigidStatic } from "../../types/systems/physics";
 import type { ParticleSystem } from "../shared/presentation/ParticleSystem";
-import type { FlatZone } from "../../types/world/terrain";
+import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import { applyDuelStoneSurface } from "./DuelStoneMaterial";
+import {
+  createDuelArenaFloorZones,
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  DUEL_ARENA_FLOOR_CENTER_OFFSET as FLOOR_HEIGHT_OFFSET,
+  DUEL_ARENA_FLOOR_THICKNESS as FLOOR_THICKNESS,
+} from "../../data/arena-grading";
 import {
   getDuelArenaConfig,
   type DuelArenaConfig,
@@ -60,10 +62,7 @@ import {
   LOBBY_CENTER_Z,
   LOBBY_WIDTH,
   LOBBY_LENGTH,
-  HOSPITAL_CENTER_X,
-  HOSPITAL_CENTER_Z,
-  HOSPITAL_WIDTH,
-  HOSPITAL_LENGTH,
+  ARENA_FORFEIT_PILLAR_INSET,
 } from "../../data/arena-layout";
 
 // Arena grid size/position: getDuelArenaConfig() at runtime (see duel-manifest / ArenaPoolManager).
@@ -77,16 +76,6 @@ const FENCE_POST_SIZE = 0.2;
 const FENCE_RAIL_HEIGHT = 0.08;
 const FENCE_RAIL_DEPTH = 0.08;
 const FENCE_RAIL_HEIGHTS = [0.3, 0.75, 1.2];
-const FLOOR_THICKNESS = 0.3;
-const FLOOR_HEIGHT_OFFSET = 0.27;
-
-const LOBBY_FLOOR_COLOR = 0xc9b896;
-const HOSPITAL_FLOOR_COLOR = 0xffffff;
-
-const TILE_TEXTURE_SIZE = 512;
-const TILE_TEXTURE_WORLD_SIZE = 8;
-const LOBBY_TILE_GRID = 3;
-const LOBBY_TILE_GROUT_WIDTH = 6;
 
 const TORCH_BRAZIER_RADIUS = 0.12;
 
@@ -101,7 +90,6 @@ const PILLAR_SHAFT_SIZE = 0.35;
 const PILLAR_SHAFT_HEIGHT = 2.0;
 const PILLAR_CAPITAL_SIZE = 0.45;
 const PILLAR_CAPITAL_HEIGHT = 0.12;
-const PILLAR_STONE_COLOR = 0x908878;
 const PILLAR_TOTAL_HEIGHT =
   PILLAR_BASE_HEIGHT + PILLAR_SHAFT_HEIGHT + PILLAR_CAPITAL_HEIGHT;
 
@@ -119,110 +107,136 @@ const BANNER_COLORS: number[] = [
   0xcc3333, 0xcc3333, 0x3366cc, 0x3366cc, 0x33aa44, 0x33aa44,
 ];
 
+/**
+ * Interaction markers and fence banners are useful in the playable client,
+ * but their tall geometry can cross the orbiting broadcast camera and obscure
+ * the scoreboard. Stream views keep the arena architecture while omitting
+ * these nonessential foreground props.
+ */
+export function shouldRenderInteractiveArenaProps(win?: Window): boolean {
+  return !isStreamingLikeViewport(win);
+}
+
+/**
+ * The playable center marker is useful for spatial judgment, but a cinematic
+ * camera can place it between the viewer and the contestants. Stream and
+ * embedded spectator views omit it so the floor never becomes foreground UI.
+ */
+export function shouldRenderArenaCenterMarker(win?: Window): boolean {
+  return !isStreamingLikeViewport(win);
+}
+
+/**
+ * Opaque authored floors sit only 2 cm above the navigation terrain. At distant
+ * broadcast cameras that separation can quantize to the same conventional
+ * depth value. One fixed depth unit resolves the tie without moving geometry,
+ * changing collision heights, or adding a slope-dependent bias at grazing views.
+ */
+export function createDuelFloorMaterial(
+  parameters?: ConstructorParameters<typeof MeshStandardNodeMaterial>[0],
+): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial(parameters);
+  material.polygonOffset = true;
+  material.polygonOffsetUnits = -1;
+  material.polygonOffsetFactor = 0;
+  return material;
+}
+
 // Instanced mesh counts (fence posts, rails, pillars) are derived from DuelArenaConfig at runtime.
 
+/**
+ * Closed eight-sided member, clipped inside the former box envelope. Separate
+ * face vertices keep dressed edges crisp without extra material groups. A
+ * narrower upper ring gives caps a shallow weather-shedding shoulder.
+ */
+function createChamferedArenaMember(
+  width: number,
+  height: number,
+  depth: number,
+  topScale = 1,
+): THREE.BufferGeometry {
+  if (
+    ![width, height, depth, topScale].every(Number.isFinite) ||
+    Math.min(width, height, depth, topScale) <= 0 ||
+    topScale > 1
+  ) {
+    throw new Error("Arena member dimensions must be finite and positive");
+  }
+  const x = width / 2;
+  const z = depth / 2;
+  const cut = Math.min(width, depth) * 0.16;
+  const ring: readonly (readonly [number, number])[] = [
+    [-x + cut, -z],
+    [x - cut, -z],
+    [x, -z + cut],
+    [x, z - cut],
+    [x - cut, z],
+    [-x + cut, z],
+    [-x, z - cut],
+    [-x, -z + cut],
+  ];
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const d = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  const edge = new THREE.Vector3();
+  for (let i = 0; i < ring.length; i++) {
+    const [ax, az] = ring[i];
+    const [bx, bz] = ring[(i + 1) % ring.length];
+    a.set(ax, -height / 2, az);
+    b.set(ax * topScale, height / 2, az * topScale);
+    c.set(bx, -height / 2, bz);
+    d.set(bx * topScale, height / 2, bz * topScale);
+    normal.subVectors(b, a).cross(edge.subVectors(c, a)).normalize();
+    const start = positions.length / 3;
+    for (const vertex of [a, b, c, d]) {
+      positions.push(vertex.x, vertex.y, vertex.z);
+      normals.push(normal.x, normal.y, normal.z);
+    }
+    const length = a.distanceTo(c);
+    uvs.push(0, 0, 0, height, length, 0, length, height);
+    indices.push(start, start + 1, start + 2, start + 1, start + 3, start + 2);
+  }
+  for (const upper of [false, true]) {
+    const start = positions.length / 3;
+    const scale = upper ? topScale : 1;
+    for (const [rx, rz] of ring) {
+      positions.push(rx * scale, ((upper ? 1 : -1) * height) / 2, rz * scale);
+      normals.push(0, upper ? 1 : -1, 0);
+      uvs.push(rx * scale, rz * scale);
+    }
+    for (let i = 1; i < ring.length - 1; i++) {
+      indices.push(
+        start,
+        start + (upper ? i + 1 : i),
+        start + (upper ? i : i + 1),
+      );
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 // ============================================================================
-// TSL Procedural Stone Functions
+// TSL Brazier Functions
 // ============================================================================
 
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
-});
-
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
-  const i = tslFloor(p);
-  const f = fract(p);
-  const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
-
-  const a = tslHash(i);
-  const b = tslHash(i.add(vec2(1.0, 0.0)));
-  const c = tslHash(i.add(vec2(0.0, 1.0)));
-  const d = tslHash(i.add(vec2(1.0, 1.0)));
-
-  return mix(mix(a, b, smoothF.x), mix(c, d, smoothF.x), smoothF.y);
-});
-
-/**
- * Running-bond stone block pattern for sandstone fences.
- * Returns vec4(isStone, blockId.x, blockId.y, bevel).
- */
-const sandstoneBlockPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
-  const blockWidth = float(0.6);
-  const blockHeight = float(0.3);
-  const mortarWidth = float(0.015);
-
-  const scaled = uvIn.div(vec2(blockWidth, blockHeight));
-  const row = tslFloor(scaled.y);
-  const rowOffset = mod(row, float(2.0)).mul(0.5);
-  const offsetUV = vec2(scaled.x.add(rowOffset), scaled.y);
-
-  const blockId = tslFloor(offsetUV);
-  const localUV = fract(offsetUV);
-
-  const mortarU = mortarWidth.div(blockWidth);
-  const mortarV = mortarWidth.div(blockHeight);
-
-  const edgeDistX = tslMin(localUV.x, float(1.0).sub(localUV.x));
-  const edgeDistY = tslMin(localUV.y, float(1.0).sub(localUV.y));
-  const bevel = smoothstep(
-    float(0.0),
-    float(0.06),
-    tslMin(edgeDistX, edgeDistY),
-  );
-
-  const isStone = smoothstep(mortarU, mortarU.add(float(0.01)), localUV.x)
-    .mul(
-      smoothstep(mortarU, mortarU.add(float(0.01)), float(1.0).sub(localUV.x)),
-    )
-    .mul(smoothstep(mortarV, mortarV.add(float(0.01)), localUV.y))
-    .mul(
-      smoothstep(mortarV, mortarV.add(float(0.01)), float(1.0).sub(localUV.y)),
-    );
-
-  return vec4(isStone, blockId.x, blockId.y, bevel);
-});
-
-/**
- * Square grid tile pattern for arena floors (large flagstones).
- * Returns vec4(isStone, tileId.x, tileId.y, bevel).
- * Uses positionWorld.xz for seamless world-space tiling.
- */
-const floorTilePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
-  const tileSize = float(1.2);
-  const mortarWidth = float(0.02);
-
-  const scaled = uvIn.div(tileSize);
-  const tileId = tslFloor(scaled);
-  const localUV = fract(scaled);
-
-  const mortarFrac = mortarWidth.div(tileSize);
-
-  const edgeDistX = tslMin(localUV.x, float(1.0).sub(localUV.x));
-  const edgeDistY = tslMin(localUV.y, float(1.0).sub(localUV.y));
-  const bevel = smoothstep(
-    float(0.0),
-    float(0.05),
-    tslMin(edgeDistX, edgeDistY),
-  );
-
-  const isStone = smoothstep(mortarFrac, mortarFrac.add(float(0.01)), localUV.x)
-    .mul(
-      smoothstep(
-        mortarFrac,
-        mortarFrac.add(float(0.01)),
-        float(1.0).sub(localUV.x),
-      ),
-    )
-    .mul(smoothstep(mortarFrac, mortarFrac.add(float(0.01)), localUV.y))
-    .mul(
-      smoothstep(
-        mortarFrac,
-        mortarFrac.add(float(0.01)),
-        float(1.0).sub(localUV.y),
-      ),
-    );
-
-  return vec4(isStone, tileId.x, tileId.y, bevel);
 });
 
 // ============================================================================
@@ -240,18 +254,16 @@ export class DuelArenaVisualsSystem extends System {
 
   private terrainSystem: {
     getHeightAt?: (x: number, z: number) => number;
-    getProceduralHeightAt?: (x: number, z: number) => number;
-    registerFlatZone?: (zone: FlatZone) => void;
-    unregisterFlatZone?: (id: string) => void;
   } | null = null;
 
-  private flatZoneIds: string[] = [];
+  private arenaGradeHeight: number | null = null;
   private physicsSystem: Physics | null = null;
   private physicsBodies: PxRigidStatic[] = [];
   private particleEmitterIds: string[] = [];
 
   // Shared cached materials
   private stoneFenceMat: MeshStandardNodeMaterial | null = null;
+  private timberRailMat: MeshStandardNodeMaterial | null = null;
   private arenaFloorMat: MeshStandardNodeMaterial | null = null;
   private borderMat: MeshStandardNodeMaterial | null = null;
   private pillarStoneMat: MeshStandardNodeMaterial | null = null;
@@ -291,28 +303,45 @@ export class DuelArenaVisualsSystem extends System {
     return this.visualsCreated;
   }
 
-  private getTerrainHeight(x: number, z: number): number {
-    if (this.terrainSystem?.getHeightAt) {
-      try {
-        const height = this.terrainSystem.getHeightAt(x, z);
-        return height ?? 0;
-      } catch {
-        return 0;
-      }
-    }
-    return 0;
+  private getArenaBaseHeight(): number {
+    this.arenaGradeHeight ??= getDuelArenaGradeHeight();
+    return this.arenaGradeHeight;
   }
 
-  private getProceduralTerrainHeight(x: number, z: number): number {
-    if (this.terrainSystem?.getProceduralHeightAt) {
-      try {
-        const height = this.terrainSystem.getProceduralHeightAt(x, z);
-        return height ?? 0;
-      } catch {
-        return 0;
+  private getFloorGroundHeight(): number {
+    return this.getArenaBaseHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
+  }
+
+  /** Fail before visual allocation if authoritative terrain missed its shared floors. */
+  private assertSharedArenaFloors(): void {
+    const sample = this.terrainSystem?.getHeightAt;
+    if (!sample)
+      throw new Error(
+        "Duel arena visuals require authoritative terrain heights",
+      );
+    for (const zone of createDuelArenaFloorZones(
+      this.arenaCfg,
+      this.getArenaBaseHeight(),
+    )) {
+      const halfWidth = zone.width / 2 - 0.5;
+      const halfDepth = zone.depth / 2 - 0.5;
+      for (const [dx, dz] of [
+        [0, 0],
+        [-halfWidth, -halfDepth],
+        [-halfWidth, halfDepth],
+        [halfWidth, -halfDepth],
+        [halfWidth, halfDepth],
+      ]) {
+        const height = sample.call(
+          this.terrainSystem,
+          zone.centerX + dx,
+          zone.centerZ + dz,
+        );
+        if (!Number.isFinite(height) || Math.abs(height - zone.height) > 1e-6) {
+          throw new Error(`Duel arena shared floor is not ready: ${zone.id}`);
+        }
       }
     }
-    return this.getTerrainHeight(x, z);
   }
 
   async init(options?: WorldOptions): Promise<void> {
@@ -325,121 +354,31 @@ export class DuelArenaVisualsSystem extends System {
 
   start(): void {
     this.arenaCfg = getDuelArenaConfig();
+    this.getArenaBaseHeight();
 
     this.terrainSystem = this.world.getSystem("terrain") as {
       getHeightAt?: (x: number, z: number) => number;
-      getProceduralHeightAt?: (x: number, z: number) => number;
-      registerFlatZone?: (zone: FlatZone) => void;
-      unregisterFlatZone?: (id: string) => void;
     } | null;
 
-    if (!this.terrainSystem?.getHeightAt) {
-      console.warn(
-        "[DuelArenaVisualsSystem] TerrainSystem not available, using fallback heights",
-      );
-    }
+    this.assertSharedArenaFloors();
 
     this.physicsSystem = this.world.getSystem("physics") as Physics | null;
     if (!this.physicsSystem) {
-      console.warn(
-        "[DuelArenaVisualsSystem] Physics system not available, floors will have no collision",
-      );
+      if (this.world.isClient && isStreamingLikeViewport()) {
+        console.info(
+          "[DuelArenaVisualsSystem] Local collision intentionally omitted for the non-interactive stream viewport; movement remains server-authoritative",
+        );
+      } else {
+        console.warn(
+          "[DuelArenaVisualsSystem] Physics system not available, floors will have no collision",
+        );
+      }
     }
-
-    this.registerArenaFlatZones();
 
     console.log(
       "[DuelArenaVisualsSystem] start() called, creating arena visuals...",
     );
     this.createArenaVisuals();
-  }
-
-  // ============================================================================
-  // Flat Zone Registration
-  // ============================================================================
-
-  private registerArenaFlatZones(): void {
-    if (!this.terrainSystem?.registerFlatZone) {
-      console.warn(
-        "[DuelArenaVisualsSystem] TerrainSystem.registerFlatZone not available, skipping flat zone registration",
-      );
-      return;
-    }
-
-    const FLAT_ZONE_HEIGHT_OFFSET = 0.4;
-    const BLEND_RADIUS = 1.0;
-    const CARVE_INSET = 1.0;
-
-    const cfg = this.arenaCfg;
-    for (let i = 0; i < cfg.arenaCount; i++) {
-      const { cx: centerX, cz: centerZ } = this.arenaCell(i);
-
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        centerX,
-        centerZ,
-      );
-      const zoneId = `duel_arena_floor_${i + 1}`;
-
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX,
-        centerZ,
-        width: cfg.arenaWidth,
-        depth: cfg.arenaLength,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    // Lobby flat zone
-    {
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        LOBBY_CENTER_X,
-        LOBBY_CENTER_Z,
-      );
-      const zoneId = "duel_lobby_floor";
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX: LOBBY_CENTER_X,
-        centerZ: LOBBY_CENTER_Z,
-        width: LOBBY_WIDTH,
-        depth: LOBBY_LENGTH,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    // Hospital flat zone
-    {
-      const proceduralHeight = this.getProceduralTerrainHeight(
-        HOSPITAL_CENTER_X,
-        HOSPITAL_CENTER_Z,
-      );
-      const zoneId = "duel_hospital_floor";
-      const zone: FlatZone = {
-        id: zoneId,
-        centerX: HOSPITAL_CENTER_X,
-        centerZ: HOSPITAL_CENTER_Z,
-        width: HOSPITAL_WIDTH,
-        depth: HOSPITAL_LENGTH,
-        height: proceduralHeight + FLAT_ZONE_HEIGHT_OFFSET,
-        blendRadius: BLEND_RADIUS,
-        carveInset: CARVE_INSET,
-      };
-      this.terrainSystem.registerFlatZone(zone);
-      this.flatZoneIds.push(zoneId);
-    }
-
-    console.log(
-      `[DuelArenaVisualsSystem] Registered ${this.flatZoneIds.length} flat zones (${this.arenaCfg.arenaCount} arenas + lobby + hospital)`,
-    );
   }
 
   // ============================================================================
@@ -455,6 +394,7 @@ export class DuelArenaVisualsSystem extends System {
     if (this.world.isClient) {
       this.arenaGroup = new THREE.Group();
       this.arenaGroup.name = "DuelArenaVisuals";
+      const renderInteractiveArenaProps = shouldRenderInteractiveArenaProps();
 
       // Create all shared materials first
       this.createSharedMaterials();
@@ -464,18 +404,23 @@ export class DuelArenaVisualsSystem extends System {
       this.buildPillarInstances();
       this.buildBrazierInstances();
       this.buildBorderInstances();
-      this.buildBannerPoleInstances();
+      if (renderInteractiveArenaProps) {
+        this.buildBannerPoleInstances();
+      }
     }
 
     // Individual meshes (need unique userData/layers for raycasting)
     this.createArenaFloors();
     this.createArenaWallCollisions();
     this.createLobbyFloor();
-    this.createHospitalFloor();
     if (this.world.isClient) {
-      this.createArenaCenterRings();
-      this.createForfeitPillars();
-      this.createBannerCloths();
+      if (shouldRenderArenaCenterMarker()) {
+        this.createArenaCenterRings();
+      }
+      if (shouldRenderInteractiveArenaProps()) {
+        this.createForfeitPillars();
+        this.createBannerCloths();
+      }
     }
 
     // Register fire/torch particles
@@ -522,11 +467,13 @@ export class DuelArenaVisualsSystem extends System {
     });
     this.materials.push(this.borderMat);
 
-    this.pillarStoneMat = new MeshStandardNodeMaterial({
-      color: PILLAR_STONE_COLOR,
-      roughness: 0.85,
+    this.pillarStoneMat = this.stoneFenceMat;
+    this.timberRailMat = new MeshStandardNodeMaterial({
+      color: 0x756149,
+      roughness: 0.86,
+      metalness: 0,
     });
-    this.materials.push(this.pillarStoneMat);
+    this.materials.push(this.timberRailMat);
 
     this.brazierGlowMat = this.createBrazierGlowMaterial();
     this.materials.push(this.brazierGlowMat);
@@ -553,105 +500,20 @@ export class DuelArenaVisualsSystem extends System {
     this.materials.push(this.lobbyStandMat);
   }
 
-  /**
-   * TSL procedural sandstone block material for stone fences.
-   * GPU-computed block pattern with per-block color variation, mortar grooves,
-   * and normal-mapped raised blocks. Uses world-space UVs for seamless tiling.
-   */
+  /** Dressed stone relies on real chamfers rather than noisy micro-patterns. */
   private createStoneFenceMaterial(): MeshStandardNodeMaterial {
-    const material = new MeshStandardNodeMaterial();
-
-    material.colorNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x.add(worldPos.z), worldPos.y).mul(2.0);
-
-      const pattern = sandstoneBlockPattern(uvCoord);
-      const isStone = pattern.x;
-      const blockId = vec2(pattern.y, pattern.z);
-      const bevel = pattern.w;
-
-      const hashVal = tslHash(blockId);
-      const r = float(0.62).add(hashVal.mul(0.1));
-      const g = float(0.52).add(hashVal.mul(0.08));
-      const b = float(0.38).add(hashVal.mul(0.08));
-      const stoneColor = vec3(r, g, b);
-
-      const grain = tslNoise2D(uvCoord.mul(15.0)).mul(0.08);
-      const grainedStone = stoneColor.add(vec3(grain, grain, grain));
-
-      const mortarColor = vec3(0.35, 0.28, 0.2);
-      const baseColor = mix(mortarColor, grainedStone.mul(bevel), isStone);
-
-      return vec4(baseColor, 1.0);
-    })();
-
-    material.roughnessNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x.add(worldPos.z), worldPos.y).mul(2.0);
-
-      const pattern = sandstoneBlockPattern(uvCoord);
-      const isStone = pattern.x;
-      const blockId = vec2(pattern.y, pattern.z);
-
-      const stoneRough = float(0.72).add(
-        tslHash(blockId.add(vec2(5.0, 3.0))).mul(0.1),
-      );
-      const mortarRough = float(0.92);
-
-      return mix(mortarRough, stoneRough, isStone);
-    })();
-
-    return material;
+    return new MeshStandardNodeMaterial({
+      color: 0xaaa18d,
+      roughness: 0.9,
+      metalness: 0,
+    });
   }
 
   /**
-   * TSL procedural floor material with square flagstone pattern.
-   * World-space UVs make each arena look unique despite sharing the material.
+   * One weathered stone surface shared by every campus floor.
    */
   private createArenaFloorMaterial(): MeshStandardNodeMaterial {
-    const material = new MeshStandardNodeMaterial();
-
-    material.colorNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x, worldPos.z);
-
-      const pattern = floorTilePattern(uvCoord);
-      const isStone = pattern.x;
-      const tileId = vec2(pattern.y, pattern.z);
-      const bevel = pattern.w;
-
-      const hashVal = tslHash(tileId);
-      const r = float(0.68).add(hashVal.mul(0.12));
-      const g = float(0.54).add(hashVal.mul(0.1));
-      const b = float(0.36).add(hashVal.mul(0.08));
-      const stoneColor = vec3(r, g, b);
-
-      const grain = tslNoise2D(uvCoord.mul(12.0)).mul(0.06);
-      const grainedStone = stoneColor.add(vec3(grain, grain, grain));
-
-      const groutColor = vec3(0.4, 0.32, 0.22);
-      const baseColor = mix(groutColor, grainedStone.mul(bevel), isStone);
-
-      return vec4(baseColor, 1.0);
-    })();
-
-    material.roughnessNode = Fn(() => {
-      const worldPos = positionWorld;
-      const uvCoord = vec2(worldPos.x, worldPos.z);
-
-      const pattern = floorTilePattern(uvCoord);
-      const isStone = pattern.x;
-      const tileId = vec2(pattern.y, pattern.z);
-
-      const stoneRough = float(0.6).add(
-        tslHash(tileId.add(vec2(7.0, 11.0))).mul(0.12),
-      );
-      const groutRough = float(0.9);
-
-      return mix(groutRough, stoneRough, isStone);
-    })();
-
-    return material;
+    return applyDuelStoneSurface(createDuelFloorMaterial());
   }
 
   /**
@@ -695,7 +557,7 @@ export class DuelArenaVisualsSystem extends System {
 
   /**
    * Build all fence geometry as InstancedMesh.
-   * 288 posts + 288 caps + 36 X-rails + 36 Z-rails → 4 draw calls.
+   * Posts, caps, X-rails and Z-rails retain four batches for any arena count.
    */
   private buildFenceInstances(): void {
     const cfg = this.arenaCfg;
@@ -711,7 +573,7 @@ export class DuelArenaVisualsSystem extends System {
     const totalXRails = cfg.arenaCount * 2 * FENCE_RAIL_HEIGHTS.length;
     const totalZRails = cfg.arenaCount * 2 * FENCE_RAIL_HEIGHTS.length;
 
-    const postGeom = new THREE.BoxGeometry(
+    const postGeom = createChamferedArenaMember(
       FENCE_POST_SIZE,
       FENCE_HEIGHT,
       FENCE_POST_SIZE,
@@ -719,7 +581,7 @@ export class DuelArenaVisualsSystem extends System {
     this.geometries.push(postGeom);
 
     const capSize = FENCE_POST_SIZE + 0.06;
-    const capGeom = new THREE.BoxGeometry(capSize, 0.06, capSize);
+    const capGeom = createChamferedArenaMember(capSize, 0.06, capSize, 0.82);
     this.geometries.push(capGeom);
 
     const postsIM = new THREE.InstancedMesh(
@@ -744,7 +606,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
 
@@ -783,16 +645,16 @@ export class DuelArenaVisualsSystem extends System {
     this.arenaGroup!.add(postsIM, capsIM);
 
     // X-axis fence rails (north/south walls)
-    const railXGeom = new THREE.BoxGeometry(
-      cfg.arenaWidth,
+    const railXGeom = createChamferedArenaMember(
       FENCE_RAIL_HEIGHT,
+      cfg.arenaWidth,
       FENCE_RAIL_DEPTH,
-    );
+    ).rotateZ(-Math.PI / 2);
     this.geometries.push(railXGeom);
 
     const railsXIM = new THREE.InstancedMesh(
       railXGeom,
-      this.stoneFenceMat!,
+      this.timberRailMat!,
       totalXRails,
     );
     railsXIM.castShadow = true;
@@ -802,7 +664,7 @@ export class DuelArenaVisualsSystem extends System {
     let railXIdx = 0;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfL = cfg.arenaLength / 2;
 
       for (const railY of FENCE_RAIL_HEIGHTS) {
@@ -817,16 +679,16 @@ export class DuelArenaVisualsSystem extends System {
     this.arenaGroup!.add(railsXIM);
 
     // Z-axis fence rails (west/east walls)
-    const railZGeom = new THREE.BoxGeometry(
+    const railZGeom = createChamferedArenaMember(
       FENCE_RAIL_DEPTH,
-      FENCE_RAIL_HEIGHT,
       cfg.arenaLength,
-    );
+      FENCE_RAIL_HEIGHT,
+    ).rotateX(Math.PI / 2);
     this.geometries.push(railZGeom);
 
     const railsZIM = new THREE.InstancedMesh(
       railZGeom,
-      this.stoneFenceMat!,
+      this.timberRailMat!,
       totalZRails,
     );
     railsZIM.castShadow = true;
@@ -836,7 +698,7 @@ export class DuelArenaVisualsSystem extends System {
     let railZIdx = 0;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
 
       for (const railY of FENCE_RAIL_HEIGHTS) {
@@ -853,26 +715,27 @@ export class DuelArenaVisualsSystem extends System {
 
   /**
    * Build all stone pillar components as InstancedMesh.
-   * 32 pillars (24 arena corners + 4 lobby + 4 hospital) × 3 parts → 3 draw calls.
+   * Arena corners plus four lobby pillars × three parts → three draw calls.
    */
   private buildPillarInstances(): void {
     const cfg = this.arenaCfg;
-    const totalPillars = cfg.arenaCount * 4 + 8; // arena corners + lobby + hospital
+    const totalPillars = cfg.arenaCount * 4 + 4; // arena corners + lobby
 
-    const baseGeom = new THREE.BoxGeometry(
+    const baseGeom = createChamferedArenaMember(
       PILLAR_BASE_SIZE,
       PILLAR_BASE_HEIGHT,
       PILLAR_BASE_SIZE,
     );
-    const shaftGeom = new THREE.BoxGeometry(
+    const shaftGeom = createChamferedArenaMember(
       PILLAR_SHAFT_SIZE,
       PILLAR_SHAFT_HEIGHT,
       PILLAR_SHAFT_SIZE,
     );
-    const capitalGeom = new THREE.BoxGeometry(
+    const capitalGeom = createChamferedArenaMember(
       PILLAR_CAPITAL_SIZE,
       PILLAR_CAPITAL_HEIGHT,
       PILLAR_CAPITAL_SIZE,
+      0.82,
     );
     this.geometries.push(baseGeom, shaftGeom, capitalGeom);
 
@@ -907,7 +770,7 @@ export class DuelArenaVisualsSystem extends System {
     // Arena corner pillars
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
 
@@ -930,22 +793,7 @@ export class DuelArenaVisualsSystem extends System {
     ]) {
       positions.push({
         ...c,
-        terrainY: this.getTerrainHeight(c.x, c.z),
-      });
-    }
-
-    // Hospital corner pillars (4) — same inset as lobby
-    const hospHW = HOSPITAL_WIDTH / 2 - PILLAR_BASE_SIZE / 2;
-    const hospHL = HOSPITAL_LENGTH / 2 - PILLAR_BASE_SIZE / 2;
-    for (const c of [
-      { x: HOSPITAL_CENTER_X - hospHW, z: HOSPITAL_CENTER_Z - hospHL },
-      { x: HOSPITAL_CENTER_X + hospHW, z: HOSPITAL_CENTER_Z - hospHL },
-      { x: HOSPITAL_CENTER_X - hospHW, z: HOSPITAL_CENTER_Z + hospHL },
-      { x: HOSPITAL_CENTER_X + hospHW, z: HOSPITAL_CENTER_Z + hospHL },
-    ]) {
-      positions.push({
-        ...c,
-        terrainY: this.getTerrainHeight(c.x, c.z),
+        terrainY: this.getFloorGroundHeight(),
       });
     }
 
@@ -1007,7 +855,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const pillarTopY = terrainY + PILLAR_TOTAL_HEIGHT;
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
@@ -1070,7 +918,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
       const borderY = floorY + FLOOR_THICKNESS / 2 + BORDER_HEIGHT / 2;
       const halfW = floorWidth / 2;
@@ -1120,7 +968,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
 
       matrix.makeTranslation(
@@ -1159,7 +1007,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let i = 0; i < cfg.arenaCount; i++) {
       const { cx, cz } = this.arenaCell(i);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
 
       if (this.world.isClient) {
@@ -1173,6 +1021,9 @@ export class DuelArenaVisualsSystem extends System {
         }
 
         const floor = new THREE.Mesh(floorGeom, this.arenaFloorMat!);
+        // The opaque arena surface must receive contestant/prop shadows;
+        // receiving on the terrain hidden beneath it cannot provide contact.
+        floor.receiveShadow = true;
         floor.position.set(cx, floorY, cz);
         floor.name = `ArenaFloor_${i + 1}`;
         floor.layers.set(2);
@@ -1208,6 +1059,8 @@ export class DuelArenaVisualsSystem extends System {
     if (!this.world.isClient || !this.arenaGroup) return;
 
     const cfg = this.arenaCfg;
+    // This is a subtle center reference, not the combat boundary. Keep it
+    // compact in every viewport so it never becomes foreground obstruction.
     const innerR = 2.0;
     const outerR = 2.45;
     const ringGeom = new THREE.RingGeometry(innerR, outerR, 64);
@@ -1226,7 +1079,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorY =
         terrainY + FLOOR_HEIGHT_OFFSET + FLOOR_THICKNESS / 2 + 0.02;
 
@@ -1255,11 +1108,11 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
 
       const cornerOffset = {
-        x: cfg.arenaWidth / 2 - 2,
-        z: cfg.arenaLength / 2 - 2,
+        x: cfg.arenaWidth / 2 - ARENA_FORFEIT_PILLAR_INSET,
+        z: cfg.arenaLength / 2 - ARENA_FORFEIT_PILLAR_INSET,
       };
 
       for (const [label, sx, sz] of [
@@ -1313,7 +1166,7 @@ export class DuelArenaVisualsSystem extends System {
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const halfW = cfg.arenaWidth / 2;
       const matIndex = Math.min(
         Math.floor(a / cfg.columns),
@@ -1343,10 +1196,7 @@ export class DuelArenaVisualsSystem extends System {
   // ============================================================================
 
   private createLobbyFloor(): void {
-    const terrainY = this.getProceduralTerrainHeight(
-      LOBBY_CENTER_X,
-      LOBBY_CENTER_Z,
-    );
+    const terrainY = this.getArenaBaseHeight();
     const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
 
     if (this.world.isClient) {
@@ -1356,18 +1206,10 @@ export class DuelArenaVisualsSystem extends System {
         LOBBY_LENGTH,
       );
 
-      const tileTexture = this.generateLobbyTileTexture();
-      tileTexture.repeat.set(
-        LOBBY_WIDTH / TILE_TEXTURE_WORLD_SIZE,
-        LOBBY_LENGTH / TILE_TEXTURE_WORLD_SIZE,
-      );
-
-      const material = new MeshStandardNodeMaterial({
-        color: LOBBY_FLOOR_COLOR,
-        map: tileTexture,
-      });
+      const material = this.arenaFloorMat!;
 
       const floor = new THREE.Mesh(geometry, material);
+      floor.receiveShadow = true;
       floor.position.set(LOBBY_CENTER_X, floorY, LOBBY_CENTER_Z);
       floor.name = "LobbyFloor";
       floor.layers.set(2);
@@ -1379,7 +1221,6 @@ export class DuelArenaVisualsSystem extends System {
       );
 
       this.geometries.push(geometry);
-      this.materials.push(material);
       this.arenaGroup!.add(floor);
 
       this.createLobbyBraziers(terrainY);
@@ -1453,92 +1294,6 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   // ============================================================================
-  // Hospital Floor & Cross
-  // ============================================================================
-
-  private createHospitalFloor(): void {
-    const terrainY = this.getProceduralTerrainHeight(
-      HOSPITAL_CENTER_X,
-      HOSPITAL_CENTER_Z,
-    );
-    const floorY = terrainY + FLOOR_HEIGHT_OFFSET;
-
-    if (this.world.isClient) {
-      const geometry = new THREE.BoxGeometry(
-        HOSPITAL_WIDTH,
-        FLOOR_THICKNESS,
-        HOSPITAL_LENGTH,
-      );
-
-      const material = new MeshStandardNodeMaterial({
-        color: HOSPITAL_FLOOR_COLOR,
-      });
-
-      const floor = new THREE.Mesh(geometry, material);
-      floor.position.set(HOSPITAL_CENTER_X, floorY, HOSPITAL_CENTER_Z);
-      floor.name = "HospitalFloor";
-      floor.layers.set(2);
-      floor.layers.enable(0);
-      floor.userData = { type: "hospital-floor", walkable: true };
-
-      console.log(
-        `[DuelArenaVisualsSystem] Created hospital floor at (${HOSPITAL_CENTER_X}, ${floorY.toFixed(1)}, ${HOSPITAL_CENTER_Z}) - terrain=${terrainY.toFixed(1)}`,
-      );
-
-      this.createHospitalCross(HOSPITAL_CENTER_X, HOSPITAL_CENTER_Z, floorY);
-
-      this.geometries.push(geometry);
-      this.materials.push(material);
-      this.arenaGroup!.add(floor);
-    }
-
-    this.createFloorCollision(
-      HOSPITAL_CENTER_X,
-      floorY,
-      HOSPITAL_CENTER_Z,
-      HOSPITAL_WIDTH,
-      HOSPITAL_LENGTH,
-      "hospital_floor",
-    );
-  }
-
-  private createHospitalCross(x: number, z: number, floorY: number): void {
-    const crossHeight = 0.08;
-    const crossTopY = floorY + FLOOR_THICKNESS / 2 + crossHeight / 2 + 0.01;
-
-    const crossMaterial = new MeshStandardNodeMaterial({
-      color: 0xff0000,
-    });
-    this.materials.push(crossMaterial);
-
-    const vertGeom = new THREE.BoxGeometry(2, crossHeight, 8);
-    const vertBar = new THREE.Mesh(vertGeom, crossMaterial);
-    vertBar.position.set(x, crossTopY, z);
-    this.geometries.push(vertGeom);
-    this.arenaGroup!.add(vertBar);
-
-    const horizGeom = new THREE.BoxGeometry(8, crossHeight, 2);
-    const horizBar = new THREE.Mesh(horizGeom, crossMaterial);
-    horizBar.position.set(x, crossTopY, z);
-    this.geometries.push(horizGeom);
-    this.arenaGroup!.add(horizBar);
-
-    const particleSystem = this.world.getSystem("particle") as
-      | ParticleSystem
-      | undefined;
-    if (particleSystem) {
-      const emitterId = "healing_glow_hospital";
-      particleSystem.register(emitterId, {
-        type: "glow",
-        preset: "altar",
-        position: { x, y: crossTopY + 0.1, z },
-        color: { core: 0xffffff, mid: 0x88ccff, outer: 0x44aaff },
-      });
-      this.particleEmitterIds.push(emitterId);
-    }
-  }
-
-  // ============================================================================
   // Particle Registration
   // ============================================================================
 
@@ -1547,14 +1302,13 @@ export class DuelArenaVisualsSystem extends System {
    */
   private registerTorchParticles(): void {
     const particleSystem = this.world.getSystem("particle") as
-      | ParticleSystem
-      | undefined;
+      ParticleSystem | undefined;
     if (!particleSystem) return;
 
     const cfg = this.arenaCfg;
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getTerrainHeight(cx, cz);
+      const terrainY = this.getFloorGroundHeight();
       const pillarTopY = terrainY + PILLAR_TOTAL_HEIGHT;
       const halfW = cfg.arenaWidth / 2;
       const halfL = cfg.arenaLength / 2;
@@ -1581,14 +1335,10 @@ export class DuelArenaVisualsSystem extends System {
    */
   private registerLobbyFireParticles(): void {
     const particleSystem = this.world.getSystem("particle") as
-      | ParticleSystem
-      | undefined;
+      ParticleSystem | undefined;
     if (!particleSystem) return;
 
-    const terrainY = this.getProceduralTerrainHeight(
-      LOBBY_CENTER_X,
-      LOBBY_CENTER_Z,
-    );
+    const terrainY = this.getArenaBaseHeight();
     const topY = terrainY + LOBBY_BRAZIER_HEIGHT;
     const inset = 2.5;
 
@@ -1622,60 +1372,6 @@ export class DuelArenaVisualsSystem extends System {
       });
       this.particleEmitterIds.push(emitterId);
     }
-  }
-
-  // ============================================================================
-  // Lobby Tile Texture
-  // ============================================================================
-
-  private generateLobbyTileTexture(): THREE.CanvasTexture {
-    const canvas = document.createElement("canvas");
-    canvas.width = TILE_TEXTURE_SIZE;
-    canvas.height = TILE_TEXTURE_SIZE;
-    const ctx = canvas.getContext("2d")!;
-
-    const tileSize = TILE_TEXTURE_SIZE / LOBBY_TILE_GRID;
-
-    ctx.fillStyle = "#8a7a5e";
-    ctx.fillRect(0, 0, TILE_TEXTURE_SIZE, TILE_TEXTURE_SIZE);
-
-    for (let row = 0; row < LOBBY_TILE_GRID; row++) {
-      for (let col = 0; col < LOBBY_TILE_GRID; col++) {
-        const x = col * tileSize + LOBBY_TILE_GROUT_WIDTH / 2;
-        const y = row * tileSize + LOBBY_TILE_GROUT_WIDTH / 2;
-        const w = tileSize - LOBBY_TILE_GROUT_WIDTH;
-        const h = tileSize - LOBBY_TILE_GROUT_WIDTH;
-
-        const rBase = 200 + Math.floor(Math.random() * 25);
-        const gBase = 175 + Math.floor(Math.random() * 20);
-        const bBase = 140 + Math.floor(Math.random() * 20);
-        ctx.fillStyle = `rgb(${rBase},${gBase},${bBase})`;
-        ctx.fillRect(x, y, w, h);
-
-        for (let s = 0; s < 100; s++) {
-          const sx = x + Math.random() * w;
-          const sy = y + Math.random() * h;
-          const brightness = Math.random() * 30 - 15;
-          const r = Math.min(255, Math.max(0, rBase + brightness));
-          const g = Math.min(255, Math.max(0, gBase + brightness));
-          const b = Math.min(255, Math.max(0, bBase + brightness));
-          ctx.fillStyle = `rgba(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)},0.35)`;
-          ctx.fillRect(sx, sy, 2 + Math.random() * 3, 2 + Math.random() * 3);
-        }
-
-        ctx.strokeStyle = "rgba(0,0,0,0.06)";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-      }
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.generateMipmaps = true;
-    texture.needsUpdate = true;
-    this.textures.push(texture);
-    return texture;
   }
 
   // ============================================================================
@@ -1722,18 +1418,8 @@ export class DuelArenaVisualsSystem extends System {
         0.5,
       );
 
-      exclusionManager.addRectangularBlocker(
-        "duel_hospital",
-        HOSPITAL_CENTER_X,
-        HOSPITAL_CENTER_Z,
-        HOSPITAL_WIDTH + margin * 2,
-        HOSPITAL_LENGTH + margin * 2,
-        0,
-        0.5,
-      );
-
       console.log(
-        `[DuelArenaVisualsSystem] Registered ${this.arenaCfg.arenaCount + 2} grass exclusion zones (arenas + lobby + hospital)`,
+        `[DuelArenaVisualsSystem] Registered ${this.arenaCfg.arenaCount + 1} grass exclusion zones (arenas + lobby)`,
       );
     } catch (error) {
       console.warn(
@@ -1758,7 +1444,7 @@ export class DuelArenaVisualsSystem extends System {
 
     for (let a = 0; a < cfg.arenaCount; a++) {
       const { cx, cz } = this.arenaCell(a);
-      const terrainY = this.getProceduralTerrainHeight(cx, cz);
+      const terrainY = this.getArenaBaseHeight();
       const floorCenterY = terrainY + FLOOR_HEIGHT_OFFSET;
       const wallCenterY = floorCenterY + FLOOR_THICKNESS / 2 + wallH / 2;
       const halfW = cfg.arenaWidth / 2;
@@ -1927,16 +1613,10 @@ export class DuelArenaVisualsSystem extends System {
   }
 
   destroy(): void {
-    if (this.terrainSystem?.unregisterFlatZone) {
-      for (const id of this.flatZoneIds) {
-        this.terrainSystem.unregisterFlatZone(id);
-      }
-    }
-    this.flatZoneIds = [];
+    // Shared terrain floors outlive this visual owner; never unregister them here.
 
     const particleSystem = this.world.getSystem("particle") as
-      | ParticleSystem
-      | undefined;
+      ParticleSystem | undefined;
     if (particleSystem) {
       for (const id of this.particleEmitterIds) {
         particleSystem.unregister(id);
@@ -1988,6 +1668,7 @@ export class DuelArenaVisualsSystem extends System {
 
     this.arenaGroup = null;
     this.stoneFenceMat = null;
+    this.timberRailMat = null;
     this.arenaFloorMat = null;
     this.borderMat = null;
     this.pillarStoneMat = null;

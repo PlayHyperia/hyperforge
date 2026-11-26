@@ -11,6 +11,7 @@
  * @module ProceduralFlowers
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -43,6 +44,7 @@ import THREE, {
   smoothstep,
 } from "../../../extras/three/three";
 import { SpriteNodeMaterial } from "three/webgpu";
+import type { StorageBufferNode } from "three/webgpu";
 import { System } from "../infrastructure/System";
 import type { World } from "../../../types";
 import { tslUtils } from "../../../utils/TSLUtils";
@@ -149,7 +151,7 @@ let terrainNoiseTexture: THREE.Texture | null = null;
 // z -> 0/12 offsetY - 12/1 visibility (11 unused)
 // w -> noise packed (0/6 r, 6/6 g, 12/6 b, 18/6 a)
 
-type InstancedArrayBuffer = ReturnType<typeof instancedArray>;
+type InstancedArrayBuffer = StorageBufferNode<"vec4">;
 
 // Max height for bit-packing (matches grass heightmap max)
 const HEIGHTMAP_MAX = 100;
@@ -342,7 +344,7 @@ class FlowerSsbo {
       hmUvZ.clamp(float(0.001), float(0.999)),
     );
 
-    let heightmapY: ReturnType<typeof float>;
+    let heightmapY: Node<"float">;
     if (grassHeightmap) {
       const hmSample = grassHeightmap.sample(hmUV);
       heightmapY = hmSample.r.mul(grassUniforms.uHeightmapMax);
@@ -461,7 +463,7 @@ class FlowerSsbo {
 
     // Sample terrain noise at world position - MATCHES grass exactly
     const noiseUV = vec2(worldX, worldZ).mul(TERRAIN_NOISE_SCALE);
-    let terrainNoiseValue: ReturnType<typeof float>;
+    let terrainNoiseValue: Node<"float">;
     if (terrainNoiseTexture) {
       // Use shared terrain noise texture for exact dirt patch matching
       terrainNoiseValue = texture(terrainNoiseTexture, noiseUV).r;

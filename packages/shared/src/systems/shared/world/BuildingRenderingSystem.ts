@@ -81,8 +81,8 @@ import THREE, {
   select,
   dFdx,
   dFdy,
-  type ShaderNode,
 } from "../../../extras/three/three";
+import type { Node, UniformNode } from "three/webgpu";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { MAX_VERTEX_LIGHTS } from "./TerrainShader";
 import type { VertexLight } from "./TerrainShader";
@@ -401,14 +401,14 @@ export const BUILDING_OCCLUSION_CONFIG = {
 /**
  * Hash function for pseudo-random values
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
 /**
  * 2D noise function
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -429,10 +429,10 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * pixels, the pattern frequency exceeds Nyquist and causes aliasing. We detect
  * this and fade to the average color instead.
  */
-const calcProceduralLOD = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const calcProceduralLOD = Fn(([uvIn]: [Node<"vec2">]) => {
   // Calculate how fast UVs change per pixel (filter width)
-  const dUVdx = vec2(dFdx(uvIn.x), dFdx(uvIn.y));
-  const dUVdy = vec2(dFdy(uvIn.x), dFdy(uvIn.y));
+  const dUVdx = dFdx(uvIn);
+  const dUVdy = dFdy(uvIn);
 
   // Maximum UV change per pixel (approximates mip level)
   const maxDeriv = max(
@@ -450,39 +450,37 @@ const calcProceduralLOD = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * This prevents the "screen door" / bayer dithering effect at distance
  * by using smooth transitions based on how fast the value changes on screen
  */
-const aaStep = Fn(
-  ([edge, x]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    // Calculate filter width from screen-space derivatives
-    // fwidth(x) = abs(dFdx(x)) + abs(dFdy(x))
-    const fw = abs(dFdx(x)).add(abs(dFdy(x)));
-    // Scale filter width more aggressively to prevent aliasing
-    const filterWidth = max(fw.mul(1.5), float(0.001));
-    // Use smoothstep for anti-aliased transition
-    return smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x);
-  },
-);
+const aaStep = Fn(([edge, x]: [Node<"float">, Node<"float">]) => {
+  // Calculate filter width from screen-space derivatives
+  // fwidth(x) = abs(dFdx(x)) + abs(dFdy(x))
+  const derivativeInput = vec2(x, float(0));
+  const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
+  // Scale filter width more aggressively to prevent aliasing
+  const filterWidth = max(fw.mul(1.5), float(0.001));
+  // Use smoothstep for anti-aliased transition
+  return smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x);
+});
 
 /**
  * Anti-aliased step for comparing if x is less than edge
  * Returns 1 when x < edge, 0 when x > edge, with smooth transition
  */
-const aaStepLt = Fn(
-  ([edge, x]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    const fw = abs(dFdx(x)).add(abs(dFdy(x)));
-    const filterWidth = max(fw.mul(1.5), float(0.001));
-    // Inverted: 1 when x < edge
-    return float(1.0).sub(
-      smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x),
-    );
-  },
-);
+const aaStepLt = Fn(([edge, x]: [Node<"float">, Node<"float">]) => {
+  const derivativeInput = vec2(x, float(0));
+  const fw = abs(dFdx(derivativeInput).x).add(abs(dFdy(derivativeInput).x));
+  const filterWidth = max(fw.mul(1.5), float(0.001));
+  // Inverted: 1 when x < edge
+  return float(1.0).sub(
+    smoothstep(edge.sub(filterWidth), edge.add(filterWidth), x),
+  );
+});
 
 /**
  * Brick pattern - returns (isBrick, brickIdX, brickIdY, lodFade)
  * Uses anti-aliased step functions to prevent screen-door effect at distance.
  * lodFade indicates how much to blend toward average color (0=full detail, 1=solid)
  */
-const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const brickPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Larger bricks for more visible pattern (was 0.25 x 0.065)
   const brickWidth = float(0.4);
   const brickHeight = float(0.1);
@@ -529,7 +527,7 @@ const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  * bevelAndLod encodes both bevel (lower bits) and lodFade (combined with isStone)
  */
-const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const ashlarPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Larger stone blocks for more visible pattern (was 0.6 x 0.3)
   const blockWidth = float(0.9);
   const blockHeight = float(0.45);
@@ -578,7 +576,7 @@ const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates a smooth plaster surface with subtle texture variation
  * Reduces detail noise at distance to prevent aliasing
  */
-const stuccoPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const stuccoPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   // Calculate LOD fade factor based on fine detail frequency
   const lodFade = calcProceduralLOD(uvIn.mul(8.0));
 
@@ -611,7 +609,7 @@ const stuccoPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates Tudor-style half-timbered walls with horizontal and vertical beams (no diagonal X braces)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const timberFramePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const timberFramePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const frameThickness = float(0.08); // Timber beam width
   const cellWidth = float(1.0); // Distance between vertical beams
   const cellHeight = float(1.5); // Distance between horizontal beams
@@ -653,7 +651,7 @@ const timberFramePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates vertical wood panel walls (board-and-batten style) for rustic buildings
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodPanelPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPanelPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.18); // Width of each vertical board
   const gapWidth = float(0.006); // Gap between boards
 
@@ -685,7 +683,7 @@ const woodPanelPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Creates horizontal clapboard/lap siding for buildings
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodSidingPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodSidingPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankHeight = float(0.12); // Height of each horizontal board
   const gapWidth = float(0.004); // Gap between boards
 
@@ -716,7 +714,7 @@ const woodSidingPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Wood plank pattern - returns (isPlank, plankId, grainOffset, lodFade)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.15);
   const plankHeight = float(2.0);
   const gapWidth = float(0.005);
@@ -752,7 +750,7 @@ const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * Shingle pattern for roofs - returns (isShingle, shingleIdX, shingleIdY, thicknessAndLod)
  * Uses anti-aliased step functions to prevent screen-door effect at distance
  */
-const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const shinglePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const shingleWidth = float(0.2);
   const shingleHeight = float(0.15);
   const overlap = float(0.3);
@@ -802,10 +800,7 @@ const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _brickNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     // Match the larger brick pattern size
     const brickWidth = float(0.4);
@@ -888,10 +883,7 @@ const _brickNormalPerturbation = Fn(
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _shingleNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     const shingleWidth = float(0.2);
     const shingleHeight = float(0.15);
@@ -960,10 +952,7 @@ const _shingleNormalPerturbation = Fn(
  * @returns Tangent-space normal perturbation (x, y, z)
  */
 const _woodNormalPerturbation = Fn(
-  ([uvIn, textureScale]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvIn, textureScale]: [Node<"vec2">, Node<"float">]) => {
     const scaledUV = uvIn.div(textureScale);
     const plankWidth = float(0.15);
     const plankHeight = float(2.0);
@@ -1052,18 +1041,18 @@ const LAMP_LIGHT_SEARCH_RANGE = 45;
  * Uniforms for building occlusion material.
  */
 export type BuildingOcclusionUniforms = {
-  playerPos: { value: THREE.Vector3 };
-  cameraPos: { value: THREE.Vector3 };
+  playerPos: UniformNode<"vec3", THREE.Vector3>;
+  cameraPos: UniformNode<"vec3", THREE.Vector3>;
   // Lighting uniforms
-  sunDirection: { value: THREE.Vector3 };
-  sunColor: { value: THREE.Color };
-  sunIntensity: { value: number };
-  ambientColor: { value: THREE.Color };
-  ambientIntensity: { value: number };
+  sunDirection: UniformNode<"vec3", THREE.Vector3>;
+  sunColor: UniformNode<"color", THREE.Color>;
+  sunIntensity: UniformNode<"float", number>;
+  ambientColor: UniformNode<"color", THREE.Color>;
+  ambientIntensity: UniformNode<"float", number>;
   // Vertex lighting uniforms (lampposts)
-  vertexLightPositions: Array<ReturnType<typeof uniform<THREE.Vector3>>>;
-  vertexLightColors: Array<ReturnType<typeof uniform<THREE.Vector3>>>;
-  vertexLightParams: Array<ReturnType<typeof uniform<THREE.Vector2>>>;
+  vertexLightPositions: Array<UniformNode<"vec3", THREE.Vector3>>;
+  vertexLightColors: Array<UniformNode<"vec3", THREE.Vector3>>;
+  vertexLightParams: Array<UniformNode<"vec2", THREE.Vector2>>;
 };
 
 /**
@@ -1097,12 +1086,9 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
   const uAmbientIntensity = uniform(0.4);
 
   // Vertex lighting uniforms (lampposts)
-  const vertexLightPositions: Array<ReturnType<typeof uniform<THREE.Vector3>>> =
-    [];
-  const vertexLightColors: Array<ReturnType<typeof uniform<THREE.Vector3>>> =
-    [];
-  const vertexLightParams: Array<ReturnType<typeof uniform<THREE.Vector2>>> =
-    [];
+  const vertexLightPositions: Array<UniformNode<"vec3", THREE.Vector3>> = [];
+  const vertexLightColors: Array<UniformNode<"vec3", THREE.Vector3>> = [];
+  const vertexLightParams: Array<UniformNode<"vec2", THREE.Vector2>> = [];
 
   for (let i = 0; i < MAX_VERTEX_LIGHTS; i++) {
     vertexLightPositions.push(uniform(new THREE.Vector3(0, 0, 0)));
@@ -1313,7 +1299,7 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
     // Get material ID and surface type from UV2
     // UV2.x = material ID (0.0=brick, 0.2=stone, 0.4=timber, 0.6=stucco, 0.8=wood (vertical), 0.85=siding (horizontal), 1.0=solid)
     // UV2.y = surface type (0.0=wall, 0.33=floor, 0.67=roof, 1.0=ceiling)
-    const uv2Attr = attribute("uv2", "vec2");
+    const uv2Attr = attribute<"vec2">("uv2", "vec2");
     const materialId = uv2Attr.x;
     const surfaceType = uv2Attr.y;
 
@@ -1645,7 +1631,7 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
     // the "color" attribute. In that case, attribute() returns zeros which would
     // make roofs black. We detect this by checking if the vertex color sum is
     // near zero (invalid) and fall back to white (1,1,1).
-    const rawVertexColor = attribute("color", "vec3");
+    const rawVertexColor = attribute<"vec3">("color", "vec3");
 
     // Check if vertex colors are valid (sum > 0.1 means they exist and are non-black)
     // If vertex colors don't exist or are black (sum ~0), use white instead
@@ -1669,10 +1655,10 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
     // Simple additive point lights with smooth attenuation
     // ============================================================================
     const calculateLightContribution = (
-      lightPos: ReturnType<typeof uniform>,
-      lightColor: ReturnType<typeof uniform>,
-      lightParams: ReturnType<typeof uniform>, // x=intensity, y=range
-    ) => {
+      lightPos: UniformNode<"vec3", THREE.Vector3>,
+      lightColor: UniformNode<"vec3", THREE.Vector3>,
+      lightParams: UniformNode<"vec2", THREE.Vector2>, // x=intensity, y=range
+    ): Node<"vec3"> => {
       const toLightVec = sub(lightPos, worldPos);
       const distToLight = add(
         add(mul(toLightVec.x, toLightVec.x), mul(toLightVec.y, toLightVec.y)),
@@ -1686,7 +1672,7 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
       return mul(lightColor, attenuation);
     };
 
-    let lightAccum: ShaderNode = vec3(0, 0, 0);
+    let lightAccum: Node<"vec3"> = vec3(0, 0, 0);
     lightAccum = add(
       lightAccum,
       calculateLightContribution(
@@ -1800,7 +1786,7 @@ function createBuildingOcclusionMaterial(): BuildingOcclusionMaterial {
     const scaledUV = meshUV.div(uTextureScale);
 
     // Get material ID and surface type from UV2
-    const uv2Attr = attribute("uv2", "vec2");
+    const uv2Attr = attribute<"vec2">("uv2", "vec2");
     const materialId = uv2Attr.x;
     const surfaceType = uv2Attr.y;
 
@@ -2077,12 +2063,9 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
   const uAmbientIntensity = uniform(0.4);
 
   // Vertex lighting uniforms (lampposts)
-  const vertexLightPositions: Array<ReturnType<typeof uniform<THREE.Vector3>>> =
-    [];
-  const vertexLightColors: Array<ReturnType<typeof uniform<THREE.Vector3>>> =
-    [];
-  const vertexLightParams: Array<ReturnType<typeof uniform<THREE.Vector2>>> =
-    [];
+  const vertexLightPositions: Array<UniformNode<"vec3", THREE.Vector3>> = [];
+  const vertexLightColors: Array<UniformNode<"vec3", THREE.Vector3>> = [];
+  const vertexLightParams: Array<UniformNode<"vec2", THREE.Vector2>> = [];
 
   for (let i = 0; i < MAX_VERTEX_LIGHTS; i++) {
     vertexLightPositions.push(uniform(new THREE.Vector3(0, 0, 0)));
@@ -2100,9 +2083,9 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
     defaultCenters.push(new THREE.Vector2(-99999, -99999)); // Far away = not hidden
     defaultRadii.push(0);
   }
-  const uHiddenBuildingCenters = uniform(defaultCenters);
-  const uHiddenBuildingRadii = uniform(defaultRadii);
-  const uHiddenBuildingCount = uniform(0);
+  const uHiddenBuildingCenters = { value: defaultCenters };
+  const uHiddenBuildingRadii = { value: defaultRadii };
+  const uHiddenBuildingCount = { value: 0 };
 
   // Config as shader constants - Player occlusion cone
   const occlusionCameraRadius = float(BUILDING_OCCLUSION_CONFIG.CAMERA_RADIUS);
@@ -2136,8 +2119,8 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
 
     // ========== READ BUILDING CENTER FROM VERTEX ATTRIBUTE ==========
     // Each roof vertex has the XZ center of its building baked in
-    const buildingCenter = attribute("buildingCenter", "vec2");
-    const buildingRadius = attribute("buildingRadius", "float");
+    const buildingCenter = attribute<"vec2">("buildingCenter", "vec2");
+    const buildingRadius = attribute<"float">("buildingRadius", "float");
 
     // ========== PER-BUILDING ROOF HIDING (DITHERED FADE) ==========
     // Check distance of player AND camera to this building on XZ plane
@@ -2304,7 +2287,7 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
 
   material.colorNode = Fn(() => {
     // Read vertex color for tinting
-    const vertexColor = attribute("color", "vec3");
+    const vertexColor = attribute<"vec3">("color", "vec3");
 
     // World position for texture coordinates
     const worldPos = positionWorld;
@@ -2342,10 +2325,10 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
     // VERTEX LIGHTING (lampposts, torches, etc.)
     // ============================================================================
     const calculateLightContribution = (
-      lightPos: ReturnType<typeof uniform>,
-      lightColor: ReturnType<typeof uniform>,
-      lightParams: ReturnType<typeof uniform>, // x=intensity, y=range
-    ) => {
+      lightPos: UniformNode<"vec3", THREE.Vector3>,
+      lightColor: UniformNode<"vec3", THREE.Vector3>,
+      lightParams: UniformNode<"vec2", THREE.Vector2>, // x=intensity, y=range
+    ): Node<"vec3"> => {
       const toLightVec = sub(lightPos, worldPos);
       const distToLight = add(
         add(mul(toLightVec.x, toLightVec.x), mul(toLightVec.y, toLightVec.y)),
@@ -2359,7 +2342,7 @@ function createBuildingRoofMaterial(): RoofOcclusionMaterial {
       return mul(lightColor, attenuation);
     };
 
-    let lightAccum: ShaderNode = vec3(0, 0, 0);
+    let lightAccum: Node<"vec3"> = vec3(0, 0, 0);
     lightAccum = add(
       lightAccum,
       calculateLightContribution(
@@ -2775,8 +2758,7 @@ export class BuildingRenderingSystem extends SystemBase {
 
   /** Cached physics material for collision shapes (avoid recreating for every building) */
   private _cachedPhysicsMaterial:
-    | import("../../../types/systems/physics").PxMaterial
-    | null = null;
+    import("../../../types/systems/physics").PxMaterial | null = null;
 
   // ============================================
   // ROOF AUTO-HIDE FEATURE
@@ -3468,8 +3450,7 @@ export class BuildingRenderingSystem extends SystemBase {
             getBuildingLayout?: (
               id: string,
             ) =>
-              | import("@hyperforge/procgen/building").BuildingLayout
-              | undefined;
+              import("@hyperforge/procgen/building").BuildingLayout | undefined;
           } | null;
           const cachedLayout = townSystem?.getBuildingLayout?.(building.id);
 
@@ -5209,8 +5190,7 @@ export class BuildingRenderingSystem extends SystemBase {
 
     // Handle both TSL (WebGPU) and GLSL (WebGL) materials
     const material = impostorMesh.material as
-      | THREE.ShaderMaterial
-      | TSLImpostorMaterial;
+      THREE.ShaderMaterial | TSLImpostorMaterial;
     if (isTSLImpostorMaterial(material)) {
       // TSL material uses updateView method
       material.updateView(this._imposterFaceIndices, this._imposterFaceWeights);
@@ -5507,6 +5487,8 @@ export class BuildingRenderingSystem extends SystemBase {
     // Dispose shared materials
     this.batchedMaterial.dispose();
     this.roofMaterial.dispose();
+    this.floorMaterial.dispose();
+    this.glassMaterial.dispose();
 
     // Dispose dynamic impostor atlas
     if (this.dynamicAtlas) {

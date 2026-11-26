@@ -75,7 +75,7 @@ export function isValidLog(itemId: string): boolean {
 /**
  * Get random fire duration in ticks.
  *
- * classic MMORPG: Fires last 60-119 seconds (per Mod Ash).
+ * Fires last 60-119 seconds.
  * At 600ms/tick: 100-198 ticks.
  *
  * @returns Duration in ticks

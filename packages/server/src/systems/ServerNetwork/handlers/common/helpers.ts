@@ -88,6 +88,7 @@ export function getDatabase(world: World): DatabaseConnection | null {
 export interface SessionInfo {
   targetEntityId: string;
   type?: string;
+  targetStoreId?: string;
 }
 
 /**

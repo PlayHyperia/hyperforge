@@ -26,6 +26,7 @@ import {
   getStyleBonus,
 } from "../CombatCalculations";
 import { AttackType } from "../../../types/core/core";
+import { SeededRandom } from "../../SeededRandom";
 
 describe("CombatCalculations", () => {
   describe("calculateDamage", () => {
@@ -201,6 +202,30 @@ describe("CombatCalculations", () => {
       // Should use accurate style by default
       const result = calculateDamage(attacker, target, AttackType.MELEE);
       expect(result).toHaveProperty("damage");
+    });
+
+    it("replays melee accuracy and damage exactly with an explicit seed", () => {
+      const attacker = { stats: { attack: 60, strength: 60 } };
+      const target = { stats: { defense: 60, defenseBonus: 20 } };
+      const equipment = { attack: 40, strength: 40, defense: 0, ranged: 0 };
+      const run = () => {
+        const random = new SeededRandom(42);
+        return Array.from({ length: 64 }, () =>
+          calculateDamage(
+            attacker,
+            target,
+            AttackType.MELEE,
+            equipment,
+            "aggressive",
+            "defensive",
+            undefined,
+            undefined,
+            random,
+          ),
+        );
+      };
+
+      expect(run()).toEqual(run());
     });
   });
 

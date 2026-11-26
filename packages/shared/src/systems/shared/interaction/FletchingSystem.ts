@@ -20,11 +20,24 @@ import {
 } from "../../../constants/SmithingConstants";
 import { processingDataProvider } from "../../../data/ProcessingDataProvider";
 import type { FletchingRecipeData } from "../../../data/ProcessingDataProvider";
-import { EventType } from "../../../types/events";
-import { Skill } from "../character/SkillsSystem";
+import {
+  EventType,
+  getProcessingRequestOperationId,
+} from "../../../types/events";
 import { Logger } from "../../../utils/Logger";
+import { uuid } from "../../../utils";
 import { SystemBase } from "../infrastructure/SystemBase";
 import type { World } from "../../../types/index";
+import type {
+  AtomicProcessingActionReceipt,
+  InventorySystem,
+} from "../character/InventorySystem";
+import { canPlayerPerformPreparationAction } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active fletching session for a player */
 interface FletchingSession {
@@ -37,6 +50,18 @@ interface FletchingSession {
   crafted: number;
   /** Tick when current fletch action completes */
   completionTick: number;
+  requestId?: string;
+}
+
+interface PendingFletchingAction {
+  operationId: string;
+  playerId: string;
+  recipeId: string;
+  retryCount: number;
+  retryAtTick: number;
+  state: "in_flight" | "retry_wait" | "settled";
+  receipt: AtomicProcessingActionReceipt | null;
+  stopAfterCommit: boolean;
 }
 
 /** Pre-built inventory state to avoid redundant scans */
@@ -45,8 +70,12 @@ interface InventoryState {
   itemIds: Set<string>;
 }
 
-export class FletchingSystem extends SystemBase {
+export class FletchingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, FletchingSession>();
+  private readonly pendingActions = new Map<string, PendingFletchingAction>();
   private readonly playerSkills = new Map<
     string,
     Record<string, { level: number; xp: number }>
@@ -55,8 +84,7 @@ export class FletchingSystem extends SystemBase {
   /** Track last processed tick to ensure once-per-tick processing */
   private lastProcessedTick = -1;
 
-  /** Monotonic counter for unique fletched item IDs (avoids Date.now collisions) */
-  private fletchCounter = 0;
+  private destroyed = false;
 
   /** Reusable array for update loop to avoid allocating per tick */
   private readonly completedPlayerIds: string[] = [];
@@ -94,7 +122,12 @@ export class FletchingSystem extends SystemBase {
     // Listen for fletching request (player selected recipe and quantity)
     this.subscribe(
       EventType.PROCESSING_FLETCHING_REQUEST,
-      (data: { playerId: string; recipeId: string; quantity: number }) => {
+      (data: {
+        playerId: string;
+        recipeId: string;
+        quantity: number;
+        requestId?: string;
+      }) => {
         this.startFletching(data);
       },
     );
@@ -153,6 +186,8 @@ export class FletchingSystem extends SystemBase {
     secondaryItemId?: string;
   }): void {
     const { playerId, inputItemId, secondaryItemId } = data;
+
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) return;
 
     // Check if already fletching
     if (this.activeSessions.has(playerId)) {
@@ -248,8 +283,29 @@ export class FletchingSystem extends SystemBase {
     playerId: string;
     recipeId: string;
     quantity: number;
+    requestId?: string;
   }): void {
-    const { playerId, recipeId, quantity } = data;
+    const { playerId, recipeId, quantity, requestId } = data;
+
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) {
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "not_authorized",
+      );
+      return;
+    }
+
+    if (requestId && quantity !== 1) {
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "invalid_request",
+      );
+      return;
+    }
 
     // Check if already fletching
     if (this.activeSessions.has(playerId)) {
@@ -258,6 +314,13 @@ export class FletchingSystem extends SystemBase {
         message: "You are already fletching.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "busy",
+        true,
+      );
       return;
     }
 
@@ -269,6 +332,12 @@ export class FletchingSystem extends SystemBase {
         message: "Invalid fletching recipe.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "invalid_request",
+      );
       return;
     }
 
@@ -280,6 +349,12 @@ export class FletchingSystem extends SystemBase {
         message: `You need level ${recipe.level} Fletching to make that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -291,6 +366,12 @@ export class FletchingSystem extends SystemBase {
         message: "You have no items.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "resources_unavailable",
+      );
       return;
     }
 
@@ -302,6 +383,12 @@ export class FletchingSystem extends SystemBase {
         message: `You need a ${toolNames} to fletch that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -312,23 +399,43 @@ export class FletchingSystem extends SystemBase {
         message: "You don't have the required materials.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "fletching",
+        "resources_unavailable",
+      );
       return;
     }
 
     // Get current tick for tick-based timing
     const currentTick = this.world.currentTick ?? 0;
+    const normalizedQuantity = Number.isFinite(quantity)
+      ? Math.floor(Math.max(1, Math.min(quantity, 10_000)))
+      : 1;
 
     // Create session with tick-based completion
     const session: FletchingSession = {
       playerId,
       recipeId,
-      quantity: Math.max(1, quantity),
+      quantity: normalizedQuantity,
       crafted: 0,
       completionTick: currentTick + recipe.ticks,
+      requestId,
     };
 
     this.activeSessions.set(playerId, session);
-
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "fletching",
+    });
+    this.reportProcessingRequestProgress(
+      playerId,
+      requestId,
+      "fletching",
+      "accepted",
+      true,
+    );
     // Show start message
     const itemName = recipe.name || recipe.output.replace(/_/g, " ");
     this.emitTypedEvent(EventType.UI_MESSAGE, {
@@ -406,101 +513,211 @@ export class FletchingSystem extends SystemBase {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
 
+    if (this.pendingActions.has(playerId)) return;
+
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) {
+      this.activeSessions.delete(playerId);
+      this.rejectProcessingRequest(
+        playerId,
+        session.requestId,
+        "fletching",
+        "not_authorized",
+      );
+      return;
+    }
+
     const recipe = processingDataProvider.getFletchingRecipe(session.recipeId);
     if (!recipe) {
       this.completeFletching(playerId);
       return;
     }
 
-    // Re-verify inventory before consuming (guard against external modifications)
-    const invState = this.getInventoryState(playerId);
-    if (!invState || !this.hasRequiredInputs(invState, recipe)) {
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: "You have run out of materials.",
-        type: "info",
-      });
-      this.completeFletching(playerId);
-      return;
-    }
-    if (!this.hasRequiredTools(invState, recipe)) {
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: "You no longer have the required tools.",
-        type: "info",
-      });
-      this.completeFletching(playerId);
-      return;
-    }
-
-    // Play fletching animation
-    this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-      entityId: playerId,
-      animation: "crafting",
-      loop: false,
-    });
-
-    // Consume input materials
-    for (const input of recipe.inputs) {
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-        playerId,
-        itemId: input.item,
-        quantity: input.amount,
-      });
-    }
-
-    // Add fletched item(s) to inventory
-    // Multi-output: outputQuantity items per action (e.g., 15 arrow shafts)
-    this.emitTypedEvent(EventType.INVENTORY_ITEM_ADDED, {
-      playerId,
-      item: {
-        id: `fletch_${playerId}_${++this.fletchCounter}_${Date.now()}`,
-        itemId: recipe.output,
-        quantity: recipe.outputQuantity,
-        slot: -1,
-        metadata: null,
-      },
-    });
-
-    // Grant XP (total for the action, not per item)
-    this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-      playerId,
-      skill: Skill.FLETCHING,
-      amount: recipe.xp,
-    });
-
-    session.crafted++;
-
-    // Audit log for economic tracking
-    Logger.system("FletchingSystem", "fletch_complete", {
+    const pending: PendingFletchingAction = {
+      operationId:
+        getProcessingRequestOperationId("fletching", session.requestId) ??
+        `fletching-action:${uuid()}${uuid()}`,
       playerId,
       recipeId: session.recipeId,
-      output: recipe.output,
-      outputQuantity: recipe.outputQuantity,
-      inputsConsumed: recipe.inputs.map((i) => `${i.amount}x${i.item}`),
-      xpAwarded: recipe.xp,
-      crafted: session.crafted,
-      batchTotal: session.quantity,
-    });
+      retryCount: 0,
+      retryAtTick: 0,
+      state: "in_flight",
+      receipt: null,
+      stopAfterCommit: false,
+    };
+    this.pendingActions.set(playerId, pending);
+    this.launchFletchingCommit(pending, recipe);
+  }
 
-    // Success message
-    const itemName = recipe.name || recipe.output.replace(/_/g, " ");
-    if (recipe.outputQuantity > 1) {
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: `You fletch ${recipe.outputQuantity} ${itemName}s.`,
-        type: "success",
-      });
-    } else {
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: `You fletch a ${itemName}.`,
-        type: "success",
-      });
+  private launchFletchingCommit(
+    pending: PendingFletchingAction,
+    recipe: FletchingRecipeData,
+  ): void {
+    const inventory = this.world.getSystem("inventory") as
+      InventorySystem | undefined;
+    if (!inventory?.commitProcessingActionAtomic) {
+      pending.retryCount++;
+      pending.retryAtTick =
+        (this.world.currentTick ?? 0) +
+        Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+      pending.state = "retry_wait";
+      return;
     }
+    pending.state = "in_flight";
+    void inventory
+      .commitProcessingActionAtomic(pending.playerId, pending.operationId, {
+        skill: "fletching",
+        xpAmount: recipe.xp,
+        inputs: recipe.inputs.map((input) => ({
+          itemId: input.item,
+          quantity: input.amount,
+        })),
+        requiredItems: recipe.tools.map((itemId) => ({
+          itemId,
+          quantity: 1,
+        })),
+        consumables: [],
+        outputs: [{ itemId: recipe.output, quantity: recipe.outputQuantity }],
+      })
+      .then((receipt) => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.receipt = receipt;
+        pending.state = "settled";
+      })
+      .catch(() => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.retryCount++;
+        pending.retryAtTick =
+          (this.world.currentTick ?? 0) +
+          Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+        pending.state = "retry_wait";
+      });
+  }
 
-    // Schedule next fletch action
-    this.scheduleNextFletch(playerId);
+  private processPendingActions(currentTick: number): void {
+    for (const pending of this.pendingActions.values()) {
+      const recipe = processingDataProvider.getFletchingRecipe(
+        pending.recipeId,
+      );
+      if (!recipe) {
+        this.pendingActions.delete(pending.playerId);
+        this.completeFletching(pending.playerId);
+        continue;
+      }
+      if (
+        pending.state === "retry_wait" &&
+        currentTick >= pending.retryAtTick
+      ) {
+        this.launchFletchingCommit(pending, recipe);
+        continue;
+      }
+      if (pending.state !== "settled" || !pending.receipt) continue;
+
+      const receipt = pending.receipt;
+      if (!receipt.ok) {
+        if (receipt.retryable) {
+          pending.retryCount++;
+          pending.retryAtTick =
+            currentTick + Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+          pending.receipt = null;
+          pending.state = "retry_wait";
+          continue;
+        }
+        this.pendingActions.delete(pending.playerId);
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            receipt.reason === "inventory_full"
+              ? "Your inventory is too full to hold the fletched items."
+              : receipt.reason === "insufficient_items"
+                ? "You have run out of required materials or tools."
+                : "That fletching action could not be validated.",
+          type: "warning",
+        });
+        const session = this.activeSessions.get(pending.playerId);
+        this.rejectProcessingRequest(
+          pending.playerId,
+          session?.requestId,
+          "fletching",
+          receipt.reason === "inventory_full"
+            ? "capacity_unavailable"
+            : receipt.reason === "insufficient_items"
+              ? "resources_unavailable"
+              : "persistence_rejected",
+        );
+        this.completeFletching(pending.playerId);
+        continue;
+      }
+
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
+      this.pendingActions.delete(pending.playerId);
+      const session = this.activeSessions.get(pending.playerId);
+      if (!session || session.recipeId !== pending.recipeId) continue;
+
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "crafting",
+          loop: false,
+        });
+      }
+      session.crafted++;
+      Logger.system("FletchingSystem", "fletch_complete", {
+        playerId: pending.playerId,
+        recipeId: session.recipeId,
+        operationId: pending.operationId,
+        output: recipe.output,
+        outputQuantity: recipe.outputQuantity,
+        inputsConsumed: recipe.inputs.map(
+          (input) => `${input.amount}x${input.item}`,
+        ),
+        xpAwarded: receipt.awardedXp,
+        crafted: session.crafted,
+        batchTotal: session.quantity,
+      });
+      const itemName = recipe.name || recipe.output.replace(/_/g, " ");
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            recipe.outputQuantity > 1
+              ? `You fletch ${recipe.outputQuantity} ${itemName}s.`
+              : `You fletch a ${itemName}.`,
+          type: "success",
+        });
+      }
+      if (!receipt.liveInventoryApplied) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            "Your fletched items are safely recorded, but the live inventory view needs to resynchronize.",
+          type: "warning",
+        });
+      }
+      if (pending.stopAfterCommit) this.completeFletching(pending.playerId);
+      else this.scheduleNextFletch(pending.playerId);
+    }
   }
 
   /**
@@ -511,16 +728,19 @@ export class FletchingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "fletching");
 
     const recipe = processingDataProvider.getFletchingRecipe(session.recipeId);
 
     // Emit completion event
+    this.finishProcessingRequest(session.requestId);
     this.emitTypedEvent(EventType.FLETCHING_COMPLETE, {
       playerId,
       recipeId: session.recipeId,
       outputItemId: recipe?.output || session.recipeId,
       totalCrafted: session.crafted,
       totalXp: session.crafted * (recipe?.xp || 0),
+      ...(session.requestId ? { requestId: session.requestId } : {}),
     });
   }
 
@@ -528,6 +748,12 @@ export class FletchingSystem extends SystemBase {
    * Cancel fletching for a player
    */
   private cancelFletching(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "fletching");
+    const pending = this.pendingActions.get(playerId);
+    if (pending) {
+      pending.stopAfterCommit = true;
+      return;
+    }
     const session = this.activeSessions.get(playerId);
     if (session) {
       this.completeFletching(playerId);
@@ -601,6 +827,40 @@ export class FletchingSystem extends SystemBase {
     return this.activeSessions.has(playerId);
   }
 
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.cancelFletching(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
+  }
+
+  getFletchingCustodyStats(): {
+    activeSessions: number;
+    pendingActions: number;
+    inFlight: number;
+    retryWaiting: number;
+    maxRetryCount: number;
+  } {
+    let inFlight = 0;
+    let retryWaiting = 0;
+    let maxRetryCount = 0;
+    for (const pending of this.pendingActions.values()) {
+      if (pending.state === "in_flight") inFlight++;
+      if (pending.state === "retry_wait") retryWaiting++;
+      maxRetryCount = Math.max(maxRetryCount, pending.retryCount);
+    }
+    return {
+      activeSessions: this.activeSessions.size,
+      pendingActions: this.pendingActions.size,
+      inFlight,
+      retryWaiting,
+      maxRetryCount,
+    };
+  }
+
   /**
    * Update method - processes tick-based fletching sessions.
    * Called each frame, but only processes once per game tick.
@@ -617,10 +877,25 @@ export class FletchingSystem extends SystemBase {
     }
     this.lastProcessedTick = currentTick;
 
+    for (const session of this.activeSessions.values()) {
+      const pending = this.pendingActions.get(session.playerId);
+      this.reportProcessingRequestProgress(
+        session.playerId,
+        session.requestId,
+        "fletching",
+        pending?.state === "retry_wait" ? "reconciling" : "working",
+      );
+    }
+
+    this.processPendingActions(currentTick);
+
     // Collect completed session IDs first, then process (avoids Map snapshot allocation)
     this.completedPlayerIds.length = 0;
     for (const [playerId, session] of this.activeSessions) {
-      if (currentTick >= session.completionTick) {
+      if (
+        !this.pendingActions.has(playerId) &&
+        currentTick >= session.completionTick
+      ) {
         this.completedPlayerIds.push(playerId);
       }
     }
@@ -630,11 +905,13 @@ export class FletchingSystem extends SystemBase {
   }
 
   destroy(): void {
+    this.destroyed = true;
     // Complete all active sessions
     for (const playerId of this.activeSessions.keys()) {
       this.completeFletching(playerId);
     }
     this.activeSessions.clear();
+    this.pendingActions.clear();
     this.playerSkills.clear();
   }
 }

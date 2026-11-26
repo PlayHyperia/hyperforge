@@ -1,23 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
-import { privateKeyToAccount } from "viem/accounts";
 
 type WalletSummary = {
   generatedAt: string;
-  evm: {
-    address: string;
-    chains: Array<{
-      key: string;
-      chain: string;
-      network: string;
-    }>;
-  };
   solana: {
-    address: string;
-    keypairPath: string;
+    authority: {
+      address: string;
+      keypairPath: string;
+    };
+    reporter: {
+      address: string;
+      keypairPath: string;
+    };
     clusters: Array<{
       key: string;
       cluster: string;
@@ -26,18 +22,8 @@ type WalletSummary = {
   };
   envFiles: {
     serverEnv: string;
-    evmEnv: string;
   };
 };
-
-const SHARED_EVM_CHAINS = [
-  { key: "baseSepolia", chain: "Base", network: "testnet" },
-  { key: "bscTestnet", chain: "BSC", network: "testnet" },
-  { key: "avaxFuji", chain: "AVAX", network: "testnet" },
-  { key: "base", chain: "Base", network: "mainnet" },
-  { key: "bsc", chain: "BSC", network: "mainnet" },
-  { key: "avax", chain: "AVAX", network: "mainnet" },
-] as const;
 
 const SHARED_SOLANA_CLUSTERS = [
   { key: "solanaDevnet", cluster: "devnet", network: "testnet" },
@@ -83,98 +69,82 @@ async function main() {
   const serverDir = path.resolve(path.dirname(currentFile), "..");
   const workspaceRoot = path.resolve(serverDir, "../..");
   const serverEnvPath = path.resolve(serverDir, ".env");
-  const evmEnvPath = path.resolve(
-    workspaceRoot,
-    "packages/duel-oracle-evm/.env",
-  );
   const generatedDir = path.resolve(
     workspaceRoot,
     ".codex-artifacts/duel-arena-oracle-wallets",
   );
   await fs.mkdir(generatedDir, { recursive: true });
 
-  const evmLinesForServer: string[] = [
-    "# Shared duel arena oracle EVM signer for Base, BSC, and AVAX",
-  ];
-  const evmLinesForContracts: string[] = [
-    "# Shared duel arena oracle EVM deploy signer for Base, BSC, and AVAX",
-  ];
   const solanaLinesForServer: string[] = [
-    "# Shared duel arena oracle Solana authority/reporter signer",
+    "# Separate duel arena oracle Solana authority and reporter signers",
   ];
-  const sharedSolanaKeypairPath = path.resolve(
+  const authorityKeypairPath = path.resolve(
     generatedDir,
-    "solana-shared.json",
+    "solana-authority.json",
+  );
+  const reporterKeypairPath = path.resolve(
+    generatedDir,
+    "solana-reporter.json",
   );
   const summary: WalletSummary = {
     generatedAt: new Date().toISOString(),
-    evm: {
-      address: "",
-      chains: SHARED_EVM_CHAINS.map((chain) => ({ ...chain })),
-    },
     solana: {
-      address: "",
-      keypairPath: sharedSolanaKeypairPath,
+      authority: {
+        address: "",
+        keypairPath: authorityKeypairPath,
+      },
+      reporter: {
+        address: "",
+        keypairPath: reporterKeypairPath,
+      },
       clusters: SHARED_SOLANA_CLUSTERS.map((cluster) => ({ ...cluster })),
     },
     envFiles: {
       serverEnv: serverEnvPath,
-      evmEnv: evmEnvPath,
     },
   };
 
-  const evmPrivateKey = `0x${randomBytes(32).toString("hex")}` as const;
-  const evmAccount = privateKeyToAccount(evmPrivateKey);
-  evmLinesForServer.push(`DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY=${evmPrivateKey}`);
-  evmLinesForContracts.push(`PRIVATE_KEY=${evmPrivateKey}`);
-  summary.evm.address = evmAccount.address;
-
-  const solanaKeypair = Keypair.generate();
-  const solanaSecretBase64 = Buffer.from(solanaKeypair.secretKey).toString(
+  const authorityKeypair = Keypair.generate();
+  const reporterKeypair = Keypair.generate();
+  const authoritySecretBase64 = Buffer.from(
+    authorityKeypair.secretKey,
+  ).toString("base64");
+  const reporterSecretBase64 = Buffer.from(reporterKeypair.secretKey).toString(
     "base64",
   );
-  await Promise.all(
-    ["solanaDevnet.json", "solanaMainnet.json"].map((name) =>
-      fs.rm(path.resolve(generatedDir, name), { force: true }),
+  await Promise.all([
+    fs.writeFile(
+      authorityKeypairPath,
+      JSON.stringify(Array.from(authorityKeypair.secretKey), null, 2) + "\n",
+      { mode: 0o600 },
     ),
-  );
-  await fs.writeFile(
-    sharedSolanaKeypairPath,
-    JSON.stringify(Array.from(solanaKeypair.secretKey), null, 2) + "\n",
-    { mode: 0o600 },
+    fs.writeFile(
+      reporterKeypairPath,
+      JSON.stringify(Array.from(reporterKeypair.secretKey), null, 2) + "\n",
+      { mode: 0o600 },
+    ),
+  ]);
+  solanaLinesForServer.push(
+    `DUEL_ARENA_ORACLE_SOLANA_AUTHORITY_SECRET=base64:${authoritySecretBase64}`,
   );
   solanaLinesForServer.push(
-    `DUEL_ARENA_ORACLE_SOLANA_AUTHORITY_SECRET=base64:${solanaSecretBase64}`,
+    `DUEL_ARENA_ORACLE_SOLANA_REPORTER_SECRET=base64:${reporterSecretBase64}`,
   );
-  solanaLinesForServer.push(
-    `DUEL_ARENA_ORACLE_SOLANA_REPORTER_SECRET=base64:${solanaSecretBase64}`,
-  );
-  solanaLinesForServer.push(
-    `DUEL_ARENA_ORACLE_SOLANA_KEYPAIR_PATH=${sharedSolanaKeypairPath}`,
-  );
-  summary.solana.address = solanaKeypair.publicKey.toBase58();
+  summary.solana.authority.address = authorityKeypair.publicKey.toBase58();
+  summary.solana.reporter.address = reporterKeypair.publicKey.toBase58();
 
   let serverEnv = await readEnvFile(serverEnvPath);
-  let evmEnv = await readEnvFile(evmEnvPath);
 
   serverEnv = formatSection(
     "DUEL_ARENA_ORACLE_WALLETS",
     [
       "DUEL_ARENA_ORACLE_ENABLED=false",
       "DUEL_ARENA_ORACLE_PROFILE=testnet",
-      ...evmLinesForServer,
       ...solanaLinesForServer,
     ],
     serverEnv,
   );
-  evmEnv = formatSection(
-    "DUEL_ARENA_ORACLE_WALLETS",
-    evmLinesForContracts,
-    evmEnv,
-  );
-
   await fs.writeFile(serverEnvPath, serverEnv, { mode: 0o600 });
-  await fs.writeFile(evmEnvPath, evmEnv, { mode: 0o600 });
 
   const summaryPath = path.resolve(generatedDir, "public-addresses.json");
   await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2) + "\n", {

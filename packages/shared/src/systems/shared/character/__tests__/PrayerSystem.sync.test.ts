@@ -7,7 +7,9 @@ import type { World } from "../../../../core/World";
 
 interface MockDatabaseRow {
   prayerLevel: number;
+  prayerMaxPoints: number;
   prayerPoints: number;
+  prayerPointUnits: number;
   activePrayers: string[];
 }
 
@@ -27,6 +29,7 @@ function createPrayerTestWorld(row: MockDatabaseRow): {
   database: {
     getPlayerAsync: ReturnType<typeof vi.fn>;
     savePlayer: ReturnType<typeof vi.fn>;
+    commitPrayerStateOperationAsync: ReturnType<typeof vi.fn>;
   };
 } {
   const emitter = new EventEmitter<string | symbol, unknown>();
@@ -34,6 +37,7 @@ function createPrayerTestWorld(row: MockDatabaseRow): {
   const database = {
     getPlayerAsync: vi.fn(async () => row),
     savePlayer: vi.fn(),
+    commitPrayerStateOperationAsync: vi.fn(),
   };
 
   const originalEmit = emitter.emit.bind(emitter);
@@ -64,7 +68,9 @@ describe("PrayerSystem authoritative sync", () => {
   it("loads persisted prayer data on PLAYER_REGISTERED and re-syncs it on PLAYER_JOINED", async () => {
     const { world, emitted, database } = createPrayerTestWorld({
       prayerLevel: 7,
+      prayerMaxPoints: 7,
       prayerPoints: 5,
+      prayerPointUnits: 5_000_000,
       activePrayers: ["thick_skin"],
     });
     const system = new PrayerSystem(world as unknown as World);

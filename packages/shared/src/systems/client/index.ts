@@ -5,6 +5,7 @@
 
 export { ClientActions } from "./ClientActions";
 export { ClientAudio } from "./ClientAudio";
+export { CombatAudioSystem } from "./CombatAudioSystem";
 export { ClientCameraSystem } from "./ClientCameraSystem";
 export { ClientGraphics } from "./ClientGraphics";
 export { ClientInput } from "./ClientInput";

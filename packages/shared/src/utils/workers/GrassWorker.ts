@@ -15,11 +15,10 @@
  */
 
 import { WorkerPool } from "./WorkerPool";
+import type { GrassSurfaceEligibility } from "../../runtime/clientViewportMode";
 import {
   buildGetBaseHeightAtJS,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
 } from "../../systems/shared/world/TerrainHeightParams";
 import { buildBiomeConstantsJS } from "../../systems/shared/world/TerrainBiomeTypes";
 import {
@@ -27,8 +26,38 @@ import {
   buildHeightHelpersJS,
   buildBiomeInfluencesJS,
   buildCreateBiomeNoiseSetsJS,
+  buildTerrainWorkerProfileGuardJS,
+  assertTerrainWorkerRequest,
+  assertTerrainWorkerResult,
 } from "./TerrainWorkerShared";
 import type { TerrainWorkerConfig } from "./TerrainWorker";
+import { createAuthoredTerrainSurfaceOperations } from "../../systems/shared/world/AuthoredTerrainSurface";
+import { createRoadInfluenceOperations } from "../../systems/shared/world/RoadInfluence";
+import { createTerrainNoiseSampler } from "../../systems/shared/world/TerrainNoiseSampler";
+import {
+  createCompactTerrainColorOperations,
+  type CompactTerrainPlantingLobe,
+  type CompactGrassColorGrade,
+  type CompactPondBankField,
+  type CompactTerrainBankVerge,
+} from "../../systems/shared/world/CompactTerrainPalette";
+import {
+  createGrassTerrainSurfaceOperations,
+  GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE,
+  type GrassTerrainSurfaceSnapshot,
+} from "./GrassTerrainSurfaceSnapshot";
+import {
+  createGrassPlacementCellOperations,
+  type GrassPlacementCell,
+  type GrassPlacementCoverage,
+  type GrassPlacementDistribution,
+} from "./GrassPlacementCell";
+export type {
+  GrassPlacementCell,
+  GrassPlacementCoverage,
+  GrassPlacementCoverageTrial,
+  GrassPlacementDistribution,
+} from "./GrassPlacementCell";
 
 // ============================================================================
 // TYPES
@@ -58,6 +87,24 @@ export interface BiomeGrassConfigWorker {
 }
 
 export interface GrassWorkerInput {
+  /** Admitted appearance only; never a placement probability or root scale. */
+  pondServiceGround?: CompactTerrainBankVerge;
+  /** Restart-owned pond support; appearance-only pond modes are omitted. */
+  compactPondBlend?: "shore-contact-v1" | "composition-v1";
+  /** Restart-owned coastal ecology; detail-only material selection is omitted. */
+  compactCoastBlend?: "distribution-v1";
+  /** Explicit colour-only compact policy; the manager admits the fine profile. */
+  compactGrassColorGrade?: CompactGrassColorGrade;
+  /** Optional sampling domain; offsets remain relative to the real leaf frame. */
+  placementCell?: GrassPlacementCell;
+  /** Explicit one-cell coverage trial, independently admitted from terrain. */
+  placementCoverage?: GrassPlacementCoverage;
+  /** Explicit candidate distribution; the manager alone admits the fine profile. */
+  placementDistribution?: GrassPlacementDistribution;
+  /** Colour-only authored soil; never participates in placement eligibility. */
+  compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
+  /** Absent retains historical biome eligibility. Never inferred from terrain. */
+  grassEligibility?: GrassSurfaceEligibility;
   type: "generateGrassInstances";
   chunkKey: string;
   centerX: number;
@@ -97,19 +144,29 @@ export interface GrassWorkerInput {
     endX: number;
     endZ: number;
     width: number;
+    blendWidth?: number;
+    maxInfluence?: number;
   }>;
   roadBlendWidth: number;
   tileSize: number;
-  flatZones: Array<{
-    centerX: number;
-    centerZ: number;
-    halfWidth: number;
-    halfDepth: number;
-    blendRadius: number;
-  }>;
+  terrainSurface: GrassTerrainSurfaceSnapshot;
 }
 
 export interface GrassWorkerOutput {
+  /** Exact detached appearance descriptor, also for empty results. */
+  pondServiceGround?: CompactTerrainBankVerge;
+  /** Exact selected request marker, including empty regional results. */
+  compactPondBlend?: "shore-contact-v1" | "composition-v1";
+  /** Exact selected request marker, including empty results. */
+  compactCoastBlend?: "distribution-v1";
+  /** Echoed only when selected, independently of authoritative terrain identity. */
+  compactGrassColorGrade?: CompactGrassColorGrade;
+  /** Echoed only for an explicit cell request, never inferred from chunkKey. */
+  placementCell?: GrassPlacementCell;
+  placementCoverage?: GrassPlacementCoverage;
+  placementDistribution?: GrassPlacementDistribution;
+  grassEligibility?: GrassSurfaceEligibility;
+  terrainProfileIdentity: string;
   type: "grassInstanceResult";
   chunkKey: string;
   offsets: Float32Array;
@@ -126,91 +183,130 @@ export interface GrassBatchResult {
   failedCount: number;
 }
 
+/** Shared admission for the manager, queued requests and emitted worker. Never
+ * read accessors or infer a material choice from terrain or placement identity. */
+export function createGrassCoastBlendOperations() {
+  return {
+    validate(owner: object): "distribution-v1" | undefined {
+      if (!("compactCoastBlend" in owner)) return undefined;
+      const field = Object.getOwnPropertyDescriptor(owner, "compactCoastBlend");
+      if (
+        !field?.enumerable ||
+        !("value" in field) ||
+        field.value !== "distribution-v1"
+      )
+        throw new Error("Invalid grass coastal distribution selection");
+      return field.value;
+    },
+    assertScope(
+      mode: "distribution-v1" | undefined,
+      eligibility: GrassSurfaceEligibility,
+      field: { coastalMeadow?: unknown } | null,
+    ): void {
+      if (mode && eligibility !== "compact-pbr-v1")
+        throw new Error(
+          "Grass coastal distribution requires compact eligibility",
+        );
+      if (mode && !field?.coastalMeadow)
+        throw new Error(
+          "Grass coastal distribution requires admitted coastal meadow",
+        );
+    },
+  };
+}
+
+/** Historical selection is independent of regional water snapshots. The new
+ * composition mode requires its complete small bound zone/water pair even for
+ * remote jobs; masks there are neutral, but missing ownership is never inferred. */
+export function createGrassPondBlendOperations() {
+  return {
+    validate(owner: object): "shore-contact-v1" | "composition-v1" | undefined {
+      if (!("compactPondBlend" in owner)) return undefined;
+      const field = Object.getOwnPropertyDescriptor(owner, "compactPondBlend");
+      if (
+        !field?.enumerable ||
+        !("value" in field) ||
+        (field.value !== "shore-contact-v1" && field.value !== "composition-v1")
+      )
+        throw new Error("Invalid grass pond distribution selection");
+      return field.value;
+    },
+    assertScope(
+      mode: "shore-contact-v1" | "composition-v1" | undefined,
+      eligibility: GrassSurfaceEligibility,
+      field: { pondDistribution?: unknown; pondBankField?: unknown } | null,
+    ): void {
+      if (mode && eligibility !== "compact-pbr-v1")
+        throw new Error("Grass pond distribution requires compact eligibility");
+      if (mode === "shore-contact-v1" && !field?.pondDistribution)
+        throw new Error("Grass pond distribution requires admitted pond field");
+      if (mode === "composition-v1" && !field?.pondBankField)
+        throw new Error(
+          "Grass pond composition requires snapshot-bound pond field",
+        );
+    },
+    bankField(
+      mode: "shore-contact-v1" | "composition-v1" | undefined,
+      surface: GrassTerrainSurfaceSnapshot,
+      colors: Pick<
+        ReturnType<typeof createCompactTerrainColorOperations>,
+        "pondBankField" | "validatePond"
+      >,
+    ): CompactPondBankField | undefined {
+      if (mode !== "composition-v1") return undefined;
+      // The snapshot has already passed its full own-data and shape admission.
+      // Never accept a caller-authored field in place of these actual owners.
+      const ponds = surface.waterBodies.filter(
+        (body) => body.id === "haven_pond_water",
+      );
+      const zones = surface.zones.filter(
+        (zone) => zone.id === "haven_pond_floor",
+      );
+      if (ponds.length !== 1 || zones.length !== 1)
+        throw new Error(
+          "Grass pond composition requires complete snapshot owners",
+        );
+      const field = colors.pondBankField(
+        zones[0],
+        colors.validatePond(ponds[0]),
+      );
+      if (!field)
+        throw new Error(
+          "Grass pond composition requires admitted snapshot field",
+        );
+      return field;
+    },
+  };
+}
+
+/** One admission pass, shared verbatim with the emitted worker. Ordinary road
+ * records stay untouched; explicit overrides must be own numeric data fields. */
+function createGrassWorkerRoadProfileOperations() {
+  return {
+    validate(roads: GrassWorkerInput["roadSegments"]): void {
+      for (const road of roads) {
+        for (let field = 0; field < 2; field++) {
+          const key = field === 0 ? "blendWidth" : "maxInfluence";
+          if (!(key in road)) continue;
+          const property = Object.getOwnPropertyDescriptor(road, key);
+          if (
+            !property ||
+            !("value" in property) ||
+            typeof property.value !== "number" ||
+            !Number.isFinite(property.value) ||
+            property.value < 0 ||
+            property.value > (field === 0 ? 1024 : 1)
+          )
+            throw new Error("Invalid grass worker road influence profile");
+        }
+      }
+    },
+  };
+}
+
 // ============================================================================
 // WORKER CODE
 // ============================================================================
-
-/**
- * Build a JS string for the sampleNoiseCPU pipeline — exact match of
- * TerrainShader.ts lines 422-549 + 827-861.
- * Worker has no texture, so we always use the seamlessFbm path.
- */
-function buildSampleNoiseJS(): string {
-  return `
-  function _fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-  function _lerp(a, b, t) { return a + t * (b - a); }
-  function _grad(hash, x, y) {
-    var h = hash & 3;
-    var u = h < 2 ? x : y;
-    var v = h < 2 ? y : x;
-    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
-  }
-
-  function createPermutation(seed) {
-    var p = [];
-    for (var i = 0; i < 256; i++) p[i] = i;
-    var s = seed;
-    for (var i = 255; i > 0; i--) {
-      s = (s * 1103515245 + 12345) & 0x7fffffff;
-      var j = s % (i + 1);
-      var tmp = p[i]; p[i] = p[j]; p[j] = tmp;
-    }
-    return p.concat(p);
-  }
-
-  function perlin2DPerm(x, y, perm) {
-    var X = Math.floor(x) & 255;
-    var Y = Math.floor(y) & 255;
-    var xf = x - Math.floor(x);
-    var yf = y - Math.floor(y);
-    var u = _fade(xf);
-    var v = _fade(yf);
-    var aa = perm[perm[X] + Y];
-    var ab = perm[perm[X] + Y + 1];
-    var ba = perm[perm[X + 1] + Y];
-    var bb = perm[perm[X + 1] + Y + 1];
-    var x1 = _lerp(_grad(aa, xf, yf), _grad(ba, xf - 1, yf), u);
-    var x2 = _lerp(_grad(ab, xf, yf - 1), _grad(bb, xf - 1, yf - 1), u);
-    return _lerp(x1, x2, v);
-  }
-
-  function seamlessPerlin2D(x, y, perm) {
-    var TWO_PI = Math.PI * 2;
-    var angleX = x * TWO_PI;
-    var angleY = y * TWO_PI;
-    var nx = Math.cos(angleX);
-    var ny = Math.sin(angleX);
-    var nz = Math.cos(angleY);
-    var nw = Math.sin(angleY);
-    var n1 = perlin2DPerm(nx * 4 + 100, nz * 4 + 100, perm);
-    var n2 = perlin2DPerm(ny * 4 + 200, nw * 4 + 200, perm);
-    var n3 = perlin2DPerm(nx * 4 + ny * 4 + 300, nz * 4 + nw * 4 + 300, perm);
-    return (n1 + n2 + n3) / 3;
-  }
-
-  function seamlessFbm(x, y, perm, octaves) {
-    var value = 0, amplitude = 0.5, maxValue = 0;
-    for (var i = 0; i < octaves; i++) {
-      var ox = x + i * 17.3;
-      var oy = y + i * 31.7;
-      value += amplitude * seamlessPerlin2D(ox, oy, perm);
-      maxValue += amplitude;
-      amplitude *= 0.5;
-    }
-    return value / maxValue;
-  }
-
-  var _noisePerm = createPermutation(12345);
-
-  function sampleNoiseCPU(worldX, worldZ, scale) {
-    var u = worldX * scale;
-    var v = worldZ * scale;
-    var wu = u - Math.floor(u);
-    var wv = v - Math.floor(v);
-    return (seamlessFbm(wu, wv, _noisePerm, 4) + 1) * 0.5;
-  }
-`;
-}
 
 /**
  * Build a JS string for computeTerrainColorCPU — exact match of
@@ -356,7 +452,11 @@ function buildComputeTerrainColorJS(): string {
  * Embeds: terrain height, biome weights, terrain color, road influence,
  * grass placement, and instance attribute generation.
  */
-const GRASS_WORKER_CODE = `
+export const GRASS_WORKER_CODE = `
+${buildTerrainWorkerProfileGuardJS()}
+var authoredSurface = (${createAuthoredTerrainSurfaceOperations.toString()})();
+var terrainSurfaceOperations = (${createGrassTerrainSurfaceOperations.toString()})();
+var placementCellOperations = (${createGrassPlacementCellOperations.toString()})();
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
 
@@ -365,8 +465,19 @@ BIOME_IDS[BT_TUNDRA] = 0;
 BIOME_IDS[BT_FOREST] = 1;
 BIOME_IDS[BT_CANYON] = 2;
 
-${buildSampleNoiseJS()}
+// One private quantized field per worker, shared with the main-thread sampler.
+// This preserves existing texture bytes, not the old analytic worker population.
+var terrainNoiseSampler = (${createTerrainNoiseSampler.toString()})();
+function sampleNoiseCPU(worldX, worldZ, scale) {
+  return terrainNoiseSampler.sample(worldX, worldZ, scale);
+}
 ${buildComputeTerrainColorJS()}
+var roadInfluenceOperations = (${createRoadInfluenceOperations.toString()})();
+var roadProfileOperations = (${createGrassWorkerRoadProfileOperations.toString()})();
+var compactTerrainColorOperations = (${createCompactTerrainColorOperations.toString()})();
+var coastBlendOperations = (${createGrassCoastBlendOperations.toString()})();
+var pondBlendOperations = (${createGrassPondBlendOperations.toString()})();
+var compactMeadowNoiseScale = compactTerrainColorOperations.getComposition().meadowNoiseScale;
 
 function mulberry32(seed) {
   var s = seed | 0;
@@ -378,46 +489,47 @@ function mulberry32(seed) {
   };
 }
 
-function distToSegSq(px, pz, x1, z1, x2, z2) {
-  var dx = x2 - x1, dz = z2 - z1;
-  var lenSq = dx * dx + dz * dz;
-  if (lenSq === 0) { var ddx = px - x1, ddz = pz - z1; return ddx * ddx + ddz * ddz; }
-  var t = Math.max(0, Math.min(1, ((px - x1) * dx + (pz - z1) * dz) / lenSq));
-  var projX = x1 + t * dx, projZ = z1 + t * dz;
-  var ddx2 = px - projX, ddz2 = pz - projZ;
-  return ddx2 * ddx2 + ddz2 * ddz2;
-}
-
 function calculateRoadInfluence(wx, wz, roadSegments, roadBlendWidth) {
-  if (roadSegments.length === 0) return 0;
-  var minDistSq = Infinity, closestWidth = 6;
+  var influence = 0;
   for (var i = 0; i < roadSegments.length; i++) {
     var seg = roadSegments[i];
-    var dSq = distToSegSq(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ);
-    if (dSq < minDistSq) { minDistSq = dSq; closestWidth = seg.width; }
+    influence = Math.max(influence, roadInfluenceOperations.sampleSegment(wx, wz, seg.startX, seg.startZ, seg.endX, seg.endZ, seg.width, seg.blendWidth ?? roadBlendWidth, seg.maxInfluence ?? 1));
+    if (influence === 1) return 1;
   }
-  var halfW = closestWidth / 2;
-  var totalW = halfW + roadBlendWidth;
-  if (minDistSq >= totalW * totalW) return 0;
-  if (minDistSq <= halfW * halfW) return 1.0;
-  var minDist = Math.sqrt(minDistSq);
-  var t = 1.0 - (minDist - halfW) / roadBlendWidth;
-  return t * t * (3 - 2 * t);
-}
-
-function isInFlatZone(wx, wz, flatZones) {
-  for (var i = 0; i < flatZones.length; i++) {
-    var fz = flatZones[i];
-    var dx = Math.abs(wx - fz.centerX);
-    var dz = Math.abs(wz - fz.centerZ);
-    if (dx <= fz.halfWidth + fz.blendRadius && dz <= fz.halfDepth + fz.blendRadius) {
-      return true;
-    }
-  }
-  return false;
+  return influence;
 }
 
 function generateGrassInstances(input) {
+  assertTerrainWorkerInput(input);
+  roadProfileOperations.validate(input.roadSegments);
+  var placementDomain = placementCellOperations.resolveDomain(input);
+  var grassEligibility = compactTerrainColorOperations.grassEligibility(input.grassEligibility, input.config.TERRAIN_PROFILE.algorithm);
+  var compactGrassColorGrade = compactTerrainColorOperations.grassColorGrade(input.compactGrassColorGrade);
+  var compactCoastBlend = coastBlendOperations.validate(input);
+  var compactPondBlend = pondBlendOperations.validate(input);
+  if (compactGrassColorGrade && grassEligibility !== "compact-pbr-v1")
+    throw new Error("Grass color grade requires compact grass eligibility");
+  if (placementDomain.placementDistribution && grassEligibility !== "compact-pbr-v1")
+    throw new Error("Grass placement distribution requires compact grass eligibility");
+  var surface = terrainSurfaceOperations.validateSnapshot(input.terrainSurface);
+  var compactPondBankField = pondBlendOperations.bankField(compactPondBlend, surface, compactTerrainColorOperations);
+  var pondServiceGround = compactTerrainColorOperations.captureGroundVerge(input, "pondServiceGround");
+  if (pondServiceGround && !compactGrassColorGrade)
+    throw new Error("Pond service ground requires the graded compact meadow");
+  var compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE);
+  if (compactPondBlend === "composition-v1")
+    compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend, compactPondBankField);
+  else if (compactCoastBlend || compactPondBlend)
+    compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend);
+  if (pondServiceGround)
+    compactMacroField = compactTerrainColorOperations.macroField(input.config.TERRAIN_PROFILE, compactCoastBlend, compactPondBlend, compactPondBankField, pondServiceGround);
+  coastBlendOperations.assertScope(compactCoastBlend, grassEligibility, compactMacroField);
+  pondBlendOperations.assertScope(compactPondBlend, grassEligibility, compactMacroField);
+  var compactPlantingLobes = compactTerrainColorOperations.validatePlantingLobes(input.compactPlantingLobes);
+  var compactPondMaterial = (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5")))
+    ? compactTerrainColorOperations.validatePond(surface.waterBodies.find(function(body){return body.id === "haven_pond_water";}) || null) : null;
+  var zoneIndex = terrainSurfaceOperations.createZoneIndex(surface, input.tileSize);
+  var arenaFloorIds = new Set(surface.arenaFloorIds);
   var startTime = performance.now();
   var centerX = input.centerX, centerZ = input.centerZ, size = input.size;
   var spacingMul = input.spacingMul;
@@ -450,9 +562,18 @@ function generateGrassInstances(input) {
   ${buildHeightHelpersJS()}
   ${buildBiomeInfluencesJS()}
 
+  function getAuthoredHeight(wx, wz) {
+    var height = authoredSurface.resolveHeight(
+      zoneIndex.getZonesAt(wx, wz), wx, wz,
+      function() { return getHeightAtWithoutShore(wx, wz); },
+      arenaFloorIds, surface.arenaGradeHeight
+    );
+    return height === null ? getHeightComputed(wx, wz) : height;
+  }
+
   var spacing = input.clumpSpacing * spacingMul;
-  var maxCount = Math.ceil((size * size) / (spacing * spacing));
-  var rng = mulberry32(input.grassSeed ^ ((centerX * 374761393 + centerZ * 668265263) | 0));
+  var maxCount = placementDomain.maxCount;
+  var rng = mulberry32(input.grassSeed ^ ((placementDomain.centerX * 374761393 + placementDomain.centerZ * 668265263) | 0));
 
   var offsets = new Float32Array(maxCount * 3);
   var rotScaleHash = new Float32Array(maxCount * 3);
@@ -460,33 +581,50 @@ function generateGrassInstances(input) {
   var grassTints = new Float32Array(maxCount * 4);
   var groundNormals = new Float32Array(maxCount * 3);
   var count = 0;
+  var placementPosition = { x: 0, z: 0, leafX: 0, leafZ: 0 };
 
   var tCfg = grassConfigs[BT_TUNDRA] || grassConfigs["tundra"];
   var fCfg = grassConfigs[BT_FOREST] || grassConfigs["forest"];
   var cCfg = grassConfigs[BT_CANYON] || grassConfigs["canyon"];
 
   for (var i = 0; i < maxCount; i++) {
-    var lx = (rng() - 0.5) * size;
-    var lz = (rng() - 0.5) * size;
+    var lx, lz, wx, wz;
+    if (placementDomain.placementDistribution) {
+      placementCellOperations.samplePosition(placementDomain, i, rng(), rng(), placementPosition);
+      lx = placementPosition.leafX;
+      lz = placementPosition.leafZ;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+    } else {
+      lx = (rng() - 0.5) * placementDomain.size;
+      lz = (rng() - 0.5) * placementDomain.size;
+      wx = centerX + lx;
+      wz = centerZ + lz;
+      if (placementDomain.placementCell) {
+        wx = placementDomain.centerX + lx;
+        wz = placementDomain.centerZ + lz;
+        // Grounding and GPU placement retain the real terrain leaf's local frame.
+        lx = wx - centerX;
+        lz = wz - centerZ;
+      }
+    }
     var clumpRng = rng();
+    var ty = getAuthoredHeight(wx, wz);
 
-    var wx = centerX + lx;
-    var wz = centerZ + lz;
-    var ty = getHeightComputed(wx, wz);
+    var waterSurface = terrainSurfaceOperations.getWaterSurfaceAt(surface, WATER_THRESHOLD, wx, wz);
+    if (ty < waterSurface + 0.1) continue;
 
-    if (ty < WATER_THRESHOLD + 0.1) continue;
-
-    if (input.flatZones.length > 0 && isInFlatZone(wx, wz, input.flatZones)) continue;
+    if (authoredSurface.isGrassExcluded(zoneIndex.getZonesAt(wx, wz), wx, wz)) continue;
 
     var roadInf = calculateRoadInfluence(wx, wz, input.roadSegments, input.roadBlendWidth);
     if (roadInf > 0.8) continue;
 
     // Normal via finite differences (matches TerrainSystem.getTerrainColorAt)
-    var sd = 0.5;
-    var hL = getHeightComputed(wx - sd, wz);
-    var hR = getHeightComputed(wx + sd, wz);
-    var hD = getHeightComputed(wx, wz - sd);
-    var hU = getHeightComputed(wx, wz + sd);
+    var sd = ${GRASS_SURFACE_NORMAL_SAMPLE_DISTANCE};
+    var hL = getAuthoredHeight(wx - sd, wz);
+    var hR = getAuthoredHeight(wx + sd, wz);
+    var hD = getAuthoredHeight(wx, wz - sd);
+    var hU = getAuthoredHeight(wx, wz + sd);
     var dhdx = (hR - hL) / (2 * sd);
     var dhdz = (hU - hD) / (2 * sd);
     var gradMag = Math.sqrt(dhdx * dhdx + dhdz * dhdz);
@@ -504,6 +642,38 @@ function generateGrassInstances(input) {
     var tundraW = 1 - forestW - canyonW;
 
     var color = computeTerrainColorCPU(wx, wz, ty, slope, forestW, canyonW, sc);
+    var coastalGroundCover = 0;
+    var coastalDistributionSupport = 0;
+    var pondMarginScale = 1;
+    var grassEstablishment = false;
+    var grassEstablishmentWeight = 0;
+    if (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || input.config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5"))) {
+      var compactInput = {
+        grassColorGrade: compactGrassColorGrade,
+        noiseValue: sampleNoiseCPU(wx, wz, sc.NOISE_SCALE),
+        meadowNoise: sampleNoiseCPU(wx, wz, compactMeadowNoiseScale),
+        distortNoise: sampleNoiseCPU(wx, wz, sc.DISTORT_NOISE_SCALE),
+        slope: slope, roadInfluence: roadInf,
+        surface: {x:wx,z:wz,height:ty,pond:compactPondMaterial,macroField:compactMacroField,plantingLobes:compactPlantingLobes}
+      };
+      var compactRGB = compactTerrainColorOperations.sample(compactInput);
+      color.r = compactRGB.r; color.g = compactRGB.g; color.b = compactRGB.b;
+      if (grassEligibility === "compact-pbr-v1") {
+        color.grassWeight = compactTerrainColorOperations.grassSupportBeforeCoast(compactInput);
+      }
+      coastalGroundCover = compactTerrainColorOperations.coastalGroundCover({
+        height: ty, noiseValue: compactInput.noiseValue,
+        distortNoise: compactInput.distortNoise, field: compactMacroField
+      });
+      if (compactCoastBlend || compactPondBlend)
+        coastalDistributionSupport = compactTerrainColorOperations.grassSupport(compactInput);
+      if (compactPondBlend === "shore-contact-v1")
+        pondMarginScale = compactTerrainColorOperations.pondMarginAt(compactInput).clumpScale;
+      if (compactPondBlend === "composition-v1") {
+        grassEstablishmentWeight = compactTerrainColorOperations.bankCompositionAt(compactInput).groundCoverWeight;
+        grassEstablishment = grassEstablishmentWeight > 0;
+      }
+    }
 
     // Biome-blended grass params
     var maxSlope = tCfg.maxSlope * tundraW + fCfg.maxSlope * forestW + cCfg.maxSlope * canyonW;
@@ -514,7 +684,7 @@ function generateGrassInstances(input) {
     var patchScale = tCfg.patchScale * tundraW + fCfg.patchScale * forestW + cCfg.patchScale * canyonW;
 
     var slopeOk = slope <= maxSlope ? 1.0 : 0.0;
-    var weightOk = color.grassWeight >= minGW ? 1.0 : 0.0;
+    var weightOk = (grassEligibility === "compact-pbr-v1" ? color.grassWeight > 0 : color.grassWeight >= minGW) ? 1.0 : 0.0;
 
     var patchThreshold = patchiness * 2 - 1;
     var noiseVal = noise.simplex2D(wx * patchScale, wz * patchScale);
@@ -523,15 +693,43 @@ function generateGrassInstances(input) {
     var rawGP = color.grassWeight * density * slopeOk * weightOk * patchMask;
     var grassPlacement = Math.max(0, rawGP - roadInf);
 
-    if (grassPlacement <= 0) continue;
-    if (clumpRng > grassPlacement) continue;
+    var historicalAccepted = grassPlacement > 0 && clumpRng <= grassPlacement;
+    var distributionRaw = coastalDistributionSupport * density * slopeOk *
+      (grassEstablishment ? (coastalDistributionSupport > 0 ? 1 : 0) : weightOk) * patchMask;
+    if (grassEstablishment)
+      distributionRaw = compactTerrainColorOperations.bankEstablishmentPlacement(distributionRaw, rawGP * (1 - coastalGroundCover), grassEstablishmentWeight);
+    var distributionPlacement = Math.max(0, distributionRaw - roadInf);
+    if (!historicalAccepted && (!grassEstablishment || distributionPlacement <= 0 || clumpRng > distributionPlacement)) continue;
 
     offsets[count * 3] = lx;
     offsets[count * 3 + 1] = ty;
     offsets[count * 3 + 2] = lz;
 
-    var rotation = rng() * Math.PI * 2;
-    var scale = (input.scaleMin + clumpRng * (input.scaleMax - input.scaleMin)) * grassHeightScale;
+    var rotation = historicalAccepted ? rng() * Math.PI * 2 :
+      placementCellOperations.establishmentRotation(placementDomain, input.grassSeed, i);
+    // Keep original acceptance and rotation draws before applying candidate
+    // coastal support. Surviving roots elsewhere keep their exact seeded pose.
+    if (!grassEstablishment && coastalGroundCover > 0) {
+      var coastalPlacement = Math.max(0, rawGP * (1 - coastalGroundCover) - roadInf);
+      if (coastalPlacement <= 0 || clumpRng > coastalPlacement) continue;
+    }
+    // Old attempts consume their original rotation even when later removed.
+    // Newly admitted authored roots use the stateless fork above, never RNG.
+    if (compactCoastBlend || compactPondBlend) {
+      if (distributionPlacement <= 0 || clumpRng > distributionPlacement) continue;
+    }
+    // Consume the original accepted-clump rotation before filtering obstacles.
+    // A new rock removes intersecting clumps without re-phasing later samples.
+    if (terrainSurfaceOperations.isGrassExcluded(surface, wx, wz)) continue;
+    // Match TerrainSystem's returned height factor exactly. This is the
+    // accepted instance's real scale, not a GPU-only deformation: retained
+    // grounding and swept footprints therefore receive the same smaller tuft.
+    var scale = (input.scaleMin + clumpRng * (input.scaleMax - input.scaleMin)) * (grassHeightScale * pondMarginScale);
+    // Scale only after the existing acceptance/rotation/obstacle decisions.
+    // No new roots or random draws; the same bounded field softens the ground.
+    if (compactMacroField?.bankVerge) {
+      scale *= compactTerrainColorOperations.bankVergeClumpScale(wx, wz, roadInf, compactMacroField);
+    }
     rotScaleHash[count * 3] = rotation;
     rotScaleHash[count * 3 + 1] = scale;
     rotScaleHash[count * 3 + 2] = clumpRng;
@@ -561,7 +759,16 @@ function generateGrassInstances(input) {
 
   if (count === 0) {
     return {
+      ...(pondServiceGround ? { pondServiceGround: pondServiceGround } : {}),
+      ...(compactPondBlend ? { compactPondBlend: compactPondBlend } : {}),
+      ...(compactCoastBlend ? { compactCoastBlend: compactCoastBlend } : {}),
+      ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
+      ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
+      ...(placementDomain.placementDistribution ? { placementDistribution: placementDomain.placementDistribution } : {}),
+      ...(placementDomain.placementCoverage ? { placementCoverage: placementDomain.placementCoverage } : {}),
       type: "grassInstanceResult",
+      grassEligibility: grassEligibility,
+      terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
       chunkKey: input.chunkKey,
       offsets: new Float32Array(0),
       rotScaleHash: new Float32Array(0),
@@ -573,7 +780,16 @@ function generateGrassInstances(input) {
   }
 
   return {
+    ...(pondServiceGround ? { pondServiceGround: pondServiceGround } : {}),
+    ...(compactPondBlend ? { compactPondBlend: compactPondBlend } : {}),
+    ...(compactCoastBlend ? { compactCoastBlend: compactCoastBlend } : {}),
+    ...(compactGrassColorGrade ? { compactGrassColorGrade: compactGrassColorGrade } : {}),
+    ...(placementDomain.placementCell ? { placementCell: placementCellOperations.validateCell(placementDomain.placementCell) } : {}),
+    ...(placementDomain.placementDistribution ? { placementDistribution: placementDomain.placementDistribution } : {}),
+    ...(placementDomain.placementCoverage ? { placementCoverage: placementDomain.placementCoverage } : {}),
     type: "grassInstanceResult",
+    grassEligibility: grassEligibility,
+    terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
     chunkKey: input.chunkKey,
     offsets: offsets.subarray(0, count * 3),
     rotScaleHash: rotScaleHash.subarray(0, count * 3),
@@ -615,6 +831,182 @@ let grassWorkerPool: WorkerPool<GrassWorkerInput, GrassWorkerOutput> | null =
 
 let workersChecked = false;
 let workersAvailable = false;
+const surfaceOperations = createGrassTerrainSurfaceOperations();
+const colorOperations = createCompactTerrainColorOperations();
+const placementCellOperations = createGrassPlacementCellOperations();
+const roadProfileOperations = createGrassWorkerRoadProfileOperations();
+const coastBlendOperations = createGrassCoastBlendOperations();
+const pondBlendOperations = createGrassPondBlendOperations();
+
+/** Capture the wire-owned cell and authored surface before a pool may queue it. */
+export function prepareGrassWorkerRequest(
+  input: GrassWorkerInput,
+): GrassWorkerInput {
+  assertTerrainWorkerRequest(input.config, input.seed);
+  roadProfileOperations.validate(input.roadSegments);
+  const eligibility = colorOperations.grassEligibility(
+    input.grassEligibility,
+    input.config.TERRAIN_PROFILE.algorithm,
+  );
+  const grade = colorOperations.grassColorGrade(input.compactGrassColorGrade);
+  const pondServiceGround = colorOperations.captureGroundVerge(
+    input,
+    "pondServiceGround",
+  );
+  if (pondServiceGround && !grade)
+    throw new Error("Pond service ground requires the graded compact meadow");
+  const coastBlend = coastBlendOperations.validate(input);
+  const pondBlend = pondBlendOperations.validate(input);
+  const terrainSurface = surfaceOperations.cloneSnapshot(input.terrainSurface);
+  const pondBankField = pondBlendOperations.bankField(
+    pondBlend,
+    terrainSurface,
+    colorOperations,
+  );
+  if (coastBlend)
+    coastBlendOperations.assertScope(
+      coastBlend,
+      eligibility,
+      colorOperations.macroField(input.config.TERRAIN_PROFILE, coastBlend),
+    );
+  if (pondBlend)
+    pondBlendOperations.assertScope(
+      pondBlend,
+      eligibility,
+      colorOperations.macroField(
+        input.config.TERRAIN_PROFILE,
+        coastBlend,
+        pondBlend,
+        pondBankField,
+      ),
+    );
+  if (grade && eligibility !== "compact-pbr-v1")
+    throw new Error("Grass color grade requires compact grass eligibility");
+  const domain = placementCellOperations.resolveDomain(input);
+  if (pondServiceGround)
+    colorOperations.macroField(
+      input.config.TERRAIN_PROFILE,
+      coastBlend,
+      pondBlend,
+      pondBankField,
+      pondServiceGround,
+    );
+  if (domain.placementDistribution && eligibility !== "compact-pbr-v1")
+    throw new Error(
+      "Grass placement distribution requires compact grass eligibility",
+    );
+  return {
+    ...input,
+    ...(pondServiceGround ? { pondServiceGround } : {}),
+    ...(pondBlend ? { compactPondBlend: pondBlend } : {}),
+    ...(coastBlend ? { compactCoastBlend: coastBlend } : {}),
+    ...(domain.placementCell ? { placementCell: domain.placementCell } : {}),
+    ...(domain.placementDistribution
+      ? { placementDistribution: domain.placementDistribution }
+      : {}),
+    ...(domain.placementCoverage
+      ? { placementCoverage: domain.placementCoverage }
+      : {}),
+    terrainSurface,
+  };
+}
+
+/** Admit cell and visual grade separately from terrain identity and chunk key. */
+export function admitGrassWorkerPlacementResult(
+  result: GrassWorkerOutput,
+  request: GrassWorkerInput,
+): GrassWorkerOutput {
+  const expectedService = colorOperations.captureGroundVerge(
+    request,
+    "pondServiceGround",
+  );
+  const receivedService = colorOperations.captureGroundVerge(
+    result,
+    "pondServiceGround",
+  );
+  if (JSON.stringify(expectedService) !== JSON.stringify(receivedService))
+    throw new Error("Grass worker pond service ground mismatch");
+  const expectedPondBlend = pondBlendOperations.validate(request);
+  const receivedPondBlend = pondBlendOperations.validate(result);
+  if (receivedPondBlend !== expectedPondBlend)
+    throw new Error("Grass worker pond distribution mismatch");
+  const expectedCoastBlend = coastBlendOperations.validate(request);
+  const receivedCoastBlend = coastBlendOperations.validate(result);
+  if (receivedCoastBlend !== expectedCoastBlend)
+    throw new Error("Grass worker coastal distribution mismatch");
+  const expectedGrade = colorOperations.grassColorGrade(
+    request.compactGrassColorGrade,
+  );
+  const receivedGrade = colorOperations.grassColorGrade(
+    result.compactGrassColorGrade,
+  );
+  if (
+    receivedGrade !== expectedGrade ||
+    (!expectedGrade &&
+      Object.prototype.hasOwnProperty.call(result, "compactGrassColorGrade"))
+  )
+    throw new Error("Grass worker grass color grade mismatch");
+  const expectedDomain = placementCellOperations.resolveDomain(request);
+  const coverageField = Object.getOwnPropertyDescriptor(
+    result,
+    "placementCoverage",
+  );
+  if (
+    "placementCoverage" in result &&
+    (!coverageField?.enumerable || !("value" in coverageField))
+  )
+    throw new Error("Grass worker placement coverage must be own data");
+  const receivedCoverage = placementCellOperations.validateCoverage(
+    coverageField?.value,
+  );
+  if (
+    receivedCoverage !== expectedDomain.placementCoverage ||
+    (coverageField !== undefined) !==
+      (expectedDomain.placementCoverage !== undefined)
+  )
+    throw new Error("Grass worker placement coverage mismatch");
+  const expectedDistribution = expectedDomain.placementDistribution;
+  if (
+    expectedDistribution &&
+    colorOperations.grassEligibility(
+      request.grassEligibility,
+      request.config.TERRAIN_PROFILE.algorithm,
+    ) !== "compact-pbr-v1"
+  )
+    throw new Error(
+      "Grass placement distribution requires compact grass eligibility",
+    );
+  const receivedDistribution = placementCellOperations.validateDistribution(
+    result.placementDistribution,
+  );
+  const hasDistribution = Object.prototype.hasOwnProperty.call(
+    result,
+    "placementDistribution",
+  );
+  if (
+    receivedDistribution !== expectedDistribution ||
+    hasDistribution !== (expectedDistribution !== undefined)
+  )
+    throw new Error("Grass worker placement distribution mismatch");
+  const expected = expectedDomain.placementCell;
+  if (!expected) {
+    if (Object.prototype.hasOwnProperty.call(result, "placementCell"))
+      throw new Error("Unexpected grass worker placement cell");
+    // Validate original markers before copying: a spread must not normalize
+    // inherited fields or invoke their getters ahead of their own admission.
+    return receivedService
+      ? { ...result, pondServiceGround: receivedService }
+      : result;
+  }
+  const cell = placementCellOperations.validateCell(result.placementCell);
+  if (cell.indexX !== expected.indexX || cell.indexZ !== expected.indexZ)
+    throw new Error("Grass worker placement cell mismatch");
+  return {
+    ...result,
+    placementCell: cell,
+    ...(receivedService ? { pondServiceGround: receivedService } : {}),
+  };
+}
 
 export function isGrassWorkerAvailable(): boolean {
   if (!workersChecked) {
@@ -659,16 +1051,28 @@ export function getGrassWorkerPool(
 export async function generateGrassPlacementsAsync(
   input: GrassWorkerInput,
 ): Promise<GrassWorkerOutput | null> {
+  const request = prepareGrassWorkerRequest(input);
+  const eligibility = colorOperations.grassEligibility(
+    input.grassEligibility,
+    input.config.TERRAIN_PROFILE.algorithm,
+  );
   const pool = getGrassWorkerPool();
   if (!pool) {
     return null;
   }
-  return pool.execute(input);
+  const result = await pool.execute(request);
+  assertTerrainWorkerResult(result, input.config);
+  if ((result.grassEligibility ?? "legacy-biome-v1") !== eligibility)
+    throw new Error("Grass worker eligibility mismatch");
+  return admitGrassWorkerPlacementResult(result, request);
 }
 
 export async function generateGrassChunksBatch(
   inputs: GrassWorkerInput[],
 ): Promise<GrassBatchResult> {
+  // Validate and detach the entire batch before dispatch: a malformed later
+  // snapshot must not leave an earlier subset running after this call rejects.
+  const requests = inputs.map(prepareGrassWorkerRequest);
   const pool = getGrassWorkerPool();
   if (!pool) {
     return { results: [], workersAvailable: false, failedCount: inputs.length };
@@ -677,11 +1081,17 @@ export async function generateGrassChunksBatch(
   const results: GrassWorkerOutput[] = [];
   let failedCount = 0;
 
-  const promises = inputs.map((input) =>
+  const promises = requests.map((input) =>
     pool
       .execute(input)
       .then((result) => {
-        results.push(result);
+        assertTerrainWorkerResult(result, input.config);
+        if (
+          (result.grassEligibility ?? "legacy-biome-v1") !==
+          (input.grassEligibility ?? "legacy-biome-v1")
+        )
+          throw new Error("Grass worker eligibility mismatch");
+        results.push(admitGrassWorkerPlacementResult(result, input));
       })
       .catch(() => {
         failedCount++;

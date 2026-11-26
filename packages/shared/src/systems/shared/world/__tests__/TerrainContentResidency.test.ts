@@ -1,0 +1,1186 @@
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { Worker } from "node:worker_threads";
+import { createHash } from "node:crypto";
+import { JSDOM } from "jsdom";
+import THREE from "../../../../extras/three/three";
+import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
+import type { Entity } from "../../../../entities/Entity";
+import { PlayerEntity } from "../../../../entities/player/PlayerEntity";
+import { PlayerLocal } from "../../../../entities/player/PlayerLocal";
+import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
+import { EventType } from "../../../../types/events";
+import type { Resource } from "../../../../types/core/core";
+import type {
+  TerrainResourceSpawnBatch,
+  TerrainTile,
+} from "../../../../types/world/terrain";
+import {
+  TERRAIN_WORKER_CODE,
+  type TerrainWorkerOutput,
+} from "../../../../utils/workers/TerrainWorker";
+import { EntityManager } from "../../entities/EntityManager";
+import { ResourceSystem } from "../../entities/ResourceSystem";
+import { TerrainSystem } from "../TerrainSystem";
+import { RoadNetworkSystem } from "../RoadNetworkSystem";
+import type { GrassWorkerSetup } from "../GrassVisualManager";
+
+// Actual CPU engine classes and native worker execution; no renderer, socket,
+// persistence replacement or fabricated GPU. Only the server role is selected.
+class CpuServerWorld extends World {
+  override get isServer(): boolean {
+    return true;
+  }
+}
+type TerrainInternals = {
+  loadWaterBodiesFromManifest(): void;
+  loadFlatZonesFromManifest(): void;
+  worldToTerrainTileIndex(x: number): number;
+  generateTile(x: number, z: number, content: boolean): TerrainTile;
+  createTileGeometry(x: number, z: number): THREE.PlaneGeometry;
+  initTerrainMaterial(): void;
+  createTileFromGeometryWithResources(
+    x: number,
+    z: number,
+    geometry: THREE.PlaneGeometry,
+    content: boolean,
+  ): TerrainTile;
+  bakeWalkabilityFlags(x: number, z: number): void;
+  unloadTile(tile: TerrainTile): void;
+  promoteTileContent(tile: TerrainTile): boolean;
+  enqueueTileForGeneration(x: number, z: number, content: boolean): void;
+  dispatchWorkerBatch(): void;
+  processTileGenerationQueue(): void;
+  loadInitialTiles(): void | Promise<void>;
+  updatePlayerBasedTerrain(): void;
+  prunePendingTileQueue(
+    needed: ReadonlySet<string>,
+    content?: ReadonlySet<string>,
+  ): void;
+  buildGrassWorkerSetup(): GrassWorkerSetup;
+  acceptTerrainWorkerResult(
+    result: TerrainWorkerOutput,
+    generation: object | undefined,
+  ): void;
+  pendingContentPromotions: Map<string, TerrainTile>;
+  pendingTileGenerations: Map<string, object>;
+  pendingTileContent: Map<string, boolean>;
+  pendingTileKeys: string[];
+  pendingTileSet: Set<string>;
+  pendingWorkerTiles: Array<{ tileX: number; tileZ: number }>;
+  pendingWorkerResults: Map<string, TerrainWorkerOutput>;
+  pendingWorkerTileKeys: Set<string>;
+  workerFallbackTileKeys: Set<string>;
+  runtimeIsClient: boolean;
+  runtimeIsServer: boolean;
+  coreChunkRange: number;
+  ringChunkRange: number;
+  _terrainInitialized: boolean;
+  maxTilesPerFrame: number;
+  generationBudgetMsPerFrame: number;
+};
+type ResourceInternals = {
+  initializeWorldAreaResources(): Promise<void>;
+  terrainResourceTails: Map<string, Promise<void>>;
+  resources: Map<string, Resource>;
+  respawnAtTick: Map<string, number>;
+};
+const worlds: World[] = [];
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
+afterEach(() => {
+  for (const world of worlds.splice(0)) world.destroy();
+});
+async function fixture() {
+  const world = new CpuServerWorld();
+  worlds.push(world);
+  const manager = world.register(
+    "entity-manager",
+    EntityManager,
+  ) as EntityManager;
+  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+  const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
+  const resources = world.register(
+    "resource",
+    ResourceSystem,
+  ) as ResourceSystem;
+  const internal = terrain as unknown as TerrainInternals;
+  const resourceInternal = resources as unknown as ResourceInternals;
+  await terrain.init();
+  internal.loadWaterBodiesFromManifest();
+  internal.loadFlatZonesFromManifest();
+  await roads.init();
+  await roads.start();
+  await resources.init();
+  const batches: TerrainResourceSpawnBatch[] = [];
+  world.on(
+    EventType.RESOURCE_SPAWN_POINTS_REGISTERED,
+    (batch: TerrainResourceSpawnBatch) => batches.push(batch),
+  );
+  const settle = async () => {
+    await Promise.all([...resourceInternal.terrainResourceTails.values()]);
+  };
+  const addPlayer = (x: number, z: number) => {
+    const player = new PlayerEntity(world, {
+      id: "residency-player",
+      name: "Residency player",
+      type: "player",
+      position: [x, terrain.getResourceGroundHeight(x, z), z],
+      quaternion: [0, 0, 0, 1],
+    });
+    world.entities.set(player.id, player);
+    return player;
+  };
+  return {
+    world,
+    manager,
+    terrain,
+    internal,
+    resources,
+    resourceInternal,
+    batches,
+    settle,
+    addPlayer,
+  };
+}
+
+async function initialClientFixture() {
+  const f = await fixture();
+  // Actual CPU client assembly, not browser, renderer or PhysX qualification.
+  f.internal.runtimeIsServer = false;
+  f.internal.runtimeIsClient = true;
+  f.internal.initTerrainMaterial();
+  f.internal.coreChunkRange = 0;
+  f.internal.ringChunkRange = 1;
+  f.internal.maxTilesPerFrame = 3;
+  f.internal.generationBudgetMsPerFrame = 8;
+  return f;
+}
+
+function initialTileSnapshot(tile: TerrainTile) {
+  const bytes = (array: ArrayBufferView) =>
+    createHash("sha256")
+      .update(Buffer.from(array.buffer, array.byteOffset, array.byteLength))
+      .digest("hex");
+  return {
+    key: tile.key,
+    contentGenerated: tile.contentGenerated,
+    biome: tile.biome,
+    position: tile.mesh.position.toArray(),
+    attributes: Object.fromEntries(
+      Object.entries(tile.mesh.geometry.attributes).map(([name, attribute]) => [
+        name,
+        {
+          type: attribute.array.constructor.name,
+          itemSize: attribute.itemSize,
+          normalized: attribute.normalized,
+          bytes: bytes(attribute.array),
+        },
+      ]),
+    ),
+    index: tile.mesh.geometry.index
+      ? bytes(tile.mesh.geometry.index.array)
+      : null,
+    heights: bytes(new Float64Array(tile.heightData)),
+    resources: tile.resources.map((resource) => ({
+      id: resource.id,
+      type: resource.type,
+      position: resource.position,
+      scale: resource.scale,
+      rotation: resource.rotation,
+    })),
+  };
+}
+const proceduralIds = [
+  "tree_335_266",
+  "tree_311_295",
+  "tree_377_288",
+  "tree_289_508",
+  "tree_281_518",
+  "tree_281_513",
+  "tree_503_432",
+  "tree_502_419",
+].sort();
+const authoredIds = [
+  "tree_367_311",
+  "tree_373_313",
+  "tree_379_311",
+  "tree_379_304",
+  "tree_375_299",
+].sort();
+// Historical layout v1: explicit centered owners, not read from live config.
+const previousGroveIdsByOwner = {
+  "3_4": [
+    "tree_288_387",
+    "tree_290_432",
+    "tree_294_422",
+    "tree_297_449",
+    "tree_305_410",
+  ],
+  "3_5": [
+    "tree_293_460",
+    "tree_310_471",
+    "tree_315_492",
+    "tree_318_465",
+    "tree_320_501",
+    "tree_328_484",
+    "tree_330_500",
+    "tree_333_466",
+  ],
+  "4_4": ["tree_443_383"],
+  "5_4": ["tree_459_383", "tree_461_396"],
+};
+// Exact offline-qualified layout v2 additions. The world-config envelope remains v2.
+const newGroveIdsByOwner = {
+  "3_4": [
+    "tree_298_401",
+    "tree_297_439",
+    "tree_287_400",
+    "tree_308_438",
+    "tree_288_441",
+    "tree_292_410",
+    "tree_309_450",
+    "tree_302_387",
+  ],
+  "3_5": [
+    "tree_334_475",
+    "tree_309_499",
+    "tree_337_488",
+    "tree_319_481",
+    "tree_310_482",
+  ],
+  "4_4": ["tree_449_369", "tree_449_410"],
+  "5_4": ["tree_474_394", "tree_471_406", "tree_460_365", "tree_458_411"],
+};
+const groveIdsByOwner = {
+  "3_4": [...previousGroveIdsByOwner["3_4"], ...newGroveIdsByOwner["3_4"]],
+  "3_5": [...previousGroveIdsByOwner["3_5"], ...newGroveIdsByOwner["3_5"]],
+  "4_4": [...previousGroveIdsByOwner["4_4"], ...newGroveIdsByOwner["4_4"]],
+  "5_4": [...previousGroveIdsByOwner["5_4"], ...newGroveIdsByOwner["5_4"]],
+};
+const groveIds = Object.values(groveIdsByOwner).flat().sort();
+
+/** Real generated worker JS, native Promise and transferred Float32 output. */
+function workerJob(setup: GrassWorkerSetup, tileX: number, tileZ: number) {
+  const worker = new Worker(
+    `
+    const {parentPort}=require("node:worker_threads");
+    globalThis.self={postMessage:(value,transfers)=>parentPort.postMessage(value,transfers)};
+    ${TERRAIN_WORKER_CODE}
+    parentPort.on("message",data=>self.onmessage({data}));
+  `,
+    { eval: true, env: {} },
+  );
+  const result = new Promise<TerrainWorkerOutput>((resolve, reject) => {
+    worker.once("error", reject);
+    worker.once(
+      "message",
+      (message: { result: TerrainWorkerOutput; error?: string }) => {
+        if (message.error) reject(new Error(message.error));
+        else resolve(message.result);
+      },
+    );
+    worker.postMessage({
+      type: "generateHeightmap",
+      tileX,
+      tileZ,
+      config: setup.terrainConfig,
+      seed: setup.seed,
+      biomeCenters: setup.biomeCenters,
+      biomes: setup.biomes,
+    });
+  });
+  return { result, close: () => worker.terminate() };
+}
+
+describe("actual terrain content residency", () => {
+  it("readiness lifecycle waits before init and resolves only after actual initial tiles", async () => {
+    const world = new CpuServerWorld();
+    worlds.push(world);
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    let settled = false;
+    const ready = terrain.waitUntilReady().then(() => {
+      settled = true;
+    });
+    await terrain.init();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(terrain.getTiles().size).toBe(0);
+    await terrain.start();
+    await ready;
+    expect(terrain.isReady()).toBe(true);
+    expect(terrain.getTiles().size).toBeGreaterThan(0);
+    await expect(terrain.waitUntilReady()).resolves.toBeUndefined();
+  });
+
+  it("readiness lifecycle cancellation removes only its own waiter", async () => {
+    const f = await initialClientFixture();
+    const controller = new AbortController();
+    const reason = new Error("Cancelled terrain consumer");
+    const cancelled = f.terrain.waitUntilReady(controller.signal);
+    const cancelledResult = expect(cancelled).rejects.toBe(reason);
+    const survivor = f.terrain.waitUntilReady();
+    controller.abort(reason);
+    await cancelledResult;
+    expect(f.terrain["readinessWaiters"].size).toBe(1);
+    await f.internal.loadInitialTiles();
+    await survivor;
+    expect(f.terrain["readinessWaiters"].size).toBe(0);
+    await expect(f.terrain.waitUntilReady(controller.signal)).rejects.toBe(
+      reason,
+    );
+  });
+
+  it.each([false, true])(
+    "readiness lifecycle rejects retired terrain (previously ready=%s)",
+    async (complete) => {
+      const f = await initialClientFixture();
+      if (complete) await f.internal.loadInitialTiles();
+      const pending = complete ? undefined : f.terrain.waitUntilReady();
+      const rejected = pending
+        ? expect(pending).rejects.toThrow("Terrain is destroyed")
+        : undefined;
+      f.terrain.destroy();
+      await rejected;
+      expect(f.terrain.isReady()).toBe(false);
+      await expect(f.terrain.waitUntilReady()).rejects.toThrow(
+        "Terrain is destroyed",
+      );
+      expect(f.terrain["readinessWaiters"].size).toBe(0);
+    },
+  );
+
+  it("readiness lifecycle propagates real init selection failure before tile loading", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const dom = new JSDOM("", {
+      url: "http://localhost:3333/?dirtProjection=invalid",
+    });
+    const world = new CpuServerWorld();
+    worlds.push(world);
+    const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+    Object.defineProperty(globalThis, "window", {
+      value: dom.window,
+      configurable: true,
+    });
+    try {
+      const ready = terrain.waitUntilReady().catch((error: unknown) => error);
+      const failure = await terrain.init().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(await ready).toBe(failure);
+      expect(terrain.isReady()).toBe(false);
+      expect(terrain["initialTileLoading"]).toBeNull();
+      await expect(terrain.waitUntilReady()).rejects.toBe(failure);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      dom.window.close();
+    }
+  });
+
+  it("readiness lifecycle propagates actual generation failure and refuses startup retry", async () => {
+    const f = await initialClientFixture();
+    const revised = new Promise<void>((resolve) =>
+      setTimeout(() => {
+        f.terrain.registerFlatZone({
+          id: "readiness-revision",
+          centerX: 10000,
+          centerZ: 10000,
+          width: 2,
+          depth: 2,
+          height: 10,
+          blendRadius: 1,
+        });
+        resolve();
+      }, 0),
+    );
+    const ready = f.terrain.waitUntilReady().catch((error: unknown) => error);
+    const failure = await Promise.resolve(f.internal.loadInitialTiles()).catch(
+      (error: unknown) => error,
+    );
+    await revised;
+    expect(failure).toEqual(
+      new Error("Terrain changed during initial tile generation"),
+    );
+    expect(await ready).toBe(failure);
+    expect(f.terrain.isReady()).toBe(false);
+    await expect(f.terrain.waitUntilReady()).rejects.toBe(failure);
+    await expect(f.terrain.start()).rejects.toBe(failure);
+  });
+
+  it("player terrain wait shares one init owner and cleans every cancelled waiter", async () => {
+    const f = await initialClientFixture();
+    const player = new PlayerLocal(
+      f.world,
+      { id: "readiness-shared", position: [385, 28, 374] },
+      true,
+    );
+    f.world.entities.items.set(player.id, player);
+    f.world.entities.player = player as Entity as NonNullable<
+      typeof f.world.entities.player
+    >;
+    const first = player.init();
+    const rejected = expect(first).rejects.toThrow("Player was destroyed");
+    expect(player.init()).toBe(first);
+    expect(f.terrain["readinessWaiters"].size).toBe(1);
+    player.destroy();
+    await rejected;
+    expect(f.terrain["readinessWaiters"].size).toBe(0);
+    expect(f.world.hot.has(player)).toBe(false);
+    expect(player.base).toBeUndefined();
+    expect(player["positionValidationInterval"]).toBeUndefined();
+  });
+
+  it("player terrain wait never succeeds merely because ten seconds elapsed", async () => {
+    const f = await fixture();
+    const player = new PlayerLocal(
+      f.world,
+      { id: "readiness-delay", position: [385, 28, 374] },
+      true,
+    );
+    f.world.entities.items.set(player.id, player);
+    f.world.entities.player = player as Entity as NonNullable<
+      typeof f.world.entities.player
+    >;
+    let settled = false;
+    const waiting = player["waitForTerrain"]().then(() => {
+      settled = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10300));
+      expect(settled).toBe(false);
+      expect(player["positionValidationInterval"]).toBeUndefined();
+    } finally {
+      await f.terrain.start();
+      await waiting;
+      player.destroy();
+    }
+  }, 20000);
+
+  it.each(["destroy", "replace"] as const)(
+    "player terrain wait cannot activate a %s owner",
+    async (operation) => {
+      const f = await initialClientFixture();
+      const player = new PlayerLocal(
+        f.world,
+        { id: "readiness-retired", position: [385, 28, 374] },
+        true,
+      );
+      f.world.entities.items.set(player.id, player);
+      f.world.entities.player = player as Entity as NonNullable<
+        typeof f.world.entities.player
+      >;
+      const initializing = player.init().catch((error: unknown) => error);
+      try {
+        if (operation === "destroy") player.destroy();
+        else {
+          f.world.entities.items.delete(player.id);
+          f.world.entities.player = undefined;
+        }
+        await f.internal.loadInitialTiles();
+        expect(await initializing).toBeInstanceOf(Error);
+        expect(f.world.hot.has(player)).toBe(false);
+        expect(player.base).toBeUndefined();
+        expect(player.capsule).toBeNull();
+        expect(player["positionValidationInterval"]).toBeUndefined();
+      } finally {
+        player.destroy();
+      }
+    },
+  );
+
+  it("yields actual client initial tiles to a task before publishing readiness", async () => {
+    const f = await initialClientFixture();
+    let complete = false;
+    const opportunity = new Promise<{
+      beforeCompletion: boolean;
+      ready: boolean;
+      tiles: number;
+    }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          beforeCompletion: !complete,
+          ready: f.terrain.isReady(),
+          tiles: f.terrain.getTiles().size,
+        });
+      }, 0);
+    });
+    await f.internal.loadInitialTiles();
+    complete = true;
+    const observed = await opportunity;
+    expect(observed.beforeCompletion).toBe(true);
+    expect(observed.ready).toBe(false);
+    expect(observed.tiles).toBeGreaterThan(0);
+    expect(observed.tiles).toBeLessThanOrEqual(3);
+    expect(f.terrain.getTiles().size).toBe(9);
+    expect(f.terrain.isReady()).toBe(true);
+  });
+
+  it.each([
+    [385, 374],
+    [-125.25, 275.5],
+  ])(
+    "preserves ordered initial tile bytes and captured spectator center at (%s, %s)",
+    async (x, z) => {
+      const reference = await initialClientFixture();
+      const f = await initialClientFixture();
+      f.world.camera.position.set(x, 0, z);
+      const cx = f.internal.worldToTerrainTileIndex(x);
+      const cz = f.internal.worldToTerrainTileIndex(z);
+      const expected: TerrainTile[] = [];
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dz = -1; dz <= 1; dz++)
+          expected.push(
+            reference.internal.generateTile(
+              cx + dx,
+              cz + dz,
+              dx === 0 && dz === 0,
+            ),
+          );
+      const events: string[] = [];
+      let reentrant: void | Promise<void> = undefined;
+      f.world.on(
+        EventType.TERRAIN_TILE_GENERATED,
+        (data: { tileX: number; tileZ: number }) => {
+          events.push(`${data.tileX}_${data.tileZ}`);
+          reentrant ??= f.internal.loadInitialTiles();
+        },
+      );
+      const moved = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          f.world.camera.position.set(x + 1000, 0, z - 1000);
+          resolve();
+        }, 0);
+      });
+      const loading = f.internal.loadInitialTiles();
+      expect(reentrant).toBe(loading);
+      expect(f.internal.loadInitialTiles()).toBe(loading);
+      expect(f.terrain.isReady()).toBe(false);
+      expect(f.internal._terrainInitialized).toBe(false);
+      await loading;
+      await moved;
+      await Promise.all([f.settle(), reference.settle()]);
+      expect(events).toEqual(expected.map((tile) => tile.key));
+      expect(
+        [...f.terrain.getTiles().values()].map(initialTileSnapshot),
+      ).toEqual(expected.map(initialTileSnapshot));
+      expect(f.terrain.isReady()).toBe(true);
+      expect(f.internal.loadInitialTiles()).toBeUndefined();
+    },
+  );
+
+  it("retains synchronous server startup before any task opportunity", async () => {
+    const f = await fixture();
+    let taskRan = false;
+    const opportunity = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        taskRan = true;
+        resolve();
+      }, 0);
+    });
+    const starting = f.terrain.start();
+    expect(f.terrain.isReady()).toBe(true);
+    expect(f.terrain.getTiles().size).toBe(25);
+    expect(f.internal._terrainInitialized).toBe(true);
+    expect(taskRan).toBe(false);
+    await starting;
+    await opportunity;
+  });
+
+  it.each(["destroy", "revision"] as const)(
+    "stops suspended initial client generation after %s without publishing readiness",
+    async (operation) => {
+      const f = await initialClientFixture();
+      let countAtRetirement = 0;
+      let generated = 0;
+      f.world.on(EventType.TERRAIN_TILE_GENERATED, () => generated++);
+      const retired = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          countAtRetirement = generated;
+          if (operation === "destroy") f.terrain.destroy();
+          else
+            f.terrain.registerFlatZone({
+              id: "initial-tile-revision",
+              centerX: 10000,
+              centerZ: 10000,
+              width: 2,
+              depth: 2,
+              height: 10,
+              blendRadius: 1,
+            });
+          resolve();
+        }, 0);
+      });
+      const loading = f.internal.loadInitialTiles();
+      await expect(loading).rejects.toThrow(
+        operation === "destroy"
+          ? "Terrain destroyed during initial tile generation"
+          : "Terrain changed during initial tile generation",
+      );
+      await retired;
+      expect(countAtRetirement).toBeGreaterThan(0);
+      expect(countAtRetirement).toBeLessThanOrEqual(3);
+      expect(generated).toBe(countAtRetirement);
+      expect(f.terrain.isReady()).toBe(false);
+      expect(f.internal._terrainInitialized).toBe(false);
+      if (operation === "destroy") expect(f.terrain.getTiles().size).toBe(0);
+      else {
+        expect(f.internal.loadInitialTiles()).toBe(loading);
+        await expect(f.internal.loadInitialTiles()).rejects.toThrow(
+          "Terrain changed during initial tile generation",
+        );
+      }
+    },
+  );
+
+  it("stops initial assembly immediately after a tile listener retires the world", async () => {
+    const f = await initialClientFixture();
+    let events = 0;
+    f.world.on(EventType.TERRAIN_TILE_GENERATED, () => {
+      events++;
+      f.world.destroy();
+    });
+    await expect(f.internal.loadInitialTiles()).rejects.toThrow(
+      "Terrain destroyed during initial tile generation",
+    );
+    expect(events).toBe(1);
+    expect(f.terrain.getTiles().size).toBe(0);
+    expect(f.terrain.isReady()).toBe(false);
+    expect(f.internal._terrainInitialized).toBe(false);
+  });
+
+  it("starts the real lobby core with all 48 admitted trees, retaining the old 29, terrain-only preload and no repeated spawn", async () => {
+    const f = await fixture();
+    await f.terrain.start();
+    await f.settle();
+    await f.resourceInternal.initializeWorldAreaResources();
+    await f.settle();
+    expect(f.internal.worldToTerrainTileIndex(385)).toBe(4);
+    expect(f.internal.worldToTerrainTileIndex(374)).toBe(4);
+    const tiles = [...f.terrain.getTiles().values()];
+    expect(tiles).toHaveLength(25);
+    expect(tiles.filter((t) => t.contentGenerated)).toHaveLength(9);
+    expect(tiles.filter((t) => !t.contentGenerated)).toHaveLength(16);
+    for (const tile of tiles)
+      expect(tile.contentGenerated).toBe(
+        tile.x >= 3 && tile.x <= 5 && tile.z >= 3 && tile.z <= 5,
+      );
+    const trees = () =>
+      f.resources
+        .getAllResources()
+        .filter((r) => r.type === "tree")
+        .map((r) => r.id)
+        .sort();
+    expect(trees()).toEqual(
+      [...proceduralIds, ...authoredIds, ...groveIds].sort(),
+    );
+    // Retain the exact original 13 independently of the added collection.
+    expect(trees().filter((id) => !groveIds.includes(id))).toEqual(
+      [...proceduralIds, ...authoredIds].sort(),
+    );
+    expect(
+      trees().filter(
+        (id) => !Object.values(newGroveIdsByOwner).flat().includes(id),
+      ),
+    ).toEqual(
+      [
+        ...proceduralIds,
+        ...authoredIds,
+        ...Object.values(previousGroveIdsByOwner).flat(),
+      ].sort(),
+    );
+    for (const [owner, expected] of Object.entries(groveIdsByOwner)) {
+      expect(
+        f.terrain
+          .getTiles()
+          .get(owner)!
+          .resources.map((r) => r.id)
+          .filter((id) => groveIds.includes(id))
+          .sort(),
+      ).toEqual([...expected].sort());
+    }
+    const entities = trees().map((id) => f.manager.getEntity(id));
+    for (const entity of entities)
+      expect(entity).toBeInstanceOf(ResourceEntity);
+    const count = f.batches.length;
+    f.internal.updatePlayerBasedTerrain();
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(f.batches).toHaveLength(count);
+    expect(f.internal.pendingContentPromotions.size).toBe(0);
+    expect(trees().map((id) => f.manager.getEntity(id))).toEqual(entities);
+    // Before the residency correction, core 2..4 produced only 3 procedural
+    // plus 5 authored trees. Grove layouts separately change 13 → 29 → 48;
+    // neither population increase is free rendering.
+    expect(proceduralIds).toHaveLength(8);
+    expect(authoredIds).toHaveLength(5);
+    expect(Object.values(previousGroveIdsByOwner).flat()).toHaveLength(16);
+    expect(Object.values(newGroveIdsByOwner).flat()).toHaveLength(19);
+    expect(groveIds).toHaveLength(35);
+  });
+
+  it("uses centered half-open ownership in actual movement demand at positive and negative seams", async () => {
+    const f = await fixture();
+    const player = f.addPlayer(0, 0);
+    for (const [coordinate, expected] of [
+      [-150.001, -2],
+      [-150, -1],
+      [-50.001, -1],
+      [-50, 0],
+      [49.999, 0],
+      [50, 1],
+      [149.999, 1],
+      [150, 2],
+    ]) {
+      player.node.position.set(coordinate, 0, coordinate);
+      f.internal.updatePlayerBasedTerrain();
+      expect(f.internal.worldToTerrainTileIndex(coordinate)).toBe(expected);
+      const core = f.terrain
+        .getChunkSimulationStatus()
+        .playerChunks.get(player.id)!;
+      expect(core.size).toBe(9);
+      expect([...core].sort()).toEqual(
+        Array.from({ length: 3 }, (_, dx) =>
+          Array.from(
+            { length: 3 },
+            (_, dz) => `${expected + dx - 1}_${expected + dz - 1}`,
+          ),
+        )
+          .flat()
+          .sort(),
+      );
+      expect(f.internal.pendingTileContent.get(`${expected}_${expected}`)).toBe(
+        true,
+      );
+      expect(
+        f.internal.pendingTileContent.get(`${expected + 2}_${expected}`),
+      ).toBe(false);
+    }
+  });
+
+  it("promotes only the entered core once under the count budget, preserving tile and depleted resource identity", async () => {
+    const f = await fixture();
+    const player = f.addPlayer(300, 300);
+    const tile = f.internal.generateTile(3, 5, false);
+    const other = f.internal.generateTile(5, 4, false);
+    const refs = [
+      tile.mesh,
+      tile.mesh.geometry,
+      tile.mesh.material,
+      tile.collision,
+      tile.collider,
+      tile.heightData,
+    ];
+    f.internal.updatePlayerBasedTerrain();
+    expect(f.internal.pendingContentPromotions.size).toBe(0);
+    player.node.position.set(400, 0, 400);
+    f.internal.updatePlayerBasedTerrain();
+    expect(f.internal.pendingContentPromotions.size).toBe(2);
+    f.internal.maxTilesPerFrame = 1;
+    f.internal.generationBudgetMsPerFrame = 1000;
+    f.internal.processTileGenerationQueue();
+    expect([tile, other].filter((t) => t.contentGenerated)).toHaveLength(1);
+    expect(f.internal.pendingContentPromotions.size).toBe(1);
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(tile.contentGenerated).toBe(true);
+    expect(other.contentGenerated).toBe(true);
+    expect([
+      tile.mesh,
+      tile.mesh.geometry,
+      tile.mesh.material,
+      tile.collision,
+      tile.collider,
+      tile.heightData,
+    ]).toEqual(refs);
+    expect(
+      f.resources
+        .getAllResources()
+        .filter((r) => r.type === "tree")
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual(
+      [
+        "tree_289_508",
+        "tree_281_518",
+        "tree_281_513",
+        "tree_503_432",
+        "tree_502_419",
+        ...groveIdsByOwner["3_5"],
+        ...groveIdsByOwner["5_4"],
+      ].sort(),
+    );
+    const id = "tree_289_508";
+    const resource = f.resourceInternal.resources.get(id)!;
+    const entity = f.manager.getEntity(id) as ResourceEntity;
+    resource.isAvailable = false;
+    resource.lastDepleted = Date.now();
+    f.resourceInternal.respawnAtTick.set(id, 1234);
+    entity.updateFromNetwork({ depleted: true });
+    const nodes = tile.resources;
+    const count = f.batches.length;
+    for (let i = 0; i < 3; i++) {
+      f.internal.enqueueTileForGeneration(3, 5, true);
+      expect(f.internal.generateTile(3, 5, true)).toBe(tile);
+      expect(f.internal.promoteTileContent(tile)).toBe(false);
+    }
+    await f.settle();
+    expect(f.batches).toHaveLength(count);
+    expect(tile.resources).toBe(nodes);
+    expect(f.resourceInternal.resources.get(id)).toBe(resource);
+    expect(resource.isAvailable).toBe(false);
+    expect(f.resourceInternal.respawnAtTick.get(id)).toBe(1234);
+    expect(f.manager.getEntity(id)).toBe(entity);
+    expect(entity.config.depleted).toBe(true);
+  });
+
+  it("retires queued promotions on leaving the core, unload/reload and destroy; empty content emits only once", async () => {
+    const f = await fixture();
+    const old = f.internal.generateTile(3, 5, false);
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    f.internal.prunePendingTileQueue(new Set([old.key]), new Set());
+    f.internal.processTileGenerationQueue();
+    expect(old.contentGenerated).toBe(false);
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    f.internal.unloadTile(old);
+    const next = f.internal.generateTile(3, 5, false);
+    expect(next).not.toBe(old);
+    expect(f.internal.promoteTileContent(old)).toBe(false);
+    f.internal.unloadTile(old);
+    expect(f.terrain.getTiles().get(next.key)).toBe(next);
+    f.internal.processTileGenerationQueue();
+    expect(next.contentGenerated).toBe(false);
+    const empty = f.internal.generateTile(0, 0, false);
+    f.internal.generateTile(0, 0, true); // direct existing-tile request also stays bounded
+    expect(empty.contentGenerated).toBe(false);
+    f.internal.processTileGenerationQueue();
+    expect(f.batches).toEqual([
+      { owner: { tileX: 0, tileZ: 0 }, spawnPoints: [] },
+    ]);
+    expect(empty.contentGenerated).toBe(true);
+    expect(f.internal.promoteTileContent(empty)).toBe(false);
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    f.terrain.destroy();
+    f.internal.processTileGenerationQueue();
+    expect(f.internal.promoteTileContent(next)).toBe(false);
+    expect(f.internal.pendingContentPromotions.size).toBe(0);
+    expect(f.batches).toHaveLength(1);
+    await f.settle();
+  });
+
+  it("cannot publish a resource batch after a real synchronous tile listener unloads its owner", async () => {
+    const f = await fixture();
+    const tile = f.internal.generateTile(3, 5, false);
+    f.world.on(
+      EventType.TERRAIN_TILE_GENERATED,
+      (data: { tileX: number; tileZ: number; contentGenerated?: boolean }) => {
+        if (data.tileX === 3 && data.tileZ === 5 && data.contentGenerated)
+          f.internal.unloadTile(tile);
+      },
+    );
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(f.batches).toHaveLength(0);
+    expect(f.terrain.getTiles().has(tile.key)).toBe(false);
+    expect(f.resources.getAllResources()).toHaveLength(0);
+  });
+
+  for (const assembly of ["sync", "worker"] as const) {
+    for (const retire of ["unload", "destroy"] as const) {
+      it(`${assembly} fresh assembly stops height/collision writes after a listener's ${retire}`, async () => {
+        const f = await fixture();
+        let bakeCalls = 0;
+        const originalBake = f.internal.bakeWalkabilityFlags;
+        // Count calls while retaining the actual numerical/collision operation.
+        f.internal.bakeWalkabilityFlags = function (x, z) {
+          bakeCalls++;
+          return originalBake.call(this, x, z);
+        };
+        f.world.on(
+          EventType.TERRAIN_TILE_GENERATED,
+          (data: { tileX: number; tileZ: number }) => {
+            if (data.tileX !== 3 || data.tileZ !== 5) return;
+            const owner = f.terrain.getTiles().get("3_5")!;
+            if (retire === "unload") f.internal.unloadTile(owner);
+            else f.terrain.destroy();
+          },
+        );
+        const tile =
+          assembly === "sync"
+            ? f.internal.generateTile(3, 5, true)
+            : f.internal.createTileFromGeometryWithResources(
+                3,
+                5,
+                f.internal.createTileGeometry(3, 5),
+                true,
+              );
+        await f.settle();
+        expect(tile.heightData).toEqual([]);
+        expect(bakeCalls).toBe(0);
+        expect(f.batches).toHaveLength(0);
+        expect(f.terrain.getTiles().has("3_5")).toBe(false);
+        expect(f.resources.getAllResources()).toHaveLength(0);
+      });
+    }
+  }
+
+  for (const dispatched of [false, true]) {
+    for (const content of [false, true]) {
+      it(`retires synchronous resident prefetch after dispatch=${dispatched}, preserving content=${content}`, async () => {
+        const f = await fixture();
+        const budgets = [
+          f.internal.maxTilesPerFrame,
+          f.internal.generationBudgetMsPerFrame,
+        ];
+        f.internal.runtimeIsClient = true;
+        f.internal.enqueueTileForGeneration(3, 5, content);
+        expect(f.internal.pendingWorkerTileKeys.has("3_5")).toBe(true);
+        f.internal.runtimeIsClient = false;
+        const tile = f.internal.generateTile(3, 5, false);
+        const geometry = tile.mesh.geometry;
+        f.internal.runtimeIsClient = true;
+        // The real dispatcher excludes this now-resident request without
+        // starting a worker. Also cover retirement before that exclusion.
+        if (dispatched) f.internal.dispatchWorkerBatch();
+        f.internal.processTileGenerationQueue();
+        expect(f.internal.pendingTileKeys).toEqual([]);
+        expect(f.internal.pendingTileSet.size).toBe(0);
+        expect(f.internal.pendingTileContent.size).toBe(0);
+        expect(f.internal.pendingTileGenerations.size).toBe(0);
+        expect(f.internal.pendingWorkerTiles).toEqual([]);
+        expect(f.internal.pendingWorkerTileKeys.size).toBe(0);
+        expect(f.internal.pendingWorkerResults.size).toBe(0);
+        expect(f.internal.workerFallbackTileKeys.size).toBe(0);
+        expect(f.internal.pendingContentPromotions.get("3_5")).toBe(
+          content ? tile : undefined,
+        );
+        expect(tile.contentGenerated).toBe(false);
+        expect(f.batches).toHaveLength(0);
+        f.internal.runtimeIsClient = false;
+        f.internal.processTileGenerationQueue();
+        await f.settle();
+        expect(tile.contentGenerated).toBe(content);
+        expect(f.batches).toHaveLength(content ? 1 : 0);
+        expect(f.terrain.getTiles().get("3_5")).toBe(tile);
+        expect(tile.mesh.geometry).toBe(geometry);
+        f.internal.processTileGenerationQueue();
+        expect(f.batches).toHaveLength(content ? 1 : 0);
+        expect([
+          f.internal.maxTilesPerFrame,
+          f.internal.generationBudgetMsPerFrame,
+        ]).toEqual(budgets);
+      });
+    }
+  }
+
+  it("rejects an actual in-flight worker's late result after a synchronous resident retires its request", async () => {
+    const f = await fixture();
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    const generation = f.internal.pendingTileGenerations.get("3_5");
+    const job = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+    try {
+      f.internal.runtimeIsClient = false;
+      const tile = f.internal.generateTile(3, 5, false);
+      const geometry = tile.mesh.geometry;
+      f.internal.runtimeIsClient = true;
+      f.internal.processTileGenerationQueue();
+      expect(f.internal.pendingTileGenerations.has("3_5")).toBe(false);
+      const output = await job.result;
+      expect(output.heightData).toBeInstanceOf(Float32Array);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+      expect(f.internal.pendingWorkerTileKeys.size).toBe(0);
+      f.internal.runtimeIsClient = false;
+      f.internal.processTileGenerationQueue();
+      await f.settle();
+      expect(tile.contentGenerated).toBe(true);
+      expect(f.terrain.getTiles().get("3_5")).toBe(tile);
+      expect(tile.mesh.geometry).toBe(geometry);
+      expect(f.batches).toHaveLength(1);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+      expect(f.batches).toHaveLength(1);
+    } finally {
+      await job.close();
+    }
+  });
+
+  it("charges resident retirement and later content promotion to the same tile-count budget", async () => {
+    const f = await fixture();
+    f.internal.maxTilesPerFrame = 1;
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(0, 0, true);
+    f.internal.enqueueTileForGeneration(0, 1, true);
+    f.internal.runtimeIsClient = false;
+    const first = f.internal.generateTile(0, 0, false);
+    const second = f.internal.generateTile(0, 1, false);
+    f.internal.runtimeIsClient = true;
+    f.internal.processTileGenerationQueue();
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    expect(f.internal.pendingWorkerTiles).toEqual([{ tileX: 0, tileZ: 1 }]);
+    expect(f.internal.pendingContentPromotions.get("0_0")).toBe(first);
+    f.internal.runtimeIsClient = false;
+    f.internal.processTileGenerationQueue();
+    expect(first.contentGenerated).toBe(true);
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    f.internal.processTileGenerationQueue();
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual([]);
+    expect(f.internal.pendingWorkerTiles).toEqual([]);
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(second.contentGenerated).toBe(true);
+    expect(f.batches).toHaveLength(2);
+    expect(f.internal.maxTilesPerFrame).toBe(1);
+  });
+
+  it("retains the elapsed-time budget when a real promotion listener consumes the slice", async () => {
+    const f = await fixture();
+    f.internal.maxTilesPerFrame = 2;
+    f.internal.generationBudgetMsPerFrame = 1;
+    const first = f.internal.generateTile(0, 0, false);
+    f.internal.enqueueTileForGeneration(0, 0, true);
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(0, 1, false);
+    f.internal.runtimeIsClient = false;
+    const second = f.internal.generateTile(0, 1, false);
+    // Real event delivery, not a mocked clock or replaced promotion. A bounded
+    // synchronous subscriber exhausts this test's unchanged 1 ms slice.
+    f.world.on(EventType.TERRAIN_TILE_GENERATED, () => {
+      const end = performance.now() + 2;
+      while (performance.now() < end) {
+        // Deliberate subscriber work only for this budget regression.
+      }
+    });
+    f.internal.processTileGenerationQueue();
+    await f.settle();
+    expect(first.contentGenerated).toBe(true);
+    expect(second.contentGenerated).toBe(false);
+    expect(f.internal.pendingTileKeys).toEqual(["0_1"]);
+    expect(f.internal.pendingTileGenerations.has("0_1")).toBe(true);
+    expect(f.internal.generationBudgetMsPerFrame).toBe(1);
+    f.internal.processTileGenerationQueue();
+    expect(f.internal.pendingTileKeys).toEqual([]);
+    expect(second.contentGenerated).toBe(false);
+  });
+
+  it("upgrades an actual in-flight worker geometry job without duplicate work or losing final intent", async () => {
+    const f = await fixture();
+    f.internal.runtimeIsClient = true; // queue scheduler only; never initialize a browser/GPU
+    f.internal.enqueueTileForGeneration(3, 5, false);
+    const generation = f.internal.pendingTileGenerations.get("3_5");
+    const job = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+    try {
+      f.internal.enqueueTileForGeneration(3, 5, true);
+      expect(f.internal.pendingTileKeys).toEqual(["3_5"]);
+      f.internal.processTileGenerationQueue();
+      expect(f.terrain.getTiles().size).toBe(0);
+      const output = await job.result;
+      expect(output.heightData).toBeInstanceOf(Float32Array);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      f.internal.runtimeIsClient = false; // actual server content path, no visual substitute
+      f.internal.processTileGenerationQueue();
+      await f.settle();
+      expect(f.terrain.getTiles().get("3_5")?.contentGenerated).toBe(true);
+      expect(f.batches).toHaveLength(1);
+      expect(f.batches[0].owner).toEqual({ tileX: 3, tileZ: 5 });
+      expect(
+        f.batches[0].spawnPoints
+          .map(
+            (p) => `tree_${p.position.x.toFixed(0)}_${p.position.z.toFixed(0)}`,
+          )
+          .sort(),
+      ).toEqual(
+        [
+          "tree_289_508",
+          "tree_281_518",
+          "tree_281_513",
+          ...groveIdsByOwner["3_5"],
+        ].sort(),
+      );
+      expect(f.internal.pendingTileGenerations.size).toBe(0);
+      f.internal.acceptTerrainWorkerResult(output, generation);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+    } finally {
+      await job.close();
+    }
+  });
+
+  it("rejects old native worker completion after cancellation and same-key requeue, while permitting the current job", async () => {
+    const f = await fixture();
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    const oldGeneration = f.internal.pendingTileGenerations.get("3_5");
+    const oldJob = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+    let nextJob: ReturnType<typeof workerJob> | undefined;
+    try {
+      f.internal.prunePendingTileQueue(new Set());
+      f.internal.enqueueTileForGeneration(3, 5, false);
+      const nextGeneration = f.internal.pendingTileGenerations.get("3_5");
+      expect(nextGeneration).not.toBe(oldGeneration);
+      nextJob = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+      f.internal.acceptTerrainWorkerResult(await oldJob.result, oldGeneration);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+      expect(f.internal.pendingWorkerTileKeys.has("3_5")).toBe(true);
+      const output = await nextJob.result;
+      f.internal.acceptTerrainWorkerResult(output, nextGeneration);
+      f.internal.runtimeIsClient = false;
+      f.internal.processTileGenerationQueue();
+      expect(f.terrain.getTiles().get("3_5")?.contentGenerated).toBe(false);
+      expect(f.batches).toHaveLength(0);
+      f.terrain.destroy();
+      f.internal.acceptTerrainWorkerResult(output, nextGeneration);
+      expect(f.internal.pendingWorkerResults.size).toBe(0);
+    } finally {
+      await oldJob.close();
+      await nextJob?.close();
+    }
+  });
+
+  it("demotes in-flight content intent when the tile remains in the preload ring, then promotes the same geometry on re-entry", async () => {
+    const f = await fixture();
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    const generation = f.internal.pendingTileGenerations.get("3_5");
+    const job = workerJob(f.internal.buildGrassWorkerSetup(), 3, 5);
+    try {
+      f.internal.prunePendingTileQueue(new Set(["3_5"]), new Set());
+      expect(f.internal.pendingTileContent.get("3_5")).toBe(false);
+      f.internal.acceptTerrainWorkerResult(await job.result, generation);
+      f.internal.runtimeIsClient = false;
+      f.internal.processTileGenerationQueue();
+      const tile = f.terrain.getTiles().get("3_5")!;
+      const geometry = tile.mesh.geometry;
+      expect(tile.contentGenerated).toBe(false);
+      expect(f.batches).toHaveLength(0);
+      f.internal.enqueueTileForGeneration(3, 5, true);
+      f.internal.processTileGenerationQueue();
+      await f.settle();
+      expect(tile.contentGenerated).toBe(true);
+      expect(tile.mesh.geometry).toBe(geometry);
+      expect(f.batches).toHaveLength(1);
+    } finally {
+      await job.close();
+    }
+  });
+
+  it("does not let an old native worker-unavailable Promise clear a newer same-key request", async () => {
+    const f = await fixture();
+    // Actual production server-runtime worker availability returns false. Its
+    // native async fallback still must respect cancellation/requeue ownership.
+    f.internal.runtimeIsClient = true;
+    f.internal.enqueueTileForGeneration(3, 5, false);
+    const pending = f.terrain.precomputeTilesWithWorker([
+      { tileX: 3, tileZ: 5 },
+    ]);
+    f.internal.prunePendingTileQueue(new Set());
+    f.internal.enqueueTileForGeneration(3, 5, true);
+    await pending;
+    expect(f.internal.pendingWorkerTileKeys.has("3_5")).toBe(true);
+    expect(f.internal.workerFallbackTileKeys.has("3_5")).toBe(false);
+    expect(f.internal.pendingTileContent.get("3_5")).toBe(true);
+  });
+});

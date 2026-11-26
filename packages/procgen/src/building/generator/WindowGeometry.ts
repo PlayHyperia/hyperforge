@@ -199,7 +199,6 @@ function createWindowFrame(
 
   // Merge geometries
   const merged = mergeBufferGeometries(geometries);
-  geometries.forEach((g) => g.dispose());
 
   return merged;
 }
@@ -280,7 +279,6 @@ function createMullions(
   }
 
   const merged = mergeBufferGeometries(geometries);
-  geometries.forEach((g) => g.dispose());
 
   return merged;
 }
@@ -421,7 +419,6 @@ function createShutter(
   }
 
   const merged = mergeBufferGeometries(geometries);
-  geometries.forEach((g) => g.dispose());
 
   // Position shutter at hinge point
   const hingeOffset = (isLeft ? -1 : 1) * (width / 2);
@@ -569,7 +566,6 @@ function createLeadedGlass(
   }
 
   const leads = mergeBufferGeometries(leadGeometries);
-  leadGeometries.forEach((g) => g.dispose());
 
   return { leads };
 }
@@ -740,6 +736,7 @@ export function getWindowStyleForBuildingType(
     // Religious - ornate leaded glass
     church: "leaded",
     cathedral: "leaded",
+    chapel: "leaded",
     // Fortified - defensive slits
     keep: "slit",
     fortress: "slit",

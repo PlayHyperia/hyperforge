@@ -143,6 +143,9 @@ export class BuildingCollisionService {
   /** Spatial index: tile key -> building ID for bounding box containment (O(1) lookup) */
   private tileToBuildingBbox: Map<string, string> = new Map();
 
+  /** Exact ground silhouette: tile key -> building IDs covering that tile */
+  private tileToBuildingGroundCoverage: Map<string, Set<string>> = new Map();
+
   /** Step tile spatial index: tile key -> StepTile data */
   private tileToStepTile: Map<string, StepTile> = new Map();
 
@@ -195,6 +198,14 @@ export class BuildingCollisionService {
     if (!layout || !layout.floorPlans || layout.floorPlans.length === 0) {
       throw new Error(
         `[BuildingCollision] Building ${buildingId} has invalid layout: no floor plans`,
+      );
+    }
+    if (
+      layout.roofWalkable !== undefined &&
+      typeof layout.roofWalkable !== "boolean"
+    ) {
+      throw new Error(
+        `[BuildingCollision] Building ${buildingId} has invalid roofWalkable: expected boolean`,
       );
     }
     if (
@@ -433,6 +444,11 @@ export class BuildingCollisionService {
       worldPosition,
       rotation,
     );
+    const groundCoverageTiles = this.generateGroundCoverageTiles(
+      layout,
+      worldPosition,
+      rotation,
+    );
 
     return {
       buildingId,
@@ -442,7 +458,11 @@ export class BuildingCollisionService {
       cellWidth: layout.width,
       cellDepth: layout.depth,
       floors,
+      ...(layout.roofWalkable === false
+        ? { nonWalkableRoofFloor: layout.floors }
+        : {}),
       stepTiles,
+      groundCoverageTiles,
       boundingBox: {
         minTileX,
         maxTileX,
@@ -450,6 +470,106 @@ export class BuildingCollisionService {
         maxTileZ,
       },
     };
+  }
+
+  /**
+   * Convert the exact ground-level silhouette to world tiles.
+   *
+   * Procgen supplies exteriorFootprint for production layouts. The fallback
+   * derives the same shape for direct callers and older test fixtures: empty
+   * cells reachable from the grid edge are exterior, while enclosed voids are
+   * part of the building coverage.
+   */
+  private generateGroundCoverageTiles(
+    layout: BuildingLayoutInput,
+    worldPosition: { x: number; y: number; z: number },
+    rotation: number,
+  ): Set<string> {
+    const groundFootprint = layout.floorPlans[0]?.footprint ?? [];
+    const coverageFootprint =
+      layout.exteriorFootprint ??
+      this.deriveExteriorFootprint(groundFootprint, layout.width, layout.depth);
+    const coverageTiles = new Set<string>();
+    const halfTiles = Math.floor(TILES_PER_CELL / 2);
+
+    for (let row = 0; row < coverageFootprint.length; row++) {
+      for (let col = 0; col < coverageFootprint[row].length; col++) {
+        if (!coverageFootprint[row][col]) continue;
+
+        const centerTile = cellToWorldTile(
+          { col, row },
+          worldPosition.x,
+          worldPosition.z,
+          layout.width,
+          layout.depth,
+          rotation,
+          CELL_SIZE,
+        );
+
+        for (let dtx = -halfTiles; dtx < TILES_PER_CELL - halfTiles; dtx++) {
+          for (let dtz = -halfTiles; dtz < TILES_PER_CELL - halfTiles; dtz++) {
+            coverageTiles.add(tileKey(centerTile.x + dtx, centerTile.z + dtz));
+          }
+        }
+      }
+    }
+
+    return coverageTiles;
+  }
+
+  private deriveExteriorFootprint(
+    footprint: boolean[][],
+    width: number,
+    depth: number,
+  ): boolean[][] {
+    const coverage = Array.from({ length: depth }, (_, row) =>
+      Array.from({ length: width }, (_, col) => footprint[row]?.[col] === true),
+    );
+    const exterior = Array.from({ length: depth }, () =>
+      Array.from({ length: width }, () => false),
+    );
+    const queue: CellCoord[] = [];
+
+    for (let row = 0; row < depth; row++) {
+      for (let col = 0; col < width; col++) {
+        if (
+          (row === 0 || row === depth - 1 || col === 0 || col === width - 1) &&
+          !coverage[row][col]
+        ) {
+          exterior[row][col] = true;
+          queue.push({ col, row });
+        }
+      }
+    }
+
+    for (let index = 0; index < queue.length; index++) {
+      const current = queue[index];
+      for (const { dc, dr } of CARDINAL_DIRECTIONS) {
+        const col = current.col + dc;
+        const row = current.row + dr;
+        if (
+          col >= 0 &&
+          col < width &&
+          row >= 0 &&
+          row < depth &&
+          !coverage[row][col] &&
+          !exterior[row][col]
+        ) {
+          exterior[row][col] = true;
+          queue.push({ col, row });
+        }
+      }
+    }
+
+    for (let row = 0; row < depth; row++) {
+      for (let col = 0; col < width; col++) {
+        if (!coverage[row][col] && !exterior[row][col]) {
+          coverage[row][col] = true;
+        }
+      }
+    }
+
+    return coverage;
   }
 
   /**
@@ -776,6 +896,10 @@ export class BuildingCollisionService {
     worldPosition: { x: number; y: number; z: number },
     rotation: number,
   ): FloorCollisionData | null {
+    // Pitched/non-accessible roofs must not publish an artificial flat floor,
+    // perimeter walls, or walkable tiles. Existing layouts retain their roof.
+    if (layout.roofWalkable === false) return null;
+
     // Get the top floor footprint
     const topFloorPlan = layout.floorPlans[layout.floors - 1];
     if (!topFloorPlan) return null;
@@ -1156,6 +1280,15 @@ export class BuildingCollisionService {
       }
     }
 
+    for (const key of building.groundCoverageTiles) {
+      let buildings = this.tileToBuildingGroundCoverage.get(key);
+      if (!buildings) {
+        buildings = new Set();
+        this.tileToBuildingGroundCoverage.set(key, buildings);
+      }
+      buildings.add(building.buildingId);
+    }
+
     // PERF: Index bounding box tiles for O(1) containment checks
     const bbox = building.boundingBox;
     for (let tx = bbox.minTileX; tx <= bbox.maxTileX; tx++) {
@@ -1186,6 +1319,15 @@ export class BuildingCollisionService {
             this.tileToBuildings.delete(key);
           }
         }
+      }
+    }
+
+    for (const key of building.groundCoverageTiles) {
+      const buildings = this.tileToBuildingGroundCoverage.get(key);
+      if (!buildings) continue;
+      buildings.delete(building.buildingId);
+      if (buildings.size === 0) {
+        this.tileToBuildingGroundCoverage.delete(key);
       }
     }
 
@@ -1225,6 +1367,7 @@ export class BuildingCollisionService {
     floorIndex: number,
   ): BuildingCollisionResult {
     const key = tileKey(tileX, tileZ);
+    let nonWalkableRoofBuildingId: string | null = null;
 
     // FIRST: Check spatial index for buildings at this tile (walkable tiles)
     const buildingIds = this.tileToBuildings.get(key);
@@ -1236,7 +1379,12 @@ export class BuildingCollisionService {
 
         // Find the floor
         const floor = building.floors.find((f) => f.floorIndex === floorIndex);
-        if (!floor) continue;
+        if (!floor) {
+          if (building.nonWalkableRoofFloor === floorIndex) {
+            nonWalkableRoofBuildingId ??= buildingId;
+          }
+          continue;
+        }
 
         // Check if tile is walkable on this floor
         const isWalkable = floor.walkableTiles.has(key);
@@ -1277,19 +1425,20 @@ export class BuildingCollisionService {
       }
     }
 
-    // SECOND: Check if tile is within any building's bounding box
-    // This handles wall tiles that aren't in the walkable set but still need wall collision
-    for (const building of this.buildings.values()) {
-      const bbox = building.boundingBox;
-      if (
-        tileX >= bbox.minTileX &&
-        tileX <= bbox.maxTileX &&
-        tileZ >= bbox.minTileZ &&
-        tileZ <= bbox.maxTileZ
-      ) {
-        // Tile is within building bounding box - check for walls on this floor
+    // SECOND: Check the exact ground silhouette. Rectangular bbox holes around
+    // irregular footprints are real exterior terrain and must remain walkable.
+    const coverageBuildingIds = this.tileToBuildingGroundCoverage.get(key);
+    if (coverageBuildingIds) {
+      for (const buildingId of coverageBuildingIds) {
+        const building = this.buildings.get(buildingId);
+        if (!building) continue;
         const floor = building.floors.find((f) => f.floorIndex === floorIndex);
-        if (!floor) continue;
+        if (!floor) {
+          if (building.nonWalkableRoofFloor === floorIndex) {
+            nonWalkableRoofBuildingId ??= buildingId;
+          }
+          continue;
+        }
 
         // Get wall blocking for this tile (even though tile isn't walkable)
         // PERF: use pre-indexed wallsByTile for O(1) lookup
@@ -1309,10 +1458,10 @@ export class BuildingCollisionService {
           }
         }
 
-        // Tile is inside building bbox but not a walkable floor tile
+        // Tile is covered by the building silhouette but is not a floor tile.
         return {
           isInsideBuilding: true,
-          buildingId: building.buildingId,
+          buildingId,
           isWalkable: false, // Not a walkable floor tile
           floorIndex,
           elevation: floor.elevation,
@@ -1320,6 +1469,22 @@ export class BuildingCollisionService {
           stairTile: null,
         };
       }
+    }
+
+    // An explicitly non-walkable roof is not outdoor terrain. Keep its
+    // navigation rejection separate from surface/wall data, and allow any
+    // overlapping real floor above to take precedence. Other absent floors
+    // retain their existing fallback behavior.
+    if (nonWalkableRoofBuildingId !== null) {
+      return {
+        isInsideBuilding: true,
+        buildingId: nonWalkableRoofBuildingId,
+        isWalkable: false,
+        floorIndex,
+        elevation: null,
+        wallBlocking: { north: false, south: false, east: false, west: false },
+        stairTile: null,
+      };
     }
 
     // No matching building found
@@ -2104,6 +2269,14 @@ export class BuildingCollisionService {
     return this.tileToBuildingBbox.get(key) ?? null;
   }
 
+  /** Return the building whose exact ground silhouette covers this tile. */
+  isTileInBuildingGroundCoverage(tileX: number, tileZ: number): string | null {
+    const buildingIds = this.tileToBuildingGroundCoverage.get(
+      tileKey(tileX, tileZ),
+    );
+    return buildingIds?.values().next().value ?? null;
+  }
+
   /**
    * Check if a world position is near any building (for Y-elevation purposes).
    * Uses the bounding box which includes door approach areas.
@@ -2268,8 +2441,7 @@ export class BuildingCollisionService {
     if (buildingIds && buildingIds.size > 0) {
       // Tile IS a registered walkable building tile - check floor access
       const buildingId = buildingIds.values().next().value as
-        | string
-        | undefined;
+        string | undefined;
       if (!buildingId) return true;
 
       const building = this.buildings.get(buildingId);
@@ -2312,19 +2484,18 @@ export class BuildingCollisionService {
       return true;
     }
 
-    // Tile is NOT a registered walkable tile
-    // Check if it's inside any building's SHRUNK bounding box
-    // We shrink the bbox by 1 tile on all sides to allow approach areas near doors
-    const boundingBoxBuildingId = this.isTileInBuildingShrunkBoundingBox(
+    // Tile is NOT a registered floor tile. Block only the exact building
+    // silhouette; exterior concavities inside the rectangular bbox are terrain.
+    const coverageBuildingId = this.isTileInBuildingGroundCoverage(
       tileX,
       tileZ,
     );
-    if (boundingBoxBuildingId) {
-      // Tile is INSIDE the shrunk building area but NOT a walkable floor tile
+    if (coverageBuildingId) {
+      // Tile is covered by the building but is not a walkable floor tile.
       // HOWEVER: We must ALLOW entrance exterior approach tiles!
       // Use getEntranceWallSegments to include BOTH doors AND arches
       // This matches findClosestDoorTile which also uses entrance segments
-      const groundFloor = this.getGroundFloor(boundingBoxBuildingId);
+      const groundFloor = this.getGroundFloor(coverageBuildingId);
       if (groundFloor) {
         // Check if this tile is adjacent to any entrance (doors OR arches)
         const entranceWalls =
@@ -2344,7 +2515,7 @@ export class BuildingCollisionService {
             // This IS an entrance exterior tile - ALLOW it!
             if (this._debugLogging) {
               console.log(
-                `[isTileWalkableInBuilding] ALLOWED: tile (${tileX},${tileZ}) is entrance exterior for ${boundingBoxBuildingId}`,
+                `[isTileWalkableInBuilding] ALLOWED: tile (${tileX},${tileZ}) is entrance exterior for ${coverageBuildingId}`,
               );
             }
             return true;
@@ -2355,7 +2526,7 @@ export class BuildingCollisionService {
       // Not a door exterior - block it
       if (this._debugLogging) {
         console.log(
-          `[isTileWalkableInBuilding] BLOCKED: tile (${tileX},${tileZ}) in ${boundingBoxBuildingId} shrunk bbox (under building)`,
+          `[isTileWalkableInBuilding] BLOCKED: tile (${tileX},${tileZ}) is covered by ${coverageBuildingId} but has no floor`,
         );
       }
       return false;
@@ -2396,8 +2567,7 @@ export class BuildingCollisionService {
       if (buildingIds && buildingIds.size > 0) {
         // Check if adjacent tile is walkable on this floor
         const buildingId = buildingIds.values().next().value as
-          | string
-          | undefined;
+          string | undefined;
         if (buildingId) {
           const building = this.buildings.get(buildingId);
           if (building) {
@@ -3204,6 +3374,8 @@ export class BuildingCollisionService {
 
     this.buildings.clear();
     this.tileToBuildings.clear();
+    this.tileToBuildingBbox.clear();
+    this.tileToBuildingGroundCoverage.clear();
     this.tileToStepTile.clear();
     this.playerFloorStates.clear();
   }
@@ -3395,8 +3567,12 @@ export class BuildingCollisionService {
       toTile.x,
       toTile.z,
     );
+    const targetCoverageBuildingId = this.isTileInBuildingGroundCoverage(
+      toTile.x,
+      toTile.z,
+    );
     const targetUnderBuilding =
-      targetInBuildingBbox !== null && !targetInBuildingFootprint;
+      targetCoverageBuildingId !== null && !targetInBuildingFootprint;
     const targetWalkableOnFloor = this.isTileWalkableInBuilding(
       toTile.x,
       toTile.z,
@@ -3520,9 +3696,12 @@ export class BuildingCollisionService {
       // PLAYER IS IN BUILDING LAYER
 
       // Block tiles under a DIFFERENT building
-      if (targetUnderBuilding && targetInBuildingBbox !== playerBuildingId) {
+      if (
+        targetUnderBuilding &&
+        targetCoverageBuildingId !== playerBuildingId
+      ) {
         buildingAllowsMovement = false;
-        blockReason = `Building player (${playerBuildingId}): cannot path through different building ${targetInBuildingBbox}`;
+        blockReason = `Building player (${playerBuildingId}): cannot path through different building ${targetCoverageBuildingId}`;
       }
 
       if (buildingAllowsMovement && targetInBuildingFootprint) {

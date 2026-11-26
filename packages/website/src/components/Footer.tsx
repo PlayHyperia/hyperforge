@@ -56,10 +56,10 @@ export function Footer() {
           {/* Brand */}
           <div className="md:col-span-1">
             <Image
-              src="/images/wordmark.png"
+              src="/images/hyperia-wordmark.svg"
               alt="Hyperia"
-              width={140}
-              height={28}
+              width={160}
+              height={30}
               className="h-6 w-auto mb-4"
             />
             <p

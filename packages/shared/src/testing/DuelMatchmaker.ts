@@ -33,6 +33,8 @@ export type DuelMatchmakerConfig = {
   countdownMs?: number;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Connect bots only and let the server own duel scheduling */
+  connectOnly?: boolean;
 };
 
 export type MatchResult = {
@@ -95,6 +97,7 @@ export class DuelMatchmaker extends EventEmitter {
       matchIntervalMs: 5000,
       countdownMs: 3000,
       verbose: false,
+      connectOnly: false,
       ...config,
     };
   }
@@ -116,8 +119,10 @@ export class DuelMatchmaker extends EventEmitter {
     // Spawn bots
     await this.spawnBots();
 
-    // Start match scheduler
-    this.startMatchScheduler();
+    // Start match scheduler unless the server owns scheduling.
+    if (!this.config.connectOnly) {
+      this.startMatchScheduler();
+    }
 
     // Start stats logger
     this.statsTimer = setInterval(() => this.logStats(), 10000);

@@ -26,6 +26,7 @@ import {
   worldToTile,
   worldToTileInto,
   tileToWorld,
+  tileToWorldInto,
   tilesEqual,
   tilesWithinMeleeRange,
   tileChebyshevDistance,
@@ -86,6 +87,7 @@ function createMobTileState(
     combatRange,
     // Required by TileMovementState base interface
     requestedDestination: null,
+    requestedInteractionArrival: null,
     lastPathPartial: false,
     nextSegmentPrecomputed: false,
   };
@@ -122,6 +124,17 @@ export class MobTileMovementManager {
 
   /** Reusable tile for target position */
   private readonly _targetTile: TileCoord = { x: 0, z: 0 };
+
+  /** Reusable world position for terrain walkability checks. */
+  private readonly _walkableWorldPos: Position3D = { x: 0, y: 0, z: 0 };
+
+  /**
+   * Static walkability is stable within one authoritative tick. AI and movement
+   * frequently inspect the same candidate tile more than once, and an uncached
+   * terrain check expands into biome, water, slope, and procedural-height work.
+   */
+  private readonly _walkabilityCache = new Map<number, boolean>();
+  private _walkabilityCacheTick = -1;
 
   /** Reusable tile for actual entity position */
   private readonly _actualTile: TileCoord = { x: 0, z: 0 };
@@ -224,6 +237,12 @@ export class MobTileMovementManager {
    * @param fromTile - Optional source tile for directional wall checks
    */
   private isTileWalkable(tile: TileCoord, fromTile?: TileCoord): boolean {
+    const currentTick = this.world.currentTick;
+    if (currentTick !== this._walkabilityCacheTick) {
+      this._walkabilityCache.clear();
+      this._walkabilityCacheTick = currentTick;
+    }
+
     const towns = this.townSystem;
 
     // FIRST: Check wall blocking between tiles (handles building walls)
@@ -245,6 +264,13 @@ export class MobTileMovementManager {
     }
 
     // SECOND: Check if target tile is inside a building
+    const walkabilityKey =
+      ((tile.x + 1048576) | 0) * 2097152 + ((tile.z + 1048576) | 0);
+    const cachedWalkability = this._walkabilityCache.get(walkabilityKey);
+    if (cachedWalkability !== undefined) {
+      return cachedWalkability;
+    }
+
     if (towns) {
       const collisionService = towns.getCollisionService();
       const buildingResult = collisionService.queryCollision(tile.x, tile.z, 0);
@@ -252,9 +278,11 @@ export class MobTileMovementManager {
       if (buildingResult.isInsideBuilding) {
         // Check if this tile is walkable at ground floor (mobs stay on ground)
         if (!buildingResult.isWalkable) {
+          this._walkabilityCache.set(walkabilityKey, false);
           return false;
         }
         // Building floor is walkable - skip terrain checks
+        this._walkabilityCache.set(walkabilityKey, true);
         return true;
       }
     }
@@ -265,21 +293,38 @@ export class MobTileMovementManager {
     if (
       this.world.collision.hasFlags(tile.x, tile.z, CollisionMask.BLOCKS_WALK)
     ) {
+      this._walkabilityCache.set(walkabilityKey, false);
       return false;
     }
 
     const terrain = this.getTerrain();
     if (!terrain) {
       // Fallback: walkable if no terrain system available
+      this._walkabilityCache.set(walkabilityKey, true);
       return true;
     }
 
     // Convert tile to world coordinates (center of tile)
-    const worldPos = tileToWorld(tile);
+    tileToWorldInto(tile, this._walkableWorldPos);
 
-    // Use TerrainSystem's walkability check (water, slope, lakes biome)
-    const result = terrain.isPositionWalkable(worldPos.x, worldPos.z);
-    return result.walkable;
+    // Generated terrain tiles synchronously bake WATER and STEEP_SLOPE into
+    // CollisionMatrix. The blocking flags were checked above, so their absence
+    // is an authoritative walkable result and avoids procedural height noise.
+    if (
+      terrain.hasBakedWalkabilityAt(
+        this._walkableWorldPos.x,
+        this._walkableWorldPos.z,
+      )
+    ) {
+      this._walkabilityCache.set(walkabilityKey, true);
+      return true;
+    }
+
+    // Mobs must not move into terrain that spectators/players have not loaded.
+    // Fail closed until the tile is generated and its authoritative collision
+    // bake is present instead of running procedural terrain work on the tick.
+    this._walkabilityCache.set(walkabilityKey, false);
+    return false;
   }
 
   /**

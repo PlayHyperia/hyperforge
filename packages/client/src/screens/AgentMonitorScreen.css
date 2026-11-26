@@ -22,17 +22,29 @@
   flex-direction: column;
   background: #0a0a0f;
   color: #e8e8ed;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family:
+    "Inter",
+    system-ui,
+    -apple-system,
+    sans-serif;
   font-size: 13px;
   overflow: hidden;
 }
 
 /* ─── Scrollbar ─────────────────────────────────────────────────────────────── */
 
-.agent-monitor *::-webkit-scrollbar { width: 5px; }
-.agent-monitor *::-webkit-scrollbar-track { background: transparent; }
-.agent-monitor *::-webkit-scrollbar-thumb { background: #2a2a35; }
-.agent-monitor *::-webkit-scrollbar-thumb:hover { background: #3a3a48; }
+.agent-monitor *::-webkit-scrollbar {
+  width: 5px;
+}
+.agent-monitor *::-webkit-scrollbar-track {
+  background: transparent;
+}
+.agent-monitor *::-webkit-scrollbar-thumb {
+  background: #2a2a35;
+}
+.agent-monitor *::-webkit-scrollbar-thumb:hover {
+  background: #3a3a48;
+}
 
 /* ─── Auth Gate ─────────────────────────────────────────────────────────────── */
 
@@ -104,8 +116,13 @@
   transition: background 150ms;
 }
 
-.agent-monitor-auth-button:hover { background: #e0b85c; }
-.agent-monitor-auth-button:disabled { opacity: 0.4; cursor: not-allowed; }
+.agent-monitor-auth-button:hover {
+  background: #e0b85c;
+}
+.agent-monitor-auth-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 /* ─── Top Bar ───────────────────────────────────────────────────────────────── */
 
@@ -139,7 +156,7 @@
 .agent-monitor-topbar-left .agent-count {
   color: #55556a;
   font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
 }
 
 .agent-monitor-topbar-right {
@@ -186,8 +203,12 @@
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ─── Duel Status Bar ───────────────────────────────────────────────────────── */
@@ -230,7 +251,7 @@
 
 .duel-status-bar .timer {
   color: #55556a;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   flex-shrink: 0;
 }
 
@@ -249,11 +270,27 @@
   border-radius: 50%;
 }
 
-.duel-status-bar .stream-dot.on { background: #22c55e; }
-.duel-status-bar .stream-dot.off { background: #55556a; }
+.duel-status-bar .stream-dot.on {
+  background: #22c55e;
+}
+.duel-status-bar .stream-dot.off {
+  background: #55556a;
+}
 
 .duel-status-bar .winner-tag {
   color: #d4a84b;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.duel-status-bar .draw-tag {
+  color: #d4a84b;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.duel-status-bar .cancelled-tag {
+  color: #b8c0d0;
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -354,11 +391,21 @@
   flex-shrink: 0;
 }
 
-.state-dot.running      { background: #22c55e; }
-.state-dot.error        { background: #ef4444; }
-.state-dot.paused       { background: #eab308; }
-.state-dot.stopped      { background: #55556a; }
-.state-dot.initializing { background: #3b82f6; }
+.state-dot.running {
+  background: #22c55e;
+}
+.state-dot.error {
+  background: #ef4444;
+}
+.state-dot.paused {
+  background: #eab308;
+}
+.state-dot.stopped {
+  background: #55556a;
+}
+.state-dot.initializing {
+  background: #3b82f6;
+}
 
 .agent-list-badges {
   display: flex;
@@ -384,14 +431,23 @@
   gap: 10px;
   font-size: 11px;
   color: #55556a;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
-.agent-list-row2 .combat-tag { color: #8b8b9a; }
-.agent-list-row2 .hp-tag { }
-.agent-list-row2 .hp-tag.low { color: #ef4444; }
-.agent-list-row2 .hp-tag.mid { color: #eab308; }
-.agent-list-row2 .hp-tag.high { color: #22c55e; }
+.agent-list-row2 .combat-tag {
+  color: #8b8b9a;
+}
+.agent-list-row2 .hp-tag {
+}
+.agent-list-row2 .hp-tag.low {
+  color: #ef4444;
+}
+.agent-list-row2 .hp-tag.mid {
+  color: #eab308;
+}
+.agent-list-row2 .hp-tag.high {
+  color: #22c55e;
+}
 
 .agent-list-row3 {
   font-size: 11px;
@@ -418,7 +474,7 @@
 
 .sidebar-lb-row {
   display: grid;
-  grid-template-columns: 20px 1fr 28px 28px 36px;
+  grid-template-columns: 20px 1fr 24px 24px 24px 36px;
   gap: 4px;
   padding: 5px 12px;
   font-size: 11px;
@@ -443,16 +499,31 @@
   background: rgba(212, 168, 75, 0.06);
 }
 
-.sidebar-lb-row .rank { color: #d4a84b; font-weight: 700; }
+.sidebar-lb-row .rank {
+  color: #d4a84b;
+  font-weight: 700;
+}
 .sidebar-lb-row .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #e8e8ed;
 }
-.sidebar-lb-row .wins { color: #22c55e; font-weight: 600; }
-.sidebar-lb-row .losses { color: #ef4444; font-weight: 600; }
-.sidebar-lb-row .rate { color: #8b8b9a; }
+.sidebar-lb-row .wins {
+  color: #22c55e;
+  font-weight: 600;
+}
+.sidebar-lb-row .draws {
+  color: #d4a84b;
+  font-weight: 600;
+}
+.sidebar-lb-row .losses {
+  color: #ef4444;
+  font-weight: 600;
+}
+.sidebar-lb-row .rate {
+  color: #8b8b9a;
+}
 
 /* ─── Recent Duels (sidebar) ────────────────────────────────────────────────── */
 
@@ -480,8 +551,12 @@
   flex-shrink: 0;
 }
 
-.sidebar-duel-row .result.w { color: #22c55e; }
-.sidebar-duel-row .result.l { color: #ef4444; }
+.sidebar-duel-row .result.w {
+  color: #22c55e;
+}
+.sidebar-duel-row .result.l {
+  color: #ef4444;
+}
 
 .sidebar-duel-row .duel-names {
   color: #8b8b9a;
@@ -498,7 +573,7 @@
 
 .sidebar-duel-row .duel-time {
   color: #55556a;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   font-size: 10px;
   flex-shrink: 0;
 }
@@ -591,11 +666,21 @@
   text-transform: capitalize;
 }
 
-.agent-detail-header h2 .state-text.running { color: #22c55e; }
-.agent-detail-header h2 .state-text.paused { color: #eab308; }
-.agent-detail-header h2 .state-text.error { color: #ef4444; }
-.agent-detail-header h2 .state-text.stopped { color: #55556a; }
-.agent-detail-header h2 .state-text.initializing { color: #3b82f6; }
+.agent-detail-header h2 .state-text.running {
+  color: #22c55e;
+}
+.agent-detail-header h2 .state-text.paused {
+  color: #eab308;
+}
+.agent-detail-header h2 .state-text.error {
+  color: #ef4444;
+}
+.agent-detail-header h2 .state-text.stopped {
+  color: #55556a;
+}
+.agent-detail-header h2 .state-text.initializing {
+  color: #3b82f6;
+}
 
 .agent-detail-controls {
   display: flex;
@@ -663,8 +748,12 @@
   padding: 2px 8px;
 }
 
-.action-status.success { color: #22c55e; }
-.action-status.error { color: #ef4444; }
+.action-status.success {
+  color: #22c55e;
+}
+.action-status.error {
+  color: #ef4444;
+}
 
 /* ─── Tabs ──────────────────────────────────────────────────────────────────── */
 
@@ -677,7 +766,9 @@
   scrollbar-width: none;
 }
 
-.agent-detail-tabs::-webkit-scrollbar { display: none; }
+.agent-detail-tabs::-webkit-scrollbar {
+  display: none;
+}
 
 .agent-detail-tab {
   padding: 8px 14px;
@@ -693,7 +784,9 @@
   white-space: nowrap;
 }
 
-.agent-detail-tab:hover { color: #8b8b9a; }
+.agent-detail-tab:hover {
+  color: #8b8b9a;
+}
 
 .agent-detail-tab.active {
   color: #d4a84b;
@@ -732,7 +825,7 @@
 }
 
 .hp-bar-label .hp-value {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   color: #8b8b9a;
 }
 
@@ -769,18 +862,29 @@
 .overview-value {
   font-size: 13px;
   color: #e8e8ed;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   text-align: right;
 }
 
-.overview-value.gold  { color: #d4a84b; }
-.overview-value.green { color: #22c55e; }
-.overview-value.red   { color: #ef4444; }
+.overview-value.gold {
+  color: #d4a84b;
+}
+.overview-value.green {
+  color: #22c55e;
+}
+.overview-value.red {
+  color: #ef4444;
+}
 
 /* ─── Detail HP Bar (larger) ────────────────────────────────────────────────── */
 
-.detail-hp-bar .hp-bar-track { height: 8px; }
-.detail-hp-bar .hp-bar-label { font-size: 12px; margin-top: 4px; }
+.detail-hp-bar .hp-bar-track {
+  height: 8px;
+}
+.detail-hp-bar .hp-bar-label {
+  font-size: 12px;
+  margin-top: 4px;
+}
 
 /* ─── Skills Tab ────────────────────────────────────────────────────────────── */
 
@@ -817,7 +921,7 @@
   width: 28px;
   text-align: right;
   flex-shrink: 0;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 .skill-xp-bar {
@@ -841,7 +945,7 @@
   font-size: 10px;
   color: #55556a;
   margin-top: 1px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 /* ─── Inventory Tab ─────────────────────────────────────────────────────────── */
@@ -962,7 +1066,10 @@
   transition: all 150ms;
 }
 
-.action-log-filter:hover { color: #8b8b9a; border-color: #3a3a48; }
+.action-log-filter:hover {
+  color: #8b8b9a;
+  border-color: #3a3a48;
+}
 
 .action-log-filter.active {
   color: #d4a84b;
@@ -988,14 +1095,16 @@
   background: rgba(22, 22, 31, 0.3);
 }
 
-.action-log-entry.action-entry { border-left-color: #22c55e; }
+.action-log-entry.action-entry {
+  border-left-color: #22c55e;
+}
 
 .action-log-time {
   font-size: 10px;
   color: #55556a;
   white-space: nowrap;
   flex-shrink: 0;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 .action-log-type {
@@ -1008,11 +1117,21 @@
   min-width: 72px;
 }
 
-.action-log-type.type-action     { color: #22c55e; }
-.action-log-type.type-decision   { color: #d4a84b; }
-.action-log-type.type-thinking   { color: #a855f7; }
-.action-log-type.type-situation  { color: #3b82f6; }
-.action-log-type.type-evaluation { color: #eab308; }
+.action-log-type.type-action {
+  color: #22c55e;
+}
+.action-log-type.type-decision {
+  color: #d4a84b;
+}
+.action-log-type.type-thinking {
+  color: #a855f7;
+}
+.action-log-type.type-situation {
+  color: #3b82f6;
+}
+.action-log-type.type-evaluation {
+  color: #eab308;
+}
 
 .action-log-entry {
   cursor: pointer;
@@ -1060,7 +1179,7 @@
   padding: 8px 10px;
   background: #0a0a0f;
   border: 1px solid #22222d;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   font-size: 11px;
   line-height: 1.5;
   max-height: 400px;
@@ -1097,7 +1216,9 @@
   background: rgba(22, 22, 31, 0.3);
 }
 
-.quest-entry.quest-active { border-left-color: #d4a84b; }
+.quest-entry.quest-active {
+  border-left-color: #d4a84b;
+}
 .quest-entry.quest-completed {
   border-left-color: #22c55e;
   flex-direction: row;
@@ -1127,9 +1248,21 @@
   flex-shrink: 0;
 }
 
-.quest-status-in-progress { background: rgba(212, 168, 75, 0.1); color: #d4a84b; border: 1px solid rgba(212, 168, 75, 0.3); }
-.quest-status-ready-to-complete { background: rgba(34, 197, 94, 0.1); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3); }
-.quest-status-completed { background: rgba(34, 197, 94, 0.05); color: rgba(34, 197, 94, 0.5); border: 1px solid rgba(34, 197, 94, 0.15); }
+.quest-status-in-progress {
+  background: rgba(212, 168, 75, 0.1);
+  color: #d4a84b;
+  border: 1px solid rgba(212, 168, 75, 0.3);
+}
+.quest-status-ready-to-complete {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.quest-status-completed {
+  background: rgba(34, 197, 94, 0.05);
+  color: rgba(34, 197, 94, 0.5);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+}
 
 .quest-stage {
   font-size: 12px;
@@ -1204,13 +1337,57 @@
   font-size: 12px;
   font-weight: 700;
   color: #d4a84b;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 /* ─── Duels Tab ─────────────────────────────────────────────────────────────── */
 
 .agent-duel-stats {
   margin-bottom: 16px;
+}
+
+.duel-ops-summary {
+  margin-bottom: 16px;
+  padding: 10px 12px 12px;
+  border: 1px solid #2a2a35;
+  border-radius: 6px;
+  background: rgba(18, 18, 26, 0.72);
+}
+
+.duel-ops-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: #e8e8ed;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.duel-ops-heading span {
+  color: #77778a;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.duel-ops-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.duel-ops-reasons span {
+  padding: 3px 6px;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #f3a5a5;
+  font-size: 10px;
 }
 
 .duel-recent-list {
@@ -1233,8 +1410,18 @@
   background: rgba(22, 22, 31, 0.3);
 }
 
-.duel-recent-entry.won { border-left-color: #22c55e; }
-.duel-recent-entry.lost { border-left-color: #ef4444; }
+.duel-recent-entry.won {
+  border-left-color: #22c55e;
+}
+.duel-recent-entry.draw {
+  border-left-color: #d4a84b;
+}
+.duel-recent-entry.cancelled {
+  border-left-color: #94a3b8;
+}
+.duel-recent-entry.lost {
+  border-left-color: #ef4444;
+}
 
 .duel-result {
   font-size: 11px;
@@ -1243,8 +1430,18 @@
   text-align: center;
 }
 
-.duel-result.win  { color: #22c55e; }
-.duel-result.loss { color: #ef4444; }
+.duel-result.win {
+  color: #22c55e;
+}
+.duel-result.draw {
+  color: #d4a84b;
+}
+.duel-result.cancelled {
+  color: #b8c0d0;
+}
+.duel-result.loss {
+  color: #ef4444;
+}
 
 .duel-opponent {
   flex: 1;
@@ -1265,7 +1462,7 @@
   color: #55556a;
   margin-left: auto;
   white-space: nowrap;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 /* ─── Progress Bar (generic) ────────────────────────────────────────────────── */
@@ -1441,7 +1638,7 @@
   color: #ef4444;
   background: rgba(239, 68, 68, 0.06);
   border-top: 1px solid rgba(239, 68, 68, 0.15);
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 .reset-diff {
@@ -1464,14 +1661,14 @@
   gap: 8px;
   padding: 4px 0;
   font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
 .reset-diff-label {
   color: #8b8b9a;
   width: 90px;
   flex-shrink: 0;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: "Inter", system-ui, sans-serif;
   font-weight: 500;
 }
 
@@ -1554,11 +1751,31 @@
   letter-spacing: 0.5px;
   flex-shrink: 0;
 }
-.dp-short-circuit { background: rgba(59, 130, 246, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.35); }
-.dp-llm           { background: rgba(168, 85, 247, 0.2); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.35); }
-.dp-scripted      { background: rgba(107, 114, 128, 0.2); color: #9ca3af; border: 1px solid rgba(107, 114, 128, 0.35); }
-.dp-planner       { background: rgba(34, 197, 94, 0.2);  color: #86efac; border: 1px solid rgba(34, 197, 94, 0.35); }
-.dp-curiosity     { background: rgba(249, 115, 22, 0.2); color: #fdba74; border: 1px solid rgba(249, 115, 22, 0.35); }
+.dp-short-circuit {
+  background: rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+.dp-llm {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c4b5fd;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+.dp-scripted {
+  background: rgba(107, 114, 128, 0.2);
+  color: #9ca3af;
+  border: 1px solid rgba(107, 114, 128, 0.35);
+}
+.dp-planner {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+.dp-curiosity {
+  background: rgba(249, 115, 22, 0.2);
+  color: #fdba74;
+  border: 1px solid rgba(249, 115, 22, 0.35);
+}
 
 /* ─── Provider Chips ──────────────────────────────────────────────────────── */
 
@@ -1692,8 +1909,15 @@
   border-radius: 8px;
   width: 190px;
   cursor: default;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  transition: border-color 300ms ease, box-shadow 300ms ease, transform 300ms ease;
+  font-family:
+    "Inter",
+    system-ui,
+    -apple-system,
+    sans-serif;
+  transition:
+    border-color 300ms ease,
+    box-shadow 300ms ease,
+    transform 300ms ease;
   position: relative;
   overflow: hidden;
 }
@@ -1703,7 +1927,9 @@
   border-left: 3px solid #2a2a38;
   border-top: 1px solid #1e1e2a;
 }
-.pn.pn-entry.active { border-left-style: solid; }
+.pn.pn-entry.active {
+  border-left-style: solid;
+}
 
 /* Output node (Action) — wider, bolder */
 .pn.pn-output {
@@ -1738,17 +1964,27 @@
   flex-shrink: 0;
   color: #4a4a5e;
   opacity: 0.6;
-  transition: color 300ms, opacity 300ms;
+  transition:
+    color 300ms,
+    opacity 300ms;
 }
 
 .pn.active .pn-icon {
   opacity: 1;
 }
 
-.pn.active-sc .pn-icon       { color: #93c5fd; }
-.pn.active-llm .pn-icon      { color: #c4b5fd; }
-.pn.active-planner .pn-icon  { color: #86efac; }
-.pn.active-curiosity .pn-icon { color: #fdba74; }
+.pn.active-sc .pn-icon {
+  color: #93c5fd;
+}
+.pn.active-llm .pn-icon {
+  color: #c4b5fd;
+}
+.pn.active-planner .pn-icon {
+  color: #86efac;
+}
+.pn.active-curiosity .pn-icon {
+  color: #fdba74;
+}
 
 .pn-label {
   font-size: 11px;
@@ -1767,14 +2003,22 @@
   color: #e0e0ee;
 }
 
-.pn.active-sc .pn-label  { color: #93c5fd; }
-.pn.active-llm .pn-label  { color: #c4b5fd; }
-.pn.active-planner .pn-label { color: #86efac; }
-.pn.active-curiosity .pn-label { color: #fdba74; }
+.pn.active-sc .pn-label {
+  color: #93c5fd;
+}
+.pn.active-llm .pn-label {
+  color: #c4b5fd;
+}
+.pn.active-planner .pn-label {
+  color: #86efac;
+}
+.pn.active-curiosity .pn-label {
+  color: #fdba74;
+}
 
 .pn-freq {
   font-size: 9px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
   color: #3a3a4a;
   background: #0d0d14;
   padding: 1px 5px;
@@ -1819,8 +2063,15 @@
 }
 
 @keyframes pnPulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.7); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
 }
 
 /* ─── Content: Thought Text ─────────────────────────────────────────────── */
@@ -1911,11 +2162,13 @@
   justify-content: center;
   gap: 2px;
   font-size: 11px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   color: #4a4a5e;
 }
 
-.pn-hp-sep { color: #2e2e3e; }
+.pn-hp-sep {
+  color: #2e2e3e;
+}
 
 /* ─── Content: Provider Pills ───────────────────────────────────────────── */
 
@@ -2032,7 +2285,7 @@
 .pn-desire-score {
   font-size: 13px;
   font-weight: 700;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   color: #d4a84b;
 }
 
@@ -2067,7 +2320,7 @@
 
 .pn-goal-nums {
   font-size: 9px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   color: #4a4a5e;
   text-align: right;
 }
@@ -2122,7 +2375,7 @@
 
 .pipeline-legend-pct {
   font-size: 9px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "Fira Code", monospace;
   color: #3a3a4a;
 }
 
@@ -2136,4 +2389,3 @@
   color: #8b8b9a;
   font-weight: 600;
 }
-

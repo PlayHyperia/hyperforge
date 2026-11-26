@@ -6,6 +6,7 @@
 import * as THREE from "../../extras/three/three";
 import type { Position3D } from "../core/base-types";
 import type { BiomeType } from "../../systems/shared/world/TerrainBiomeTypes";
+import type { GrassExclusionBounds, RadialPondTerrainProfile } from "./terrain";
 
 // Temporary imports from core.ts - will be updated when those modules are created
 import type { MobData } from "../core/core";
@@ -152,6 +153,16 @@ export interface VegetationAsset {
    * If not provided, vegetation transitions from LOD1 (or LOD0) to imposter.
    */
   lod2Model?: string;
+  /** Explicit static LOD1 qualification in post-import model units and physical
+   * pixels. Uses the original instance batch/material, not legacy distance LOD.
+   */
+  screenSpaceLod?: Readonly<{
+    maxSurfaceError: number;
+    enterErrorPixels: number;
+    exitErrorPixels: number;
+    enterExtentPixels: number;
+    exitExtentPixels: number;
+  }>;
   /** Category of vegetation this asset belongs to */
   category: VegetationCategory;
   /** Base scale of the model (1.0 = original size) */
@@ -409,6 +420,8 @@ export interface BiomeResource {
   type: "tree" | "fishing_spot" | "mine" | "herb_patch";
   position: WorldPosition;
   resourceId: string;
+  /** Optional durable existing identity for an authored tree; layout changes require restart. */
+  instanceId?: string;
   respawnTime: number;
   level: number; // Required level to harvest
 }
@@ -421,14 +434,23 @@ export interface BiomeResource {
  */
 export interface NPCLocation {
   id: string; // Must match ID in npcs.json
-  type: "bank" | "general_store" | "skill_trainer" | "quest_giver";
+  type:
+    | "bank"
+    | "general_store"
+    | "skill_trainer"
+    | "quest_giver"
+    | "armor_store"
+    | "crafting_store"
+    | "magic_store"
+    | "range_store"
+    | "tanner";
   position: WorldPosition;
   // The following are optional - data should come from npcs.json manifest
   name?: string;
   services?: string[];
   modelPath?: string;
   description?: string;
-  storeId?: string; // Links NPC to store in stores.json (for general_store type)
+  storeId?: string; // Links any store-capable NPC to its exact stores.json identity
 }
 
 /**
@@ -479,6 +501,25 @@ export interface WorldArea {
   safeZone: boolean;
   /** PvP enabled - players can attack each other in this zone */
   pvpEnabled?: boolean;
+  /** Marks a bounded area as part of the autonomous duel-preparation loop. */
+  agentPreparationArea?: boolean;
+  /**
+   * Explicit death-custody contract for a preparation area. Unsupported or
+   * contradictory policies fail closed instead of falling through to public
+   * wilderness drops.
+   */
+  deathCustodyPolicy?: {
+    version: 1;
+    mode: "private_grave" | "no_loss" | "public_risk";
+    approvalStatus: "diagnostic_only" | "approved";
+    keptItemCount: number;
+    ownerProtectionTicks: number | null;
+    publicTransitionTicks: number | null;
+    terminalExpirationTicks: number | null;
+    spectatorCopyKey: string;
+    approvalId?: string;
+    approvedAt?: string;
+  };
   npcs: NPCLocation[];
   resources: BiomeResource[];
   mobSpawns: MobSpawnPoint[];
@@ -494,9 +535,20 @@ export interface WorldArea {
     spotCount: number;
     /** Resource IDs to spawn (e.g., "fishing_spot_net", "fishing_spot_bait") */
     spotTypes: string[];
+    /** Optional explicit water owner. Requires complete, reachable family coverage. */
+    waterBodyId?: string;
   };
   /** Station placements for this area (furnaces, anvils, banks, altars, ranges) */
   stations?: StationLocation[];
+  /**
+   * Explicit absolute duel-floor base, independent of campus grading coverage.
+   * Only the duel arena consumes this datum. Omission retains legacy admission;
+   * a present value must pass arena-grading's strict metadata validation.
+   */
+  arenaFloorDatum?: Readonly<{ height: number }>;
+  /** Narrow duel-only custody to physical facilities and their one-metre apron.
+   * Omission retains historical broad-zone behavior; unknown modes fail closed. */
+  duelProtection?: "facility-floors-v1";
   /** Flat zones for terrain flattening (e.g., arena floors) */
   flatZones?: Array<{
     id: string;
@@ -507,6 +559,22 @@ export interface WorldArea {
     height?: number;
     heightOffset?: number;
     blendRadius: number;
+    /** Rounded distance outside a rectangular core; existing zones are unchanged. */
+    blendShape?: "rounded";
+    /** Optional same-height rounded union; absent metadata preserves legacy grading. */
+    blendComposition?: "smooth-union";
+    /** Defaults to true; terrain shaping and grass exclusion are independent. */
+    excludeGrass?: boolean;
+    grassExclusionBounds?: GrassExclusionBounds;
+    radialPond?: RadialPondTerrainProfile;
+  }>;
+  /** Explicit elevated water bodies used for compact ponds and lakes. */
+  waterBodies?: Array<{
+    id: string;
+    centerX: number;
+    centerZ: number;
+    radius: number;
+    surfaceY: number;
   }>;
   /** Sub-zones within this area (e.g., lobby, hospital, arenas) */
   subZones?: Record<
@@ -561,9 +629,7 @@ export interface MobSpawnPointData {
  * Zone spawn point data - union type for all spawn point types
  */
 export type ZoneSpawnPointData =
-  | PlayerSpawnPointData
-  | ResourceSpawnPointData
-  | MobSpawnPointData;
+  PlayerSpawnPointData | ResourceSpawnPointData | MobSpawnPointData;
 
 /**
  * Zone spawn point - a spawn point in a zone
@@ -1063,6 +1129,12 @@ export type RoadMaterial = "dirt" | "cobblestone" | "stone";
  */
 export type RoadEndpointType = "town" | "poi";
 
+/** Baked surface dimensions for one original, unclipped road segment. */
+export interface RoadSegmentSurface {
+  width: number;
+  blendWidth: number;
+}
+
 /**
  * A road connection between two locations (towns and/or POIs)
  */
@@ -1085,6 +1157,12 @@ export interface ProceduralRoad {
   path: RoadPathPoint[];
   /** Road width in meters */
   width: number;
+  /** Optional edge fade in meters; omitted roads use the caller's ordinary fade. */
+  blendWidth?: number;
+  /** Optional peak mask influence in [0, 1]; omission retains a full-strength road. */
+  maxInfluence?: number;
+  /** Optional dimensions aligned exactly with path[i] → path[i + 1]. */
+  segmentSurfaces?: RoadSegmentSurface[];
   /** Road material for visual rendering */
   material: RoadMaterial;
   /** Total road length in meters */
@@ -1102,6 +1180,10 @@ export interface RoadTileSegment {
   end: { x: number; z: number };
   /** Road width */
   width: number;
+  /** Optional per-segment edge fade in meters, independent of the road width. */
+  blendWidth?: number;
+  /** Optional peak mask influence in [0, 1]; omission means 1. */
+  maxInfluence?: number;
   /** Parent road ID */
   roadId: string;
 }
@@ -1295,13 +1377,175 @@ export interface POIConfigManifest {
   biomeSuitability?: Partial<Record<POICategory, Record<string, number>>>;
 }
 
+/** Frozen functional tree anchor, admitted through centered terrain ownership. */
+export interface CompactResourceGroveAnchor {
+  /** Checked coordinate-derived identity; never forwarded as instanceId. */
+  readonly id: string;
+  readonly subType: "general" | "oak";
+  readonly position: Readonly<{ x: number; y: number; z: number }>;
+  readonly scale: number;
+  readonly rotation: number;
+}
+
+interface CompactResourceGroveRegions {
+  readonly regions: readonly {
+    readonly id: "west-ridge-foot" | "southern-meadow" | "eastern-shoulder";
+    readonly bounds: Readonly<{
+      minX: number;
+      maxX: number;
+      minZ: number;
+      maxZ: number;
+    }>;
+    readonly anchors: readonly CompactResourceGroveAnchor[];
+  }[];
+}
+
+/** Historical full-size layout and explicitly versioned grouped successor. */
+export type CompactResourceGrovesManifest = CompactResourceGroveRegions &
+  (
+    | {
+        readonly schemaVersion: 1;
+        readonly layoutId: "compact-functional-groves-v1";
+        readonly terrainProfileId:
+          | "compact-duel-island-v4"
+          | "compact-duel-island-v5"
+          | "compact-duel-island-v6";
+      }
+    | {
+        readonly schemaVersion: 2;
+        readonly layoutId: "compact-functional-groves-v2";
+        readonly terrainProfileId:
+          "compact-duel-island-v5" | "compact-duel-island-v6";
+      }
+  );
+
 /**
- * Complete world configuration manifest
- * Loaded from assets/manifests/world-config.json
+ * Exact, optional preparation lodge placement and immutable layout recipe.
  */
+export interface CompactPreparationLodgeManifest {
+  readonly schemaVersion: 1;
+  readonly layoutId: "compact-preparation-lodge-v1";
+  readonly terrainProfileId:
+    | "compact-duel-island-v4"
+    | "compact-duel-island-v5"
+    | "compact-duel-island-v6";
+  readonly position: Readonly<{ x: number; z: number }>;
+  readonly rotation: number;
+  readonly layoutSeed: "compact-bank-lodge01:360,318:8x8:south";
+  readonly recipeId:
+    "compact-bank-lodge01-v1" | "compact-bank-lodge01-haven-v2";
+}
+
+/** Optional open architecture with terrain support, never an indoor/floor owner. */
+export type CompactServiceCourtManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-service-court-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: 336.5; z: 337.5 }>;
+  rotation: 0;
+  recipeId: "open-timber-smithy-v2" | "open-timber-smithy-haven-v3";
+}>;
+
+/** Optional open bank canopy; the service court owns only its four supports. */
+export type CompactBankPavilionManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-bank-pavilion-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: 350; z: 320 }>;
+  rotation: 0;
+  recipeId: "open-timber-bank-haven-v2";
+}>;
+
+/** ID-addressed open service architecture; positions remain manifest-owned. */
+export type CompactServiceCourtPlacement = Readonly<{
+  schemaVersion: 2;
+  layoutId: string;
+  terrainProfileId: "compact-duel-island-v6";
+  position: Readonly<{ x: number; z: number }>;
+  rotation: 0;
+  recipeId:
+    | "open-timber-smithy-haven-v3"
+    | "open-timber-bank-haven-v2"
+    | "open-timber-pond-bank-haven-v1";
+  stationIds: readonly string[];
+  npcIds: readonly string[];
+}>;
+
+/** Replaces singular service architecture atomically, never adds a second owner. */
+export type CompactServiceCourtsManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-service-courts-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  primaryBankId: string;
+  courts: readonly CompactServiceCourtPlacement[];
+}>;
+
+/** Explicit shoreline anchor; cardinal geometry and navigation share this datum. */
+export type CompactPondDockPlacement = Readonly<{
+  id: string;
+  x: number;
+  z: number;
+  rotation: 0 | 90 | 180 | 270;
+  recipeId: "haven-fishing-landing-v1" | "haven-reed-jetty-v1";
+}>;
+
+/** Two independently owned fishing docks bound to one explicit inland basin. */
+export type CompactPondDocksManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId: "compact-pond-docks-v1";
+  terrainProfileId: "compact-duel-island-v6";
+  waterBodyId: string;
+  docks: readonly CompactPondDockPlacement[];
+}>;
+
+/** Low, non-colliding planting; tree/resource ownership is never changed. */
+export type CompactServicePlantingManifest = Readonly<{
+  schemaVersion: 1 | 2;
+  layoutId: "compact-smithy-planting-v1" | "compact-smithy-planting-v2";
+  terrainProfileId: "compact-duel-island-v6";
+  beds: readonly Readonly<{
+    id: "west" | "east";
+    /** V2 colour-only soil support; does not change height, paths or ecology. */
+    soilLobes?: readonly Readonly<{
+      centerX: number;
+      centerZ: number;
+      radiusX: number;
+      radiusZ: number;
+    }>[];
+    plants: readonly Readonly<{
+      /** V1 is bush-only. V2 requires an explicit admitted source model. */
+      model?: "bush" | "fern";
+      x: number;
+      z: number;
+      scale: number;
+      yaw: number;
+    }>[];
+  }>[];
+}>;
+
+/** Bounded authored scenery with shared exact collision and navigation ownership. */
+export type CompactLandscapeRocksManifest = Readonly<{
+  schemaVersion: 1;
+  layoutId:
+    "compact-preparation-rocks-v1" | "compact-preparation-coastal-rocks-v2";
+  terrainProfileId: "compact-duel-island-v6";
+  sourceSha256: string;
+  rocks: readonly Readonly<{
+    id: string;
+    variant: "rock10" | "rock11" | "rock13";
+    x: number;
+    z: number;
+    yaw: number;
+    scale: number;
+  }>[];
+}>;
+
+/** Complete configuration loaded from assets/manifests/world-config.json. */
 export interface WorldConfigManifest {
   /** Manifest version for compatibility checking */
   version: number;
+  /** Explicit, validated terrain identity consumed by every world height path. */
+  terrainProfile?: import("../../systems/shared/world/WorldTerrainProfile").WorldTerrainProfile;
   /** Terrain generation configuration */
   terrain: TerrainConfigManifest;
   /** Town generation configuration */
@@ -1312,6 +1556,16 @@ export interface WorldConfigManifest {
   pois?: POIConfigManifest;
   /** World seed for procedural generation */
   seed: number;
+  /** Version-2 compact-only frozen functional trees, using normal tile ownership. */
+  compactResourceGroves?: CompactResourceGrovesManifest;
+  /** Optional, explicitly admitted preparation architecture; no town/NPC generation. */
+  compactPreparationLodge?: CompactPreparationLodgeManifest;
+  compactServiceCourt?: CompactServiceCourtManifest;
+  compactBankPavilion?: CompactBankPavilionManifest;
+  compactServiceCourts?: CompactServiceCourtsManifest;
+  compactPondDocks?: CompactPondDocksManifest;
+  compactServicePlanting?: CompactServicePlantingManifest;
+  compactLandscapeRocks?: CompactLandscapeRocksManifest;
 }
 
 // ============== BUILDINGS MANIFEST TYPES ==============

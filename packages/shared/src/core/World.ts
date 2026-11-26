@@ -31,6 +31,10 @@ import {
   FrameBudgetManager,
   type FrameTimingStats,
 } from "../utils/FrameBudgetManager";
+import {
+  DurationHistogram,
+  type DurationPercentiles,
+} from "../utils/DurationHistogram";
 
 // NOTE: Import directly to avoid circular dependency through barrel file
 // The barrel imports combat which imports MobEntity which extends Entity (circular)
@@ -156,6 +160,19 @@ interface AsyncTickCallMetric {
   peakInFlight: number;
   rejections: number;
   lastSeenAt: number;
+}
+
+export interface WorldTickTimingPercentiles {
+  total: DurationPercentiles;
+  fixedUpdate: DurationPercentiles;
+  update: DurationPercentiles;
+  lateUpdate: DurationPercentiles;
+  commit: DurationPercentiles;
+  unmeasured: DurationPercentiles;
+}
+
+export interface WorldSystemTimingPercentiles extends DurationPercentiles {
+  name: string;
 }
 
 /**
@@ -390,7 +407,7 @@ export class World extends EventEmitter {
   network!: NetworkSystem & {
     id?: string;
     send?: (event: string, data?: unknown) => void;
-    dropItem?: (itemId: string, slot?: number, quantity?: number) => void;
+    dropItem?: (itemId: string, slot?: number, quantity?: number) => string;
     lastInventoryByPlayerId?: Record<
       string,
       {
@@ -442,6 +459,7 @@ export class World extends EventEmitter {
     hide: () => void;
     getFps: () => number;
     getFrameTime: () => number;
+    getStreamingPerformanceSnapshot: () => unknown | null;
     isVisible: () => boolean;
     enableSystemTiming: () => void;
     disableSystemTiming: () => void;
@@ -1470,17 +1488,7 @@ export class World extends EventEmitter {
 
     // Commit changes (render on client, send network updates on server)
     this.commit();
-
-    if (this.isServer) {
-      const _commitMs = performance.now() - _phaseT3;
-      const _totalTickMs = performance.now() - _tickT0;
-      const _measuredMs = _fixedMs + _updateMs + _lateMs + _commitMs;
-      if (_totalTickMs > 50) {
-        console.warn(
-          `[World.tick] TOTAL=${_totalTickMs.toFixed(0)}ms fixed=${_fixedMs.toFixed(0)}ms(${_fixedSteps}st) update=${_updateMs.toFixed(0)}ms late=${_lateMs.toFixed(0)}ms commit=${_commitMs.toFixed(0)}ms unmeasured=${(_totalTickMs - _measuredMs).toFixed(0)}ms`,
-        );
-      }
-    }
+    const _commitMs = this.isServer ? performance.now() - _phaseT3 : 0;
 
     // Process deferred work if we have budget remaining
     // This runs low-priority work that was deferred from previous frames
@@ -1490,6 +1498,23 @@ export class World extends EventEmitter {
 
     // End performance monitoring
     this.postTick();
+
+    if (this.isServer) {
+      const _totalTickMs = performance.now() - _tickT0;
+      const _measuredMs = _fixedMs + _updateMs + _lateMs + _commitMs;
+      const _unmeasuredMs = Math.max(0, _totalTickMs - _measuredMs);
+      this._serverTickTimingHistograms.total.record(_totalTickMs);
+      this._serverTickTimingHistograms.fixedUpdate.record(_fixedMs);
+      this._serverTickTimingHistograms.update.record(_updateMs);
+      this._serverTickTimingHistograms.lateUpdate.record(_lateMs);
+      this._serverTickTimingHistograms.commit.record(_commitMs);
+      this._serverTickTimingHistograms.unmeasured.record(_unmeasuredMs);
+      if (_totalTickMs > 50) {
+        console.warn(
+          `[World.tick] TOTAL=${_totalTickMs.toFixed(0)}ms fixed=${_fixedMs.toFixed(0)}ms(${_fixedSteps}st) update=${_updateMs.toFixed(0)}ms late=${_lateMs.toFixed(0)}ms commit=${_commitMs.toFixed(0)}ms unmeasured=${_unmeasuredMs.toFixed(0)}ms`,
+        );
+      }
+    }
 
     // End frame budget tracking (client only)
     if (this.frameBudget) {
@@ -1516,6 +1541,21 @@ export class World extends EventEmitter {
     { samples: number[]; avg: number }
   >();
 
+  /** Full-window server frame and per-system distributions for soak evidence. */
+  private readonly _serverTickTimingHistograms = {
+    total: new DurationHistogram(),
+    fixedUpdate: new DurationHistogram(),
+    update: new DurationHistogram(),
+    lateUpdate: new DurationHistogram(),
+    commit: new DurationHistogram(),
+    unmeasured: new DurationHistogram(),
+  };
+  private readonly _serverSystemFrameTotals = new Map<string, number>();
+  private readonly _serverSystemTimingHistograms = new Map<
+    string,
+    DurationHistogram
+  >();
+
   /** Maximum samples to keep for averaging */
   private readonly _maxTimingSamples = 30;
   private _asyncTickCallMetrics = new Map<string, AsyncTickCallMetric>();
@@ -1536,6 +1576,38 @@ export class World extends EventEmitter {
     this._measureSystemTiming = false;
     this._systemTimings.clear();
     this._systemTimingAverages.clear();
+    this._serverSystemFrameTotals.clear();
+    this._serverSystemTimingHistograms.clear();
+  }
+
+  getServerTickTimingPercentiles(): WorldTickTimingPercentiles {
+    return {
+      total: this._serverTickTimingHistograms.total.snapshot(),
+      fixedUpdate: this._serverTickTimingHistograms.fixedUpdate.snapshot(),
+      update: this._serverTickTimingHistograms.update.snapshot(),
+      lateUpdate: this._serverTickTimingHistograms.lateUpdate.snapshot(),
+      commit: this._serverTickTimingHistograms.commit.snapshot(),
+      unmeasured: this._serverTickTimingHistograms.unmeasured.snapshot(),
+    };
+  }
+
+  getSystemTimingPercentiles(): WorldSystemTimingPercentiles[] {
+    return Array.from(this._serverSystemTimingHistograms.entries())
+      .map(([name, histogram]) => ({ name, ...histogram.snapshot() }))
+      .sort((left, right) => {
+        if (right.p99 !== left.p99) return right.p99 - left.p99;
+        if (right.max !== left.max) return right.max - left.max;
+        return left.name.localeCompare(right.name);
+      });
+  }
+
+  resetServerTimingPercentiles(): void {
+    for (const histogram of Object.values(this._serverTickTimingHistograms)) {
+      histogram.reset();
+    }
+    for (const histogram of this._serverSystemTimingHistograms.values()) {
+      histogram.reset();
+    }
   }
 
   /**
@@ -1660,6 +1732,7 @@ export class World extends EventEmitter {
     }
     timing[phase] += timeMs;
     timing.total = timing.update + timing.fixedUpdate + timing.lateUpdate;
+    this.recordServerSystemTiming(systemName, timeMs);
 
     // Update rolling average
     let avgData = this._systemTimingAverages.get(systemName);
@@ -1686,6 +1759,25 @@ export class World extends EventEmitter {
       avgData.avg =
         avgData.samples.reduce((a, b) => a + b, 0) / avgData.samples.length;
     }
+
+    if (this.isServer) {
+      for (const [name, durationMs] of this._serverSystemFrameTotals) {
+        let histogram = this._serverSystemTimingHistograms.get(name);
+        if (!histogram) {
+          histogram = new DurationHistogram();
+          this._serverSystemTimingHistograms.set(name, histogram);
+        }
+        histogram.record(durationMs);
+      }
+    }
+  }
+
+  private recordServerSystemTiming(systemName: string, timeMs: number): void {
+    if (!this.isServer || !this._measureSystemTiming) return;
+    this._serverSystemFrameTotals.set(
+      systemName,
+      (this._serverSystemFrameTotals.get(systemName) ?? 0) + timeMs,
+    );
   }
 
   /**
@@ -1698,6 +1790,7 @@ export class World extends EventEmitter {
       timing.lateUpdate = 0;
       timing.total = 0;
     }
+    this._serverSystemFrameTotals.clear();
   }
 
   /** Pre-tick phase: Initialize performance monitoring */
@@ -1712,6 +1805,7 @@ export class World extends EventEmitter {
         const _t = performance.now();
         system.preTick();
         const _e = performance.now() - _t;
+        this.recordServerSystemTiming(this._getSystemName(system), _e);
         if (_e > 20) {
           console.warn(
             `[World.tick] system.preTick "${this._getSystemName(system)}" took ${_e.toFixed(0)}ms`,
@@ -1733,6 +1827,7 @@ export class World extends EventEmitter {
         const _t = performance.now();
         system.preFixedUpdate(willFixedStep);
         const _e = performance.now() - _t;
+        this.recordServerSystemTiming(this._getSystemName(system), _e);
         if (_e > 20) {
           console.warn(
             `[World.tick] system.preFixedUpdate "${this._getSystemName(system)}" took ${_e.toFixed(0)}ms`,
@@ -1812,7 +1907,16 @@ export class World extends EventEmitter {
    */
   private postFixedUpdate(delta: number): void {
     for (const system of this.systems) {
-      system.postFixedUpdate(delta);
+      if (this.isServer && this._measureSystemTiming) {
+        const start = performance.now();
+        system.postFixedUpdate(delta);
+        this.recordServerSystemTiming(
+          this._getSystemName(system),
+          performance.now() - start,
+        );
+      } else {
+        system.postFixedUpdate(delta);
+      }
     }
   }
 
@@ -1826,6 +1930,7 @@ export class World extends EventEmitter {
         const _t = performance.now();
         system.preUpdate(alpha);
         const _e = performance.now() - _t;
+        this.recordServerSystemTiming(this._getSystemName(system), _e);
         if (_e > 20) {
           console.warn(
             `[World.tick] system.preUpdate "${this._getSystemName(system)}" took ${_e.toFixed(0)}ms`,
@@ -1926,7 +2031,16 @@ export class World extends EventEmitter {
    */
   private postUpdate(delta: number): void {
     for (const system of this.systems) {
-      system.postUpdate(delta);
+      if (this.isServer && this._measureSystemTiming) {
+        const start = performance.now();
+        system.postUpdate(delta);
+        this.recordServerSystemTiming(
+          this._getSystemName(system),
+          performance.now() - start,
+        );
+      } else {
+        system.postUpdate(delta);
+      }
     }
   }
 
@@ -1988,7 +2102,16 @@ export class World extends EventEmitter {
       }
     }
     for (const system of this.systems) {
-      system.postLateUpdate(delta);
+      if (this.isServer && this._measureSystemTiming) {
+        const start = performance.now();
+        system.postLateUpdate(delta);
+        this.recordServerSystemTiming(
+          this._getSystemName(system),
+          performance.now() - start,
+        );
+      } else {
+        system.postLateUpdate(delta);
+      }
     }
   }
 
@@ -1999,6 +2122,7 @@ export class World extends EventEmitter {
         const _t = performance.now();
         system.commit();
         const _elapsed = performance.now() - _t;
+        this.recordServerSystemTiming(this._getSystemName(system), _elapsed);
         if (_elapsed > 20) {
           console.warn(
             `[World.tick] system.commit "${this._getSystemName(system)}" took ${_elapsed.toFixed(0)}ms`,
@@ -2015,7 +2139,16 @@ export class World extends EventEmitter {
   /** Post-tick phase: Finalize performance monitoring */
   private postTick(): void {
     for (const system of this.systems) {
-      system.postTick();
+      if (this.isServer && this._measureSystemTiming) {
+        const start = performance.now();
+        system.postTick();
+        this.recordServerSystemTiming(
+          this._getSystemName(system),
+          performance.now() - start,
+        );
+      } else {
+        system.postTick();
+      }
     }
 
     // Finalize system timing averages
@@ -2082,8 +2215,8 @@ export class World extends EventEmitter {
     // Some persisted player records store shorthand avatar filenames like "ws-avatar.vrm".
     // Treat these as local avatar assets instead of mistaken bare hostnames.
     const legacyAvatarAliases: Record<string, string> = {
-      "ws-avatar.vrm": "avatar-male-01.vrm",
-      "avatar.vrm": "avatar-male-01.vrm",
+      "ws-avatar.vrm": "duel-candidates/duel-bandit.vrm",
+      "avatar.vrm": "duel-candidates/duel-bandit.vrm",
     };
     const resolveLegacyAvatarFilename = (filename: string) =>
       legacyAvatarAliases[filename.toLowerCase()] ?? filename;

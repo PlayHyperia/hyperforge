@@ -23,7 +23,16 @@
 import THREE, { MeshStandardNodeMaterial } from "../../extras/three/three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { copyPbrToNodeMaterial } from "./ModelMaterialConversion";
 import type { World } from "../../core/World";
+import {
+  PROCESSED_MODEL_VERSION,
+  identifyProcessedModelSource,
+  encodeProcessedModel,
+  decodeProcessedModel,
+  type ProcessedModelSource,
+} from "./ProcessedModelCodec";
 import {
   lodManager,
   type LODBundle,
@@ -64,88 +73,13 @@ interface CachedModel {
 
 const PROCESSED_DB_NAME = "hyperia-processed-models";
 const PROCESSED_STORE_NAME = "models";
-const PROCESSED_CACHE_VERSION = 6;
+const PROCESSED_CACHE_VERSION = PROCESSED_MODEL_VERSION;
 
-/** Serialized mesh data for IndexedDB storage */
-interface SerializedMesh {
-  name: string;
-  type: "Mesh" | "SkinnedMesh";
-  positions: ArrayBuffer; // Float32Array
-  normals?: ArrayBuffer;
-  uvs?: ArrayBuffer;
-  uv2s?: ArrayBuffer;
-  colors?: ArrayBuffer;
-  colorItemSize?: number;
-  indices?: ArrayBuffer;
-  indexType?: "Uint16" | "Uint32";
-  skinWeights?: ArrayBuffer;
-  skinIndices?: ArrayBuffer;
-  /** Material properties (not the GPU material itself) */
-  material: SerializedMaterialProps | SerializedMaterialProps[];
-}
-
-/** Raw RGBA pixel data for a texture, stored as ArrayBuffer in IndexedDB. */
+/** Used only by the unchanged cold color/emissive conversion below. */
 interface SerializedTextureData {
   pixels: ArrayBuffer;
   width: number;
   height: number;
-}
-
-/** Material properties that can be serialized (no GPU state) */
-interface SerializedMaterialProps {
-  name: string;
-  color: number; // hex
-  emissive: number;
-  emissiveIntensity: number;
-  roughness: number;
-  metalness: number;
-  opacity: number;
-  transparent: boolean;
-  alphaTest: number;
-  side: number;
-  flatShading: boolean;
-  vertexColors: boolean;
-  mapData?: SerializedTextureData;
-  normalMapData?: SerializedTextureData;
-  normalScaleX?: number;
-  normalScaleY?: number;
-  emissiveMapData?: SerializedTextureData;
-  roughnessMapData?: SerializedTextureData;
-  metalnessMapData?: SerializedTextureData;
-  aoMapData?: SerializedTextureData;
-  aoMapIntensity?: number;
-}
-
-/** Serialized scene node hierarchy */
-interface SerializedNode {
-  name: string;
-  type: "Group" | "Object3D" | "Mesh" | "SkinnedMesh" | "Bone";
-  meshIndex?: number; // Index into meshes array (for Mesh/SkinnedMesh)
-  children: SerializedNode[];
-}
-
-/** Full serialized model stored in IndexedDB */
-interface SerializedProcessedModel {
-  version: number;
-  url: string;
-  /** Size of original GLB file — used for staleness detection */
-  sourceSize: number;
-  meshes: SerializedMesh[];
-  hierarchy: SerializedNode;
-  collision?: ModelCollisionData;
-  /** Serialized animation clips (track names + keyframe data) */
-  animations: Array<{
-    name: string;
-    duration: number;
-    tracks: Array<{
-      name: string;
-      type: string; // "vector" | "quaternion" | "number" | "boolean" | "string" | "color"
-      times: ArrayBuffer;
-      values: ArrayBuffer;
-      interpolation: number;
-    }>;
-  }>;
-  cachedAt: number;
 }
 
 export class ModelCache {
@@ -271,15 +205,10 @@ export class ModelCache {
    */
   private async loadProcessedModel(
     url: string,
-    sourceSize: number,
+    source: ProcessedModelSource,
     world?: World,
-  ): Promise<{
-    scene: THREE.Object3D;
-    animations: THREE.AnimationClip[];
-    collision?: ModelCollisionData;
-  } | null> {
+  ): Promise<ReturnType<typeof decodeProcessedModel>> {
     if (!this.processedDB) return null;
-
     return new Promise((resolve) => {
       try {
         const tx = this.processedDB!.transaction(
@@ -287,242 +216,61 @@ export class ModelCache {
           "readonly",
         );
         const request = tx.objectStore(PROCESSED_STORE_NAME).get(url);
-        request.onsuccess = () => {
-          const stored = request.result as SerializedProcessedModel | undefined;
-          if (
-            !stored ||
-            stored.version !== PROCESSED_CACHE_VERSION ||
-            stored.sourceSize !== sourceSize
-          ) {
-            resolve(null);
-            return;
-          }
-          try {
-            const result = this.deserializeScene(stored, world);
-            resolve(result);
-          } catch (err) {
-            console.warn(
-              `[ModelCache] Failed to deserialize cached model ${url}:`,
-              err,
-            );
-            resolve(null);
-          }
-        };
+        request.onsuccess = () =>
+          resolve(
+            decodeProcessedModel(
+              request.result,
+              url,
+              source,
+              world ? (material) => world.setupMaterial(material) : undefined,
+            ),
+          );
         request.onerror = () => resolve(null);
+        tx.onabort = () => resolve(null);
       } catch {
         resolve(null);
       }
     });
   }
 
-  /**
-   * Save a processed model to IndexedDB for future sessions.
-   * Fire-and-forget — does not block the loading pipeline.
-   */
+  /** Unsupported scenes are not persisted; the complete cold scene stays intact. */
   private saveProcessedModel(
     url: string,
-    sourceSize: number,
+    source: ProcessedModelSource,
     scene: THREE.Object3D,
     animations: THREE.AnimationClip[],
     collision?: ModelCollisionData,
   ): void {
     if (!this.processedDB) return;
-
+    const record = encodeProcessedModel(
+      url,
+      source,
+      scene,
+      animations,
+      collision,
+    );
+    if (!record) return;
     try {
-      const serialized = this.serializeScene(
-        url,
-        sourceSize,
-        scene,
-        animations,
-        collision,
-      );
-
       const tx = this.processedDB.transaction(
         PROCESSED_STORE_NAME,
         "readwrite",
       );
-      const putReq = tx.objectStore(PROCESSED_STORE_NAME).put(serialized);
-      putReq.onerror = () =>
+      const request = tx.objectStore(PROCESSED_STORE_NAME).put(record);
+      request.onerror = () =>
         console.warn(
-          `[ModelCache] IndexedDB put failed for ${url}:`,
-          putReq.error,
+          "[ModelCache] Processed cache write failed",
+          url,
+          request.error,
         );
       tx.onerror = () =>
-        console.warn(`[ModelCache] IndexedDB tx failed for ${url}:`, tx.error);
-    } catch (err) {
-      console.warn(`[ModelCache] Failed to cache processed model ${url}:`, err);
+        console.warn(
+          "[ModelCache] Processed cache transaction failed",
+          url,
+          tx.error,
+        );
+    } catch (error) {
+      console.warn("[ModelCache] Processed cache unavailable", url, error);
     }
-  }
-
-  /**
-   * Serialize a processed scene into IndexedDB-storable format.
-   * Captures geometry typed arrays and material properties (but not GPU state).
-   */
-  private serializeScene(
-    url: string,
-    sourceSize: number,
-    scene: THREE.Object3D,
-    animations: THREE.AnimationClip[],
-    collision?: ModelCollisionData,
-  ): SerializedProcessedModel {
-    const meshes: SerializedMesh[] = [];
-    const meshNodeToIndex = new Map<THREE.Object3D, number>();
-
-    // Copy only the typed-array VIEW's bytes — not the entire underlying
-    // ArrayBuffer. GLTF attributes are often views into one large GLB binary
-    // chunk; buffer.slice(0) would copy megabytes of unrelated data and
-    // cause deserialized geometries to have inflated vertex counts.
-    const sliceView = (
-      arr: ArrayLike<number> & {
-        buffer: ArrayBuffer;
-        byteOffset: number;
-        byteLength: number;
-      },
-    ) => arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength);
-
-    // Extract a geometry attribute's data into a contiguous typed array buffer.
-    // InterleavedBufferAttribute.array returns the FULL interleaved buffer
-    // (containing positions + normals + UVs all packed together), so we must
-    // deinterleave by reading each component individually via getComponent().
-    // Without this, deserialized geometries get fractional vertex counts and
-    // NaN bounding boxes because the byte length isn't divisible by itemSize*4.
-    const extractAttr = (
-      attr: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-    ): ArrayBuffer => {
-      if (
-        (attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute
-      ) {
-        const iba = attr as THREE.InterleavedBufferAttribute;
-        const TypedArrayCtor = iba.data.array.constructor as new (
-          len: number,
-        ) => Float32Array | Uint16Array | Uint8Array | Int16Array;
-        const out = new TypedArrayCtor(iba.count * iba.itemSize);
-        for (let i = 0; i < iba.count; i++) {
-          for (let j = 0; j < iba.itemSize; j++) {
-            out[i * iba.itemSize + j] = iba.getComponent(i, j);
-          }
-        }
-        return out.buffer as ArrayBuffer;
-      }
-      return sliceView(
-        (attr as THREE.BufferAttribute).array as ArrayLike<number> & {
-          buffer: ArrayBuffer;
-          byteOffset: number;
-          byteLength: number;
-        },
-      );
-    };
-
-    // Collect all meshes and build identity map (avoids name-collision bugs)
-    scene.traverse((node) => {
-      if (node instanceof THREE.Mesh || node instanceof THREE.SkinnedMesh) {
-        const geo = node.geometry;
-        meshNodeToIndex.set(node, meshes.length);
-        const sm: SerializedMesh = {
-          name: node.name,
-          type: node instanceof THREE.SkinnedMesh ? "SkinnedMesh" : "Mesh",
-          positions: extractAttr(
-            geo.getAttribute("position") as
-              | THREE.BufferAttribute
-              | THREE.InterleavedBufferAttribute,
-          ),
-          material: Array.isArray(node.material)
-            ? node.material.map((m) => this.serializeMaterialProps(m))
-            : this.serializeMaterialProps(node.material),
-        };
-
-        // Optional attributes
-        const normals = geo.getAttribute("normal");
-        if (normals)
-          sm.normals = extractAttr(
-            normals as THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-          );
-
-        const uvs = geo.getAttribute("uv");
-        if (uvs)
-          sm.uvs = extractAttr(
-            uvs as THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-          );
-
-        const uv2s = geo.getAttribute("uv2");
-        if (uv2s)
-          sm.uv2s = extractAttr(
-            uv2s as THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-          );
-
-        const colors = geo.getAttribute("color");
-        if (colors) {
-          sm.colors = extractAttr(
-            colors as THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-          );
-          sm.colorItemSize = colors.itemSize;
-        }
-
-        if (geo.index) {
-          sm.indices = sliceView(geo.index.array);
-          sm.indexType =
-            geo.index.array instanceof Uint16Array ? "Uint16" : "Uint32";
-        }
-
-        // Skinning data
-        if (node instanceof THREE.SkinnedMesh) {
-          const skinWeights = geo.getAttribute("skinWeight");
-          const skinIndices = geo.getAttribute("skinIndex");
-          if (skinWeights)
-            sm.skinWeights = extractAttr(
-              skinWeights as
-                | THREE.BufferAttribute
-                | THREE.InterleavedBufferAttribute,
-            );
-          if (skinIndices)
-            sm.skinIndices = extractAttr(
-              skinIndices as
-                | THREE.BufferAttribute
-                | THREE.InterleavedBufferAttribute,
-            );
-        }
-
-        meshes.push(sm);
-      }
-    });
-
-    // Serialize hierarchy (uses identity map, not name-based lookup)
-    const hierarchy = this.serializeNode(scene, meshNodeToIndex);
-
-    // Serialize animations
-    const serializedAnimations = animations.map((clip) => ({
-      name: clip.name,
-      duration: clip.duration,
-      tracks: clip.tracks.map((track) => ({
-        name: track.name,
-        type:
-          track instanceof THREE.QuaternionKeyframeTrack
-            ? "quaternion"
-            : track instanceof THREE.VectorKeyframeTrack
-              ? "vector"
-              : track instanceof THREE.NumberKeyframeTrack
-                ? "number"
-                : track instanceof THREE.BooleanKeyframeTrack
-                  ? "boolean"
-                  : track instanceof THREE.ColorKeyframeTrack
-                    ? "color"
-                    : "number",
-        times: new Float32Array(track.times).buffer as ArrayBuffer,
-        values: new Float32Array(track.values).buffer as ArrayBuffer,
-        interpolation: track.getInterpolation() as number,
-      })),
-    }));
-
-    return {
-      version: PROCESSED_CACHE_VERSION,
-      url,
-      sourceSize,
-      meshes,
-      hierarchy,
-      collision,
-      animations: serializedAnimations,
-      cachedAt: Date.now(),
-    };
   }
 
   /**
@@ -587,325 +335,6 @@ export class ModelCache {
     }
   }
 
-  /** Serialize material properties (no GPU state) */
-  private serializeMaterialProps(mat: THREE.Material): SerializedMaterialProps {
-    const m = mat as THREE.MeshStandardMaterial & {
-      map?: THREE.Texture | null;
-      normalMap?: THREE.Texture | null;
-      normalScale?: THREE.Vector2;
-      emissiveMap?: THREE.Texture | null;
-      roughnessMap?: THREE.Texture | null;
-      metalnessMap?: THREE.Texture | null;
-      aoMap?: THREE.Texture | null;
-      aoMapIntensity?: number;
-    };
-
-    const props: SerializedMaterialProps = {
-      name: m.name || "",
-      color: m.color?.getHex?.() ?? 0xffffff,
-      emissive: m.emissive?.getHex?.() ?? 0x000000,
-      emissiveIntensity: m.emissiveIntensity ?? 0,
-      roughness: m.roughness ?? 0.7,
-      metalness: m.metalness ?? 0.0,
-      opacity: m.opacity ?? 1,
-      transparent: m.transparent ?? false,
-      alphaTest: m.alphaTest ?? 0,
-      side: m.side ?? THREE.FrontSide,
-      flatShading: m.flatShading ?? false,
-      vertexColors: m.vertexColors ?? false,
-    };
-
-    if (m.map) {
-      const d = this.textureToPixelData(m.map);
-      if (d) props.mapData = d;
-    }
-    if (m.normalMap) {
-      const d = this.textureToPixelData(m.normalMap);
-      if (d) props.normalMapData = d;
-    }
-    if (m.normalScale) {
-      props.normalScaleX = m.normalScale.x;
-      props.normalScaleY = m.normalScale.y;
-    }
-    if (m.emissiveMap) {
-      const d = this.textureToPixelData(m.emissiveMap);
-      if (d) props.emissiveMapData = d;
-    }
-    if (m.roughnessMap) {
-      const d = this.textureToPixelData(m.roughnessMap);
-      if (d) props.roughnessMapData = d;
-    }
-    if (m.metalnessMap) {
-      const d = this.textureToPixelData(m.metalnessMap);
-      if (d) props.metalnessMapData = d;
-    }
-    if (m.aoMap) {
-      const d = this.textureToPixelData(m.aoMap);
-      if (d) props.aoMapData = d;
-      props.aoMapIntensity = m.aoMapIntensity ?? 1.0;
-    }
-
-    return props;
-  }
-
-  /** Serialize scene hierarchy using object-identity mesh indices */
-  private serializeNode(
-    node: THREE.Object3D,
-    meshNodeToIndex: Map<THREE.Object3D, number>,
-  ): SerializedNode {
-    let type: SerializedNode["type"] = "Object3D";
-    let meshIndex: number | undefined;
-
-    if (node instanceof THREE.SkinnedMesh) {
-      type = "SkinnedMesh";
-      meshIndex = meshNodeToIndex.get(node);
-    } else if (node instanceof THREE.Mesh) {
-      type = "Mesh";
-      meshIndex = meshNodeToIndex.get(node);
-    } else if (node instanceof THREE.Bone) {
-      type = "Bone";
-    } else if (node instanceof THREE.Group) {
-      type = "Group";
-    }
-
-    return {
-      name: node.name,
-      type,
-      meshIndex,
-      children: node.children.map((child) =>
-        this.serializeNode(child, meshNodeToIndex),
-      ),
-    };
-  }
-
-  /**
-   * Deserialize a cached model back into a THREE.Object3D scene.
-   * Reconstructs geometry from typed arrays and creates fresh materials.
-   */
-  private deserializeScene(
-    stored: SerializedProcessedModel,
-    world?: World,
-  ): {
-    scene: THREE.Object3D;
-    animations: THREE.AnimationClip[];
-    collision?: ModelCollisionData;
-  } {
-    // Reconstruct all meshes
-    const reconstructedMeshes: THREE.Object3D[] = stored.meshes.map((sm) => {
-      const geo = new THREE.BufferGeometry();
-
-      // Restore geometry attributes
-      geo.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(sm.positions), 3),
-      );
-      if (sm.normals) {
-        geo.setAttribute(
-          "normal",
-          new THREE.BufferAttribute(new Float32Array(sm.normals), 3),
-        );
-      }
-      if (sm.uvs) {
-        geo.setAttribute(
-          "uv",
-          new THREE.BufferAttribute(new Float32Array(sm.uvs), 2),
-        );
-      }
-      if (sm.uv2s) {
-        geo.setAttribute(
-          "uv2",
-          new THREE.BufferAttribute(new Float32Array(sm.uv2s), 2),
-        );
-      }
-      if (sm.colors) {
-        geo.setAttribute(
-          "color",
-          new THREE.BufferAttribute(
-            new Float32Array(sm.colors),
-            sm.colorItemSize ?? 3,
-          ),
-        );
-      }
-      if (sm.indices) {
-        const IndexArray =
-          sm.indexType === "Uint16" ? Uint16Array : Uint32Array;
-        geo.setIndex(new THREE.BufferAttribute(new IndexArray(sm.indices), 1));
-      }
-      if (sm.skinWeights) {
-        geo.setAttribute(
-          "skinWeight",
-          new THREE.BufferAttribute(new Float32Array(sm.skinWeights), 4),
-        );
-      }
-      if (sm.skinIndices) {
-        geo.setAttribute(
-          "skinIndex",
-          new THREE.BufferAttribute(new Uint16Array(sm.skinIndices), 4),
-        );
-      }
-
-      geo.computeBoundingSphere();
-      geo.computeBoundingBox();
-
-      // Reconstruct material(s) as MeshStandardNodeMaterial
-      const createMat = (
-        props: SerializedMaterialProps,
-      ): MeshStandardNodeMaterial => {
-        const mat = new MeshStandardNodeMaterial();
-        mat.name = props.name;
-        mat.color = new THREE.Color(props.color);
-        mat.emissive = new THREE.Color(props.emissive);
-        mat.emissiveIntensity = props.emissiveIntensity;
-        mat.roughness = props.roughness;
-        mat.metalness = props.metalness;
-        mat.opacity = props.opacity;
-        mat.transparent = props.transparent;
-        mat.alphaTest = props.alphaTest;
-        mat.side = props.side as THREE.Side;
-        mat.flatShading = props.flatShading;
-        mat.vertexColors = props.vertexColors;
-        mat.fog = true;
-        (mat as THREE.Material & { shadowSide?: number }).shadowSide =
-          THREE.BackSide;
-
-        const restoreTex = (
-          td: SerializedTextureData,
-          srgb: boolean,
-        ): THREE.DataTexture => {
-          const tex = new THREE.DataTexture(
-            new Uint8ClampedArray(td.pixels),
-            td.width,
-            td.height,
-            THREE.RGBAFormat,
-          );
-          tex.colorSpace = srgb
-            ? THREE.SRGBColorSpace
-            : THREE.LinearSRGBColorSpace;
-          tex.needsUpdate = true;
-          return tex;
-        };
-
-        if (props.mapData) mat.map = restoreTex(props.mapData, true);
-        if (props.normalMapData) {
-          mat.normalMap = restoreTex(props.normalMapData, false);
-          if (props.normalScaleX !== undefined) {
-            mat.normalScale.set(
-              props.normalScaleX,
-              props.normalScaleY ?? props.normalScaleX,
-            );
-          }
-        }
-        if (props.emissiveMapData)
-          mat.emissiveMap = restoreTex(props.emissiveMapData, true);
-        if (props.roughnessMapData)
-          mat.roughnessMap = restoreTex(props.roughnessMapData, false);
-        if (props.metalnessMapData)
-          mat.metalnessMap = restoreTex(props.metalnessMapData, false);
-        if (props.aoMapData) {
-          mat.aoMap = restoreTex(props.aoMapData, false);
-          mat.aoMapIntensity = props.aoMapIntensity ?? 1.0;
-        }
-        mat.needsUpdate = true;
-
-        // CSM integration
-        if (world?.setupMaterial) {
-          world.setupMaterial(mat);
-        }
-
-        this.managedMaterials.add(mat);
-        return mat;
-      };
-
-      const material = Array.isArray(sm.material)
-        ? sm.material.map(createMat)
-        : createMat(sm.material);
-
-      // Create appropriate mesh type
-      let mesh: THREE.Mesh;
-      if (sm.type === "SkinnedMesh") {
-        mesh = new THREE.SkinnedMesh(geo, material);
-        (mesh as THREE.SkinnedMesh).frustumCulled = false;
-      } else {
-        mesh = new THREE.Mesh(geo, material);
-      }
-      mesh.name = sm.name;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-
-      return mesh;
-    });
-
-    // Reconstruct hierarchy from serialized node tree
-    const buildNode = (sn: SerializedNode): THREE.Object3D => {
-      let node: THREE.Object3D;
-
-      if (
-        sn.meshIndex !== undefined &&
-        sn.meshIndex < reconstructedMeshes.length
-      ) {
-        node = reconstructedMeshes[sn.meshIndex];
-      } else if (sn.type === "Bone") {
-        node = new THREE.Bone();
-        node.name = sn.name;
-      } else if (sn.type === "Group") {
-        node = new THREE.Group();
-        node.name = sn.name;
-      } else {
-        node = new THREE.Object3D();
-        node.name = sn.name;
-      }
-
-      for (const childNode of sn.children) {
-        node.add(buildNode(childNode));
-      }
-
-      return node;
-    };
-
-    const scene = buildNode(stored.hierarchy);
-
-    // Reconstruct animations
-    const animations = stored.animations.map((sa) => {
-      const tracks = sa.tracks.map((st) => {
-        const times = new Float32Array(st.times);
-        const values = new Float32Array(st.values);
-
-        let track: THREE.KeyframeTrack;
-        switch (st.type) {
-          case "quaternion":
-            track = new THREE.QuaternionKeyframeTrack(st.name, times, values);
-            break;
-          case "vector":
-            track = new THREE.VectorKeyframeTrack(st.name, times, values);
-            break;
-          case "color":
-            track = new THREE.ColorKeyframeTrack(st.name, times, values);
-            break;
-          case "boolean":
-            track = new THREE.BooleanKeyframeTrack(
-              st.name,
-              times as unknown as number[],
-              Array.from(values).map((v) => v !== 0),
-            );
-            break;
-          default:
-            track = new THREE.NumberKeyframeTrack(st.name, times, values);
-        }
-
-        track.setInterpolation(st.interpolation as THREE.InterpolationModes);
-        return track;
-      });
-
-      return new THREE.AnimationClip(sa.name, sa.duration, tracks);
-    });
-
-    return {
-      scene,
-      animations,
-      collision: stored.collision,
-    };
-  }
-
   static getInstance(): ModelCache {
     if (!ModelCache.instance) {
       ModelCache.instance = new ModelCache();
@@ -931,6 +360,15 @@ export class ModelCache {
     mat: THREE.Material,
     hasVertexColors = false,
   ): MeshStandardNodeMaterial {
+    // Physical is a Standard subclass, but flattening it discards authored
+    // IOR/specular and other optical inputs. Preserve the native PBR type and
+    // state; ownership/disposal remains with this cache, not the copy helper.
+    const pbr = copyPbrToNodeMaterial(mat, hasVertexColors);
+    if (pbr) {
+      mat.dispose();
+      return pbr;
+    }
+
     // Extract textures and colors from original material (handles MeshStandardMaterial, MeshPhysicalMaterial, etc.)
     const originalMat = mat as THREE.Material & {
       map?: THREE.Texture | null;
@@ -1037,6 +475,42 @@ export class ModelCache {
         // Clone geometry to avoid modifying shared geometry
         child.geometry = child.geometry.clone();
 
+        // glTF quantization is a storage format, not a transform workspace.
+        // BufferAttribute setters write back into that integer storage: even
+        // a small translated normalized Int16 coordinate can wrap by two units.
+        // Expand only transformed attributes, through their decoded getters
+        // (also handles interleaving and Float16). Keep UVs/colors/indices packed.
+        for (const name of ["position", "normal", "tangent"]) {
+          const attribute = child.geometry.getAttribute(name);
+          if (
+            !attribute ||
+            attribute.array instanceof Float32Array ||
+            attribute.array instanceof Float64Array
+          )
+            continue;
+          const values = new Float32Array(attribute.count * attribute.itemSize);
+          for (let i = 0; i < attribute.count; i++) {
+            const offset = i * attribute.itemSize;
+            // Float16 overrides getXYZW, but not getComponent in Three r186.
+            values[offset] = attribute.getX(i);
+            values[offset + 1] = attribute.getY(i);
+            values[offset + 2] = attribute.getZ(i);
+            if (attribute.itemSize === 4)
+              values[offset + 3] = attribute.getW(i);
+          }
+          const expanded = new THREE.BufferAttribute(
+            values,
+            attribute.itemSize,
+          );
+          expanded.name = attribute.name;
+          expanded.setUsage(
+            attribute instanceof THREE.InterleavedBufferAttribute
+              ? attribute.data.usage
+              : attribute.usage,
+          );
+          child.geometry.setAttribute(name, expanded);
+        }
+
         // Apply world matrix to geometry (Three.js built-in method)
         // This handles positions, normals, and other attributes correctly
         child.geometry.applyMatrix4(child.matrixWorld);
@@ -1077,6 +551,10 @@ export class ModelCache {
    * Also converts non-PBR materials to MeshStandardMaterial for proper lighting
    */
   private setupMaterials(scene: THREE.Object3D, world?: World): void {
+    // A glTF material may be used by many meshes/LODs. Convert each effective
+    // variant once per scene: repeating conversion also repeats color-image
+    // readback and allocates a separate DataTexture for every mesh.
+    const converted = new Map<string, THREE.Material>();
     scene.traverse((node) => {
       if (node instanceof THREE.Mesh || node instanceof THREE.SkinnedMesh) {
         const mesh = node;
@@ -1096,6 +574,9 @@ export class ModelCache {
         // Convert ALL materials to MeshStandardNodeMaterial for WebGPU-native TSL dissolve support
         // This is required for DistanceFade dissolve effects to work on loaded models
         const convertMaterial = (mat: THREE.Material): THREE.Material => {
+          const key = `${mat.uuid}:${hasVertexColors || Boolean((mat as THREE.MeshStandardMaterial).vertexColors)}`;
+          const existing = converted.get(key);
+          if (existing) return existing;
           // If already a MeshStandardNodeMaterial, just set it up
           if (mat instanceof MeshStandardNodeMaterial) {
             if (hasVertexColors && !mat.vertexColors) {
@@ -1103,11 +584,13 @@ export class ModelCache {
               mat.needsUpdate = true;
             }
             this.setupSingleMaterial(mat, world);
+            converted.set(key, mat);
             return mat;
           }
           // Convert ALL other materials (including MeshStandardMaterial) to MeshStandardNodeMaterial
           const newMat = this.convertToStandardMaterial(mat, hasVertexColors);
           this.setupSingleMaterial(newMat, world);
+          converted.set(key, newMat);
           return newMat;
         };
 
@@ -1269,10 +752,9 @@ export class ModelCache {
           true,
         );
       }
-      // Force metalness to 0 — the game has no environment map, so metallic
-      // materials lose their diffuse component and appear black. Zeroing metalness
-      // ensures base colors render fully via diffuse lighting.
-      material.metalness = 0;
+      // Preserve authored PBR factors/maps regardless of when scene lighting
+      // becomes ready. OutdoorEnvironment owns illumination; changing metalness
+      // here would permanently flatten metals in both memory and processed caches.
       material.envMapIntensity = material.envMapIntensity ?? 1.0;
     } else if (
       material instanceof THREE.MeshBasicMaterial ||
@@ -1336,10 +818,6 @@ export class ModelCache {
     /** LOD bundle with decimated meshes and impostor (if generateLODs was true) */
     lodBundle?: LODBundle;
   }> {
-    // Ensure MeshoptDecoder WASM is ready before loading
-    // This prevents "Invalid typed array length" errors from race conditions
-    await this.initMeshoptDecoder();
-
     const shareMaterials = options?.shareMaterials ?? true; // Default to sharing
     const generateLODs = options?.generateLODs ?? false;
     // Resolve asset:// URLs to actual URLs
@@ -1386,8 +864,8 @@ export class ModelCache {
 
       cached.cloneCount++;
 
-      // Clone the scene for this instance
-      const clonedScene = cached.scene.clone(true);
+      // Bones/skeletons belong to the instance; geometry/materials remain shared.
+      const clonedScene = cloneSkeleton(cached.scene);
 
       if (shareMaterials && cached.sharedMaterials.size > 0) {
         // Reuse shared materials (reduces draw calls)
@@ -1423,8 +901,10 @@ export class ModelCache {
     const loadingPromise = this.loading.get(resolvedPath);
     if (loadingPromise) {
       const result = await loadingPromise;
+      if (this.cache.get(resolvedPath) !== result)
+        throw new Error(`Model load invalidated: ${resolvedPath}`);
       result.cloneCount++;
-      const clonedScene = result.scene.clone(true);
+      const clonedScene = cloneSkeleton(result.scene);
 
       if (shareMaterials && result.sharedMaterials.size > 0) {
         // Reuse shared materials (reduces draw calls)
@@ -1459,127 +939,135 @@ export class ModelCache {
     // Load for the first time
     // First try IndexedDB processed cache (skip expensive GLTF parsing)
     // Then fall back to full GLTF load via ClientLoader
-    await this.initProcessedDB();
-    let sourceSize = 0; // Track GLB size for cache staleness detection
-    const promise = (async () => {
-      let gltf: Awaited<ReturnType<typeof this.gltfLoader.parseAsync>>;
+    // Only the exact bytes successfully parsed below may authorize a persisted row.
+    let source: ProcessedModelSource | null = null;
+    let unpublishedScene: THREE.Object3D | undefined;
+    const assertCurrent = (): void => {
+      if (this.loading.get(resolvedPath) !== promise)
+        throw new Error(`Model load invalidated: ${resolvedPath}`);
+    };
+    // Publish the promise before *any* initialization await. Same-turn calls
+    // must join one load, and remove/clear must be able to retire it immediately.
+    const promise = Promise.resolve()
+      .then(async () => {
+        await this.initMeshoptDecoder();
+        await this.initProcessedDB();
+        assertCurrent();
+        let gltf: Awaited<ReturnType<typeof this.gltfLoader.parseAsync>>;
 
-      // Try to use ClientLoader for caching benefits (IndexedDB, deduplication)
-      if (world?.loader) {
-        const loader = world.loader as {
-          loadFile: (url: string) => Promise<File | undefined>;
-          loadFileWithPriority?: (
-            url: string,
-            priority: number,
-            opts?: {
-              position?: THREE.Vector3;
-              tile?: { x: number; z: number };
-            },
-          ) => Promise<File | undefined>;
-          clearCachedFile?: (url: string) => Promise<void>;
-        };
+        // Try to use ClientLoader for caching benefits (IndexedDB, deduplication)
+        if (world?.loader) {
+          const loader = world.loader as {
+            loadFile: (url: string) => Promise<File | undefined>;
+            loadFileWithPriority?: (
+              url: string,
+              priority: number,
+              opts?: {
+                position?: THREE.Vector3;
+                tile?: { x: number; z: number };
+              },
+            ) => Promise<File | undefined>;
+            clearCachedFile?: (url: string) => Promise<void>;
+          };
 
-        let file: File | undefined;
+          let file: File | undefined;
 
-        // Use priority-based loading if priority is specified and loader supports it
-        if (options?.priority !== undefined && loader.loadFileWithPriority) {
-          file = await loader.loadFileWithPriority(
-            resolvedPath,
-            options.priority,
-            {
-              position: options.position,
-              tile: options.tile,
-            },
-          );
-        } else {
-          // Standard loading (immediate, high priority)
-          file = await loader.loadFile(resolvedPath);
-        }
-
-        if (file) {
-          sourceSize = file.size;
-
-          // ── Check processed model cache (IndexedDB) ──
-          // If we have a processed version of this exact file, skip GLTF parsing entirely
-          const processedResult = await this.loadProcessedModel(
-            resolvedPath,
-            sourceSize,
-            world,
-          );
-          if (processedResult) {
-            // Return a pseudo-GLTF result so downstream code works unchanged
-            return {
-              scene: processedResult.scene,
-              animations: processedResult.animations,
-              parser: undefined as unknown as typeof gltf.parser,
-              _processedCacheHit: true,
-              _collision: processedResult.collision,
-            } as unknown as typeof gltf;
+          // Use priority-based loading if priority is specified and loader supports it
+          if (options?.priority !== undefined && loader.loadFileWithPriority) {
+            file = await loader.loadFileWithPriority(
+              resolvedPath,
+              options.priority,
+              {
+                position: options.position,
+                tile: options.tile,
+              },
+            );
+          } else {
+            // Standard loading (immediate, high priority)
+            file = await loader.loadFile(resolvedPath);
           }
+          assertCurrent();
 
-          const buffer = await file.arrayBuffer();
-          // Pass resolvedPath as base URL for resolving relative/data URIs in GLTF
-          // Empty string "" causes issues with embedded base64 data URIs
-          try {
-            gltf = await this.gltfLoader.parseAsync(buffer, resolvedPath);
-          } catch (parseError) {
-            // Check for "Invalid typed array length" error - indicates corrupted file
-            const errorMsg =
-              parseError instanceof Error
-                ? parseError.message
-                : String(parseError);
-            if (
-              errorMsg.includes("Invalid typed array length") ||
-              errorMsg.includes("RangeError") ||
-              errorMsg.includes("Malformed buffer")
-            ) {
-              console.warn(
-                `[ModelCache] Corrupted file detected for ${resolvedPath}, clearing cache and retrying...`,
+          if (file) {
+            const buffer = await file.arrayBuffer();
+            source = await identifyProcessedModelSource(buffer);
+            assertCurrent();
+            if (source) {
+              const processed = await this.loadProcessedModel(
+                resolvedPath,
+                source,
+                world,
               );
-
-              // Clear corrupted file from IndexedDB cache
-              if (loader.clearCachedFile) {
-                await loader.clearCachedFile(resolvedPath);
-              }
-
-              // Retry with direct load (bypasses corrupted cache)
-              gltf = await this.gltfLoader.loadAsync(resolvedPath);
-            } else {
-              throw parseError;
+              if (processed) return { processed };
             }
+            assertCurrent();
+            // Pass resolvedPath as base URL for resolving relative/data URIs in GLTF
+            // Empty string "" causes issues with embedded base64 data URIs
+            try {
+              gltf = await this.gltfLoader.parseAsync(buffer, resolvedPath);
+            } catch (parseError) {
+              // An invalidated parser failure cannot evict source files or
+              // start a retry on behalf of a retired cache operation.
+              assertCurrent();
+              // Check for "Invalid typed array length" error - indicates corrupted file
+              const errorMsg =
+                parseError instanceof Error
+                  ? parseError.message
+                  : String(parseError);
+              if (
+                errorMsg.includes("Invalid typed array length") ||
+                errorMsg.includes("RangeError") ||
+                errorMsg.includes("Malformed buffer")
+              ) {
+                console.warn(
+                  `[ModelCache] Corrupted file detected for ${resolvedPath}, clearing cache and retrying...`,
+                );
+
+                // Clear corrupted file from IndexedDB cache
+                if (loader.clearCachedFile) {
+                  await loader.clearCachedFile(resolvedPath);
+                }
+                assertCurrent();
+
+                // Retry with direct load (bypasses corrupted cache)
+                source = null; // Retry bytes are not the failed ClientLoader File.
+                gltf = await this.gltfLoader.loadAsync(resolvedPath);
+              } else {
+                throw parseError;
+              }
+            }
+          } else {
+            // Fallback to direct load if file fetch failed
+            gltf = await this.gltfLoader.loadAsync(resolvedPath);
           }
         } else {
-          // Fallback to direct load if file fetch failed
+          // No ClientLoader available, use direct load
           gltf = await this.gltfLoader.loadAsync(resolvedPath);
         }
-      } else {
-        // No ClientLoader available, use direct load
-        gltf = await this.gltfLoader.loadAsync(resolvedPath);
-      }
 
-      return gltf;
-    })()
-      .then((gltf) => {
-        // Check if this was a processed cache hit (skip all post-processing)
-        const gltfWithMeta = gltf as typeof gltf & {
-          _processedCacheHit?: boolean;
-          _collision?: ModelCollisionData;
-        };
-        if (gltfWithMeta._processedCacheHit) {
-          // Scene was already deserialized with fresh materials
-          const sharedMaterials = this.extractSharedMaterials(gltf.scene);
+        return { gltf };
+      })
+      .then((loaded) => {
+        unpublishedScene = loaded.processed
+          ? loaded.processed.scene
+          : loaded.gltf.scene;
+        assertCurrent();
+        if (loaded.processed) {
+          const { scene, animations, collision } = loaded.processed;
           const cachedModel: CachedModel = {
-            scene: gltf.scene,
-            animations: gltf.animations,
+            scene,
+            animations,
+            collision,
             loadedAt: Date.now(),
             cloneCount: 0,
-            sharedMaterials,
-            collision: gltfWithMeta._collision,
+            sharedMaterials: this.extractSharedMaterials(scene),
           };
           this.cache.set(resolvedPath, cachedModel);
           this.loading.delete(resolvedPath);
+          unpublishedScene = undefined;
           return cachedModel;
         }
+        const gltf = loaded.gltf;
 
         // CRITICAL: Verify we got a pure THREE.Object3D, not a HyperForge Node
         if ("ctx" in gltf.scene || "isDirty" in gltf.scene) {
@@ -1624,6 +1112,7 @@ export class ModelCache {
         // CRITICAL: Setup materials on the original scene for WebGPU/CSM
         // This ensures all clones will have properly configured materials
         this.setupMaterials(gltf.scene, world);
+        assertCurrent();
 
         // Extract materials for sharing across clones
         const sharedMaterials = this.extractSharedMaterials(gltf.scene);
@@ -1644,10 +1133,10 @@ export class ModelCache {
         }
 
         // ── Save to processed cache for future sessions (fire-and-forget) ──
-        if (sourceSize > 0) {
+        if (source) {
           this.saveProcessedModel(
             resolvedPath,
-            sourceSize,
+            source,
             gltf.scene,
             gltf.animations,
             collision,
@@ -1665,19 +1154,34 @@ export class ModelCache {
 
         this.cache.set(resolvedPath, cachedModel);
         this.loading.delete(resolvedPath);
+        unpublishedScene = undefined;
 
         return cachedModel;
       })
       .catch((error) => {
-        this.loading.delete(resolvedPath);
+        // A retired load must not erase a newer load registered at the same URL.
+        if (this.loading.get(resolvedPath) === promise)
+          this.loading.delete(resolvedPath);
+        if (unpublishedScene) {
+          try {
+            this.disposeUnpublishedScene(unpublishedScene);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "Model load and unpublished cleanup failed",
+            );
+          }
+        }
         throw error;
       });
 
     this.loading.set(resolvedPath, promise);
     const result = await promise;
+    if (this.cache.get(resolvedPath) !== result)
+      throw new Error(`Model load invalidated: ${resolvedPath}`);
     result.cloneCount++;
 
-    const clonedScene = result.scene.clone(true);
+    const clonedScene = cloneSkeleton(result.scene);
 
     // FINAL VALIDATION: Ensure we're returning pure THREE.Object3D
     if ("ctx" in clonedScene || "isDirty" in clonedScene) {
@@ -1943,14 +1447,46 @@ export class ModelCache {
     });
   }
 
+  /** Nothing in an unpublished parse has been lent to a cache consumer. */
+  private disposeUnpublishedScene(scene: THREE.Object3D): void {
+    const resources = new Set<{ dispose(): void }>();
+    scene.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      resources.add(node.geometry);
+      if (node instanceof THREE.SkinnedMesh) resources.add(node.skeleton);
+      for (const material of Array.isArray(node.material)
+        ? node.material
+        : [node.material]) {
+        resources.add(material);
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) resources.add(value);
+        }
+      }
+    });
+    const errors: unknown[] = [];
+    for (const resource of resources) {
+      try {
+        resource.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length)
+      throw new AggregateError(errors, "Unpublished model cleanup failed");
+  }
+
   /**
    * Clear the cache (useful for hot reload)
    * Should be called when code is rebuilt to prevent stale HyperForge Nodes
    * IMPORTANT: Disposes geometries to prevent GPU memory leaks
    */
   clear(): void {
+    // Retire ownership before disposal callbacks can re-enter the cache.
+    const models = [...this.cache.values()];
+    this.cache.clear();
+    this.loading.clear();
     // Dispose all cached model geometries before clearing
-    for (const [, model] of this.cache) {
+    for (const model of models) {
       this.disposeSceneGeometries(model.scene);
       // Dispose LOD bundle geometries if present
       if (model.lodBundle) {
@@ -1959,8 +1495,6 @@ export class ModelCache {
         model.lodBundle.lod2?.dispose();
       }
     }
-    this.cache.clear();
-    this.loading.clear();
   }
 
   /**
@@ -1972,11 +1506,14 @@ export class ModelCache {
   }
 
   /**
-   * Remove a specific model from cache
+   * Remove a specific resolved URL from cache, including pending publication.
+   * A retired operation may finish shared file work but cannot publish a model.
    * IMPORTANT: Disposes geometries to prevent GPU memory leaks
    */
   remove(path: string): boolean {
     const model = this.cache.get(path);
+    const pending = this.loading.delete(path);
+    const cached = this.cache.delete(path);
     if (model) {
       this.disposeSceneGeometries(model.scene);
       // Dispose LOD bundle geometries if present
@@ -1986,7 +1523,7 @@ export class ModelCache {
         model.lodBundle.lod2?.dispose();
       }
     }
-    return this.cache.delete(path);
+    return cached || pending;
   }
 
   /**

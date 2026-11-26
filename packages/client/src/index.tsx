@@ -472,6 +472,13 @@ function App() {
         try {
           const response = await fetch(
             `${apiBaseUrl}/api/users/check?accountId=${encodeURIComponent(accountId)}`,
+            {
+              headers: privyAuthManager.getToken()
+                ? {
+                    Authorization: `Bearer ${privyAuthManager.getToken()}`,
+                  }
+                : undefined,
+            },
           );
 
           if (response.ok) {

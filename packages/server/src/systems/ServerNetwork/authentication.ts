@@ -25,13 +25,33 @@ import {
 import { createJWT, verifyJWT } from "../../shared/utils";
 import { uuid } from "@hyperforge/shared";
 import { errMsg } from "../../shared/errMsg.js";
+import { verifyAgentCredentialSessionWithSystemDatabase } from "../../database/agent-credential-sessions.js";
+
+export class AgentCredentialAuthenticationError extends Error {
+  constructor() {
+    super("Agent credential authentication failed");
+    this.name = "AgentCredentialAuthenticationError";
+  }
+}
+
+export class PresentedCredentialAuthenticationError extends Error {
+  constructor() {
+    super("Presented credential authentication failed");
+    this.name = "PresentedCredentialAuthenticationError";
+  }
+}
 
 /**
  * Check if load test mode is enabled
  * When enabled, allows anonymous connections without database insertion
  */
-export function isLoadTestMode(): boolean {
-  return process.env.LOAD_TEST_MODE === "true";
+export function isLoadTestMode(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    environment.LOAD_TEST_MODE === "true" &&
+    environment.NODE_ENV !== "production"
+  );
 }
 
 /**
@@ -148,7 +168,8 @@ export async function checkUserBan(
  * Authentication flow:
  * 1. Try Privy authentication (if enabled and token provided)
  * 2. Fall back to legacy JWT authentication
- * 3. Create anonymous user if no authentication succeeds
+ * 3. Reject a presented credential if neither verifier accepts it
+ * 4. Create an anonymous user only when no credential was presented
  *
  * @param params - Connection parameters from WebSocket
  * @param db - Database instance for user lookups/creation
@@ -160,17 +181,25 @@ export async function authenticateUser(
 ): Promise<{
   user: User;
   authToken: string;
+  agentCredentialCharacterId?: string;
+  agentCredentialSessionExpiresAt?: string;
+  agentCredentialSessionId?: string;
   userWithPrivy?: User & {
     privyUserId?: string | null;
     farcasterFid?: string | null;
   };
 }> {
   let authToken = params.authToken;
+  const credentialWasPresented =
+    typeof authToken === "string" && authToken.length > 0;
   const name = params.name;
   const avatar = params.avatar;
   const privyUserId = (params as { privyUserId?: string }).privyUserId;
 
   let user: User | undefined;
+  let agentCredentialCharacterId: string | undefined;
+  let agentCredentialSessionExpiresAt: string | undefined;
+  let agentCredentialSessionId: string | undefined;
   let userWithPrivy:
     | (User & { privyUserId?: string | null; farcasterFid?: string | null })
     | undefined;
@@ -188,8 +217,7 @@ export async function authenticateUser(
             .first()) as User | undefined;
         } catch (_e) {
           dbResult = (await db("users").where("id", privyUserId).first()) as
-            | User
-            | undefined;
+            User | undefined;
         }
 
         if (dbResult) {
@@ -270,10 +298,23 @@ export async function authenticateUser(
     try {
       const jwtPayload = await verifyJWT(authToken);
       if (jwtPayload && jwtPayload.userId) {
+        if (jwtPayload.isAgent === true) {
+          const credentialSession =
+            await verifyAgentCredentialSessionWithSystemDatabase(
+              jwtPayload,
+              db,
+            );
+          if (!credentialSession) {
+            throw new AgentCredentialAuthenticationError();
+          }
+          agentCredentialCharacterId = credentialSession.characterId;
+          agentCredentialSessionExpiresAt = credentialSession.expiresAt;
+          agentCredentialSessionId = credentialSession.sessionId;
+        }
         // Look up user account
-        let dbResult = await db("users")
+        let dbResult = (await db("users")
           .where("id", jwtPayload.userId as string)
-          .first();
+          .first()) as User | undefined;
 
         // If user doesn't exist for a valid server-signed JWT userId, create
         // a minimal user record so accountId remains stable across reconnects.
@@ -302,10 +343,22 @@ export async function authenticateUser(
               insertErr,
             );
             // Try fetching again in case of race condition
-            dbResult = await db("users")
+            dbResult = (await db("users")
               .where("id", jwtPayload.userId as string)
-              .first();
+              .first()) as User | undefined;
           }
+        }
+
+        const persistedRoles = dbResult?.roles;
+        const isPersistedAgentAccount = Array.isArray(persistedRoles)
+          ? persistedRoles.includes("agent")
+          : typeof persistedRoles === "string" &&
+            persistedRoles
+              .split(",")
+              .map((role) => role.trim())
+              .includes("agent");
+        if (isPersistedAgentAccount && jwtPayload.isAgent !== true) {
+          throw new AgentCredentialAuthenticationError();
         }
 
         if (dbResult) {
@@ -313,12 +366,18 @@ export async function authenticateUser(
         }
       }
     } catch (err) {
+      if (err instanceof AgentCredentialAuthenticationError) {
+        throw err;
+      }
       console.error(
-        "[Authentication] Failed to read authToken:",
-        authToken,
+        "[Authentication] Failed to verify a presented authentication token:",
         err,
       );
     }
+  }
+
+  if (!user && credentialWasPresented) {
+    throw new PresentedCredentialAuthenticationError();
   }
 
   // Create anonymous user if no authentication succeeded
@@ -380,7 +439,14 @@ export async function authenticateUser(
     }
   }
 
-  return { user, authToken: authToken || "", userWithPrivy };
+  return {
+    user,
+    authToken: authToken || "",
+    agentCredentialCharacterId,
+    agentCredentialSessionExpiresAt,
+    agentCredentialSessionId,
+    userWithPrivy,
+  };
 }
 
 /**
@@ -416,6 +482,29 @@ export async function verifyStreamingViewerCredentials(
     try {
       const jwtPayload = await verifyJWT(authToken);
       if (jwtPayload && jwtPayload.userId) {
+        if (jwtPayload.isAgent === true) {
+          const credentialSession =
+            await verifyAgentCredentialSessionWithSystemDatabase(
+              jwtPayload,
+              db,
+            );
+          if (!credentialSession) return false;
+        } else {
+          const persistedUser = (await db("users")
+            .where("id", jwtPayload.userId as string)
+            .first()) as { roles?: string | string[] } | undefined;
+          const roles = persistedUser?.roles;
+          if (
+            (Array.isArray(roles) && roles.includes("agent")) ||
+            (typeof roles === "string" &&
+              roles
+                .split(",")
+                .map((role) => role.trim())
+                .includes("agent"))
+          ) {
+            return false;
+          }
+        }
         resolvedUserId = jwtPayload.userId as string;
       }
     } catch {

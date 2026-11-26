@@ -23,6 +23,7 @@ import { DataManager } from "../../../data/DataManager";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { dist2D } from "../../../utils/MathUtils";
 import type { TownSystem } from "./TownSystem";
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
 
 // Default configuration values
 const DEFAULTS: POIConfig = {
@@ -175,9 +176,8 @@ export class POISystem extends System {
   }
 
   async init(): Promise<void> {
-    const worldConfig = (this.world as { config?: { terrainSeed?: number } })
-      .config;
-    this.seed = worldConfig?.terrainSeed ?? 0;
+    await DataManager.getInstance().initialize();
+    this.seed = DataManager.getWorldTerrainProfile().seed;
     this.randomState = this.seed;
     this.config = loadPOIConfig();
     this.noise = new NoiseGenerator(this.seed + 98765);
@@ -233,19 +233,13 @@ export class POISystem extends System {
     const categories = Object.keys(
       this.config.countPerCategory,
     ) as POICategory[];
-    // World is 100 tiles of TERRAIN_TILE_SIZE meters each
-    const worldSize = TERRAIN_CONSTANTS.TERRAIN_TILE_SIZE * 100;
-    const halfWorld = worldSize / 2;
+    const bounds = DataManager.getWorldTerrainProfile().bounds;
 
     for (const category of categories) {
       const count = this.config.countPerCategory[category] ?? 0;
       if (count === 0) continue;
 
-      const generated = this.generatePOIsForCategory(
-        category,
-        count,
-        halfWorld,
-      );
+      const generated = this.generatePOIsForCategory(category, count, bounds);
       this.pois.push(...generated);
     }
 
@@ -264,11 +258,11 @@ export class POISystem extends System {
   private generatePOIsForCategory(
     category: POICategory,
     targetCount: number,
-    halfWorld: number,
+    bounds: WorldTerrainProfile["bounds"],
   ): PointOfInterest[] {
     // Special handling for fishing spots - they need to be at water edges
     if (category === "fishing_spot") {
-      return this.generateFishingSpotPOIs(targetCount, halfWorld);
+      return this.generateFishingSpotPOIs(targetCount, bounds);
     }
 
     const pois: PointOfInterest[] = [];
@@ -284,8 +278,8 @@ export class POISystem extends System {
       attempt++
     ) {
       // Random position with some clustering based on noise
-      const baseX = (this.random() - 0.5) * halfWorld * 1.8;
-      const baseZ = (this.random() - 0.5) * halfWorld * 1.8;
+      const baseX = bounds.minX + this.random() * (bounds.maxX - bounds.minX);
+      const baseZ = bounds.minZ + this.random() * (bounds.maxZ - bounds.minZ);
 
       // Add noise-based clustering
       const clusterNoise = this.noise.simplex2D(baseX * 0.001, baseZ * 0.001);
@@ -295,7 +289,12 @@ export class POISystem extends System {
       const z = baseZ;
 
       // Check world bounds
-      if (Math.abs(x) > halfWorld - 100 || Math.abs(z) > halfWorld - 100) {
+      if (
+        x - properties.radius < bounds.minX ||
+        x + properties.radius > bounds.maxX ||
+        z - properties.radius < bounds.minZ ||
+        z + properties.radius > bounds.maxZ
+      ) {
         continue;
       }
 
@@ -369,12 +368,12 @@ export class POISystem extends System {
    */
   private generateFishingSpotPOIs(
     targetCount: number,
-    halfWorld: number,
+    bounds: WorldTerrainProfile["bounds"],
   ): PointOfInterest[] {
     const pois: PointOfInterest[] = [];
     const properties = CATEGORY_PROPERTIES["fishing_spot"];
     const towns = this.townSystem?.getTowns() ?? [];
-    const waterThreshold = TERRAIN_CONSTANTS.WATER_THRESHOLD;
+    const waterThreshold = DataManager.getWorldTerrainProfile().water.threshold;
     const maxAttempts = targetCount * 50; // More attempts needed for water edge finding
     const searchRadius = 300; // Increased search radius for better water finding
     const searchStepSize = 8; // Smaller steps for more precise edge detection
@@ -392,16 +391,8 @@ export class POISystem extends System {
       attempt++
     ) {
       // Random starting position
-      const startX = (this.random() - 0.5) * halfWorld * 1.8;
-      const startZ = (this.random() - 0.5) * halfWorld * 1.8;
-
-      // Check world bounds
-      if (
-        Math.abs(startX) > halfWorld - 200 ||
-        Math.abs(startZ) > halfWorld - 200
-      ) {
-        continue;
-      }
+      const startX = bounds.minX + this.random() * (bounds.maxX - bounds.minX);
+      const startZ = bounds.minZ + this.random() * (bounds.maxZ - bounds.minZ);
 
       // Search in multiple directions from each starting point to maximize chance of finding water
       let waterEdge: { x: number; z: number } | null = null;
@@ -422,6 +413,13 @@ export class POISystem extends System {
 
       waterEdgesFound++;
       const { x, z } = waterEdge;
+      if (
+        x - properties.radius < bounds.minX ||
+        x + properties.radius > bounds.maxX ||
+        z - properties.radius < bounds.minZ ||
+        z + properties.radius > bounds.maxZ
+      )
+        continue;
 
       // Check distance from towns (fishing spots can be closer than other POIs)
       const minDistFromTown = this.config.minDistanceFromTowns * 0.5;

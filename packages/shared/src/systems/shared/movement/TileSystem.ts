@@ -39,6 +39,13 @@ export interface TileCoord {
   z: number; // Integer tile Z
 }
 
+/** Exact non-combat arrival boundary around a centered entity footprint. */
+export interface TileInteractionArrival {
+  interactionRange: number;
+  footprintWidth: number;
+  footprintDepth: number;
+}
+
 /**
  * Movement state for a single entity
  */
@@ -55,7 +62,6 @@ export interface TileMovementState {
    * Following a player means walking to their PREVIOUS tile,
    * creating the characteristic 1-tick trailing effect.
    *
-   * @see https://rune-server.org/threads/help-with-player-dancing-spinning-when-following-each-other.706121/
    */
   previousTile: TileCoord | null;
 
@@ -74,6 +80,12 @@ export interface TileMovementState {
    * Used to seamlessly continue movement when BFS returns a partial path.
    */
   requestedDestination: TileCoord | null;
+
+  /**
+   * Optional interaction boundary for the requested non-combat destination.
+   * Retained across partial paths and obstruction replans.
+   */
+  requestedInteractionArrival: TileInteractionArrival | null;
 
   /**
    * Whether the most recently computed path for this player was partial
@@ -958,6 +970,7 @@ export function createTileMovementState(
     moveSeq: 0,
     previousTile: null, // Set on first tick
     requestedDestination: null,
+    requestedInteractionArrival: null,
     lastPathPartial: false,
     nextSegmentPrecomputed: false,
   };

@@ -5,7 +5,6 @@
  *
  * 1. Fix broken upstream type chains where .d.ts re-exports point to missing files:
  *    - plugin-anthropic@2.0.0-alpha.6  (index.node.d.ts missing)
- *    - plugin-ollama@2.0.0-alpha.6     (dist/index.d.ts missing)
  *    - plugin-sql@2.0.0-alpha.12       (index.node.d.ts missing)
  *    - plugin-trajectory-logger@2.0.0-alpha.11 (no .d.ts files at all)
  *
@@ -30,22 +29,6 @@ declare module "@elizaos/plugin-anthropic" {
   import type { Plugin } from "@elizaos/core";
 
   export const anthropicPlugin: Plugin;
-  const _default: Plugin;
-  export default _default;
-}
-
-declare module "@elizaos/plugin-openrouter" {
-  import type { Plugin } from "@elizaos/core";
-
-  export const openrouterPlugin: Plugin;
-  const _default: Plugin;
-  export default _default;
-}
-
-declare module "@elizaos/plugin-ollama" {
-  import type { Plugin } from "@elizaos/core";
-
-  export const ollamaPlugin: Plugin;
   const _default: Plugin;
   export default _default;
 }

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "title": "Certified bow primary-grip close review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-grip-front",
+      "name": "Bow idle grip · front",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-left",
+      "name": "Bow idle grip · left",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-rear",
+      "name": "Bow idle grip · rear",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-right",
+      "name": "Bow idle grip · right",
+      "asset": "emotes/emote-bow-duel-idle-steve.glb",
+      "sampleRatio": 0.35,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "draw-grip-front",
+      "name": "Bow draw grip · front",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.55,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "draw-grip-left",
+      "name": "Bow draw grip · left",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.55,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "draw-grip-rear",
+      "name": "Bow draw grip · rear",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.55,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "draw-grip-right",
+      "name": "Bow draw grip · right",
+      "asset": "emotes/emote-range.glb",
+      "sampleRatio": 0.55,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    }
+  ]
+}

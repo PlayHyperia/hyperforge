@@ -1,9 +1,256 @@
+import { BIOME_CONFIG } from "../../systems/shared/world/TerrainHeightParams";
+import { createCompactHavenShoulder } from "../../systems/shared/world/CompactHavenShoulder";
+import { createCompactCoastalApron } from "../../systems/shared/world/CompactCoastalApron";
+import { createCompactSouthernMeadow } from "../../systems/shared/world/CompactIslandLandform";
+import {
+  COMPACT_WORLD_TERRAIN_PROFILE,
+  COMPACT_LANDFORM_PARAMETERS,
+  COMPACT_BAY_PARAMETERS,
+  COMPACT_TERRACE_PARAMETERS,
+  COMPACT_RIDGE_BREAKUP_PARAMETERS,
+  getCompactCoastalApronSupport,
+  resolveWorldTerrainProfile,
+  worldTerrainProfileIdentity,
+  type WorldTerrainProfile,
+} from "../../systems/shared/world/WorldTerrainProfile";
+import type { TerrainWorkerConfig } from "./TerrainWorker";
+
+/** One immutable config for tile, quad and grass workers. No environment defaults. */
+export function createTerrainWorkerConfig(
+  input: WorldTerrainProfile,
+  tileResolution: number,
+): TerrainWorkerConfig {
+  const profile = resolveWorldTerrainProfile(input);
+  if (
+    !Number.isSafeInteger(tileResolution) ||
+    tileResolution < 2 ||
+    tileResolution > 1024
+  )
+    throw new Error("Terrain worker resolution must be 2..1024");
+  return Object.freeze({
+    TERRAIN_PROFILE: profile,
+    TERRAIN_PROFILE_IDENTITY: worldTerrainProfileIdentity(profile),
+    TILE_SIZE: profile.terrainTileSize,
+    TILE_RESOLUTION: tileResolution,
+    MAX_HEIGHT: profile.height.maxHeightParameter,
+    BIOME_GAUSSIAN_COEFF: BIOME_CONFIG.gaussianCoeff,
+    BIOME_BOUNDARY_NOISE_SCALE: BIOME_CONFIG.boundaryNoiseScale,
+    BIOME_BOUNDARY_NOISE_AMOUNT: BIOME_CONFIG.boundaryNoiseAmount,
+    WATER_THRESHOLD: profile.water.threshold,
+    WATER_LEVEL_NORMALIZED:
+      profile.water.threshold / profile.height.maxHeightParameter,
+    SHORELINE_THRESHOLD: profile.shoreline.THRESHOLD,
+    SHORELINE_STRENGTH: profile.shoreline.STRENGTH,
+    SHORELINE_MIN_SLOPE: profile.shoreline.MIN_SLOPE,
+    SHORELINE_SLOPE_SAMPLE_DISTANCE: profile.shoreline.SLOPE_SAMPLE_DISTANCE,
+    SHORELINE_LAND_BAND: profile.shoreline.LAND_BAND,
+    SHORELINE_LAND_MAX_MULTIPLIER: profile.shoreline.LAND_MAX_MULTIPLIER,
+    SHORELINE_UNDERWATER_BAND: profile.shoreline.UNDERWATER_BAND,
+    UNDERWATER_DEPTH_MULTIPLIER: profile.shoreline.UNDERWATER_DEPTH_MULTIPLIER,
+  });
+}
+
+export function assertTerrainWorkerRequest(
+  config: TerrainWorkerConfig,
+  seed: number,
+): void {
+  const expected = createTerrainWorkerConfig(
+    config.TERRAIN_PROFILE,
+    config.TILE_RESOLUTION,
+  );
+  if (
+    seed !== expected.TERRAIN_PROFILE.seed ||
+    config.TERRAIN_PROFILE_IDENTITY !== expected.TERRAIN_PROFILE_IDENTITY
+  )
+    throw new Error("Terrain worker profile identity or seed mismatch");
+  for (const key of Object.keys(expected) as Array<keyof TerrainWorkerConfig>) {
+    if (key !== "TERRAIN_PROFILE" && config[key] !== expected[key])
+      throw new Error(`Terrain worker derived config mismatch: ${key}`);
+  }
+}
+
+export function assertTerrainWorkerResult(
+  result: { terrainProfileIdentity: string },
+  config: TerrainWorkerConfig,
+): void {
+  if (result.terrainProfileIdentity !== config.TERRAIN_PROFILE_IDENTITY)
+    throw new Error("Terrain worker result profile identity mismatch");
+}
+
+/** Guard executes inside the actual module-load-built worker source, per request. */
+export function buildTerrainWorkerProfileGuardJS(): string {
+  const shape = COMPACT_WORLD_TERRAIN_PROFILE;
+  const groups = ["bounds", "island", "height", "water", "shoreline"] as const;
+  return `
+function assertTerrainWorkerInput(input) {
+  var config = input.config;
+  var p = config && config.TERRAIN_PROFILE;
+  function fail() { throw new Error("Terrain worker invalid profile/config identity"); }
+  function keys(value, expected) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail();
+    var actual = Object.keys(value);
+    if (actual.length !== expected.length || actual.some(k => !expected.includes(k))) fail();
+  }
+  var sculpt2 = p && p.algorithm === "compact-island-sculpt-v2";
+  var sculpt3 = p && p.algorithm === "compact-island-sculpt-v3";
+  var sculpt4 = p && p.algorithm === "compact-island-sculpt-v4";
+  var sculpt5 = p && p.algorithm === "compact-island-sculpt-v5";
+  var hasHavenShoulder = p && Object.prototype.hasOwnProperty.call(p, "havenShoulder");
+  var hasCoastalApron = p && Object.prototype.hasOwnProperty.call(p, "coastalApron");
+  var hasSouthernMeadow = p && Object.prototype.hasOwnProperty.call(p, "southernMeadow");
+  keys(p, ${JSON.stringify(Object.keys(shape))}.concat(sculpt2 || sculpt3 || sculpt4 || sculpt5 ? ["landform"] : []).concat(sculpt3 || sculpt4 || sculpt5 ? ["bay"] : []).concat(sculpt4 || sculpt5 ? ["terrace"] : []).concat(sculpt5 ? ["ridgeBreakup"] : []).concat(sculpt5 && hasHavenShoulder ? ["havenShoulder"] : []).concat(sculpt5 && hasCoastalApron ? ["coastalApron"] : []).concat(sculpt5 && hasSouthernMeadow ? ["southernMeadow"] : []));
+  if (hasHavenShoulder) {
+    var shoulderDescriptor = Object.getOwnPropertyDescriptor(p, "havenShoulder");
+    if (!shoulderDescriptor || !("value" in shoulderDescriptor)) fail();
+    var hs = (${createCompactHavenShoulder.toString()})().validate(shoulderDescriptor.value);
+    if (hs.minX < p.bounds.minX || hs.maxX > p.bounds.maxX || hs.minZ < p.bounds.minZ || hs.maxZ > p.bounds.maxZ ||
+        hs.grade <= p.water.threshold || [...hs.crest, ...hs.shelf, ...hs.toe].some(point => point[2] > p.height.maxHeightParameter)) fail();
+    if (JSON.stringify(hs) !== JSON.stringify(shoulderDescriptor.value)) fail();
+    p.havenShoulder = hs;
+  }
+  if (sculpt2 || sculpt3 || sculpt4 || sculpt5) {
+    keys(p.landform, ${JSON.stringify(Object.keys(COMPACT_LANDFORM_PARAMETERS))});
+    if (!Object.values(p.landform).every(Number.isFinite)) fail();
+    var l = p.landform;
+    if (Math.abs(l.westHeadlandBearing) > Math.PI || Math.abs(l.inletBearing) > Math.PI ||
+        l.westHeadlandHalfWidth < 0.1 || l.westHeadlandHalfWidth > Math.PI/2 ||
+        l.westHeadlandStrength < 0 || l.westHeadlandStrength > 0.3 ||
+        l.inletTipDistance <= 0 || l.inletTipDistance >= 165 ||
+        l.inletTipTransition < 16 || l.inletTipTransition > 80 ||
+        l.inletHalfWidth < 20 || l.inletHalfWidth > 80 ||
+        l.inletBankTransition < 12 || l.inletBankTransition >= l.inletHalfWidth ||
+        l.ridgeStartZ < -165 || l.ridgeEndZ > 165 || l.ridgeStartZ >= l.ridgeEndZ ||
+        Math.abs(l.ridgeBaseX) + Math.abs(l.ridgeBend) > 165 ||
+        l.ridgeWestWidth < 16 || l.ridgeWestWidth > 80 ||
+        l.ridgeEastWidth < 16 || l.ridgeEastWidth > 80 ||
+        l.ridgeHeight <= 0 || l.ridgeHeight > 24 ||
+        l.ridgeEndFade < 16 || l.ridgeEndFade > (l.ridgeEndZ-l.ridgeStartZ)/2) fail();
+  }
+  ${groups
+    .map(
+      (
+        group,
+      ) => `keys(p.${group}, ${JSON.stringify(Object.keys(shape[group]))});
+  if (!Object.values(p.${group}).every(Number.isFinite)) fail();`,
+    )
+    .join("\n")}
+  if (sculpt3 || sculpt4 || sculpt5) {
+    keys(p.bay, ${JSON.stringify(Object.keys(COMPACT_BAY_PARAMETERS))});
+    if (!Object.values(p.bay).every(Number.isFinite)) fail();
+    var bay = p.bay;
+    if (bay.innerHalfWidth < 16 || bay.innerHalfWidth > l.inletHalfWidth ||
+        Math.abs(bay.centerlineBend) > l.inletHalfWidth-bay.innerHalfWidth ||
+        bay.leftBankScale < 0.5 || bay.leftBankScale > 1.5 ||
+        bay.rightBankScale < 0.5 || bay.rightBankScale > 1.5 ||
+        Math.max(bay.leftBankScale,bay.rightBankScale)*l.inletBankTransition >= bay.innerHalfWidth ||
+        l.inletTipDistance+l.inletTipTransition >= 165*(1+p.island.maxCoastVariation)) fail();
+  }
+  if (sculpt4 || sculpt5) {
+    keys(p.terrace, ${JSON.stringify(Object.keys(COMPACT_TERRACE_PARAMETERS))});
+    if (!Object.values(p.terrace).every(Number.isFinite)) fail();
+    var t = p.terrace;
+    if (t.startZ < l.ridgeStartZ || t.endZ > l.ridgeEndZ || t.startZ >= t.endZ ||
+        t.endFade < 6 || t.endFade > (t.endZ-t.startZ)/2 ||
+        t.westFoot !== -l.ridgeWestWidth ||
+        t.crestStart-t.westFoot < 3 || t.crestStart > 0 ||
+        t.crestEnd-t.crestStart < 3 || t.crestEnd > 16 ||
+        t.crestHeight <= 0 || t.crestHeight > 24 ||
+        t.shelfHeight <= 0 || t.shelfHeight >= t.crestHeight ||
+        t.scarpRun < 6 || t.scarpRun > 16 || t.shelfWidth < 6 || t.shelfWidth > 24 ||
+        t.apronWidth < 6 || t.apronWidth > 40 ||
+        t.eastPreservationStart < l.ridgeBaseX-Math.abs(l.ridgeBend) ||
+        t.eastPreservationEnd-t.eastPreservationStart < 3 ||
+        t.eastPreservationEnd > l.ridgeBaseX+l.ridgeEastWidth/2) fail();
+  }
+  if (sculpt5) {
+    keys(p.ridgeBreakup, ${JSON.stringify(Object.keys(COMPACT_RIDGE_BREAKUP_PARAMETERS))});
+    if (!Object.values(p.ridgeBreakup).every(Number.isFinite)) fail();
+    var r = p.ridgeBreakup;
+    if (r.northGapHalfWidth < 16 || r.southGapHalfWidth < 16 ||
+        r.northGapZ-r.northGapHalfWidth < t.startZ+6 ||
+        r.southGapZ+r.southGapHalfWidth > t.endZ-6 ||
+        r.northGapZ+r.northGapHalfWidth >= r.southGapZ-r.southGapHalfWidth ||
+        r.northGapDepth < 0 || r.northGapDepth > 0.8 ||
+        r.southGapDepth < 0 || r.southGapDepth > 0.8 ||
+        r.lateralWarp < 0 || r.lateralWarp > 4 ||
+        r.warpWavelength < 32 || r.warpWavelength > 120 ||
+        r.facetRelief < 0 || r.facetRelief > 1.5 ||
+        r.facetScale < 0.05 || r.facetScale > 0.14) fail();
+  }
+  if (p.schemaVersion !== 1 || (p.algorithm !== "terrain-height-params-v1" && p.algorithm !== "compact-island-sculpt-v1" && !sculpt2 && !sculpt3 && !sculpt4 && !sculpt5) ||
+      p.boundsMeaning !== "nominal-generation-envelope" || typeof p.id !== "string" ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(p.id) ||
+      p.kind !== "compact-candidate" || p.id === "large-world-v1" ||
+      !Number.isInteger(p.seed) || p.seed < 0 || p.seed > 0xffffffff || input.seed !== p.seed) fail();
+  if ((p.id === "compact-duel-island-v2" && p.algorithm !== "compact-island-sculpt-v1") ||
+      (p.id === "compact-duel-island-v3" && !sculpt2) ||
+      (p.id === "compact-duel-island-v4" && !sculpt3) ||
+      (p.id === "compact-duel-island-v5" && !sculpt4) ||
+      (p.id === "compact-duel-island-v6" && !sculpt5)) fail();
+  var b = p.bounds, i = p.island, h = p.height, w = p.water, s = p.shoreline;
+  if (!Number.isFinite(p.terrainTileSize) || p.terrainTileSize <= 0 ||
+      b.minX >= b.maxX || b.minZ >= b.maxZ ||
+      !Number.isSafeInteger((b.maxX-b.minX)/p.terrainTileSize) ||
+      !Number.isSafeInteger((b.maxZ-b.minZ)/p.terrainTileSize) ||
+      i.radius <= 0 || i.falloff <= 0 || i.falloff > i.radius || i.deepOceanBuffer < 0 ||
+      i.beachProfilePower <= 0 || i.maxCoastVariation < 0 || i.maxCoastVariation >= 1) fail();
+  var extent = i.radius * (1+i.maxCoastVariation) + i.deepOceanBuffer;
+  if (!Number.isFinite(extent) || i.centerX-extent < b.minX || i.centerX+extent > b.maxX ||
+      i.centerZ-extent < b.minZ || i.centerZ+extent > b.maxZ ||
+      h.maxHeightParameter <= 0 || h.terrainScale <= 0 || h.featureScale <= 0 ||
+      w.threshold <= w.oceanFloorHeight || w.threshold >= h.maxHeightParameter ||
+      s.THRESHOLD < 0 || s.THRESHOLD > 1 || s.STRENGTH < 0 || s.STRENGTH > 1 ||
+      s.MIN_SLOPE < 0 || s.SLOPE_SAMPLE_DISTANCE <= 0 || s.LAND_BAND <= 0 ||
+      s.LAND_MAX_MULTIPLIER <= 0 || s.UNDERWATER_BAND <= 0 || s.UNDERWATER_DEPTH_MULTIPLIER <= 0) fail();
+  if (hasCoastalApron) {
+    var apronDescriptor = Object.getOwnPropertyDescriptor(p, "coastalApron");
+    if (!apronDescriptor || !("value" in apronDescriptor)) fail();
+    var apronAdmission = (${createCompactCoastalApron.toString()})();
+    var ca = apronAdmission.validate(apronDescriptor.value);
+    if (ca.floorHeight !== w.oceanFloorHeight || ca.referencePlateau !== h.baseOffset || ca.referencePlateau <= w.threshold) fail();
+    if (ca.headShoulder && ca.headShoulder.end[2] < w.threshold+s.LAND_BAND) fail();
+    apronAdmission.validateSupport(ca, b, s.SLOPE_SAMPLE_DISTANCE);
+    apronAdmission.validateSupport(ca, (${getCompactCoastalApronSupport.toString()})(i,l), s.SLOPE_SAMPLE_DISTANCE);
+    if (JSON.stringify(ca) !== JSON.stringify(apronDescriptor.value)) fail();
+    // Structured cloning removes frozen descriptors. Sampling receives the
+    // validated immutable replacement, not the mutable transport object.
+    p.coastalApron = ca;
+  }
+  if (hasSouthernMeadow) {
+    var meadowDescriptor = Object.getOwnPropertyDescriptor(p, "southernMeadow");
+    if (!meadowDescriptor || !("value" in meadowDescriptor)) fail();
+    var meadowAdmission = (${createCompactSouthernMeadow.toString()})();
+    var sm = meadowAdmission.validate(meadowDescriptor.value);
+    meadowAdmission.validateSupport(sm, p);
+    if (JSON.stringify(sm) !== JSON.stringify(meadowDescriptor.value)) fail();
+    p.southernMeadow = sm;
+  }
+  var identity = "hyperia-world-terrain-profile-v1\\n" + JSON.stringify(p);
+  if (identity !== config.TERRAIN_PROFILE_IDENTITY) fail();
+  if (!Number.isSafeInteger(config.TILE_RESOLUTION) || config.TILE_RESOLUTION < 2 || config.TILE_RESOLUTION > 1024) fail();
+  var derived = {
+    TILE_SIZE:p.terrainTileSize, MAX_HEIGHT:h.maxHeightParameter,
+    WATER_THRESHOLD:w.threshold, WATER_LEVEL_NORMALIZED:w.threshold/h.maxHeightParameter,
+    BIOME_GAUSSIAN_COEFF:${BIOME_CONFIG.gaussianCoeff},
+    BIOME_BOUNDARY_NOISE_SCALE:${BIOME_CONFIG.boundaryNoiseScale},
+    BIOME_BOUNDARY_NOISE_AMOUNT:${BIOME_CONFIG.boundaryNoiseAmount},
+    SHORELINE_THRESHOLD:s.THRESHOLD, SHORELINE_STRENGTH:s.STRENGTH,
+    SHORELINE_MIN_SLOPE:s.MIN_SLOPE, SHORELINE_SLOPE_SAMPLE_DISTANCE:s.SLOPE_SAMPLE_DISTANCE,
+    SHORELINE_LAND_BAND:s.LAND_BAND, SHORELINE_LAND_MAX_MULTIPLIER:s.LAND_MAX_MULTIPLIER,
+    SHORELINE_UNDERWATER_BAND:s.UNDERWATER_BAND, UNDERWATER_DEPTH_MULTIPLIER:s.UNDERWATER_DEPTH_MULTIPLIER
+  };
+  for (var key of Object.keys(derived)) if (config[key] !== derived[key]) fail();
+  if (input.type === "generateGrassInstances" &&
+      (input.waterThreshold !== w.threshold || input.tileSize !== p.terrainTileSize)) fail();
+}`;
+}
+
 /**
  * TerrainWorkerShared — Single source of truth for inline worker JS code
- * shared between QuadChunkWorker and TerrainWorker.
+ * shared between QuadChunkWorker, TerrainWorker and GrassWorker.
  *
  * Workers can't import TS modules, so we build JS strings that get injected
- * into the inline worker code. Both workers call these builders to get
+ * into the inline worker code. All three workers call these builders to get
  * identical copies of the shared logic.
  *
  * If you need to change noise generation, height helpers, biome influence

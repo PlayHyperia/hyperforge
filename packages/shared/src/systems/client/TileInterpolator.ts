@@ -58,6 +58,10 @@ const CATCHUP_MAX_CHANGE_PER_SEC = 5.0; // Can change by at most 5.0 per second 
 // Higher = faster rotation, lower = smoother/slower rotation
 // 12.0 = ~90% of rotation completed in ~0.2 seconds (responsive but smooth)
 const ROTATION_SLERP_SPEED = 12.0;
+// Keep large target-side reversals readable. Exponential damping remains
+// responsive for ordinary tracking errors, while this angular-velocity ceiling
+// prevents a close-range bearing flip from becoming a one-sample visual snap.
+const MAX_ROTATION_RADIANS_PER_SECOND = 5.85;
 
 // Emotes that are controlled by TileInterpolator (movement-related)
 // Other emotes like "chopping", "combat", "death" etc. should NOT be overridden
@@ -153,6 +157,10 @@ interface EntityMovementState {
   // Whether entity is in combat rotation mode (takes priority over movement facing)
   // When true, combat rotation is maintained even during movement
   inCombatRotation: boolean;
+  // A frozen streaming duel pair owns facing over generic entity rotation packets.
+  // This prevents an ordinary movement/combat quaternion from steering a
+  // contestant away from its opponent between authoritative target refreshes.
+  combatRotationLocked: boolean;
 
   // ========== Sync State ==========
   // Last tile confirmed by server
@@ -307,6 +315,33 @@ export class TileInterpolator {
   }
 
   /**
+   * Advance the visual quaternion toward its current movement/combat target.
+   * Keeping this in one path ensures stationary combat turns and movement turns
+   * use the same frame-rate-independent damping and shortest-arc behavior.
+   */
+  private smoothRotation(state: EntityMovementState, deltaTime: number): void {
+    if (state.quaternion.dot(state.targetQuaternion) < 0) {
+      state.targetQuaternion.set(
+        -state.targetQuaternion.x,
+        -state.targetQuaternion.y,
+        -state.targetQuaternion.z,
+        -state.targetQuaternion.w,
+      );
+    }
+    const remainingAngle = state.quaternion.angleTo(state.targetQuaternion);
+    if (remainingAngle < 1e-6) return;
+    const rotationAlpha = 1 - Math.exp(-deltaTime * ROTATION_SLERP_SPEED);
+    const angularVelocityAlpha = Math.min(
+      1,
+      (MAX_ROTATION_RADIANS_PER_SECOND * deltaTime) / remainingAngle,
+    );
+    state.quaternion.slerp(
+      state.targetQuaternion,
+      Math.min(rotationAlpha, angularVelocityAlpha),
+    );
+  }
+
+  /**
    * Called when server sends a movement path started
    * This is the PRIMARY way movement begins - client receives full path
    *
@@ -456,6 +491,7 @@ export class TileInterpolator {
     const serverConfirmed = startTile ?? worldToTile(startPos.x, startPos.z);
 
     if (state) {
+      const preserveCombatRotation = state.inCombatRotation;
       // Update existing state with new path
       state.fullPath = finalPath;
       state.targetTileIndex = 0;
@@ -463,19 +499,21 @@ export class TileInterpolator {
       state.visualPosition.copy(startPos);
       state.targetWorldPos.set(firstTileWorld.x, startPos.y, firstTileWorld.z);
       // DON'T snap quaternion - keep current visual rotation for smooth turn
-      // Set target rotation - slerp will smoothly rotate toward it
-      state.targetQuaternion.copy(initialRotation);
+      // A combat-facing fighter keeps looking at its opponent while a new
+      // strafe/kite segment begins. Replacing the target here creates a
+      // one-frame turn toward the path before ClientNetwork refreshes the
+      // opponent direction on the next animation frame. That transient snap is
+      // visible to 60 FPS capture and can exceed a right angle. Ordinary
+      // movement still takes ownership once combat rotation is explicitly
+      // cleared by the combat-ended/clear-face packet.
+      if (!preserveCombatRotation) {
+        state.targetQuaternion.copy(initialRotation);
+      }
       state.isRunning = running;
       state.isMoving = true;
       state.emote = emote ?? (running ? "run" : "walk");
       state.pendingArrivalEmote = null;
-      // Clear combat rotation on new movement start so movement direction takes over.
-      // For entities still in active combat, MobEntity.clientUpdate() handles combat
-      // rotation locally (checks aiState), and server re-sends setCombatRotation
-      // within 1 tick for remote players. Without this clear, the flag stays true
-      // forever (clearCombatRotation is never called), preventing mobs from rotating
-      // toward their movement direction after combat ends.
-      state.inCombatRotation = false;
+      state.inCombatRotation = preserveCombatRotation;
       state.serverConfirmedTile = { ...serverConfirmed };
       state.serverConfirmedY = startPos.y; // Preserve server Y (building floor elevation)
       state.lastServerTick = 0;
@@ -503,6 +541,7 @@ export class TileInterpolator {
         emote: emote ?? (running ? "run" : "walk"),
         pendingArrivalEmote: null,
         inCombatRotation: false,
+        combatRotationLocked: false,
         serverConfirmedTile: { ...serverConfirmed },
         serverConfirmedY: startPos.y, // Preserve server Y (building floor elevation)
         lastServerTick: 0,
@@ -620,6 +659,7 @@ export class TileInterpolator {
         emote: emote,
         pendingArrivalEmote: null,
         inCombatRotation: false,
+        combatRotationLocked: false,
         serverConfirmedTile: { ...serverTile },
         serverConfirmedY: worldPos.y, // Preserve server Y (building floor elevation)
         lastServerTick: tickNumber ?? 0,
@@ -1011,13 +1051,17 @@ export class TileInterpolator {
           modify: (data: Record<string, unknown>) => void;
         }
       | undefined,
-    getTerrainHeight?: (x: number, z: number) => number | null,
+    getTerrainHeight?: (
+      x: number,
+      z: number,
+      entityId: string,
+    ) => number | null,
     onMovementComplete?: (
       entityId: string,
       position: { x: number; y: number; z: number },
     ) => void,
     isNearBuilding?: (x: number, z: number) => boolean,
-    getStepHeight?: (x: number, z: number) => number | null,
+    getStepHeight?: (x: number, z: number, entityId: string) => number | null,
     hasTimeRemaining?: (minimumMs?: number) => boolean,
   ): void {
     const frameDelta =
@@ -1075,6 +1119,12 @@ export class TileInterpolator {
         state.fullPath.length === 0 ||
         state.targetTileIndex >= state.fullPath.length
       ) {
+        // Combat-facing updates also arrive while the entity is stationary.
+        // Previously setCombatRotation snapped both quaternions immediately and
+        // this early-return branch never ran the movement slerp, so every target
+        // change could visibly pop. Use the same bounded turn path as movement.
+        this.smoothRotation(state, effectiveDelta);
+
         // Update Y: building floor > entrance steps > terrain
         // Check if near building - if so, preserve server Y (correct floor elevation)
         const inBuilding =
@@ -1090,6 +1140,7 @@ export class TileInterpolator {
           const stepY = getStepHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (stepY !== null && Number.isFinite(stepY)) {
             state.visualPosition.y = stepY;
@@ -1098,6 +1149,7 @@ export class TileInterpolator {
             const height = getTerrainHeight(
               state.visualPosition.x,
               state.visualPosition.z,
+              entityId,
             );
             if (height !== null && Number.isFinite(height)) {
               state.visualPosition.y = height; // Feet at ground level
@@ -1108,6 +1160,7 @@ export class TileInterpolator {
           const height = getTerrainHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (height !== null && Number.isFinite(height)) {
             state.visualPosition.y = height; // Feet at ground level
@@ -1396,6 +1449,7 @@ export class TileInterpolator {
         const stepY = getStepHeight(
           state.visualPosition.x,
           state.visualPosition.z,
+          entityId,
         );
         if (stepY !== null && Number.isFinite(stepY)) {
           state.visualPosition.y = stepY;
@@ -1404,6 +1458,7 @@ export class TileInterpolator {
           const height = getTerrainHeight(
             state.visualPosition.x,
             state.visualPosition.z,
+            entityId,
           );
           if (height !== null && Number.isFinite(height)) {
             state.visualPosition.y = height; // Feet at ground level
@@ -1414,30 +1469,16 @@ export class TileInterpolator {
         const height = getTerrainHeight(
           state.visualPosition.x,
           state.visualPosition.z,
+          entityId,
         );
         if (height !== null && Number.isFinite(height)) {
           state.visualPosition.y = height; // Feet at ground level
         }
       }
 
-      // Smoothly interpolate rotation toward target using spherical lerp (slerp)
-      // This prevents jarring direction snaps when player course-corrects
-      // Uses exponential smoothing: alpha = 1 - e^(-dt * rate) for frame-rate independence
-      //
-      // IMPORTANT: Quaternions have double cover - q and -q represent the SAME rotation.
-      // When dot product is negative, slerp takes the "long way" around (~360° rotation).
-      // Fix: negate target quaternion when dot < 0 to ensure short path interpolation.
-      if (state.quaternion.dot(state.targetQuaternion) < 0) {
-        state.targetQuaternion.set(
-          -state.targetQuaternion.x,
-          -state.targetQuaternion.y,
-          -state.targetQuaternion.z,
-          -state.targetQuaternion.w,
-        );
-      }
-      const rotationAlpha =
-        1 - Math.exp(-effectiveDelta * ROTATION_SLERP_SPEED);
-      state.quaternion.slerp(state.targetQuaternion, rotationAlpha);
+      // Smoothly turn along the shortest quaternion arc. This is shared with
+      // stationary combat facing so movement/attack transitions cannot snap.
+      this.smoothRotation(state, effectiveDelta);
 
       // Apply visual state to entity
       entity.position.copy(state.visualPosition);
@@ -1561,8 +1602,14 @@ export class TileInterpolator {
     entityId: string,
     quaternion: number[] | THREE.Quaternion,
     entityPosition?: { x: number; y: number; z: number },
+    lockTarget = false,
   ): boolean {
     let state = this.entityStates.get(entityId);
+    const createdState = !state;
+
+    if (state?.combatRotationLocked && !lockTarget) {
+      return true;
+    }
 
     // Create minimal state if it doesn't exist (fixes first-attack rotation issue)
     // CRITICAL: Use entity's current position to initialize visualPosition.
@@ -1593,8 +1640,9 @@ export class TileInterpolator {
         emote: "idle",
         pendingArrivalEmote: null,
         inCombatRotation: false,
+        combatRotationLocked: false,
         serverConfirmedTile: initTile,
-        serverConfirmedY: 0,
+        serverConfirmedY: initPos.y,
         lastServerTick: 0,
         catchUpMultiplier: 1.0,
         targetCatchUpMultiplier: 1.0,
@@ -1605,24 +1653,21 @@ export class TileInterpolator {
       this.setEntityState(entityId, state);
     }
 
-    // Apply combat rotation ONLY if not currently moving
-    // Movement direction takes priority over combat rotation (rules-accurate)
-    if (state.isMoving) {
-      return false; // Ignored while moving
-    }
-
-    // The inCombatRotation flag prevents movement code from overwriting this
+    // Combat-facing packets remain authoritative while the fighter is moving.
+    // This is what lets a ranged or magic contestant strafe/kite without
+    // visually turning its back on the opponent. Movement starts still clear
+    // this mode, and the next combat-facing packet reasserts it for the active
+    // engagement.
     state.inCombatRotation = true;
+    state.combatRotationLocked = lockTarget;
 
-    // Apply combat rotation to state - TileInterpolator.update() will apply to entity.base
-    // Support both number[] (from server packets) and THREE.Quaternion (from local player)
+    // Update only the target on an existing rendered state. The normal update
+    // loop advances the visible quaternion with bounded, frame-rate-independent
+    // slerp; copying both values here caused stationary combat target switches
+    // to snap. A newly created state has no owned visual orientation yet, so it
+    // may initialize at the authoritative facing without inventing a turn from
+    // world-forward.
     if (Array.isArray(quaternion)) {
-      state.quaternion.set(
-        quaternion[0],
-        quaternion[1],
-        quaternion[2],
-        quaternion[3],
-      );
       state.targetQuaternion.set(
         quaternion[0],
         quaternion[1],
@@ -1630,8 +1675,10 @@ export class TileInterpolator {
         quaternion[3],
       );
     } else {
-      state.quaternion.copy(quaternion);
       state.targetQuaternion.copy(quaternion);
+    }
+    if (createdState) {
+      state.quaternion.copy(state.targetQuaternion);
     }
 
     return true; // Rotation accepted
@@ -1645,6 +1692,7 @@ export class TileInterpolator {
     const state = this.entityStates.get(entityId);
     if (state) {
       state.inCombatRotation = false;
+      state.combatRotationLocked = false;
     }
   }
 
@@ -1675,6 +1723,7 @@ export class TileInterpolator {
       state.visualPosition.set(worldPos.x, position.y, worldPos.z);
       state.targetWorldPos.set(worldPos.x, position.y, worldPos.z);
       state.serverConfirmedTile = { ...newTile };
+      state.serverConfirmedY = position.y;
       state.isMoving = false;
       state.pendingArrivalEmote = null;
       // Only track idle state if current emote is movement-related
@@ -1704,6 +1753,7 @@ export class TileInterpolator {
         emote: "idle",
         pendingArrivalEmote: null,
         inCombatRotation: false,
+        combatRotationLocked: false,
         serverConfirmedTile: { ...newTile },
         serverConfirmedY: position.y, // Preserve initial Y (floor elevation)
         lastServerTick: 0,

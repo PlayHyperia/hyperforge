@@ -8,6 +8,8 @@
  * Spatial grid: O(1) hash + O(K) body check where K ≈ 0-2 per cell.
  */
 
+import type { TerrainGridBounds } from "./TerrainGridSurface";
+
 export type WaterBodySourceType = "explicit" | "landscape_pond";
 
 export class ElevatedWaterBody {
@@ -47,6 +49,7 @@ export class WaterBodyRegistry {
   private gridCellSize: number;
   private grid: Map<number, number[]> = new Map();
   private oceanLevel: number;
+  private sealed = false;
 
   constructor(oceanLevel: number, gridCellSize = 50) {
     this.oceanLevel = oceanLevel;
@@ -62,6 +65,8 @@ export class WaterBodyRegistry {
     surfaceY: number;
     sourceType: WaterBodySourceType;
   }): void {
+    if (this.sealed)
+      throw new Error("Bound pond composition water changes require restart");
     if (this.bodies.some((b) => b.id === data.id)) {
       console.warn(
         `[WaterBodyRegistry] Duplicate water body ID "${data.id}" — skipping`,
@@ -127,9 +132,13 @@ export class WaterBodyRegistry {
     tileZ: number,
     tileSize: number,
   ): ElevatedWaterBody[] {
-    const minX = tileX * tileSize;
+    // Terrain meshes are centered on tileX * tileSize, so tile 0 spans
+    // [-tileSize/2, +tileSize/2). Match TerrainSystem's indexing exactly or
+    // elevated bodies on the negative half of a tile disappear from both
+    // collision baking and rendering.
+    const minX = tileX * tileSize - tileSize * 0.5;
     const maxX = minX + tileSize;
-    const minZ = tileZ * tileSize;
+    const minZ = tileZ * tileSize - tileSize * 0.5;
     const maxZ = minZ + tileSize;
 
     const result: ElevatedWaterBody[] = [];
@@ -166,6 +175,81 @@ export class WaterBodyRegistry {
 
   getAllBodies(): ReadonlyArray<ElevatedWaterBody> {
     return this.bodies;
+  }
+
+  /** Opt-in restart-owned material bindings cannot follow live water edits.
+   * Freeze exposed bodies too, so callers cannot bypass registry admission. */
+  seal(): void {
+    for (const body of this.bodies) Object.freeze(body);
+    Object.freeze(this.bodies);
+    this.sealed = true;
+  }
+
+  /** Closed-region, read-only ownership for suspended vegetation work. Newly
+   * registered or moved-in bodies invalidate it; unrelated bodies do not. */
+  captureRegion(
+    bounds: TerrainGridBounds,
+    padding = 0,
+  ): { isCurrent(): boolean } {
+    if (
+      ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ, padding].every(
+        Number.isFinite,
+      ) ||
+      bounds.minX > bounds.maxX ||
+      bounds.minZ > bounds.maxZ ||
+      padding < 0 ||
+      padding > 32 ||
+      this.bodies.length > 128
+    )
+      throw new Error("Invalid water-region lease");
+    const region = Object.freeze({ ...bounds });
+    const valid = (body: ElevatedWaterBody) =>
+      Number.isFinite(body.centerX) &&
+      Number.isFinite(body.centerZ) &&
+      Number.isFinite(body.radius) &&
+      Number.isFinite(body.radiusSq) &&
+      Number.isFinite(body.surfaceY) &&
+      body.radius > 0 &&
+      body.radiusSq === body.radius * body.radius;
+    const overlaps = (body: ElevatedWaterBody) => {
+      const dx =
+        body.centerX -
+        Math.max(region.minX, Math.min(region.maxX, body.centerX));
+      const dz =
+        body.centerZ -
+        Math.max(region.minZ, Math.min(region.maxZ, body.centerZ));
+      return dx * dx + dz * dz <= (body.radius + padding) ** 2;
+    };
+    const captured = new Map<ElevatedWaterBody, Readonly<ElevatedWaterBody>>();
+    for (const body of this.bodies) {
+      if (!valid(body)) throw new Error("Invalid water-region body");
+      if (overlaps(body)) captured.set(body, Object.freeze({ ...body }));
+    }
+    let current = true;
+    return Object.freeze({
+      isCurrent: () => {
+        if (!current || this.bodies.length > 128) return (current = false);
+        let matches = 0;
+        for (const body of this.bodies) {
+          if (!valid(body)) return (current = false);
+          if (!overlaps(body)) continue;
+          const old = captured.get(body);
+          if (
+            !old ||
+            old.id !== body.id ||
+            old.centerX !== body.centerX ||
+            old.centerZ !== body.centerZ ||
+            old.radius !== body.radius ||
+            old.radiusSq !== body.radiusSq ||
+            old.surfaceY !== body.surfaceY ||
+            old.sourceType !== body.sourceType
+          )
+            return (current = false);
+          matches++;
+        }
+        return (current = matches === captured.size);
+      },
+    });
   }
 
   getOceanLevel(): number {

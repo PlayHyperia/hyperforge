@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { dataManager } from "../DataManager";
 import { ITEMS } from "../items";
+import { AttackType, WeaponType } from "../../types/game/item-types";
 
 // ITEMS is populated by vitest.setup.ts before this file runs
 // If ITEMS is empty, manifests weren't available (CI without manifest files)
@@ -103,6 +104,31 @@ describe.skipIf(!manifestsAvailable)(
     });
 
     describe("item normalization", () => {
+      it("canonicalizes authored combat metadata into runtime enums", () => {
+        expect(ITEMS.get("bronze_shortsword")).toMatchObject({
+          attackType: AttackType.MELEE,
+          weaponType: WeaponType.SWORD,
+        });
+        expect(ITEMS.get("shortbow")).toMatchObject({
+          attackType: AttackType.RANGED,
+          weaponType: WeaponType.BOW,
+        });
+        expect(ITEMS.get("staff_of_air")).toMatchObject({
+          attackType: AttackType.MAGIC,
+          weaponType: WeaponType.STAFF,
+        });
+
+        const attackTypes = new Set<unknown>(Object.values(AttackType));
+        const weaponTypes = new Set<unknown>(Object.values(WeaponType));
+        for (const item of ITEMS.values()) {
+          if (item.isNoted) continue;
+          if (item.attackType !== null && item.attackType !== undefined) {
+            expect(attackTypes.has(item.attackType), item.id).toBe(true);
+          }
+          expect(weaponTypes.has(item.weaponType), item.id).toBe(true);
+        }
+      });
+
       it("applies TierDataProvider requirements to tiered weapons", () => {
         const steelSword = ITEMS.get("steel_sword");
         if (steelSword) {

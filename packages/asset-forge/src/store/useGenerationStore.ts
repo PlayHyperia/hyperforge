@@ -195,12 +195,7 @@ interface GenerationState {
   setSelectedStageResult: (
     result: {
       stage:
-        | "description"
-        | "image"
-        | "model"
-        | "remesh"
-        | "analysis"
-        | "final";
+        "description" | "image" | "model" | "remesh" | "analysis" | "final";
       result:
         | ImageGenerationResult
         | ModelGenerationResult
@@ -222,7 +217,12 @@ interface GenerationState {
   initializePipelineStages: () => void;
 }
 
-export const useGenerationStore = create<GenerationState>()(
+interface StoreHook<T> {
+  (): T;
+  <U>(selector: (state: T) => U): U;
+}
+
+const generationStore = create<GenerationState>()(
   devtools(
     persist(
       subscribeWithSelector(
@@ -704,3 +704,5 @@ export const useGenerationStore = create<GenerationState>()(
     },
   ),
 );
+
+export const useGenerationStore: StoreHook<GenerationState> = generationStore;

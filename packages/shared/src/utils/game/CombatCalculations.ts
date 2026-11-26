@@ -16,10 +16,7 @@ import {
 import { getGameRng, SeededRandom } from "../SeededRandom";
 
 export type CombatStyle =
-  | "accurate"
-  | "aggressive"
-  | "defensive"
-  | "controlled";
+  "accurate" | "aggressive" | "defensive" | "controlled";
 
 export interface StyleBonus {
   attack: number;
@@ -154,6 +151,7 @@ export function calculateDamage(
   defenderStyle?: CombatStyle,
   attackerPrayerBonuses?: PrayerCombatBonuses,
   defenderPrayerBonuses?: PrayerCombatBonuses,
+  rng?: SeededRandom,
 ): HitCalculationResult {
   let maxHit = 1;
   let attackStat = 0;
@@ -217,7 +215,7 @@ export function calculateDamage(
     targetDefenseBonus,
     style,
     defenderStyle,
-    undefined, // rng - use default
+    rng,
     attackerPrayerBonuses,
     defenderPrayerBonuses,
   );
@@ -231,8 +229,8 @@ export function calculateDamage(
     };
   }
 
-  const rng = getGameRng();
-  const damage = rng.damageRoll(maxHit);
+  const random = rng ?? getGameRng();
+  const damage = random.damageRoll(maxHit);
 
   if (!Number.isFinite(damage) || damage < 0) {
     return {

@@ -1,12 +1,616 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { STREAMING_RENDER_PROFILES } from "../../../../shared/src/runtime/clientViewportMode";
 import {
+  LEGACY_TERRAIN_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_V4_PROFILE_FIXTURE,
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  worldTerrainProfileIdentity,
+} from "../../../../shared/src/systems/shared/world/WorldTerrainProfile";
+import {
+  applyCaptureFrameRateToUrl,
+  assertCaptureRenderProfileContract,
   buildDefaultCaptureLaunchArgs,
+  CANONICAL_CAPTURE_RENDER_PROFILE,
+  CAPTURE_RENDER_PROFILE_CONTRACTS,
+  DEFAULT_CAPTURE_GAME_URL,
+  FALLBACK_CAPTURE_RENDER_PROFILE,
+  ISLAND_CAPTURE_RENDER_PROFILE,
+  SHADOWS_CAPTURE_RENDER_PROFILE,
+  matchesExpectedCaptureRenderProfile,
+  normalizeCaptureRenderProfileSnapshot,
   resolveAllowedCaptureOrigins,
+  resolveCaptureBrowserEndpoint,
+  resolveCaptureRenderProfileForUrls,
+  resolveCaptureRenderProfileId,
+  resolveDefaultCaptureFeatureFlags,
+  resolveCaptureUrlCandidates,
   resolveUnexpectedCaptureOrigin,
   shouldAcceptCaptureReadiness,
 } from "../captureBrowserPolicy";
 
+const compactTerrainIdentity = worldTerrainProfileIdentity(
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+);
+
+// Pure wire-contract fixture, not a renderer or GPU qualification substitute.
+function shadowApplicationSnapshot() {
+  const preferences = {
+    dpr: 1,
+    shadows: "med",
+    postprocessing: false,
+    bloom: false,
+    colorGrading: "none",
+    depthBlur: false,
+    waterReflections: false,
+    entityHighlighting: false,
+  };
+  return {
+    ...CAPTURE_RENDER_PROFILE_CONTRACTS[SHADOWS_CAPTURE_RENDER_PROFILE],
+    explicit: true,
+    application: {
+      schemaVersion: 1 as const,
+      ready: true,
+      mismatchReason: null,
+      requested: { ...preferences },
+      applied: {
+        preferences: { ...preferences },
+        renderer: {
+          isWebGPU: true,
+          hasRendered: true,
+          dpr: 1,
+          width: 1280,
+          height: 720,
+          samples: 4,
+          shadowsEnabled: true,
+          shadowType: 1,
+          postprocessing: false,
+          composerPresent: false,
+        },
+        sunlight: {
+          name: "SunLight_Single",
+          castShadow: true,
+          cascaded: false,
+          mapSize: [4096, 4096] as const,
+          allocatedMapSize: [4096, 4096] as const,
+          frustum: [-200, 200, 200, -200, 0.5, 600] as const,
+          bias: 0.0002,
+          normalBias: 0.01,
+        },
+        water: { reflectionsEnabled: false, activeReflectionCount: 0 },
+      },
+    },
+  };
+}
+
+function islandApplicationSnapshot() {
+  const snapshot = shadowApplicationSnapshot();
+  return {
+    ...snapshot,
+    ...CAPTURE_RENDER_PROFILE_CONTRACTS[ISLAND_CAPTURE_RENDER_PROFILE],
+    application: {
+      ...snapshot.application,
+      applied: {
+        ...snapshot.application.applied,
+        sunlight: {
+          ...snapshot.application.applied.sunlight,
+          bias: 0,
+          terrainProfileIdentity: compactTerrainIdentity,
+        },
+        grass: {
+          schemaVersion: 1 as const,
+          profileId: "compact-island-v1" as const,
+          eligibility: "compact-pbr-v1" as const,
+          terrainProfileIdentity: compactTerrainIdentity,
+          minimumLodLevel: 1,
+          clumpSpacingMultiplier: 4,
+          clumpSpacing: 2.8,
+          maxRenderDistance: 140,
+          maxChunksPerFrame: 1,
+          castShadow: false,
+          destroyed: false,
+          liveNodes: 0,
+          pendingChunks: 0,
+          inflightChunks: 0,
+          settledChunks: 0,
+          installedChunks: 0,
+          installedClumps: 0,
+        },
+      },
+    },
+  };
+}
+
 describe("captureBrowserPolicy", () => {
+  it("requires an explicit island profile and matching encoder/fallback contracts", () => {
+    const candidate =
+      "https://game.example/stream.html?streamRenderProfile=island-720p60-v1&streamFps=60";
+    expect(applyCaptureFrameRateToUrl(candidate, 60)).toBe(candidate);
+    expect(resolveCaptureRenderProfileForUrls([candidate], 60)).toBe(
+      ISLAND_CAPTURE_RENDER_PROFILE,
+    );
+    expect(() => applyCaptureFrameRateToUrl(candidate, 30)).toThrow(
+      "contradicts streamFps=30",
+    );
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(
+        [candidate, DEFAULT_CAPTURE_GAME_URL],
+        60,
+      ),
+    ).toThrow("same render profile");
+    expect(resolveCaptureRenderProfileId(60)).toBe(
+      CANONICAL_CAPTURE_RENDER_PROFILE,
+    );
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: ISLAND_CAPTURE_RENDER_PROFILE,
+        sourceFps: 60,
+        outputFps: 60,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).not.toThrow();
+  });
+
+  it("requires independently checked actual grass configuration for island admission", () => {
+    const snapshot = islandApplicationSnapshot();
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toEqual(snapshot);
+    expect(
+      matchesExpectedCaptureRenderProfile(
+        snapshot,
+        ISLAND_CAPTURE_RENDER_PROFILE,
+      ),
+    ).toBe(true);
+    for (const application of [undefined, null]) {
+      expect(
+        normalizeCaptureRenderProfileSnapshot({ ...snapshot, application }),
+      ).toBeNull();
+    }
+    for (const grass of [undefined, null, {}]) {
+      expect(
+        normalizeCaptureRenderProfileSnapshot({
+          ...snapshot,
+          application: {
+            ...snapshot.application,
+            applied: { ...snapshot.application.applied, grass },
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it.each([undefined, null])(
+    "retains legacy single-map bias with absent provenance %s, never zero",
+    (terrainProfileIdentity) => {
+      const snapshot = shadowApplicationSnapshot();
+      const sunlight = {
+        ...snapshot.application.applied.sunlight,
+        terrainProfileIdentity,
+      };
+      const candidate = {
+        ...snapshot,
+        application: {
+          ...snapshot.application,
+          applied: { ...snapshot.application.applied, sunlight },
+        },
+      };
+      expect(normalizeCaptureRenderProfileSnapshot(candidate)).toEqual(
+        candidate,
+      );
+      sunlight.bias = 0;
+      expect(normalizeCaptureRenderProfileSnapshot(candidate)).toBeNull();
+    },
+  );
+
+  it("requires exact compact zero bias and matching terrain identities despite ready:true", () => {
+    const snapshot = islandApplicationSnapshot();
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toEqual(snapshot);
+    snapshot.application.applied.sunlight.bias = 0.0002;
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+    snapshot.application.applied.sunlight.bias = 0;
+    snapshot.application.applied.grass.terrainProfileIdentity =
+      worldTerrainProfileIdentity(SCULPTED_COMPACT_V4_PROFILE_FIXTURE);
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+  });
+
+  it("selects compact bias from admitted light provenance, not the render-profile name", () => {
+    const snapshot = shadowApplicationSnapshot();
+    const candidate = {
+      ...snapshot,
+      application: {
+        ...snapshot.application,
+        applied: {
+          ...snapshot.application.applied,
+          sunlight: {
+            ...snapshot.application.applied.sunlight,
+            bias: 0,
+            terrainProfileIdentity: compactTerrainIdentity,
+          },
+        },
+      },
+    };
+    expect(normalizeCaptureRenderProfileSnapshot(candidate)).toEqual(candidate);
+    candidate.application.applied.sunlight.bias = 0.0002;
+    expect(normalizeCaptureRenderProfileSnapshot(candidate)).toBeNull();
+  });
+
+  it.each([
+    undefined,
+    null,
+    "",
+    " ",
+    "x".repeat(16_385),
+    false,
+    0,
+    {},
+    [],
+    "hyperia-world-terrain-profile-v1\n{",
+    "compact-duel-island-v6",
+    worldTerrainProfileIdentity(LEGACY_TERRAIN_PROFILE_FIXTURE),
+    compactTerrainIdentity + " ",
+    "hyperia-world-terrain-profile-v1\n" +
+      JSON.stringify(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE, null, 2),
+  ])(
+    "rejects forged compact readiness with invalid sunlight identity case %$",
+    (identity) => {
+      const snapshot = islandApplicationSnapshot();
+      const sunlight: Record<string, unknown> =
+        snapshot.application.applied.sunlight;
+      sunlight.terrainProfileIdentity = identity;
+      expect(snapshot.application.ready).toBe(true);
+      expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+    },
+  );
+
+  it.each([
+    ["schemaVersion", 2],
+    ["profileId", "fixed-arena-v1"],
+    ["eligibility", "legacy-biome-v1"],
+    ["terrainProfileIdentity", ""],
+    ["terrainProfileIdentity", " "],
+    ["terrainProfileIdentity", "x".repeat(16_385)],
+    ["minimumLodLevel", 2],
+    ["clumpSpacingMultiplier", 1],
+    ["clumpSpacing", 14],
+    ["clumpSpacing", NaN],
+    ["maxRenderDistance", 90],
+    ["maxChunksPerFrame", 2],
+    ["castShadow", true],
+    ["castShadow", "false"],
+    ["destroyed", true],
+    ["installedClumps", -1],
+    ["installedChunks", NaN],
+    ["liveNodes", 0.5],
+    ["pendingChunks", "0"],
+    ["inflightChunks", Number.MAX_SAFE_INTEGER + 1],
+    ["settledChunks", null],
+  ])("rejects a claimed ready island with invalid grass.%s", (field, value) => {
+    const snapshot = islandApplicationSnapshot();
+    const grass: Record<string, unknown> = snapshot.application.applied.grass;
+    grass[String(field)] = value;
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+  });
+
+  it("keeps exactly four qualified server contracts equal to their shared profiles without changing defaults", () => {
+    expect(CAPTURE_RENDER_PROFILE_CONTRACTS).toEqual({
+      [CANONICAL_CAPTURE_RENDER_PROFILE]:
+        STREAMING_RENDER_PROFILES[CANONICAL_CAPTURE_RENDER_PROFILE],
+      [FALLBACK_CAPTURE_RENDER_PROFILE]:
+        STREAMING_RENDER_PROFILES[FALLBACK_CAPTURE_RENDER_PROFILE],
+      [SHADOWS_CAPTURE_RENDER_PROFILE]:
+        STREAMING_RENDER_PROFILES[SHADOWS_CAPTURE_RENDER_PROFILE],
+      [ISLAND_CAPTURE_RENDER_PROFILE]:
+        STREAMING_RENDER_PROFILES[ISLAND_CAPTURE_RENDER_PROFILE],
+    });
+    expect(resolveCaptureRenderProfileId(60)).toBe(
+      CANONICAL_CAPTURE_RENDER_PROFILE,
+    );
+    expect(resolveCaptureRenderProfileId(30)).toBe(
+      FALLBACK_CAPTURE_RENDER_PROFILE,
+    );
+    expect(resolveCaptureRenderProfileId(45)).toBeNull();
+  });
+
+  it.each(["island-meadow-720p60-v1", "island-fine-meadow-720p60-v1"] as const)(
+    "rejects the unqualified capture selector %s",
+    (profileId) => {
+      const url =
+        "https://game.example/stream.html?streamRenderProfile=" +
+        profileId +
+        "&streamFps=60";
+      expect(() => applyCaptureFrameRateToUrl(url, 60)).toThrow(
+        "Unsupported capture render profile " + profileId,
+      );
+      expect(() => resolveCaptureRenderProfileForUrls([url], 60)).toThrow(
+        "Unsupported capture render profile " + profileId,
+      );
+      expect(
+        normalizeCaptureRenderProfileSnapshot({
+          ...islandApplicationSnapshot(),
+          ...STREAMING_RENDER_PROFILES[profileId],
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("preserves the explicit shadow candidate and requires consistent navigation fallbacks", () => {
+    const candidate =
+      "https://game.example/stream.html?streamRenderProfile=shadows-720p60-v1&streamFps=60#access";
+    expect(applyCaptureFrameRateToUrl(candidate, 60)).toBe(candidate);
+    expect(
+      resolveCaptureRenderProfileForUrls(
+        [candidate, candidate.replace("game.example", "fallback.example")],
+        60,
+      ),
+    ).toBe(SHADOWS_CAPTURE_RENDER_PROFILE);
+    expect(
+      resolveCaptureRenderProfileForUrls([DEFAULT_CAPTURE_GAME_URL], 60),
+    ).toBe(CANONICAL_CAPTURE_RENDER_PROFILE);
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(
+        [candidate, DEFAULT_CAPTURE_GAME_URL],
+        60,
+      ),
+    ).toThrow("same render profile");
+    expect(() => resolveCaptureRenderProfileForUrls([], 60)).toThrow(
+      "at least one",
+    );
+    expect(() =>
+      resolveCaptureRenderProfileForUrls(["invalid-url"], 60),
+    ).toThrow("valid game URL");
+    expect(() => applyCaptureFrameRateToUrl(candidate, 30)).toThrow(
+      "contradicts streamFps=30",
+    );
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: SHADOWS_CAPTURE_RENDER_PROFILE,
+        sourceFps: 60,
+        outputFps: 60,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    "streamRenderProfile=shadows-720p60-v1&streamRenderProfile=shadows-720p60-v1",
+    "streamRenderProfile=canonical-720p60-v1&streamRenderProfile=shadows-720p60-v1",
+    "streamRenderProfile=unknown",
+    "streamRenderProfile=toString",
+    "streamRenderProfile=",
+    "streamFps=60&streamFps=60",
+    "streamFps=60&streamFps=30",
+    "streamFps=30",
+    "streamFps=NaN",
+    "streamFps=60.0",
+    "streamFps=",
+  ])("rejects ambiguous/contradictory capture selection: %s", (query) => {
+    expect(() =>
+      applyCaptureFrameRateToUrl(
+        "https://game.example/stream.html?" + query,
+        60,
+      ),
+    ).toThrow();
+  });
+
+  it("requires and retains an independently checked applied-state receipt for shadow admission", () => {
+    const snapshot = shadowApplicationSnapshot();
+    expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toEqual(snapshot);
+    expect(
+      matchesExpectedCaptureRenderProfile(
+        snapshot,
+        SHADOWS_CAPTURE_RENDER_PROFILE,
+      ),
+    ).toBe(true);
+    expect(
+      normalizeCaptureRenderProfileSnapshot({
+        ...snapshot,
+        application: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      normalizeCaptureRenderProfileSnapshot({ ...snapshot, application: null }),
+    ).toBeNull();
+    expect(
+      normalizeCaptureRenderProfileSnapshot({ id: "toString", explicit: true }),
+    ).toBeNull();
+    expect(
+      shouldAcceptCaptureReadiness({
+        snapshot: {
+          ready: true,
+          degradedReason: null,
+          diagnostics: null,
+          renderProfile: { ...snapshot, application: undefined },
+        },
+        expectedRenderProfileId: SHADOWS_CAPTURE_RENDER_PROFILE,
+        startedAt: 0,
+        nowMs: 1_000_000,
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["schemaVersion", 2],
+    ["ready", false],
+    ["mismatchReason", "not_ready"],
+    ["requested", null],
+    ["requested.shadows", "none"],
+    ["applied", null],
+    ["applied.preferences.bloom", true],
+    ["applied.renderer.isWebGPU", false],
+    ["applied.renderer.isWebGPU", "true"],
+    ["applied.renderer.hasRendered", false],
+    ["applied.renderer.samples", 1],
+    ["applied.renderer.dpr", 2],
+    ["applied.renderer.width", 1920],
+    ["applied.renderer.shadowsEnabled", false],
+    ["applied.renderer.shadowType", 2],
+    ["applied.renderer.composerPresent", true],
+    ["applied.sunlight", null],
+    ["applied.sunlight.castShadow", false],
+    ["applied.sunlight.cascaded", true],
+    ["applied.sunlight.mapSize", [2048, 2048]],
+    ["applied.sunlight.allocatedMapSize", null],
+    ["applied.sunlight.frustum", [-200, 200, 200, -200, 0.5, 500]],
+    ["applied.sunlight.frustum", Array(6)],
+    ["applied.sunlight.bias", NaN],
+    ["applied.sunlight.normalBias", 0.02],
+    ["applied.water", null],
+    ["applied.water.reflectionsEnabled", true],
+    ["applied.water.activeReflectionCount", 1],
+  ])(
+    "does not trust ready:true with invalid application.%s",
+    (field, value) => {
+      const snapshot = shadowApplicationSnapshot();
+      const keys = String(field).split(".");
+      let target: Record<string, unknown> = snapshot.application;
+      for (const key of keys.slice(0, -1))
+        target = target[key] as Record<string, unknown>;
+      target[keys[keys.length - 1]] = value;
+      expect(normalizeCaptureRenderProfileSnapshot(snapshot)).toBeNull();
+    },
+  );
+
+  it("makes both capture entry points derive their expected contract from the validated URL set", () => {
+    for (const name of ["capture-browser-host.ts", "stream-to-rtmp.ts"]) {
+      const source = readFileSync(
+        new URL("../../../scripts/" + name, import.meta.url),
+        "utf8",
+      );
+      expect(source).toContain("resolveCaptureRenderProfileForUrls(");
+      expect(source).not.toContain("resolveCaptureRenderProfileId(");
+      expect(source).toContain("applyCaptureFrameRateToUrl(");
+    }
+  });
+  it("uses only the canonical stream page when no fallback is explicit", () => {
+    expect(resolveCaptureUrlCandidates({})).toEqual([DEFAULT_CAPTURE_GAME_URL]);
+    expect(DEFAULT_CAPTURE_GAME_URL.endsWith("/stream.html")).toBe(true);
+  });
+
+  it("passes a bounded render rate to the capture page", () => {
+    expect(
+      applyCaptureFrameRateToUrl(
+        "https://game.example/stream.html?existing=1#access",
+        60,
+      ),
+    ).toBe(
+      "https://game.example/stream.html?existing=1&streamFps=60&streamRenderProfile=canonical-720p60-v1#access",
+    );
+    expect(
+      applyCaptureFrameRateToUrl("https://game.example/stream.html", 240),
+    ).toBe(
+      "https://game.example/stream.html?streamFps=60&streamRenderProfile=canonical-720p60-v1",
+    );
+    expect(
+      applyCaptureFrameRateToUrl("https://game.example/stream.html", 30),
+    ).toBe(
+      "https://game.example/stream.html?streamFps=30&streamRenderProfile=fallback-720p30-v1",
+    );
+    expect(CANONICAL_CAPTURE_RENDER_PROFILE).toBe("canonical-720p60-v1");
+    expect(FALLBACK_CAPTURE_RENDER_PROFILE).toBe("fallback-720p30-v1");
+  });
+
+  it("rejects a contradictory explicit capture render profile", () => {
+    expect(() =>
+      applyCaptureFrameRateToUrl(
+        "https://game.example/stream.html?streamRenderProfile=fallback-720p30-v1",
+        60,
+      ),
+    ).toThrow("contradicts streamFps=60");
+  });
+
+  it("rejects unversioned capture frame rates", () => {
+    expect(() =>
+      applyCaptureFrameRateToUrl("https://game.example/stream.html", 45),
+    ).toThrow("support only 30 or 60 FPS");
+  });
+
+  it("binds viewport, source, and encoded output to the selected profile", () => {
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: FALLBACK_CAPTURE_RENDER_PROFILE,
+        sourceFps: 30,
+        outputFps: 30,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: FALLBACK_CAPTURE_RENDER_PROFILE,
+        sourceFps: 60,
+        outputFps: 30,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).toThrow("requires sourceFps=30");
+    expect(() =>
+      assertCaptureRenderProfileContract({
+        profileId: FALLBACK_CAPTURE_RENDER_PROFILE,
+        sourceFps: 30,
+        outputFps: 30,
+        viewportWidth: 1920,
+        viewportHeight: 1080,
+        outputWidth: 1280,
+        outputHeight: 720,
+      }),
+    ).toThrow("requires viewportWidth=1280");
+
+    const fallbackSnapshot = {
+      ...CAPTURE_RENDER_PROFILE_CONTRACTS[FALLBACK_CAPTURE_RENDER_PROFILE],
+      explicit: true,
+    };
+    expect(normalizeCaptureRenderProfileSnapshot(fallbackSnapshot)).toEqual(
+      fallbackSnapshot,
+    );
+    expect(
+      normalizeCaptureRenderProfileSnapshot({
+        ...fallbackSnapshot,
+        antialiasing: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts only explicitly configured capture fallbacks and deduplicates them", () => {
+    expect(
+      resolveCaptureUrlCandidates({
+        primaryUrl: "https://game.example/stream.html",
+        fallbackUrls:
+          "https://game.example/spectator, https://game.example/stream.html",
+      }),
+    ).toEqual([
+      "https://game.example/stream.html",
+      "https://game.example/spectator",
+    ]);
+  });
+
+  it("accepts only an explicit loopback CDP browser origin", () => {
+    expect(resolveCaptureBrowserEndpoint(undefined)).toBeNull();
+    expect(resolveCaptureBrowserEndpoint(" http://127.0.0.1:9223 ")).toBe(
+      "http://127.0.0.1:9223",
+    );
+    expect(resolveCaptureBrowserEndpoint("http://localhost:9223")).toBe(
+      "http://localhost:9223",
+    );
+    expect(() =>
+      resolveCaptureBrowserEndpoint("https://127.0.0.1:9223"),
+    ).toThrow("loopback HTTP origin");
+    expect(() =>
+      resolveCaptureBrowserEndpoint("http://capture.example:9223"),
+    ).toThrow("loopback HTTP origin");
+    expect(() =>
+      resolveCaptureBrowserEndpoint("http://127.0.0.1:9223/json/version"),
+    ).toThrow("loopback HTTP origin");
+  });
+
   it("does not include disable-web-security in the default launch args", () => {
     const args = buildDefaultCaptureLaunchArgs({
       angleBackend: "metal",
@@ -15,6 +619,36 @@ describe("captureBrowserPolicy", () => {
 
     expect(args).not.toContain("--disable-web-security");
     expect(args).not.toContain("--no-sandbox");
+  });
+
+  it("selects capture features without mixing Vulkan into ANGLE/Metal", () => {
+    expect(resolveDefaultCaptureFeatureFlags("darwin")).toBe(
+      "--enable-features=UseSkiaRenderer,WebGPU",
+    );
+    expect(resolveDefaultCaptureFeatureFlags("linux")).toBe(
+      "--enable-features=Vulkan,UseSkiaRenderer,WebGPU",
+    );
+    expect(resolveDefaultCaptureFeatureFlags("win32")).toBe(
+      "--enable-features=UseSkiaRenderer,WebGPU",
+    );
+
+    const macArgs = buildDefaultCaptureLaunchArgs({
+      angleBackend: "metal",
+      featureFlags: resolveDefaultCaptureFeatureFlags("darwin"),
+    });
+    expect(macArgs).toContain("--use-angle=metal");
+    expect(macArgs).toContain("--enable-features=UseSkiaRenderer,WebGPU");
+    expect(macArgs.join(" ")).not.toContain("Vulkan");
+  });
+
+  it("retains the host display clock used for representative frame pacing", () => {
+    const args = buildDefaultCaptureLaunchArgs({
+      angleBackend: "metal",
+      featureFlags: "--enable-features=Vulkan,UseSkiaRenderer,WebGPU",
+    });
+
+    expect(args).not.toContain("--disable-frame-rate-limit");
+    expect(args).not.toContain("--disable-gpu-vsync");
   });
 
   it("only includes no-sandbox when capture sandboxing is explicitly disabled", () => {
@@ -116,6 +750,64 @@ describe("captureBrowserPolicy", () => {
         startedAt: 0,
         nowMs: 180_000,
       }),
+    ).toBe(false);
+  });
+
+  it("withholds readiness until the page proves the exact explicit render profile", () => {
+    const readySnapshot = {
+      ready: true,
+      degradedReason: null,
+      diagnostics: null,
+    };
+    expect(
+      shouldAcceptCaptureReadiness({
+        snapshot: readySnapshot,
+        startedAt: 0,
+        nowMs: 1_000,
+        expectedRenderProfileId: CANONICAL_CAPTURE_RENDER_PROFILE,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcceptCaptureReadiness({
+        snapshot: {
+          ...readySnapshot,
+          renderProfile: {
+            ...CAPTURE_RENDER_PROFILE_CONTRACTS[
+              FALLBACK_CAPTURE_RENDER_PROFILE
+            ],
+            explicit: true,
+          },
+        },
+        startedAt: 0,
+        nowMs: 1_000,
+        expectedRenderProfileId: CANONICAL_CAPTURE_RENDER_PROFILE,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcceptCaptureReadiness({
+        snapshot: {
+          ...readySnapshot,
+          renderProfile: {
+            ...CAPTURE_RENDER_PROFILE_CONTRACTS[
+              CANONICAL_CAPTURE_RENDER_PROFILE
+            ],
+            explicit: true,
+          },
+        },
+        startedAt: 0,
+        nowMs: 1_000,
+        expectedRenderProfileId: CANONICAL_CAPTURE_RENDER_PROFILE,
+      }),
+    ).toBe(true);
+    expect(
+      matchesExpectedCaptureRenderProfile(
+        {
+          ...CAPTURE_RENDER_PROFILE_CONTRACTS[CANONICAL_CAPTURE_RENDER_PROFILE],
+          targetFps: 30,
+          explicit: true,
+        },
+        CANONICAL_CAPTURE_RENDER_PROFILE,
+      ),
     ).toBe(false);
   });
 });

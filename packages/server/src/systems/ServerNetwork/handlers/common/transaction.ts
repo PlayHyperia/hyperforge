@@ -15,6 +15,10 @@
  */
 
 import { EventType } from "@hyperforge/shared";
+import {
+  runInPostgresTransaction,
+  type PostgresTransactionDatabase,
+} from "../../../../database/postgres-transaction";
 
 /**
  * InventorySystem interface for transaction locking operations.
@@ -100,9 +104,7 @@ function getRetryDelay(attempt: number): number {
  * Drizzle transaction type (extracted for readability).
  * This is the type of `tx` passed to transaction callbacks.
  */
-export type DrizzleTransaction = Parameters<
-  Parameters<BaseHandlerContext["db"]["drizzle"]["transaction"]>[0]
->[0];
+export type DrizzleTransaction = PostgresTransactionDatabase;
 
 /**
  * Configuration for secure transaction execution.
@@ -126,6 +128,14 @@ export interface TransactionConfig<
 
   /** Additional error message mappings (merged with defaults) */
   errorMessages?: Record<string, string>;
+
+  /**
+   * Optional machine-readable failure signal for authoritative callers.
+   * Known business failures are definitely rejected. Infrastructure failures
+   * are conservatively unknown because COMMIT may have reached PostgreSQL even
+   * when its response did not reach this process.
+   */
+  onFailure?: (status: "rejected" | "unknown", error: unknown) => void;
 }
 
 // ============================================================================
@@ -180,9 +190,10 @@ export async function executeSecureTransaction<
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       // Execute transaction
-      const result = await context.db.drizzle.transaction(async (tx) => {
-        return config.execute(tx, context);
-      });
+      const result = await runInPostgresTransaction(
+        context.db.pool,
+        async (tx) => config.execute(tx, context),
+      );
 
       return result;
     } catch (error) {
@@ -191,6 +202,7 @@ export async function executeSecureTransaction<
       // Check if this is a known business error
       const userMessage = errorMessages[errorMsg];
       if (userMessage) {
+        config.onFailure?.("rejected", error);
         sendErrorToast(context.socket, userMessage);
         return null;
       }
@@ -210,6 +222,7 @@ export async function executeSecureTransaction<
         `${handlerTag} Transaction failed (attempt ${attempt + 1}/${maxRetries}):`,
         error,
       );
+      config.onFailure?.("unknown", error);
       sendErrorToast(context.socket, "Operation failed - please try again");
       return null;
     }
@@ -217,6 +230,7 @@ export async function executeSecureTransaction<
 
   // All retries exhausted
   console.error(`${handlerTag} All ${maxRetries} retries failed`);
+  config.onFailure?.("unknown", new Error("transaction_retries_exhausted"));
   sendErrorToast(context.socket, "Operation failed - please try again");
   return null;
 }
@@ -332,8 +346,7 @@ export async function executeInventoryTransaction<T>(
   operation: () => Promise<T | null>,
 ): Promise<T | null> {
   const inventorySystem = context.world.getSystem("inventory") as
-    | InventorySystem
-    | undefined;
+    InventorySystem | undefined;
 
   if (!inventorySystem) {
     console.error("[InventoryTransaction] InventorySystem not available");

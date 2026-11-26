@@ -3,18 +3,29 @@
  *
  * Generates procedural docks on water bodies.
  * Follows the BridgeSystem pattern for collision registration:
- * - Walkable tiles: remove WATER flag, add DOCK flag
+ * - Compact decks: lifecycle-owned WATER/STEEP overlays, preserving base flags
  * - Edge blocking: classic MMORPG dual-tile wall flags on dock perimeter
  * - Deck height tracking: per-tile Y override for player positioning
  *
- * Works on both client (mesh + collision) and server (collision only).
+ * Works on both client and server with shared fitted triangle collision.
  *
  * @module ProceduralDocks
  */
 
+import type { Node } from "three/webgpu";
 import * as THREE from "three";
 import { System } from "../infrastructure/System";
 import type { World } from "../../../types";
+import { DataManager } from "../../../data/DataManager";
+import { RigidBody } from "../../../nodes/RigidBody";
+import { Collider } from "../../../nodes/Collider";
+import type { StaticCollisionLease } from "../movement/CollisionMatrix";
+import type { TerrainSystem } from "./TerrainSystem";
+import {
+  groundCompactPondDock,
+  POND_DOCK_SURFACE,
+  type GroundedPondDock,
+} from "./CompactPondDockLayout";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import type {
   ShorelinePoint,
@@ -27,7 +38,13 @@ import {
   type GeneratedDock,
   type DockRecipe,
 } from "@hyperforge/procgen/items/dock";
-import { ISLAND_DOCKS, type DockDefinition } from "./DockDefinition";
+import {
+  ISLAND_DOCKS,
+  getCompactPondDockDirection,
+  validateCompactPondDocks,
+  validateCompactPondDockBindings,
+  type DockDefinition,
+} from "./DockDefinition";
 import { CollisionFlag, getOppositeWallFlag } from "../movement/CollisionFlags";
 
 // TSL imports for dock material (client-only, same pattern as BridgeSystem)
@@ -48,6 +65,7 @@ import {
   mix,
   smoothstep,
   min as tslMin,
+  attribute,
 } from "three/tsl";
 
 // Constants — single source of truth from GameConstants
@@ -69,16 +87,18 @@ const DOCK_FENCE_CAP_HEIGHT = 0.05;
 const DOCK_FENCE_RAIL_HEIGHTS = [0.25, 0.6, 1.0];
 const DOCK_FENCE_RAIL_SIZE = 0.06;
 const DOCK_FENCE_POST_SPACING = 1.5;
+const COMPACT_DOCK_POST_CHAMFER = 0.008;
+const COMPACT_DOCK_RAIL_CHAMFER = 0.003;
 
 // ============================================================================
 // TSL Procedural Wood Functions (matching BridgeSystem quality)
 // ============================================================================
 
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = tslFloor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -93,7 +113,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
  * Wood plank pattern — horizontal planks with thin gaps.
  * Returns vec4(isPlank, plankIndex, 0, bevel).
  */
-const dockPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const dockPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.4);
   const gapWidth = float(0.01);
 
@@ -127,6 +147,97 @@ const dockWoodUV = Fn(() => {
   return mix(vertUV, deckUV, horiz);
 });
 
+/** Compact-only solid timber: X follows the member, Y/Z cut its growth rings.
+ * The same warped cross-section is visible on side and end faces, rather than
+ * unrelated side stripes/end rings. Inspired by Three r186 WoodNodeMaterial's
+ * local growth volume, without its multi-octave/Voronoi work. One noise sample,
+ * one filtered growth wave, no textures or micro-normal. */
+const compactDockTimberField = Fn(() => {
+  const coord = attribute("dockTimberCoord", "vec4");
+  const frame = attribute("dockTimberAxis", "vec4");
+  const plank = coord.w.lessThan(1.5).select(1, 0);
+  // All sixteen top rows remain byte-exact/shared. Derive a constant board ID
+  // in each row's interior, never interpolate a random seed between vertices.
+  // The exposed terminal cut at 8m belongs to board15, not a seventeenth board.
+  const board = tslFloor(coord.y.mul(2))
+    .clamp(0, 15)
+    .mul(plank)
+    .toVar("compactDockBoardIndex");
+  const seed = frame.w.add(board.mul(0.731));
+  const variation = tslHash(vec2(seed, seed.add(4.7))).toVar(
+    "compactDockBoardVariation",
+  );
+  const sectionU = mix(coord.y, coord.y.sub(board.mul(0.5)).sub(0.25), plank);
+  const broad = tslNoise2D(
+    vec2(coord.x.mul(0.32), sectionU.mul(2.4)).add(vec2(seed.mul(7.3), seed)),
+  ).toVar("compactDockBroadWeathering");
+  // Different cuts through the same kind of growth volume, not a regularly
+  // tiled cross-grain pattern. The pith is below the plank; longitudinal warp
+  // changes slowly, so growth lines remain aligned with the actual timber.
+  // Reuse the broad field to drift an eccentric, elliptical section along the
+  // member. Warping before length changes the shape of the growth lines, not
+  // just their spacing; the long axis stays slower than the cross section.
+  const warp = broad.sub(0.5);
+  const section = vec2(
+    sectionU
+      .add(variation.sub(0.5).mul(0.7))
+      .add(warp.mul(0.07))
+      .mul(mix(0.88, 1.12, variation)),
+    coord.z
+      .add(fract(variation.mul(7.13)).mul(0.25).add(0.12))
+      .add(warp.mul(0.035))
+      .mul(mix(0.84, 1.18, fract(variation.mul(5.17)))),
+  ).toVar("compactDockGrowthSection");
+  const ringFrequency = mix(110, 190, fract(variation.mul(3.71))).toVar(
+    "compactDockRingFrequency",
+  );
+  const growthPhase = section
+    .length()
+    .mul(ringFrequency)
+    .add(seed.mul(Math.PI * 2))
+    .toVar("compactDockGrowthPhase");
+  // Thin latewood lines sit within a wider earlywood field. This borrows the
+  // asymmetric ring response of Three's WoodNodeMaterial, not extra octaves.
+  // Subtract its analytical full-cycle mean before fading, so distant timber
+  // returns to the same weathered tone instead of becoming lighter or darker.
+  const latewood = smoothstep(0.28, 0.88, sin(growthPhase)).toVar(
+    "compactDockLatewood",
+  );
+  const growthVisibility = float(1)
+    .sub(smoothstep(0.45, 1.6, growthPhase.fwidth()))
+    .toVar("compactDockGrowthVisibility");
+  const growth = float(0.29968370474824446)
+    .sub(latewood)
+    .mul(growthVisibility)
+    .toVar("compactDockGrowthContrast");
+  const end = smoothstep(0.72, 0.96, abs(normalWorld.dot(frame.xyz)));
+  const grain = growth.mul(mix(0.085, 0.1, end)).toVar("compactDockGrainTone");
+  const rowLocal = fract(coord.y.mul(2));
+  const jointDistance = tslMin(rowLocal, float(1).sub(rowLocal)).mul(0.5);
+  const joint = float(1)
+    .sub(
+      smoothstep(0.001, coord.y.fwidth().max(0.002).add(0.003), jointDistance),
+    )
+    .mul(plank);
+  // Board tint and tone multiply. Keep their combined range restrained so
+  // joints separate boards without turning the landing into alternating bands.
+  const boardTone = float(0.95)
+    .add(variation.mul(0.04))
+    .toVar("compactDockBoardTone");
+  const tone = boardTone
+    .add(warp.mul(0.1))
+    .add(grain)
+    .sub(end.mul(0.065))
+    .sub(joint.mul(0.1));
+  const roughness = float(0.86)
+    .add(broad.mul(0.07))
+    .sub(grain.mul(0.25))
+    .add(end.mul(0.025))
+    .add(joint.mul(0.025))
+    .clamp(0.82, 0.98);
+  return vec4(tone, roughness, variation, coord.w.clamp(0, 1));
+});
+
 /** Pre-allocated test points for isTerrainReady(). */
 const TERRAIN_READY_TEST_POINTS: ReadonlyArray<{ x: number; z: number }> = [
   { x: 0, z: 0 },
@@ -148,6 +259,17 @@ interface DockInstance {
 interface TerrainSystemInterface {
   getHeightAt(x: number, z: number): number;
 }
+
+type CompactDockOwned = {
+  record: GroundedPondDock;
+  dock: GeneratedDock;
+  mesh: THREE.Mesh | null;
+  geometry: THREE.BufferGeometry | null;
+  body: RigidBody | null;
+  collider: Collider | null;
+  collision: StaticCollisionLease | null;
+  grass: { release(): void } | null;
+};
 
 interface StageSystemInterface {
   scene: THREE.Scene;
@@ -172,13 +294,24 @@ export class ProceduralDocks extends System {
 
   /** Pending dock generation queue — processed one per tick to avoid spikes. */
   private pendingDockQueue: DockDefinition[] = [];
+  private compactOwned: CompactDockOwned[] = [];
+  private compactTiles = new Map<number, GroundedPondDock>();
+  private generation = 0;
 
   constructor(world: World) {
     super(world);
     this.generator = new DockGenerator();
   }
 
+  getDependencies() {
+    return { required: ["terrain"], optional: ["stage", "physics"] };
+  }
+
   async init(): Promise<void> {
+    if (this.initialized) return;
+    const generation = ++this.generation;
+    await DataManager.getInstance().initialize();
+    if (generation !== this.generation) return;
     const terrain = this.world.getSystem("terrain");
     if (terrain && "getHeightAt" in terrain) {
       this.terrainSystem = terrain as unknown as TerrainSystemInterface;
@@ -188,6 +321,212 @@ export class ProceduralDocks extends System {
     if (stage && "scene" in stage) {
       this.scene = (stage as unknown as StageSystemInterface).scene;
     }
+    this.initialized = true;
+  }
+
+  override async start(): Promise<void> {
+    if (!this.initialized || this.started) return;
+    const generation = ++this.generation;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
+    const value = DataManager.getWorldConfig()?.compactPondDocks;
+    if (!value) {
+      this.docksGenerated = ISLAND_DOCKS.length === 0;
+      this.started = true;
+      return;
+    }
+    if (!terrain) throw new Error("Pond docks require authoritative terrain");
+    const layout = validateCompactPondDocks(
+      value,
+      terrain.getWorldTerrainProfile(),
+    )!;
+    const bound = validateCompactPondDockBindings(
+      layout,
+      DataManager.getInstance().getAllWorldAreas(),
+    )!;
+    const body = terrain
+      .getWaterBodyRegistry()
+      .getAllBodies()
+      .find((entry) => entry.id === bound.id);
+    if (
+      !body ||
+      body.sourceType !== "explicit" ||
+      body.centerX !== bound.centerX ||
+      body.centerZ !== bound.centerZ ||
+      body.radius !== bound.radius ||
+      body.radiusSq !== bound.radius ** 2 ||
+      body.surfaceY !== bound.surfaceY
+    )
+      throw new Error("Pond dock manifest and live water ownership differ");
+    const ground = terrain.captureCanonicalGroundLease();
+    try {
+      for (const descriptor of layout.docks) {
+        const record = groundCompactPondDock(descriptor, body, ground);
+        for (const tile of record.tiles) {
+          if (
+            this.world.collision.getFlags(tile.x, tile.z) &
+            (CollisionFlag.BLOCKED |
+              CollisionFlag.BRIDGE |
+              CollisionFlag.DOCK |
+              0xff)
+          )
+            throw new Error(
+              "Pond dock intersects existing movement infrastructure",
+            );
+        }
+        const direction = getCompactPondDockDirection(descriptor.rotation);
+        const recipe: DockRecipe = {
+          ...DEFAULT_DOCK_PARAMS,
+          label:
+            descriptor.recipeId === "haven-fishing-landing-v1"
+              ? "Fishing Landing"
+              : "Reed Jetty",
+          widthRange: [3, 3],
+          lengthRange: [6, 6],
+          postSpacing: 2,
+          postRadius: 0.18,
+          hasRailing: false,
+          deckHeight: record.deckY - body.surfaceY,
+        };
+        // Generate layout only: the retained fitted surface replaces the flat
+        // stock platform, and no throwaway client material/mesh is allocated.
+        const dock = this.generator.generate(
+          recipe,
+          {
+            position: { x: descriptor.x, y: record.deckY, z: descriptor.z },
+            waterwardNormal: direction,
+            landwardNormal: { x: -direction.x, z: -direction.z },
+            height: record.deckY,
+            slope: 0,
+            distanceFromCenter: 0,
+          },
+          { seed: descriptor.id, waterLevel: body.surfaceY, skipMesh: true },
+        );
+        const owned: CompactDockOwned = {
+          record,
+          dock,
+          mesh: null,
+          geometry: null,
+          body: null,
+          collider: null,
+          collision: null,
+          grass: null,
+        };
+        this.compactOwned.push(owned);
+        const mesh = this.buildDockMeshWorldSpace(
+          dock,
+          recipe,
+          body.surfaceY,
+          body.surfaceY - 3,
+          record,
+        );
+        if (!mesh) throw new Error("Pond dock generated no physical geometry");
+        owned.mesh = mesh;
+        owned.geometry = mesh.geometry;
+        mesh.name = `PondDock_${descriptor.id}`;
+        mesh.userData.dockId = descriptor.id;
+        if (this.world.physics) {
+          owned.body = new RigidBody({ type: "static", tag: descriptor.id });
+          owned.collider = new Collider({
+            type: "geometry",
+            geometry: mesh.geometry,
+            convex: false,
+            layer: "environment",
+          });
+          owned.body.add(owned.collider);
+          owned.body.activate(this.world);
+          if (
+            !owned.body.actor ||
+            !owned.body.actorHandle ||
+            !owned.collider.shape ||
+            !owned.collider.pmesh
+          )
+            throw new Error("Pond dock native triangle collision failed");
+        }
+        owned.collision = this.world.collision.acquireWalkableDeck(
+          record.tiles,
+          record.walls,
+        );
+        owned.grass = terrain.acquireGrassExclusionPolygons([
+          {
+            id: `pond-dock-${descriptor.id}`,
+            ...record.bounds,
+            vertices: [
+              { x: record.bounds.minX, z: record.bounds.minZ },
+              { x: record.bounds.maxX, z: record.bounds.minZ },
+              { x: record.bounds.maxX, z: record.bounds.maxZ },
+              { x: record.bounds.minX, z: record.bounds.maxZ },
+            ],
+          },
+        ]);
+        for (const tile of record.tiles)
+          this.compactTiles.set(dockTileKey(tile.x, tile.z), record);
+        this.scene?.add(mesh);
+        // Scene publication dispatches synchronous user callbacks. A teardown
+        // there already released this generation; never resurrect the next dock.
+        if (generation !== this.generation) return;
+      }
+      if (!ground.isCurrent())
+        throw new Error("Pond dock ground changed before publication");
+      this.docksGenerated = true;
+      this.started = true;
+    } catch (error) {
+      try {
+        this.releaseCompactDocks();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Pond dock startup and cleanup failed",
+        );
+      } finally {
+        if (!this.dockMeshes.length) {
+          const material = this.dockMaterial;
+          this.dockMaterial = null;
+          material?.dispose();
+        }
+      }
+      throw error;
+    }
+  }
+
+  getCompactDiagnostics() {
+    return Object.freeze(
+      this.compactOwned.map(({ record, geometry, body, collider }) =>
+        Object.freeze({
+          id: record.descriptor.id,
+          recipeId: record.descriptor.recipeId,
+          waterBodyId: record.waterBodyId,
+          deckY: record.deckY,
+          tiles: record.tiles.length,
+          railSegments: record.rails.length,
+          vertices: geometry?.getAttribute("position").count ?? 0,
+          triangles: (geometry?.getIndex()?.count ?? 0) / 3,
+          physicsActor: Boolean(body?.actor),
+          physicsShape: Boolean(collider?.shape),
+        }),
+      ),
+    );
+  }
+
+  private releaseCompactDocks(): void {
+    this.compactTiles.clear();
+    const owned = this.compactOwned.splice(0).reverse();
+    const failures: unknown[] = [];
+    const release = (fn: () => void) => {
+      try {
+        fn();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    for (const entry of owned) {
+      release(() => entry.mesh?.removeFromParent());
+      release(() => entry.body?.deactivate());
+      release(() => entry.geometry?.dispose());
+      release(() => entry.collision?.release());
+      release(() => entry.grass?.release());
+    }
+    if (failures.length)
+      throw new AggregateError(failures, "Pond dock cleanup failed");
   }
 
   /**
@@ -462,6 +801,7 @@ export class ProceduralDocks extends System {
     recipe: DockRecipe,
     waterLevel: number,
     waterFloorY: number,
+    grounded?: GroundedPondDock,
   ): THREE.Mesh | null {
     const { position, direction, length, width } = dock.layout;
     const perpX = -direction.z;
@@ -470,100 +810,138 @@ export class ProceduralDocks extends System {
     const deckY = position.y; // layout.position.y = waterLevel + deckHeight
 
     const woodGeometries: THREE.BufferGeometry[] = [];
+    try {
+      // Helper to build a dock section (main body, T-section, or L-section)
+      const buildSection = (
+        sx: number,
+        sz: number,
+        dx: number,
+        dz: number,
+        px: number,
+        pz: number,
+        sectionLen: number,
+        sectionWidth: number,
+        postSpacing: number,
+        postRadius: number,
+      ) => {
+        const hw = sectionWidth / 2;
 
-    // Helper to build a dock section (main body, T-section, or L-section)
-    const buildSection = (
-      sx: number,
-      sz: number,
-      dx: number,
-      dz: number,
-      px: number,
-      pz: number,
-      sectionLen: number,
-      sectionWidth: number,
-      postSpacing: number,
-      postRadius: number,
-    ) => {
-      const hw = sectionWidth / 2;
+        // Compact planks retain the exact admitted top and close below it.
+        // Legacy generated docks keep their historical geometry.
+        const deckGeo = grounded
+          ? this.buildCompactDockPlanks(grounded)
+          : this.buildDockDeckGeometry(
+              sx,
+              sz,
+              deckY,
+              dx,
+              dz,
+              px,
+              pz,
+              sectionLen,
+              sectionWidth,
+            );
+        if (deckGeo) woodGeometries.push(deckGeo);
 
-      // ── Deck surface (top face only, custom grid mesh) ──
-      const deckGeo = this.buildDockDeckGeometry(
-        sx,
-        sz,
-        deckY,
-        dx,
-        dz,
-        px,
-        pz,
-        sectionLen,
-        sectionWidth,
-      );
-      if (deckGeo) woodGeometries.push(deckGeo);
-
-      // ── Side stringers (structural beams under deck edges) ──
-      const stringerY = deckY - DOCK_STRINGER_HEIGHT / 2 - 0.03;
-      for (const side of [-1, 1]) {
-        woodGeometries.push(
-          this.buildOrientedRail(
-            sx + px * hw * side,
-            sz + pz * hw * side,
-            stringerY,
-            sx + dx * sectionLen + px * hw * side,
-            sz + dz * sectionLen + pz * hw * side,
-            stringerY,
-            DOCK_STRINGER_WIDTH,
-            DOCK_STRINGER_HEIGHT,
-            px,
-            pz,
-          ),
-        );
-      }
-
-      // ── Cross joists (transverse beams between stringers) ──
-      const joistCount = Math.max(
-        2,
-        Math.floor(sectionLen / DOCK_JOIST_SPACING) + 1,
-      );
-      const inset = DOCK_STRINGER_WIDTH / 2;
-      for (let j = 0; j < joistCount; j++) {
-        const t = j / (joistCount - 1);
-        const cx = sx + dx * sectionLen * t;
-        const cz = sz + dz * sectionLen * t;
-        const joistY = deckY - DOCK_JOIST_HEIGHT / 2 - 0.03;
-        woodGeometries.push(
-          this.buildOrientedRail(
-            cx + px * (hw - inset),
-            cz + pz * (hw - inset),
-            joistY,
-            cx - px * (hw - inset),
-            cz - pz * (hw - inset),
-            joistY,
-            DOCK_JOIST_WIDTH,
-            DOCK_JOIST_HEIGHT,
-            dx,
-            dz,
-          ),
-        );
-      }
-
-      // ── Support posts (square, from water floor to deck underside) ──
-      const postCount = Math.max(2, Math.ceil(sectionLen / postSpacing) + 1);
-      const postSize = postRadius * 2;
-      const postInset = hw - postRadius * 2;
-      for (let p = 0; p < postCount; p++) {
-        const t = p / (postCount - 1);
-        const cx = sx + dx * sectionLen * t;
-        const cz = sz + dz * sectionLen * t;
-
+        // ── Side stringers (structural beams under deck edges) ──
+        const stringerY = deckY - DOCK_STRINGER_HEIGHT / 2 - 0.03;
         for (const side of [-1, 1]) {
-          const postX = cx + px * postInset * side;
-          const postZ = cz + pz * postInset * side;
-          const postHeight = deckY - waterFloorY;
-          if (postHeight < 0.2) continue;
+          woodGeometries.push(
+            this.buildOrientedRail(
+              sx + px * hw * side,
+              sz + pz * hw * side,
+              stringerY,
+              sx + dx * sectionLen + px * hw * side,
+              sz + dz * sectionLen + pz * hw * side,
+              stringerY,
+              DOCK_STRINGER_WIDTH,
+              DOCK_STRINGER_HEIGHT,
+              px,
+              pz,
+            ),
+          );
+        }
+
+        // ── Cross joists (transverse beams between stringers) ──
+        const joistCount = Math.max(
+          2,
+          Math.floor(sectionLen / DOCK_JOIST_SPACING) + 1,
+        );
+        const inset = DOCK_STRINGER_WIDTH / 2;
+        for (let j = 0; j < joistCount; j++) {
+          const t = j / (joistCount - 1);
+          const cx = sx + dx * sectionLen * t;
+          const cz = sz + dz * sectionLen * t;
+          const joistY = deckY - DOCK_JOIST_HEIGHT / 2 - 0.03;
+          woodGeometries.push(
+            this.buildOrientedRail(
+              cx + px * (hw - inset),
+              cz + pz * (hw - inset),
+              joistY,
+              cx - px * (hw - inset),
+              cz - pz * (hw - inset),
+              joistY,
+              DOCK_JOIST_WIDTH,
+              DOCK_JOIST_HEIGHT,
+              dx,
+              dz,
+            ),
+          );
+        }
+
+        // ── Support posts (square, from water floor to deck underside) ──
+        const postCount = Math.max(2, Math.ceil(sectionLen / postSpacing) + 1);
+        const postSize = postRadius * 2;
+        const postInset = hw - postRadius * 2;
+        const supportPosts =
+          grounded?.posts ??
+          Array.from({ length: postCount }, (_, p) => {
+            const t = p / (postCount - 1);
+            const cx = sx + dx * sectionLen * t;
+            const cz = sz + dz * sectionLen * t;
+            return [-1, 1].map((side) => ({
+              x: cx + px * postInset * side,
+              z: cz + pz * postInset * side,
+              bottomY: waterFloorY,
+            }));
+          }).flat();
+        for (const support of supportPosts) {
+          const postX = support.x,
+            postZ = support.z,
+            floorY = support.bottomY;
+          const supportDeckY = grounded
+            ? grounded.heightAt(postX, postZ)
+            : deckY;
+          if (supportDeckY === null || !Number.isFinite(supportDeckY))
+            throw new Error("Dock support escapes its retained deck");
+          // Compact planks are solid: the cap meets their actual underside,
+          // and the shaft meets the cap, never the walkable top. Preserve the
+          // historical zero-thickness generated dock equations otherwise.
+          const capTopY = grounded
+            ? Math.fround(supportDeckY - POND_DOCK_SURFACE.boardThickness)
+            : deckY;
+          const postTopY = grounded
+            ? Math.fround(capTopY - DOCK_POST_CAP_HEIGHT)
+            : deckY;
+          const postHeight = postTopY - floorY;
+          if (grounded && postHeight <= 0)
+            throw new Error("Dock support cannot fit below its plank and cap");
+          if (!grounded && postHeight < 0.2) continue;
 
           // Post shaft
           const postGeo = new THREE.BoxGeometry(postSize, postHeight, postSize);
-          postGeo.translate(postX, waterFloorY + postHeight / 2, postZ);
+          postGeo.translate(postX, floorY + postHeight / 2, postZ);
+          if (grounded) {
+            // Keep the fitted Float32 interfaces exact, avoiding cancellation
+            // in BoxGeometry's half-height followed by translation.
+            const p = postGeo.getAttribute("position");
+            for (let i = 0; i < p.count; i++)
+              p.setY(
+                i,
+                p.getY(i) > floorY + postHeight / 2 ? postTopY : floorY,
+              );
+            postGeo.userData.dockVerticalTimber = true;
+          }
           woodGeometries.push(postGeo);
 
           // Post cap (wider, just under deck)
@@ -573,33 +951,19 @@ export class ProceduralDocks extends System {
             DOCK_POST_CAP_HEIGHT,
             capSize,
           );
-          capGeo.translate(postX, deckY - DOCK_POST_CAP_HEIGHT / 2, postZ);
+          const capCenterY = capTopY - DOCK_POST_CAP_HEIGHT / 2;
+          capGeo.translate(postX, capCenterY, postZ);
+          if (grounded) {
+            const p = capGeo.getAttribute("position");
+            for (let i = 0; i < p.count; i++)
+              p.setY(i, p.getY(i) > capCenterY ? capTopY : postTopY);
+          }
           woodGeometries.push(capGeo);
         }
-      }
-    };
+      };
 
-    // ── Build main dock section ──
-    buildSection(
-      position.x,
-      position.z,
-      direction.x,
-      direction.z,
-      perpX,
-      perpZ,
-      length,
-      width,
-      recipe.postSpacing,
-      recipe.postRadius,
-    );
-
-    // ── Fence posts + rails (if hasRailing) ──
-    if (recipe.hasRailing) {
-      const hasTSection = dock.layout.tSection != null;
-      const hasLSection = dock.layout.lSection != null;
-
-      this.buildFenceForSection(
-        woodGeometries,
+      // ── Build main dock section ──
+      buildSection(
         position.x,
         position.z,
         direction.x,
@@ -608,40 +972,57 @@ export class ProceduralDocks extends System {
         perpZ,
         length,
         width,
-        deckY,
-        true, // include start railing (shore end is open for entry)
-        !(hasTSection || hasLSection), // skip end railing if T/L junction
-      );
-    }
-
-    // ── T-section (perpendicular bar at dock end) ──
-    if (dock.layout.tSection) {
-      const tWidth = dock.layout.tSection.width;
-      const halfTWidth = tWidth / 2;
-      const endX = position.x + direction.x * length;
-      const endZ = position.z + direction.z * length;
-
-      // T-section: runs perpendicular, centered at dock end
-      const tStartX = endX - perpX * halfTWidth;
-      const tStartZ = endZ - perpZ * halfTWidth;
-
-      buildSection(
-        tStartX,
-        tStartZ,
-        perpX,
-        perpZ,
-        -direction.x,
-        -direction.z,
-        tWidth,
-        width,
         recipe.postSpacing,
         recipe.postRadius,
       );
 
-      // T-section fence (3 outer edges)
+      if (grounded) {
+        for (const rail of grounded.rails) {
+          this.buildFenceSide(
+            woodGeometries,
+            rail.start.x,
+            rail.start.z,
+            rail.end.x,
+            rail.end.z,
+            deckY,
+            true,
+          );
+        }
+      }
+
+      // ── Fence posts + rails (if hasRailing) ──
       if (recipe.hasRailing) {
+        const hasTSection = dock.layout.tSection != null;
+        const hasLSection = dock.layout.lSection != null;
+
         this.buildFenceForSection(
           woodGeometries,
+          position.x,
+          position.z,
+          direction.x,
+          direction.z,
+          perpX,
+          perpZ,
+          length,
+          width,
+          deckY,
+          true, // include start railing (shore end is open for entry)
+          !(hasTSection || hasLSection), // skip end railing if T/L junction
+        );
+      }
+
+      // ── T-section (perpendicular bar at dock end) ──
+      if (dock.layout.tSection) {
+        const tWidth = dock.layout.tSection.width;
+        const halfTWidth = tWidth / 2;
+        const endX = position.x + direction.x * length;
+        const endZ = position.z + direction.z * length;
+
+        // T-section: runs perpendicular, centered at dock end
+        const tStartX = endX - perpX * halfTWidth;
+        const tStartZ = endZ - perpZ * halfTWidth;
+
+        buildSection(
           tStartX,
           tStartZ,
           perpX,
@@ -650,47 +1031,48 @@ export class ProceduralDocks extends System {
           -direction.z,
           tWidth,
           width,
-          deckY,
-          true, // both ends
-          true,
+          recipe.postSpacing,
+          recipe.postRadius,
         );
-        // Front edge (outer, along main dock direction)
-        this.buildFenceSide(
-          woodGeometries,
-          endX + direction.x * (width / 2) - perpX * halfTWidth,
-          endZ + direction.z * (width / 2) - perpZ * halfTWidth,
-          endX + direction.x * (width / 2) + perpX * halfTWidth,
-          endZ + direction.z * (width / 2) + perpZ * halfTWidth,
-          deckY,
-        );
+
+        // T-section fence (3 outer edges)
+        if (recipe.hasRailing) {
+          this.buildFenceForSection(
+            woodGeometries,
+            tStartX,
+            tStartZ,
+            perpX,
+            perpZ,
+            -direction.x,
+            -direction.z,
+            tWidth,
+            width,
+            deckY,
+            true, // both ends
+            true,
+          );
+          // Front edge (outer, along main dock direction)
+          this.buildFenceSide(
+            woodGeometries,
+            endX + direction.x * (width / 2) - perpX * halfTWidth,
+            endZ + direction.z * (width / 2) - perpZ * halfTWidth,
+            endX + direction.x * (width / 2) + perpX * halfTWidth,
+            endZ + direction.z * (width / 2) + perpZ * halfTWidth,
+            deckY,
+          );
+        }
       }
-    }
 
-    // ── L-section (90-degree turn at dock end) ──
-    if (dock.layout.lSection) {
-      const lLen = dock.layout.lSection.length;
-      const lDir = dock.layout.lSection.direction;
-      const lPerpX = -lDir.z;
-      const lPerpZ = lDir.x;
-      const lStartX = position.x + direction.x * length;
-      const lStartZ = position.z + direction.z * length;
+      // ── L-section (90-degree turn at dock end) ──
+      if (dock.layout.lSection) {
+        const lLen = dock.layout.lSection.length;
+        const lDir = dock.layout.lSection.direction;
+        const lPerpX = -lDir.z;
+        const lPerpZ = lDir.x;
+        const lStartX = position.x + direction.x * length;
+        const lStartZ = position.z + direction.z * length;
 
-      buildSection(
-        lStartX,
-        lStartZ,
-        lDir.x,
-        lDir.z,
-        lPerpX,
-        lPerpZ,
-        lLen,
-        width,
-        recipe.postSpacing,
-        recipe.postRadius,
-      );
-
-      if (recipe.hasRailing) {
-        this.buildFenceForSection(
-          woodGeometries,
+        buildSection(
           lStartX,
           lStartZ,
           lDir.x,
@@ -699,29 +1081,66 @@ export class ProceduralDocks extends System {
           lPerpZ,
           lLen,
           width,
-          deckY,
-          false, // skip start (junction with main dock)
-          true, // include end
+          recipe.postSpacing,
+          recipe.postRadius,
         );
+
+        if (recipe.hasRailing) {
+          this.buildFenceForSection(
+            woodGeometries,
+            lStartX,
+            lStartZ,
+            lDir.x,
+            lDir.z,
+            lPerpX,
+            lPerpZ,
+            lLen,
+            width,
+            deckY,
+            false, // skip start (junction with main dock)
+            true, // include end
+          );
+        }
       }
+
+      // ── Merge all wood geometry into single mesh ──
+      if (woodGeometries.length === 0) return null;
+
+      if (grounded) {
+        for (let index = 0; index < woodGeometries.length; index++) {
+          let geometry = woodGeometries[index];
+          // The inherited rail box shares eight corners, producing rounded
+          // normals on square lumber. Separate only compact member faces.
+          if (index > 0 && geometry.getAttribute("position").count === 8) {
+            const faces = geometry.toNonIndexed();
+            faces.computeVertexNormals();
+            geometry.dispose();
+            woodGeometries[index] = geometry = faces;
+          }
+          this.addCompactTimberCoordinates(geometry, grounded, index);
+        }
+      }
+
+      const merged = this.mergeGeometries(woodGeometries);
+      if (!merged) return null;
+
+      try {
+        const material = this.getOrCreateDockMaterial();
+        const mesh = new THREE.Mesh(merged, material);
+        mesh.name = "Dock";
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.frustumCulled = true;
+        mesh.userData = { type: "terrain", walkable: true, clickable: true };
+
+        return mesh;
+      } catch (error) {
+        merged.dispose();
+        throw error;
+      }
+    } finally {
+      for (const geometry of woodGeometries) geometry.dispose();
     }
-
-    // ── Merge all wood geometry into single mesh ──
-    if (woodGeometries.length === 0) return null;
-
-    const merged = this.mergeGeometries(woodGeometries);
-    for (const g of woodGeometries) g.dispose();
-    if (!merged) return null;
-
-    const material = this.getOrCreateDockMaterial();
-    const mesh = new THREE.Mesh(merged, material);
-    mesh.name = "Dock";
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.frustumCulled = true;
-    mesh.userData = { type: "terrain", walkable: true, clickable: true };
-
-    return mesh;
   }
 
   /**
@@ -734,9 +1153,12 @@ export class ProceduralDocks extends System {
     endX: number,
     endZ: number,
     deckY: number,
+    compact = false,
   ): void {
     const dx = endX - startX;
     const dz = endZ - startZ;
+    if (compact && dx !== 0 && dz !== 0)
+      throw new Error("Compact timber rails require a cardinal footprint");
     const sideLen = Math.sqrt(dx * dx + dz * dz);
     if (sideLen < 0.5) return;
 
@@ -762,7 +1184,12 @@ export class ProceduralDocks extends System {
         DOCK_FENCE_POST_SIZE,
       );
       postGeo.translate(px, deckY + DOCK_FENCE_HEIGHT / 2, pz);
-      woodGeometries.push(postGeo);
+      postGeo.userData.dockVerticalTimber = true;
+      woodGeometries.push(
+        compact
+          ? this.chamferCompactTimber(postGeo, COMPACT_DOCK_POST_CHAMFER)
+          : postGeo,
+      );
 
       const capSize = DOCK_FENCE_POST_SIZE + DOCK_FENCE_CAP_OVERHANG * 2;
       const capGeo = new THREE.BoxGeometry(
@@ -775,7 +1202,11 @@ export class ProceduralDocks extends System {
         deckY + DOCK_FENCE_HEIGHT + DOCK_FENCE_CAP_HEIGHT / 2,
         pz,
       );
-      woodGeometries.push(capGeo);
+      woodGeometries.push(
+        compact
+          ? this.chamferCompactTimber(capGeo, COMPACT_DOCK_POST_CHAMFER)
+          : capGeo,
+      );
     }
 
     // Horizontal rails connecting posts
@@ -788,21 +1219,139 @@ export class ProceduralDocks extends System {
       const pz1 = startZ + dz * t1;
 
       for (const railH of DOCK_FENCE_RAIL_HEIGHTS) {
+        const rail = this.buildOrientedRail(
+          px0,
+          pz0,
+          deckY + railH,
+          px1,
+          pz1,
+          deckY + railH,
+          DOCK_FENCE_RAIL_SIZE,
+          DOCK_FENCE_RAIL_SIZE,
+          spx,
+          spz,
+        );
         woodGeometries.push(
-          this.buildOrientedRail(
-            px0,
-            pz0,
-            deckY + railH,
-            px1,
-            pz1,
-            deckY + railH,
-            DOCK_FENCE_RAIL_SIZE,
-            DOCK_FENCE_RAIL_SIZE,
-            spx,
-            spz,
-          ),
+          compact
+            ? this.chamferCompactTimber(rail, COMPACT_DOCK_RAIL_CHAMFER)
+            : rail,
         );
       }
+    }
+  }
+
+  /** Single-cut chamfers for the cardinal compact rail assemblies only.
+   * Six broad faces, twelve edge faces and eight corner faces: 44 triangles,
+   * with flat normals per face. All points stay inside the original Float32
+   * box, retaining its exact extents and member identity. The fitted walking
+   * top, support posts and legacy generated docks never enter this path.
+   * Takes ownership of the original box, including on construction failure. */
+  private chamferCompactTimber(
+    original: THREE.BufferGeometry,
+    inset: number,
+  ): THREE.BufferGeometry {
+    try {
+      original.computeBoundingBox();
+      const box = original.boundingBox!;
+      const low = box.min.toArray();
+      const high = box.max.toArray();
+      if (
+        !Number.isFinite(inset) ||
+        inset <= 0 ||
+        low.some(
+          (value, axis) =>
+            !Number.isFinite(value) ||
+            !Number.isFinite(high[axis]) ||
+            high[axis] - value <= inset * 2,
+        )
+      )
+        throw new Error("Invalid compact timber chamfer bounds");
+      const center = box.getCenter(new THREE.Vector3());
+      const positions: number[] = [];
+      const normals: number[] = [];
+      const indices: number[] = [];
+      const point = (signs: number[], outerAxis: number) => {
+        const coordinates = signs.map((sign, axis) =>
+          Math.fround(
+            sign > 0
+              ? high[axis] - (axis === outerAxis ? 0 : inset)
+              : low[axis] + (axis === outerAxis ? 0 : inset),
+          ),
+        );
+        return new THREE.Vector3(
+          coordinates[0],
+          coordinates[1],
+          coordinates[2],
+        );
+      };
+      const face = (vertices: THREE.Vector3[]) => {
+        const normal = vertices[1]
+          .clone()
+          .sub(vertices[0])
+          .cross(vertices[2].clone().sub(vertices[0]));
+        if (normal.dot(vertices[0].clone().sub(center)) < 0) {
+          vertices.reverse();
+          normal.negate();
+        }
+        normal.normalize();
+        const start = positions.length / 3;
+        for (const vertex of vertices) {
+          positions.push(...vertex.toArray());
+          normals.push(...normal.toArray());
+        }
+        for (let i = 1; i < vertices.length - 1; i++)
+          indices.push(start, start + i, start + i + 1);
+      };
+      for (let axis = 0; axis < 3; axis++) {
+        const a = (axis + 1) % 3,
+          b = (axis + 2) % 3;
+        for (const side of [-1, 1]) {
+          face(
+            [
+              [-1, -1],
+              [1, -1],
+              [1, 1],
+              [-1, 1],
+            ].map(([sa, sb]) => {
+              const signs = [0, 0, 0];
+              signs[axis] = side;
+              signs[a] = sa;
+              signs[b] = sb;
+              return point(signs, axis);
+            }),
+          );
+        }
+        // Four chamfered edges parallel to this axis.
+        for (const sa of [-1, 1])
+          for (const sb of [-1, 1]) {
+            const signs = [0, 0, 0];
+            signs[a] = sa;
+            signs[b] = sb;
+            signs[axis] = -1;
+            const p0 = point(signs, a),
+              p1 = point(signs, b);
+            signs[axis] = 1;
+            face([p0, p1, point(signs, b), point(signs, a)]);
+          }
+      }
+      for (const x of [-1, 1])
+        for (const y of [-1, 1])
+          for (const z of [-1, 1])
+            face([0, 1, 2].map((axis) => point([x, y, z], axis)));
+      const result = new THREE.BufferGeometry();
+      result.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(positions, 3),
+      );
+      result.setAttribute(
+        "normal",
+        new THREE.Float32BufferAttribute(normals, 3),
+      );
+      result.setIndex(indices);
+      result.userData = { ...original.userData };
+      return result;
+    } finally {
+      original.dispose();
     }
   }
 
@@ -862,6 +1411,176 @@ export class ProceduralDocks extends System {
     if (includeStartRailing) {
       // Shore end is typically open, skip for standard docks
     }
+  }
+
+  /**
+   * Sixteen fitted 0.5m transverse planks, 0.12m thick. The first position and
+   * index ranges are byte-identical to the retained walkable top. Bottoms and
+   * four sides close each plank; adjoining faces touch without raised seams or
+   * holes in the walking surface. This adds 640 triangles, never another draw.
+   */
+  private buildCompactDockPlanks(
+    record: GroundedPondDock,
+  ): THREE.BufferGeometry {
+    const columns = 7;
+    const rows = 17;
+    const thickness = POND_DOCK_SURFACE.boardThickness;
+    const positions = Array.from(record.positions);
+    const indices = Array.from(record.indices);
+    const top = new THREE.BufferGeometry();
+    top.setAttribute(
+      "position",
+      new THREE.BufferAttribute(record.positions, 3),
+    );
+    top.setIndex(new THREE.BufferAttribute(record.indices, 1));
+    top.computeVertexNormals();
+    const normals = Array.from(top.getAttribute("normal").array);
+    top.dispose();
+    const point = (index: number, lower = false) =>
+      new THREE.Vector3(
+        record.positions[index * 3],
+        lower
+          ? Math.fround(record.positions[index * 3 + 1] - thickness)
+          : record.positions[index * 3 + 1],
+        record.positions[index * 3 + 2],
+      );
+    const quad = (
+      a: THREE.Vector3,
+      b: THREE.Vector3,
+      c: THREE.Vector3,
+      d: THREE.Vector3,
+    ) => {
+      const normal = b.clone().sub(a).cross(c.clone().sub(a)).normalize();
+      const base = positions.length / 3;
+      for (const p of [a, b, c, d]) {
+        positions.push(p.x, p.y, p.z);
+        normals.push(normal.x, normal.y, normal.z);
+      }
+      indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+    };
+    for (let row = 0; row < rows - 1; row++) {
+      const lowerStart = positions.length / 3;
+      for (let r = row; r <= row + 1; r++)
+        for (let column = 0; column < columns; column++) {
+          const sourceIndex = r * columns + column;
+          const p = point(sourceIndex, true);
+          positions.push(p.x, p.y, p.z);
+          normals.push(
+            -normals[sourceIndex * 3],
+            -normals[sourceIndex * 3 + 1],
+            -normals[sourceIndex * 3 + 2],
+          );
+        }
+      for (let column = 0; column < columns - 1; column++) {
+        const a = lowerStart + column,
+          b = a + 1,
+          c = a + columns,
+          d = c + 1;
+        indices.push(a, c, b, b, c, d);
+        const front = row * columns + column;
+        const back = front + columns;
+        quad(
+          point(front),
+          point(front, true),
+          point(front + 1),
+          point(front + 1, true),
+        );
+        quad(
+          point(back),
+          point(back + 1),
+          point(back, true),
+          point(back + 1, true),
+        );
+      }
+      const left = row * columns;
+      const right = left + columns - 1;
+      quad(
+        point(left),
+        point(left + columns),
+        point(left, true),
+        point(left + columns, true),
+      );
+      quad(
+        point(right),
+        point(right, true),
+        point(right + columns),
+        point(right + columns, true),
+      );
+    }
+    const result = new THREE.BufferGeometry();
+    result.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(positions, 3),
+    );
+    result.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    result.setIndex(indices);
+    return result;
+  }
+
+  /** Member-local metre coordinates permit one PBR material for both docks.
+   * A zero mask on historical geometry retains its original material result. */
+  private addCompactTimberCoordinates(
+    geometry: THREE.BufferGeometry,
+    record: GroundedPondDock,
+    member: number,
+  ): void {
+    const position = geometry.getAttribute("position");
+    const coord = new Float32Array(position.count * 4);
+    const frames = new Float32Array(position.count * 4);
+    const direction = getCompactPondDockDirection(record.descriptor.rotation);
+    const grain = new THREE.Vector3(-direction.z, 0, direction.x);
+    const across = new THREE.Vector3(direction.x, 0, direction.z);
+    const origin = new THREE.Vector3(
+      record.descriptor.x,
+      record.deckY,
+      record.descriptor.z,
+    );
+    if (member !== 0) {
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox!;
+      const size = box.getSize(new THREE.Vector3());
+      box.getCenter(origin);
+      if (
+        geometry.userData.dockVerticalTimber === true ||
+        (size.y > size.x && size.y > size.z)
+      )
+        grain.set(0, 1, 0);
+      else if (size.x > size.z) grain.set(1, 0, 0);
+      else grain.set(0, 0, 1);
+      if (grain.y === 1) across.set(-direction.z, 0, direction.x);
+      else across.set(0, 1, 0);
+    }
+    const depth = grain.clone().cross(across);
+    // Seed identity follows the authored dock/member, not its world position.
+    // Keep 24 bits in [0,1), exactly representable by the existing float attr.
+    // Thus moving a dock does not repaint it and the two recipes no longer
+    // share the same deck/rail pattern. Board identity is added in the shader.
+    let seed = 2166136261;
+    const memberId = `${record.descriptor.id}:${member}`;
+    for (let i = 0; i < memberId.length; i++)
+      seed = Math.imul(seed ^ memberId.charCodeAt(i), 16777619);
+    const memberSeed = (seed >>> 8) / 16777216;
+    const p = new THREE.Vector3();
+    for (let i = 0; i < position.count; i++) {
+      p.fromBufferAttribute(position, i).sub(origin);
+      coord[i * 4] = p.dot(grain);
+      coord[i * 4 + 1] = p.dot(across) + (member === 0 ? 2 : 0);
+      coord[i * 4 + 2] =
+        member === 0
+          ? position.getY(i) -
+            record.heightAt(position.getX(i), position.getZ(i))!
+          : p.dot(depth);
+      coord[i * 4 + 3] = member === 0 ? 1 : 2;
+      frames.set([grain.x, grain.y, grain.z, memberSeed], i * 4);
+    }
+    geometry.setAttribute(
+      "dockTimberCoord",
+      new THREE.BufferAttribute(coord, 4),
+    );
+    geometry.setAttribute(
+      "dockTimberAxis",
+      new THREE.BufferAttribute(frames, 4),
+    );
   }
 
   /**
@@ -1021,6 +1740,8 @@ export class ProceduralDocks extends System {
     const allVerts: number[] = [];
     const allNormals: number[] = [];
     const allIndices: number[] = [];
+    const allTimberCoordinates: number[] = [];
+    const allTimberAxes: number[] = [];
     let vertexOffset = 0;
 
     for (const geo of geometries) {
@@ -1041,6 +1762,22 @@ export class ProceduralDocks extends System {
       } else {
         for (let i = 0; i < posAttr.count; i++) {
           allNormals.push(0, 1, 0);
+        }
+      }
+      for (const [name, values] of [
+        ["dockTimberCoord", allTimberCoordinates],
+        ["dockTimberAxis", allTimberAxes],
+      ] as const) {
+        const timber = geo.getAttribute(name);
+        for (let i = 0; i < posAttr.count; i++) {
+          if (timber)
+            values.push(
+              timber.getX(i),
+              timber.getY(i),
+              timber.getZ(i),
+              timber.getW(i),
+            );
+          else values.push(0, 0, 0, 0);
         }
       }
 
@@ -1070,6 +1807,14 @@ export class ProceduralDocks extends System {
       new THREE.Float32BufferAttribute(allNormals, 3),
     );
     merged.setIndex(allIndices);
+    merged.setAttribute(
+      "dockTimberCoord",
+      new THREE.Float32BufferAttribute(allTimberCoordinates, 4),
+    );
+    merged.setAttribute(
+      "dockTimberAxis",
+      new THREE.Float32BufferAttribute(allTimberAxes, 4),
+    );
     return merged;
   }
 
@@ -1090,6 +1835,8 @@ export class ProceduralDocks extends System {
    */
   private createDockWoodMaterial(): MeshStandardNodeMaterial {
     const mat = new MeshStandardNodeMaterial();
+    const timber = compactDockTimberField().toVar("compactDockTimber");
+    mat.metalness = 0;
 
     mat.colorNode = Fn(() => {
       const uvCoord = dockWoodUV();
@@ -1114,7 +1861,14 @@ export class ProceduralDocks extends System {
 
       // Dark gap between planks
       const gapColor = vec3(0.06, 0.04, 0.02);
-      return vec4(mix(gapColor, woodColor.mul(edgeDark), isPlank), 1.0);
+      const historical = mix(gapColor, woodColor.mul(edgeDark), isPlank);
+      const palette = mix(
+        vec3(0.2565, 0.2005, 0.1405),
+        vec3(0.2685, 0.2125, 0.1505),
+        timber.z,
+      ).toVar("compactDockBoardPalette");
+      const compact = palette.mul(timber.x);
+      return vec4(mix(historical, compact, timber.w), 1.0);
     })();
 
     mat.roughnessNode = Fn(() => {
@@ -1127,7 +1881,7 @@ export class ProceduralDocks extends System {
       const woodRough = float(0.82).add(
         tslHash(plankId.add(vec2(7.0, 3.0))).mul(0.1),
       );
-      return mix(float(0.95), woodRough, isPlank);
+      return mix(mix(float(0.95), woodRough, isPlank), timber.y, timber.w);
     })();
 
     return mat;
@@ -1142,6 +1896,8 @@ export class ProceduralDocks extends System {
    */
   getDeckHeightAt(tileX: number, tileZ: number): number | null {
     const key = dockTileKey(tileX, tileZ);
+    const compact = this.compactTiles.get(key);
+    if (compact) return compact.heightAt(tileX + 0.5, tileZ + 0.5);
     const h = this.dockDeckHeights.get(key);
     return h !== undefined ? h : null;
   }
@@ -1149,11 +1905,13 @@ export class ProceduralDocks extends System {
   /**
    * Get dock deck height at a world position.
    * Called by TerrainSystem.getHeightAt() for dock-aware terrain height.
-   * Dock decks are flat (constant Y per dock), so no interpolation needed.
+   * Compact shore approaches use the exact retained triangle surface.
    */
   getDeckHeightAtSmooth(worldX: number, worldZ: number): number | null {
     const tileX = Math.floor(worldX);
     const tileZ = Math.floor(worldZ);
+    const compact = this.compactTiles.get(dockTileKey(tileX, tileZ));
+    if (compact) return compact.heightAt(worldX, worldZ);
     return this.getDeckHeightAt(tileX, tileZ);
   }
 
@@ -1163,14 +1921,32 @@ export class ProceduralDocks extends System {
 
   /** Get collision data for all docks */
   getCollisionData(): ItemCollisionData[] {
-    return Array.from(this.docks.values()).map(
+    const legacy = Array.from(this.docks.values()).map(
       (instance) => instance.dock.collision,
+    );
+    return legacy.concat(
+      this.compactOwned.map(({ record }) => ({
+        walkableTiles: record.tiles.map((tile) => ({ ...tile })),
+        blockedEdges: record.walls.map((wall) => ({
+          tileX: wall.x,
+          tileZ: wall.z,
+          direction:
+            wall.flags === CollisionFlag.WALL_NORTH
+              ? ("north" as const)
+              : wall.flags === CollisionFlag.WALL_SOUTH
+                ? ("south" as const)
+                : wall.flags === CollisionFlag.WALL_EAST
+                  ? ("east" as const)
+                  : ("west" as const),
+        })),
+      })),
     );
   }
 
   /** Check if a tile is on a dock */
   isDockTile(tileX: number, tileZ: number): boolean {
-    return this.dockDeckHeights.has(dockTileKey(tileX, tileZ));
+    const key = dockTileKey(tileX, tileZ);
+    return this.compactTiles.has(key) || this.dockDeckHeights.has(key);
   }
 
   // getDockAtTile and isDockEdgeBlocked removed — unused, and collision
@@ -1181,25 +1957,44 @@ export class ProceduralDocks extends System {
   // ---------------------------------------------------------------------------
 
   dispose(): void {
+    ++this.generation;
+    this.started = false;
+    this.docksGenerated = false;
+    const errors: unknown[] = [];
+    try {
+      this.releaseCompactDocks();
+    } catch (error) {
+      errors.push(error);
+    }
     // Remove world-space meshes from scene
-    for (const mesh of this.dockMeshes) {
+    for (const mesh of this.dockMeshes.splice(0)) {
       if (this.scene) this.scene.remove(mesh);
       mesh.geometry.dispose();
     }
-    this.dockMeshes = [];
 
     // Dispose shared material
     if (this.dockMaterial) {
-      this.dockMaterial.dispose();
+      const material = this.dockMaterial;
       this.dockMaterial = null;
+      material.dispose();
     }
 
     this.docks.clear();
     this.dockDeckHeights.clear();
+    this.pendingDockQueue = [];
+    if (errors.length) throw new AggregateError(errors, "Dock disposal failed");
+  }
+
+  override destroy(): void {
+    try {
+      this.dispose();
+    } finally {
+      super.destroy();
+    }
   }
 
   update(_deltaTime: number): void {
-    if (this.docksGenerated) return;
+    if (!this.started || this.docksGenerated) return;
 
     // First ready tick: build the queue (cheap — just enqueues work items)
     if (this.pendingDockQueue.length === 0 && this.isTerrainReady()) {

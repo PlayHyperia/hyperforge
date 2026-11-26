@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 180" role="img" aria-labelledby="title description">
+  <title id="title">Hyperia</title>
+  <desc id="description">Hyperia gold wordmark</desc>
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff3bf"/>
+      <stop offset="0.42" stop-color="#f5d783"/>
+      <stop offset="1" stop-color="#b97827"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-35%" width="140%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="blur"/>
+      <feFlood flood-color="#d9a441" flood-opacity="0.55"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <text
+    x="480"
+    y="132"
+    fill="url(#gold)"
+    filter="url(#glow)"
+    font-family="Avenir Next, Montserrat, Futura, Arial, sans-serif"
+    font-size="142"
+    font-weight="700"
+    letter-spacing="20"
+    text-anchor="middle"
+  >HYPERIA</text>
+</svg>

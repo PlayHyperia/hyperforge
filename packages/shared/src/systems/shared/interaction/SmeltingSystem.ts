@@ -17,9 +17,23 @@ import {
   getSmithingLevelSafe,
 } from "../../../constants/SmithingConstants";
 import { processingDataProvider } from "../../../data/ProcessingDataProvider";
-import { EventType } from "../../../types/events";
+import {
+  EventType,
+  getProcessingRequestOperationId,
+} from "../../../types/events";
+import { uuid } from "../../../utils";
 import { SystemBase } from "../infrastructure/SystemBase";
 import type { World } from "../../../types/index";
+import type {
+  AtomicProcessingActionReceipt,
+  InventorySystem,
+} from "../character/InventorySystem";
+import { canPlayerUseProcessingStation } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active smelting session for a player */
 interface SmeltingSession {
@@ -32,10 +46,28 @@ interface SmeltingSession {
   failed: number;
   /** Tick when current smelt action completes (tick-based timing) */
   completionTick: number;
+  requestId?: string;
 }
 
-export class SmeltingSystem extends SystemBase {
+interface PendingSmeltingAction {
+  operationId: string;
+  playerId: string;
+  barItemId: string;
+  success: boolean;
+  retryCount: number;
+  retryAtTick: number;
+  state: "in_flight" | "retry_wait" | "settled";
+  receipt: AtomicProcessingActionReceipt | null;
+  stopAfterCommit: boolean;
+}
+
+export class SmeltingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, SmeltingSession>();
+  private readonly authorizedFurnaces = new Map<string, string>();
+  private readonly pendingActions = new Map<string, PendingSmeltingAction>();
   private readonly playerSkills = new Map<
     string,
     Record<string, { level: number; xp: number }>
@@ -43,6 +75,7 @@ export class SmeltingSystem extends SystemBase {
 
   /** Track last processed tick to ensure once-per-tick processing */
   private lastProcessedTick = -1;
+  private destroyed = false;
 
   /** OPTIMIZATION: Pre-allocated array for completed players (avoids allocation per tick) */
   private readonly _completedPlayers: string[] = [];
@@ -80,6 +113,7 @@ export class SmeltingSystem extends SystemBase {
         barItemId: string;
         furnaceId: string;
         quantity: number;
+        requestId?: string;
       }) => {
         this.startSmelting(data);
       },
@@ -101,21 +135,18 @@ export class SmeltingSystem extends SystemBase {
       playerId: string;
       targetPosition: { x: number; y: number; z: number };
     }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
-      if (this.activeSessions.has(data.playerId)) {
-        this.cancelSmelting(data.playerId);
-      }
+      this.authorizedFurnaces.delete(data.playerId);
+      this.cancelSmelting(data.playerId);
     });
 
     // Cancel smelting on combat start
     this.subscribe(
       EventType.COMBAT_STARTED,
       (data: { attackerId: string; targetId: string }) => {
-        if (this.activeSessions.has(data.attackerId)) {
-          this.cancelSmelting(data.attackerId);
-        }
-        if (this.activeSessions.has(data.targetId)) {
-          this.cancelSmelting(data.targetId);
-        }
+        this.authorizedFurnaces.delete(data.attackerId);
+        this.authorizedFurnaces.delete(data.targetId);
+        this.cancelSmelting(data.attackerId);
+        this.cancelSmelting(data.targetId);
       },
     );
 
@@ -123,6 +154,7 @@ export class SmeltingSystem extends SystemBase {
     this.subscribe(
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => {
+        this.authorizedFurnaces.delete(data.playerId);
         this.cancelSmelting(data.playerId);
         this.playerSkills.delete(data.playerId); // Memory cleanup
       },
@@ -137,6 +169,17 @@ export class SmeltingSystem extends SystemBase {
     furnaceId: string;
   }): void {
     const { playerId, furnaceId } = data;
+
+    if (!this.canPlayerUseFurnace(playerId, furnaceId)) {
+      this.authorizedFurnaces.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "You must be next to that furnace to smelt.",
+        type: "error",
+      });
+      return;
+    }
+    this.authorizedFurnaces.set(playerId, furnaceId);
 
     // Check if already smelting
     if (this.activeSessions.has(playerId)) {
@@ -228,8 +271,38 @@ export class SmeltingSystem extends SystemBase {
     barItemId: string;
     furnaceId: string;
     quantity: number;
+    requestId?: string;
   }): void {
-    const { playerId, barItemId, furnaceId, quantity } = data;
+    const { playerId, barItemId, furnaceId, quantity, requestId } = data;
+
+    if (requestId && quantity !== 1) {
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smelting",
+        "invalid_request",
+      );
+      return;
+    }
+
+    if (
+      this.authorizedFurnaces.get(playerId) !== furnaceId ||
+      !this.canPlayerUseFurnace(playerId, furnaceId)
+    ) {
+      this.authorizedFurnaces.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "Use a nearby furnace before selecting a bar to smelt.",
+        type: "error",
+      });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smelting",
+        "not_authorized",
+      );
+      return;
+    }
 
     // Check if already smelting
     if (this.activeSessions.has(playerId)) {
@@ -238,6 +311,13 @@ export class SmeltingSystem extends SystemBase {
         message: "You are already smelting.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smelting",
+        "busy",
+        true,
+      );
       return;
     }
 
@@ -249,6 +329,12 @@ export class SmeltingSystem extends SystemBase {
         message: "Invalid bar type.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smelting",
+        "invalid_request",
+      );
       return;
     }
 
@@ -260,6 +346,12 @@ export class SmeltingSystem extends SystemBase {
         message: `You need level ${smeltingData.levelRequired} Smithing to smelt that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smelting",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -276,10 +368,22 @@ export class SmeltingSystem extends SystemBase {
       smelted: 0,
       failed: 0,
       completionTick: currentTick + smeltingData.ticks, // First smelt completes after smeltingData.ticks
+      requestId,
     };
 
     this.activeSessions.set(playerId, session);
-
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "smelting",
+      targetEntityId: furnaceId,
+    });
+    this.reportProcessingRequestProgress(
+      playerId,
+      requestId,
+      "smelting",
+      "accepted",
+      true,
+    );
     // Show start message
     const barName = barItemId.replace("_bar", " bar");
     this.emitTypedEvent(EventType.UI_MESSAGE, {
@@ -303,6 +407,12 @@ export class SmeltingSystem extends SystemBase {
   private scheduleNextSmelt(playerId: string): void {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
+
+    if (!this.canPlayerUseFurnace(playerId, session.furnaceId)) {
+      this.authorizedFurnaces.delete(playerId);
+      this.completeSmelting(playerId);
+      return;
+    }
 
     // Check if we've reached the target quantity
     if (session.smelted + session.failed >= session.quantity) {
@@ -342,6 +452,14 @@ export class SmeltingSystem extends SystemBase {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
 
+    if (this.pendingActions.has(playerId)) return;
+
+    if (!this.canPlayerUseFurnace(playerId, session.furnaceId)) {
+      this.authorizedFurnaces.delete(playerId);
+      this.completeSmelting(playerId);
+      return;
+    }
+
     const smeltingData = processingDataProvider.getSmeltingData(
       session.barItemId,
     );
@@ -350,74 +468,214 @@ export class SmeltingSystem extends SystemBase {
       return;
     }
 
-    // Play smelting animation (classic MMORPG-style)
-    this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-      entityId: playerId,
-      animation: "smelting",
-      loop: false,
-    });
-
-    // Consume materials first
-    this.consumeMaterials(playerId, smeltingData);
-
-    // Check success (iron has 50% failure)
     const success = Math.random() < smeltingData.successRate;
+    const pending: PendingSmeltingAction = {
+      operationId:
+        getProcessingRequestOperationId("smelting", session.requestId) ??
+        `smelting-action:${uuid()}${uuid()}`,
+      playerId,
+      barItemId: session.barItemId,
+      success,
+      retryCount: 0,
+      retryAtTick: 0,
+      state: "in_flight",
+      receipt: null,
+      stopAfterCommit: false,
+    };
+    this.pendingActions.set(playerId, pending);
+    this.launchSmeltingCommit(pending, smeltingData);
+  }
 
-    if (success) {
-      // Add bar to inventory
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_ADDED, {
-        playerId,
-        item: {
-          id: `inv_${playerId}_${Date.now()}`,
-          itemId: session.barItemId,
-          quantity: 1,
-          slot: -1,
-          metadata: null,
-        },
-      });
-
-      // Grant XP
-      this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-        playerId,
-        skill: "smithing",
-        amount: smeltingData.xp,
-      });
-
-      session.smelted++;
-
-      // Success message
-      const barName = session.barItemId.replace("_bar", " bar");
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: `You smelt a ${barName}.`,
-        type: "success",
-      });
-
-      // Emit success event
-      this.emitTypedEvent(EventType.SMELTING_SUCCESS, {
-        playerId,
-        barItemId: session.barItemId,
-        xpGained: smeltingData.xp,
-      });
-    } else {
-      session.failed++;
-
-      // Failure message (iron ore specific)
-      this.emitTypedEvent(EventType.UI_MESSAGE, {
-        playerId,
-        message: "The ore is too impure and you fail to smelt it.",
-        type: "warning",
-      });
-
-      // Emit failure event
-      this.emitTypedEvent(EventType.SMELTING_FAILURE, {
-        playerId,
-        barItemId: session.barItemId,
-      });
+  private launchSmeltingCommit(
+    pending: PendingSmeltingAction,
+    smeltingData: {
+      primaryOre: string;
+      secondaryOre: string | null;
+      coalRequired: number;
+      xp: number;
+    },
+  ): void {
+    const inventory = this.world.getSystem("inventory") as
+      InventorySystem | undefined;
+    if (!inventory?.commitProcessingActionAtomic) {
+      pending.retryCount++;
+      pending.retryAtTick =
+        (this.world.currentTick ?? 0) +
+        Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+      pending.state = "retry_wait";
+      return;
     }
+    pending.state = "in_flight";
+    void inventory
+      .commitProcessingActionAtomic(pending.playerId, pending.operationId, {
+        skill: "smithing",
+        xpAmount: pending.success ? smeltingData.xp : 0,
+        inputs: this.processingInputs(smeltingData),
+        requiredItems: [],
+        consumables: [],
+        outputs: pending.success
+          ? [{ itemId: pending.barItemId, quantity: 1 }]
+          : [],
+      })
+      .then((receipt) => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.receipt = receipt;
+        pending.state = "settled";
+      })
+      .catch(() => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.retryCount++;
+        pending.retryAtTick =
+          (this.world.currentTick ?? 0) +
+          Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+        pending.state = "retry_wait";
+      });
+  }
 
-    // Schedule next smelt action
-    this.scheduleNextSmelt(playerId);
+  private processingInputs(smeltingData: {
+    primaryOre: string;
+    secondaryOre: string | null;
+    coalRequired: number;
+  }): Array<{ itemId: string; quantity: number }> {
+    const inputs = [{ itemId: smeltingData.primaryOre, quantity: 1 }];
+    if (smeltingData.secondaryOre) {
+      inputs.push({ itemId: smeltingData.secondaryOre, quantity: 1 });
+    }
+    if (smeltingData.coalRequired > 0) {
+      inputs.push({ itemId: "coal", quantity: smeltingData.coalRequired });
+    }
+    return inputs;
+  }
+
+  private processPendingActions(currentTick: number): void {
+    for (const pending of this.pendingActions.values()) {
+      const smeltingData = processingDataProvider.getSmeltingData(
+        pending.barItemId,
+      );
+      if (!smeltingData) {
+        this.pendingActions.delete(pending.playerId);
+        this.completeSmelting(pending.playerId);
+        continue;
+      }
+      if (
+        pending.state === "retry_wait" &&
+        currentTick >= pending.retryAtTick
+      ) {
+        this.launchSmeltingCommit(pending, smeltingData);
+        continue;
+      }
+      if (pending.state !== "settled" || !pending.receipt) continue;
+
+      const receipt = pending.receipt;
+      if (!receipt.ok) {
+        if (receipt.retryable) {
+          pending.retryCount++;
+          pending.retryAtTick =
+            currentTick + Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+          pending.receipt = null;
+          pending.state = "retry_wait";
+          continue;
+        }
+        this.pendingActions.delete(pending.playerId);
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            receipt.reason === "inventory_full"
+              ? "Your inventory is too full to hold the smelted bar."
+              : receipt.reason === "insufficient_items"
+                ? "You have run out of materials."
+                : "That smelting action could not be validated.",
+          type: "warning",
+        });
+        const session = this.activeSessions.get(pending.playerId);
+        this.rejectProcessingRequest(
+          pending.playerId,
+          session?.requestId,
+          "smelting",
+          receipt.reason === "inventory_full"
+            ? "capacity_unavailable"
+            : receipt.reason === "insufficient_items"
+              ? "resources_unavailable"
+              : "persistence_rejected",
+        );
+        this.completeSmelting(pending.playerId);
+        continue;
+      }
+
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
+      this.pendingActions.delete(pending.playerId);
+      const session = this.activeSessions.get(pending.playerId);
+      if (!session || session.barItemId !== pending.barItemId) continue;
+
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "smelting",
+          loop: false,
+        });
+      }
+      if (pending.success) {
+        session.smelted++;
+        const barName = session.barItemId.replace("_bar", " bar");
+        if (!pending.stopAfterCommit) {
+          this.emitTypedEvent(EventType.UI_MESSAGE, {
+            playerId: pending.playerId,
+            message: `You smelt a ${barName}.`,
+            type: "success",
+          });
+        }
+        this.emitTypedEvent(EventType.SMELTING_SUCCESS, {
+          playerId: pending.playerId,
+          barItemId: session.barItemId,
+          xpGained: receipt.awardedXp,
+        });
+      } else {
+        session.failed++;
+        if (!pending.stopAfterCommit) {
+          this.emitTypedEvent(EventType.UI_MESSAGE, {
+            playerId: pending.playerId,
+            message: "The ore is too impure and you fail to smelt it.",
+            type: "warning",
+          });
+        }
+        this.emitTypedEvent(EventType.SMELTING_FAILURE, {
+          playerId: pending.playerId,
+          barItemId: session.barItemId,
+        });
+      }
+      if (!receipt.liveInventoryApplied) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            "Your smelting result is safely recorded, but the live inventory view needs to resynchronize.",
+          type: "warning",
+        });
+      }
+      if (pending.stopAfterCommit) this.completeSmelting(pending.playerId);
+      else this.scheduleNextSmelt(pending.playerId);
+    }
   }
 
   /**
@@ -428,8 +686,10 @@ export class SmeltingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "smelting");
 
     // Emit completion event
+    this.finishProcessingRequest(session.requestId);
     this.emitTypedEvent(EventType.SMELTING_COMPLETE, {
       playerId,
       barItemId: session.barItemId,
@@ -438,6 +698,7 @@ export class SmeltingSystem extends SystemBase {
       totalXp:
         session.smelted *
         (processingDataProvider.getSmeltingXP(session.barItemId) || 0),
+      ...(session.requestId ? { requestId: session.requestId } : {}),
     });
   }
 
@@ -445,6 +706,12 @@ export class SmeltingSystem extends SystemBase {
    * Cancel smelting for a player
    */
   private cancelSmelting(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "smelting");
+    const pending = this.pendingActions.get(playerId);
+    if (pending) {
+      pending.stopAfterCommit = true;
+      return;
+    }
     const session = this.activeSessions.get(playerId);
     if (session) {
       this.completeSmelting(playerId);
@@ -494,43 +761,6 @@ export class SmeltingSystem extends SystemBase {
   }
 
   /**
-   * Consume materials for smelting
-   */
-  private consumeMaterials(
-    playerId: string,
-    smeltingData: {
-      primaryOre: string;
-      secondaryOre: string | null;
-      coalRequired: number;
-    },
-  ): void {
-    // Remove primary ore
-    this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-      playerId,
-      itemId: smeltingData.primaryOre,
-      quantity: 1,
-    });
-
-    // Remove secondary ore (bronze)
-    if (smeltingData.secondaryOre) {
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-        playerId,
-        itemId: smeltingData.secondaryOre,
-        quantity: 1,
-      });
-    }
-
-    // Remove coal
-    if (smeltingData.coalRequired > 0) {
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-        playerId,
-        itemId: "coal",
-        quantity: smeltingData.coalRequired,
-      });
-    }
-  }
-
-  /**
    * Get player's smithing level using type-safe access
    */
   private getSmithingLevel(playerId: string): number {
@@ -545,11 +775,60 @@ export class SmeltingSystem extends SystemBase {
     return getSmithingLevelSafe(player, 1);
   }
 
+  canPlayerUseFurnace(playerId: string, furnaceId: string): boolean {
+    return canPlayerUseProcessingStation(
+      this.world,
+      playerId,
+      furnaceId,
+      "furnace",
+    );
+  }
+
+  canPlayerUseActiveFurnace(playerId: string): boolean {
+    const furnaceId = this.authorizedFurnaces.get(playerId);
+    return !!furnaceId && this.canPlayerUseFurnace(playerId, furnaceId);
+  }
+
   /**
    * Check if player is currently smelting
    */
   isPlayerSmelting(playerId: string): boolean {
     return this.activeSessions.has(playerId);
+  }
+
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.authorizedFurnaces.delete(playerId);
+    this.cancelSmelting(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
+  }
+
+  getSmeltingCustodyStats(): {
+    activeSessions: number;
+    pendingActions: number;
+    inFlight: number;
+    retryWaiting: number;
+    maxRetryCount: number;
+  } {
+    let inFlight = 0;
+    let retryWaiting = 0;
+    let maxRetryCount = 0;
+    for (const pending of this.pendingActions.values()) {
+      if (pending.state === "in_flight") inFlight++;
+      if (pending.state === "retry_wait") retryWaiting++;
+      maxRetryCount = Math.max(maxRetryCount, pending.retryCount);
+    }
+    return {
+      activeSessions: this.activeSessions.size,
+      pendingActions: this.pendingActions.size,
+      inFlight,
+      retryWaiting,
+      maxRetryCount,
+    };
   }
 
   /**
@@ -568,11 +847,26 @@ export class SmeltingSystem extends SystemBase {
     }
     this.lastProcessedTick = currentTick;
 
+    for (const session of this.activeSessions.values()) {
+      const pending = this.pendingActions.get(session.playerId);
+      this.reportProcessingRequestProgress(
+        session.playerId,
+        session.requestId,
+        "smelting",
+        pending?.state === "retry_wait" ? "reconciling" : "working",
+      );
+    }
+
+    this.processPendingActions(currentTick);
+
     // Process all active sessions that have reached their completion tick
     // OPTIMIZATION: Use pre-allocated array to avoid allocation per tick
     this._completedPlayers.length = 0; // Clear without reallocating
     for (const [playerId, session] of this.activeSessions) {
-      if (currentTick >= session.completionTick) {
+      if (
+        !this.pendingActions.has(playerId) &&
+        currentTick >= session.completionTick
+      ) {
         this._completedPlayers.push(playerId);
       }
     }
@@ -582,11 +876,14 @@ export class SmeltingSystem extends SystemBase {
   }
 
   destroy(): void {
+    this.destroyed = true;
     // Complete all active sessions
     for (const playerId of this.activeSessions.keys()) {
       this.completeSmelting(playerId);
     }
     this.activeSessions.clear();
+    this.authorizedFurnaces.clear();
+    this.pendingActions.clear();
     this.playerSkills.clear(); // Memory cleanup
   }
 }

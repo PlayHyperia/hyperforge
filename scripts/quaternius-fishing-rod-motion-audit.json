@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "title": "Quaternius fishing-rod presentation motion candidates",
+  "motions": [
+    {
+      "id": "fishing",
+      "name": "Rod cast",
+      "asset": "motions/kaykit-fishing.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-idle",
+      "name": "Rod idle",
+      "asset": "motions/kaykit-fishing-idle.glb",
+      "sampleRatio": 0.5
+    },
+    {
+      "id": "fishing-bite",
+      "name": "Rod bite response",
+      "asset": "motions/kaykit-fishing-bite.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-tug",
+      "name": "Rod tug",
+      "asset": "motions/kaykit-fishing-tug.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-reeling",
+      "name": "Rod reeling",
+      "asset": "motions/kaykit-fishing-reeling.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-struggling",
+      "name": "Rod struggling",
+      "asset": "motions/kaykit-fishing-struggling.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "fishing-catch",
+      "name": "Rod catch",
+      "asset": "motions/kaykit-fishing-catch.glb",
+      "sampleRatio": 0.72
+    }
+  ]
+}

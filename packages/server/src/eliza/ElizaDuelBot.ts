@@ -23,6 +23,7 @@ import { errMsg } from "../shared/errMsg.js";
 import type { ModelProviderConfig } from "./ModelAgentSpawner.js";
 import { loadModelPlugin, createAgentCharacter } from "./agentHelpers.js";
 import { duelLogError, duelLogInfo, duelLogWarn } from "./logging.js";
+import { isLocalDiagnosticDuelRuntime } from "../systems/StreamingDuelScheduler/managers/DuelOrchestrator.js";
 
 // Re-export for convenience
 export { MODEL_AGENTS } from "./ModelAgentSpawner.js";
@@ -104,11 +105,9 @@ export class ElizaDuelBot extends EventEmitter {
   private duelListenersRegistered = false;
   /** Stable handler refs for proper listener teardown */
   private duelFightStartHandler:
-    | ((data: Record<string, unknown>) => void)
-    | null = null;
+    ((data: Record<string, unknown>) => void) | null = null;
   private duelCompletedHandler:
-    | ((data: Record<string, unknown>) => void)
-    | null = null;
+    ((data: Record<string, unknown>) => void) | null = null;
 
   state: ElizaDuelBotState = "disconnected";
   currentDuelId: string | null = null;
@@ -172,6 +171,11 @@ export class ElizaDuelBot extends EventEmitter {
   }
 
   async connect(): Promise<void> {
+    if (!isLocalDiagnosticDuelRuntime(process.env)) {
+      throw new Error(
+        "Standalone Eliza duel bots are restricted to the exact local no-money diagnostic runtime",
+      );
+    }
     this.state = "connecting";
     const { modelConfig, wsUrl, name, accountId } = this.config;
     const tag = `ElizaDuelBot:${name}`;

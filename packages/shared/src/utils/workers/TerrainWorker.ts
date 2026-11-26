@@ -13,8 +13,6 @@ import { WorkerPool } from "./WorkerPool";
 import {
   buildGetBaseHeightAtJS,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
 } from "../../systems/shared/world/TerrainHeightParams";
 import { buildBiomeConstantsJS } from "../../systems/shared/world/TerrainBiomeTypes";
 import {
@@ -22,11 +20,17 @@ import {
   buildHeightHelpersJS,
   buildBiomeInfluencesJS,
   buildCreateBiomeNoiseSetsJS,
+  buildTerrainWorkerProfileGuardJS,
+  assertTerrainWorkerRequest,
+  assertTerrainWorkerResult,
 } from "./TerrainWorkerShared";
+import type { WorldTerrainProfile } from "../../systems/shared/world/WorldTerrainProfile";
 
 // Types for terrain generation
 // MUST match TerrainSystem.CONFIG exactly for height and biome calculation
 export interface TerrainWorkerConfig {
+  TERRAIN_PROFILE: WorldTerrainProfile;
+  TERRAIN_PROFILE_IDENTITY: string;
   TILE_SIZE: number;
   TILE_RESOLUTION: number;
   MAX_HEIGHT: number;
@@ -70,6 +74,7 @@ export interface TerrainWorkerInput {
 }
 
 export interface TerrainWorkerOutput {
+  terrainProfileIdentity: string;
   type: "heightmapResult";
   tileKey: string;
   tileX: number;
@@ -96,9 +101,10 @@ export interface TerrainWorkerOutput {
  *
  * Synced with: packages/shared/src/systems/shared/world/TerrainSystem.ts
  */
-const TERRAIN_WORKER_CODE = `
+export const TERRAIN_WORKER_CODE = `
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
+${buildTerrainWorkerProfileGuardJS()}
 
 var BIOME_IDS = {};
 BIOME_IDS[BT_TUNDRA] = 0;
@@ -106,6 +112,7 @@ BIOME_IDS[BT_FOREST] = 1;
 BIOME_IDS[BT_CANYON] = 2;
 
 function generateHeightmap(input) {
+  assertTerrainWorkerInput(input);
   const { tileX, tileZ, config, seed, biomeCenters, biomes } = input;
   const {
     TILE_SIZE,
@@ -246,6 +253,7 @@ function generateHeightmap(input) {
 
   return {
     type: 'heightmapResult',
+    terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
     tileKey: tileX + '_' + tileZ,
     tileX,
     tileZ,
@@ -361,11 +369,12 @@ export async function generateTerrainHeightmapAsync(
     { heightModifier: number; color: { r: number; g: number; b: number } }
   >,
 ): Promise<TerrainWorkerOutput | null> {
+  assertTerrainWorkerRequest(config, seed);
   const pool = getTerrainWorkerPool();
   if (!pool) {
     return null;
   }
-  return pool.execute({
+  const result = await pool.execute({
     type: "generateHeightmap",
     tileX,
     tileZ,
@@ -374,6 +383,8 @@ export async function generateTerrainHeightmapAsync(
     biomeCenters,
     biomes,
   });
+  assertTerrainWorkerResult(result, config);
+  return result;
 }
 
 /**
@@ -407,6 +418,7 @@ export async function generateTerrainTilesBatch(
     { heightModifier: number; color: { r: number; g: number; b: number } }
   >,
 ): Promise<TerrainBatchResult> {
+  assertTerrainWorkerRequest(config, seed);
   const pool = getTerrainWorkerPool();
   if (!pool) {
     // Workers not available - caller should fall back to synchronous
@@ -431,6 +443,7 @@ export async function generateTerrainTilesBatch(
 
   try {
     const results = await pool.executeAll(tasks);
+    for (const result of results) assertTerrainWorkerResult(result, config);
     return {
       results,
       workersAvailable: true,

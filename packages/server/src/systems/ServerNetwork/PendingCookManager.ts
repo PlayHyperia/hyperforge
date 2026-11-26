@@ -27,6 +27,7 @@ import {
   tilesWithinMeleeRange,
   type TileCoord,
   GATHERING_CONSTANTS,
+  canPlayerPerformPreparationAction,
 } from "@hyperforge/shared";
 import type { TileMovementManager } from "./tile-movement";
 
@@ -79,6 +80,8 @@ interface PendingCook {
   createdTick: number;
   /** Specific inventory slot to cook from (-1 = find first raw_shrimp) */
   fishSlot: number;
+  /** Optional validated caller UUID echoed by the cooking completion. */
+  requestId?: string;
 }
 
 /** Timeout for pending cooks (in ticks) - 20 ticks = 12 seconds at 600ms/tick */
@@ -133,9 +136,15 @@ export class PendingCookManager {
     currentTick: number,
     runMode?: boolean,
     fishSlot: number = -1,
+    requestId?: string,
   ): void {
     // Cancel any existing pending cook
-    this.cancelPendingCook(playerId);
+    this.cancelPendingCook(playerId, "interrupted");
+
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) {
+      this.rejectPendingCook(playerId, requestId, "not_authorized", false);
+      return;
+    }
 
     // Look up cooking source - could be fire or range
     const cookingSource = this.getCookingSource(sourceId);
@@ -144,6 +153,7 @@ export class PendingCookManager {
       console.log(
         `[PendingCook] Cooking source ${sourceId} not found or inactive`,
       );
+      this.rejectPendingCook(playerId, requestId, "not_authorized", false);
       return;
     }
 
@@ -151,6 +161,7 @@ export class PendingCookManager {
     const player = this.world.getPlayer?.(playerId);
     if (!player?.position) {
       console.warn(`[PendingCook] Player ${playerId} not found`);
+      this.rejectPendingCook(playerId, requestId, "not_authorized", false);
       return;
     }
 
@@ -183,7 +194,13 @@ export class PendingCookManager {
       console.log(
         `[PendingCook]   Already on cardinal tile - starting cook immediately`,
       );
-      this.startCooking(playerId, sourceId, cookingSource.sourceType, fishSlot);
+      this.startCooking(
+        playerId,
+        sourceId,
+        cookingSource.sourceType,
+        fishSlot,
+        requestId,
+      );
       return;
     }
 
@@ -213,6 +230,7 @@ export class PendingCookManager {
       lastPlayerTile: { x: this._playerTile.x, z: this._playerTile.z },
       createdTick: currentTick,
       fishSlot,
+      ...(requestId ? { requestId } : {}),
     });
 
     console.log(
@@ -258,9 +276,14 @@ export class PendingCookManager {
   /**
    * Cancel pending cook for a player
    */
-  cancelPendingCook(playerId: string): void {
-    if (this.pendingCooks.has(playerId)) {
+  cancelPendingCook(
+    playerId: string,
+    reason: "interrupted" | "not_authorized" = "interrupted",
+  ): void {
+    const pending = this.pendingCooks.get(playerId);
+    if (pending) {
       this.pendingCooks.delete(playerId);
+      this.rejectPendingCook(playerId, pending.requestId, reason, true);
       console.log(`[PendingCook] Cancelled pending cook for ${playerId}`);
     }
   }
@@ -292,6 +315,12 @@ export class PendingCookManager {
           error,
         );
         this.pendingCooks.delete(playerId);
+        this.rejectPendingCook(
+          playerId,
+          pending.requestId,
+          "interrupted",
+          true,
+        );
       }
     }
   }
@@ -308,13 +337,23 @@ export class PendingCookManager {
     if (currentTick - pending.createdTick > PENDING_COOK_TIMEOUT_TICKS) {
       console.log(`[PendingCook] Timeout for ${playerId}`);
       this.pendingCooks.delete(playerId);
+      this.rejectPendingCook(playerId, pending.requestId, "interrupted", true);
       return;
     }
 
     // Get player entity
     const player = this.world.getPlayer?.(playerId);
-    if (!player?.position) {
+    if (
+      !player?.position ||
+      !canPlayerPerformPreparationAction(this.world, playerId)
+    ) {
       this.pendingCooks.delete(playerId);
+      this.rejectPendingCook(
+        playerId,
+        pending.requestId,
+        "not_authorized",
+        false,
+      );
       return;
     }
 
@@ -326,6 +365,12 @@ export class PendingCookManager {
         `[PendingCook] Source ${pending.sourceId} no longer available`,
       );
       this.pendingCooks.delete(playerId);
+      this.rejectPendingCook(
+        playerId,
+        pending.requestId,
+        "not_authorized",
+        true,
+      );
       return;
     }
 
@@ -350,6 +395,7 @@ export class PendingCookManager {
         pending.sourceId,
         pending.sourceType,
         pending.fishSlot,
+        pending.requestId,
       );
 
       // Remove from pending
@@ -367,6 +413,7 @@ export class PendingCookManager {
     sourceId: string,
     sourceType: "fire" | "range",
     fishSlot: number,
+    requestId?: string,
   ): void {
     // Emit PROCESSING_COOKING_REQUEST event via EventBus - ProcessingSystem subscribes to EventBus
     // fishSlot = -1 means server should find first raw_shrimp slot
@@ -376,6 +423,7 @@ export class PendingCookManager {
       rangeId: sourceType === "range" ? sourceId : undefined,
       sourceType,
       fishSlot,
+      ...(requestId ? { requestId } : {}),
     };
 
     // Use EventBus (world.$eventBus) instead of EventEmitter (world.emit)
@@ -389,6 +437,31 @@ export class PendingCookManager {
     } else {
       // Fallback to EventEmitter if EventBus not available
       this.world.emit(EventType.PROCESSING_COOKING_REQUEST, eventData);
+    }
+  }
+
+  private rejectPendingCook(
+    playerId: string,
+    requestId: string | undefined,
+    reason: "interrupted" | "not_authorized",
+    retryable: boolean,
+  ): void {
+    if (!requestId) return;
+    const eventData = {
+      playerId,
+      requestId,
+      skill: "cooking" as const,
+      reason,
+      retryable,
+    };
+    if (this.world.$eventBus) {
+      this.world.$eventBus.emitEvent(
+        EventType.PROCESSING_REQUEST_REJECTED,
+        eventData,
+        "PendingCookManager",
+      );
+    } else {
+      this.world.emit(EventType.PROCESSING_REQUEST_REJECTED, eventData);
     }
   }
 }

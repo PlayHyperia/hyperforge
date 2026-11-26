@@ -10,6 +10,10 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import {
+  classifyMemoryProcess,
+  isSteadyStateMemorySample,
+} from "./lib/memory-leak-analysis.mjs";
 
 const ONE_MB_KB = 1024;
 
@@ -46,22 +50,6 @@ function formatStamp(date = new Date()) {
 
 function formatMbFromKb(kb) {
   return (kb / ONE_MB_KB).toFixed(1);
-}
-
-function classifyProcess(command) {
-  if (
-    command.includes("stream-to-rtmp") ||
-    command.includes("RTMPBridge") ||
-    command.includes("playwright")
-  ) {
-    return "streaming";
-  }
-  if (command.includes("packages/server")) return "server";
-  if (command.includes("vite") || command.includes("packages/client"))
-    return "client";
-  if (command.includes("turbo")) return "orchestrator";
-  if (command.includes("packages/shared")) return "shared";
-  return "other";
 }
 
 function safePsSnapshot() {
@@ -230,6 +218,12 @@ const processGrowth = new Map();
 let firstTotalRssKb = null;
 let lastTotalRssKb = 0;
 let maxTotalRssKb = 0;
+let firstSteadyStateRssKb = null;
+let lastSteadyStateRssKb = 0;
+let maxSteadyStateRssKb = 0;
+let firstSteadyStateAtMs = null;
+let lastSteadyStateAtMs = null;
+let steadyStateSampleCount = 0;
 let sampleCount = 0;
 let sampleInFlight = false;
 let childExited = false;
@@ -303,7 +297,7 @@ async function pollSample() {
       pid: proc.pid,
       ppid: proc.ppid,
       rssKb: proc.rssKb,
-      role: classifyProcess(proc.command),
+      role: classifyMemoryProcess(proc.command),
       command: proc.command,
     }));
 
@@ -362,6 +356,16 @@ async function pollSample() {
       processes,
       streaming,
     };
+    if (isSteadyStateMemorySample(sample)) {
+      if (firstSteadyStateRssKb == null) {
+        firstSteadyStateRssKb = totalRssKb;
+        firstSteadyStateAtMs = elapsedMs;
+      }
+      lastSteadyStateRssKb = totalRssKb;
+      maxSteadyStateRssKb = Math.max(maxSteadyStateRssKb, totalRssKb);
+      lastSteadyStateAtMs = elapsedMs;
+      steadyStateSampleCount += 1;
+    }
     sampleStream.write(`${JSON.stringify(sample)}\n`);
 
     updateGrowth(sample, elapsedMs);
@@ -431,6 +435,10 @@ async function finalize() {
   const durationMsFinal = Date.now() - startedAt;
   const totalGrowthKb =
     firstTotalRssKb == null ? 0 : lastTotalRssKb - firstTotalRssKb;
+  const steadyStateGrowthKb =
+    firstSteadyStateRssKb == null
+      ? 0
+      : lastSteadyStateRssKb - firstSteadyStateRssKb;
 
   const growthSummary = [...processGrowth.values()]
     .map((entry) => ({
@@ -466,6 +474,32 @@ async function finalize() {
       maxRssMb: Number((maxTotalRssKb / ONE_MB_KB).toFixed(2)),
       growthMb: Number((totalGrowthKb / ONE_MB_KB).toFixed(2)),
     },
+    steadyStateMemory: {
+      available: firstSteadyStateRssKb != null,
+      sampleCount: steadyStateSampleCount,
+      firstSeenAtMs: firstSteadyStateAtMs,
+      lastSeenAtMs: lastSteadyStateAtMs,
+      durationMs:
+        firstSteadyStateAtMs == null || lastSteadyStateAtMs == null
+          ? 0
+          : Math.max(0, lastSteadyStateAtMs - firstSteadyStateAtMs),
+      firstRssMb:
+        firstSteadyStateRssKb == null
+          ? null
+          : Number((firstSteadyStateRssKb / ONE_MB_KB).toFixed(2)),
+      lastRssMb:
+        firstSteadyStateRssKb == null
+          ? null
+          : Number((lastSteadyStateRssKb / ONE_MB_KB).toFixed(2)),
+      maxRssMb:
+        firstSteadyStateRssKb == null
+          ? null
+          : Number((maxSteadyStateRssKb / ONE_MB_KB).toFixed(2)),
+      growthMb:
+        firstSteadyStateRssKb == null
+          ? null
+          : Number((steadyStateGrowthKb / ONE_MB_KB).toFixed(2)),
+    },
     warnGrowthMb,
     processGrowth: growthSummary,
     childExit: {
@@ -485,7 +519,12 @@ async function finalize() {
   console.log(`[memcheck] summary: ${summaryPath}`);
   if (summary.totalMemory.growthMb != null) {
     console.log(
-      `[memcheck] total RSS growth: ${summary.totalMemory.growthMb.toFixed(2)}MB`,
+      `[memcheck] whole-run RSS growth (includes startup/shutdown): ${summary.totalMemory.growthMb.toFixed(2)}MB`,
+    );
+  }
+  if (summary.steadyStateMemory.growthMb != null) {
+    console.log(
+      `[memcheck] ready steady-state RSS growth: ${summary.steadyStateMemory.growthMb.toFixed(2)}MB across ${summary.steadyStateMemory.sampleCount} samples`,
     );
   }
   if (growthSummary.length > 0) {

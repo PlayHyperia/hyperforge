@@ -22,6 +22,7 @@
 import { ITEMS } from "./items";
 import type { SmithingCategory } from "./smithing-recipes";
 import { SMITHING_CONSTANTS } from "../constants/SmithingConstants";
+import { PROCESSING_CONSTANTS } from "../constants/ProcessingConstants";
 
 // ============================================================================
 // RECIPE MANIFEST TYPES - Structures matching the JSON files
@@ -342,6 +343,8 @@ export interface CookingItemData {
   burntItemId: string;
   levelRequired: number;
   xp: number;
+  /** Exact authored duration in game ticks. */
+  ticks: number;
   stopBurnLevel: {
     fire: number;
     range: number;
@@ -355,6 +358,8 @@ export interface FiremakingItemData {
   logId: string;
   levelRequired: number;
   xp: number;
+  /** Exact authored duration in game ticks. */
+  ticks: number;
 }
 
 /**
@@ -362,6 +367,8 @@ export interface FiremakingItemData {
  */
 export interface SmeltingItemData {
   barItemId: string;
+  /** Exact authored inputs, retained so downstream planners do not reconstruct recipes. */
+  inputs?: Array<{ itemId: string; quantity: number }>;
   primaryOre: string;
   secondaryOre: string | null;
   coalRequired: number;
@@ -634,13 +641,21 @@ export class ProcessingDataProvider {
       return;
     }
 
+    const errors: string[] = [];
     for (const recipe of this.cookingManifest.recipes) {
+      if (!Number.isSafeInteger(recipe.ticks) || recipe.ticks <= 0) {
+        errors.push(
+          `[${recipe.raw || "unknown"}] ticks must be a positive integer, got ${recipe.ticks}`,
+        );
+        continue;
+      }
       const cookingData: CookingItemData = {
         rawItemId: recipe.raw,
         cookedItemId: recipe.cooked,
         burntItemId: recipe.burnt,
         levelRequired: recipe.level,
         xp: recipe.xp,
+        ticks: recipe.ticks,
         stopBurnLevel: {
           fire: recipe.stopBurnLevel.fire,
           range: recipe.stopBurnLevel.range,
@@ -648,6 +663,9 @@ export class ProcessingDataProvider {
       };
       this.cookingDataMap.set(recipe.raw, cookingData);
       this.cookableItemIds.add(recipe.raw);
+    }
+    if (errors.length > 0) {
+      throw new Error(`Invalid cooking manifest:\n${errors.join("\n")}`);
     }
   }
 
@@ -665,14 +683,25 @@ export class ProcessingDataProvider {
       return;
     }
 
+    const errors: string[] = [];
     for (const recipe of this.firemakingManifest.recipes) {
+      if (!Number.isSafeInteger(recipe.ticks) || recipe.ticks <= 0) {
+        errors.push(
+          `[${recipe.log || "unknown"}] ticks must be a positive integer, got ${recipe.ticks}`,
+        );
+        continue;
+      }
       const firemakingData: FiremakingItemData = {
         logId: recipe.log,
         levelRequired: recipe.level,
         xp: recipe.xp,
+        ticks: recipe.ticks,
       };
       this.firemakingDataMap.set(recipe.log, firemakingData);
       this.burneableLogIds.add(recipe.log);
+    }
+    if (errors.length > 0) {
+      throw new Error(`Invalid firemaking manifest:\n${errors.join("\n")}`);
     }
   }
 
@@ -708,6 +737,10 @@ export class ProcessingDataProvider {
 
       const smeltingData: SmeltingItemData = {
         barItemId: recipe.output,
+        inputs: recipe.inputs.map((input) => ({
+          itemId: input.item,
+          quantity: input.amount,
+        })),
         primaryOre,
         secondaryOre,
         coalRequired,
@@ -779,6 +812,7 @@ export class ProcessingDataProvider {
           burntItemId: item.cooking.burntItemId,
           levelRequired: item.cooking.levelRequired,
           xp: item.cooking.xp,
+          ticks: PROCESSING_CONSTANTS.SKILL_MECHANICS.cooking.ticksPerItem,
           stopBurnLevel: {
             fire: item.cooking.stopBurnLevel.fire,
             range: item.cooking.stopBurnLevel.range,
@@ -800,6 +834,7 @@ export class ProcessingDataProvider {
           logId: itemId,
           levelRequired: item.firemaking.levelRequired,
           xp: item.firemaking.xp,
+          ticks: PROCESSING_CONSTANTS.SKILL_MECHANICS.firemaking.baseRollTicks,
         };
         this.firemakingDataMap.set(itemId, firemakingData);
         this.burneableLogIds.add(itemId);
@@ -815,6 +850,15 @@ export class ProcessingDataProvider {
       if (item.smelting) {
         const smeltingData: SmeltingItemData = {
           barItemId: itemId,
+          inputs: [
+            { itemId: item.smelting.primaryOre, quantity: 1 },
+            ...(item.smelting.secondaryOre
+              ? [{ itemId: item.smelting.secondaryOre, quantity: 1 }]
+              : []),
+            ...(item.smelting.coalRequired > 0
+              ? [{ itemId: "coal", quantity: item.smelting.coalRequired }]
+              : []),
+          ],
           primaryOre: item.smelting.primaryOre,
           secondaryOre: item.smelting.secondaryOre || null,
           coalRequired: item.smelting.coalRequired,

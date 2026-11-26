@@ -188,6 +188,39 @@ describe("TickSystem", () => {
       expect(health.missedTicks).toBe(0);
       expect(health.lateTicks).toBe(0);
       expect(health.maxLateness).toBe(0);
+      expect(health.tickDurations.samples).toBe(0);
+      expect(health.tickLateness.samples).toBe(0);
+    });
+
+    it("records full-window tick and named-handler percentiles", () => {
+      let duration = 0;
+      tickSystem.onTick(
+        () => {
+          duration++;
+          vi.advanceTimersByTime(duration);
+        },
+        TickPriority.COMBAT,
+        "measuredCombat",
+      );
+      tickSystem.start();
+
+      for (let i = 0; i < 100; i++) {
+        vi.advanceTimersToNextTimer();
+      }
+
+      const health = tickSystem.getTickHealthStats();
+      expect(health.tickDurations).toMatchObject({
+        samples: 100,
+        average: 50.5,
+        p50: 50,
+        p95: 95,
+        p99: 99,
+        max: 100,
+      });
+      expect(health.tickLateness.samples).toBe(100);
+      expect(tickSystem.getHandlerTimingPercentiles().measuredCombat).toEqual(
+        health.tickDurations,
+      );
     });
   });
 

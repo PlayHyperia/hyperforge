@@ -1,0 +1,457 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-19T19:00:00.000Z",
+  "avatar": {
+    "id": "steve",
+    "asset": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207"
+  },
+  "activationManifest": "packages/server/world/assets/manifests/duel-presentation-assets.json",
+  "maximumOrientationDeviationDegrees": 0.02,
+  "maximumTwoHandAxisDeviationDegrees": 0.001,
+  "visualReviewAngles": [
+    { "id": "front", "yawDegrees": 0, "pitchDegrees": 0 },
+    { "id": "left-profile", "yawDegrees": -70, "pitchDegrees": 0 },
+    { "id": "right-profile", "yawDegrees": 70, "pitchDegrees": 0 },
+    { "id": "elevated-quarter", "yawDegrees": 38, "pitchDegrees": 24 }
+  ],
+  "families": [
+    {
+      "id": "hatchet",
+      "itemIds": [
+        "bronze_hatchet",
+        "iron_hatchet",
+        "steel_hatchet",
+        "mithril_hatchet",
+        "adamant_hatchet",
+        "rune_hatchet"
+      ],
+      "grip": "one-hand",
+      "motionManifest": "scripts/steve-bronze-hatchet-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [-1, 0, 0],
+      "actionSemantic": "blade-impact",
+      "actionAxisSymmetry": "directed",
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.04,
+      "visualReviewPhaseId": "woodcutting",
+      "phases": [
+        {
+          "id": "woodcutting-start",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0.067314, -0.985082, 0.158377],
+          "expectedActionAxis": [-0.995271, -0.077439, -0.058648]
+        },
+        {
+          "id": "woodcutting-lift",
+          "sampleRatio": 0.3,
+          "expectedHandleAxis": [0.705995, -0.488882, -0.512412],
+          "expectedActionAxis": [-0.53508, -0.842196, 0.066296]
+        },
+        {
+          "id": "woodcutting",
+          "sampleRatio": 0.55,
+          "expectedHandleAxis": [0.821312, 0.022741, -0.570024],
+          "expectedActionAxis": [-0.309749, -0.821312, -0.479063],
+          "actionYMaximum": -0.75
+        },
+        {
+          "id": "woodcutting-follow-through",
+          "sampleRatio": 0.7,
+          "expectedHandleAxis": [0.020509, -0.992135, 0.123481],
+          "expectedActionAxis": [-0.999649, -0.022421, -0.01411]
+        },
+        {
+          "id": "woodcutting-recovery",
+          "sampleRatio": 0.9,
+          "expectedHandleAxis": [0.813079, -0.15464, -0.56124],
+          "expectedActionAxis": [-0.386251, -0.86461, -0.32134]
+        }
+      ]
+    },
+    {
+      "id": "pickaxe",
+      "itemIds": [
+        "bronze_pickaxe",
+        "iron_pickaxe",
+        "steel_pickaxe",
+        "mithril_pickaxe",
+        "adamant_pickaxe",
+        "rune_pickaxe"
+      ],
+      "grip": "two-hand",
+      "motionManifest": "scripts/steve-bronze-pickaxe-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [1, 0, 0],
+      "actionSemantic": "pick-impact",
+      "actionAxisSymmetry": "bidirectional",
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.04,
+      "maximumSecondaryHandSurfaceDistanceMetres": 0.05,
+      "visualReviewPhaseId": "mining",
+      "phases": [
+        {
+          "id": "mining-start",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0.657379, -0.092738, 0.747831],
+          "expectedActionAxis": [0.746208, 0.218399, -0.628868],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "mining-lift",
+          "sampleRatio": 0.3,
+          "expectedHandleAxis": [0.710056, -0.375738, -0.595518],
+          "expectedActionAxis": [0.664372, 0.637705, 0.389798],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "mining",
+          "sampleRatio": 0.55,
+          "expectedHandleAxis": [0.694966, -0.368504, -0.617435],
+          "expectedActionAxis": [0.647076, 0.694966, 0.313552],
+          "secondaryHandContactRequired": true,
+          "absoluteActionYMinimum": 0.65
+        },
+        {
+          "id": "mining-follow-through",
+          "sampleRatio": 0.7,
+          "expectedHandleAxis": [0.700772, -0.081752, 0.708684],
+          "expectedActionAxis": [0.697626, 0.286182, -0.656824],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "mining-recovery",
+          "sampleRatio": 0.9,
+          "expectedHandleAxis": [0.703165, -0.372422, -0.60569],
+          "expectedActionAxis": [0.656827, 0.66644, 0.352756],
+          "secondaryHandContactRequired": true
+        }
+      ]
+    },
+    {
+      "id": "fishing-rod",
+      "itemIds": ["fishing_rod"],
+      "grip": "two-hand",
+      "motionManifest": "scripts/steve-fishing-rod-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [0, 1, 0],
+      "actionSemantic": "rod-tip",
+      "actionAxisSymmetry": "directed",
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.015,
+      "maximumSecondaryHandSurfaceDistanceMetres": 0.02,
+      "visualReviewPhaseId": "fishing",
+      "phases": [
+        {
+          "id": "fishing-start",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0.906022, 0.175368, 0.385188],
+          "expectedActionAxis": [-0.906022, -0.175368, -0.385188],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "fishing-lift",
+          "sampleRatio": 0.3,
+          "expectedHandleAxis": [0.790921, -0.172359, 0.587142],
+          "expectedActionAxis": [-0.790921, 0.172359, -0.587142]
+        },
+        {
+          "id": "fishing",
+          "sampleRatio": 0.55,
+          "expectedHandleAxis": [0.879347, -0.422074, -0.220459],
+          "expectedActionAxis": [-0.879347, 0.422074, 0.220459],
+          "actionYMinimum": 0.35
+        },
+        {
+          "id": "fishing-follow-through",
+          "sampleRatio": 0.7,
+          "expectedHandleAxis": [0.911609, -0.075045, -0.40415],
+          "expectedActionAxis": [-0.911609, 0.075045, 0.40415]
+        },
+        {
+          "id": "fishing-recovery",
+          "sampleRatio": 0.85,
+          "expectedHandleAxis": [0.907787, 0.383359, 0.170175],
+          "expectedActionAxis": [-0.907787, -0.383359, -0.170175],
+          "secondaryHandContactRequired": true
+        }
+      ]
+    },
+    {
+      "id": "harpoon",
+      "itemIds": ["harpoon"],
+      "grip": "two-hand",
+      "motionManifest": "scripts/hyperia-steve-harpoon-motion-audit.json",
+      "sourceHandleAxis": [0, 1, 0],
+      "sourceActionAxis": [0, 1, 0],
+      "actionSemantic": "harpoon-tip",
+      "actionAxisSymmetry": "directed",
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.001,
+      "maximumSecondaryHandSurfaceDistanceMetres": 0.04,
+      "visualReviewPhaseId": "steve-harpoon-cycle-70",
+      "phases": [
+        {
+          "id": "steve-harpoon-cycle-02",
+          "sampleRatio": 0.02,
+          "expectedHandleAxis": [0.989336, 0.050486, -0.13662],
+          "expectedActionAxis": [0.989336, 0.050486, -0.13662],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "steve-harpoon-cycle-10",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0.967224, 0.181056, -0.178036],
+          "expectedActionAxis": [0.967224, 0.181056, -0.178036],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "steve-harpoon-cycle-20",
+          "sampleRatio": 0.2,
+          "expectedHandleAxis": [0.910989, -0.296859, 0.286317],
+          "expectedActionAxis": [0.910989, -0.296859, 0.286317],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "steve-harpoon-cycle-30",
+          "sampleRatio": 0.3,
+          "expectedHandleAxis": [0.731038, -0.51621, 0.446218],
+          "expectedActionAxis": [0.731038, -0.51621, 0.446218],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "steve-harpoon-cycle-40",
+          "sampleRatio": 0.4,
+          "expectedHandleAxis": [0.66261, -0.592314, 0.458376],
+          "expectedActionAxis": [0.66261, -0.592314, 0.458376],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "steve-harpoon-cycle-50",
+          "sampleRatio": 0.5,
+          "expectedHandleAxis": [0.632486, -0.685671, 0.360303],
+          "expectedActionAxis": [0.632486, -0.685671, 0.360303],
+          "secondaryHandContactRequired": true,
+          "actionYMaximum": -0.5
+        },
+        {
+          "id": "steve-harpoon-cycle-60",
+          "sampleRatio": 0.6,
+          "expectedHandleAxis": [0.637921, -0.693928, 0.333945],
+          "expectedActionAxis": [0.637921, -0.693928, 0.333945],
+          "secondaryHandContactRequired": true,
+          "actionYMaximum": -0.5
+        },
+        {
+          "id": "steve-harpoon-cycle-70",
+          "sampleRatio": 0.7,
+          "expectedHandleAxis": [0.648342, -0.692092, 0.317274],
+          "expectedActionAxis": [0.648342, -0.692092, 0.317274],
+          "secondaryHandContactRequired": true,
+          "actionYMaximum": -0.5
+        },
+        {
+          "id": "steve-harpoon-cycle-80",
+          "sampleRatio": 0.8,
+          "expectedHandleAxis": [0.660895, -0.687545, 0.300835],
+          "expectedActionAxis": [0.660895, -0.687545, 0.300835],
+          "secondaryHandContactRequired": true,
+          "actionYMaximum": -0.5
+        },
+        {
+          "id": "steve-harpoon-cycle-90",
+          "sampleRatio": 0.9,
+          "expectedHandleAxis": [0.697638, -0.667592, 0.260039],
+          "expectedActionAxis": [0.697638, -0.667592, 0.260039],
+          "secondaryHandContactRequired": true,
+          "actionYMaximum": -0.5
+        },
+        {
+          "id": "steve-harpoon-cycle-98",
+          "sampleRatio": 0.98,
+          "expectedHandleAxis": [0.989226, -0.13709, -0.051379],
+          "expectedActionAxis": [0.989226, -0.13709, -0.051379],
+          "secondaryHandContactRequired": true
+        }
+      ]
+    },
+    {
+      "id": "fly-fishing-rod",
+      "itemIds": ["fly_fishing_rod"],
+      "grip": "two-hand",
+      "motionManifest": "scripts/steve-fishing-rod-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [0, 1, 0],
+      "actionSemantic": "rod-tip",
+      "actionAxisSymmetry": "directed",
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.016,
+      "maximumSecondaryHandSurfaceDistanceMetres": 0.02,
+      "visualReviewPhaseId": "fishing",
+      "phases": [
+        {
+          "id": "fishing-start",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0.906022, 0.175368, 0.385188],
+          "expectedActionAxis": [-0.906022, -0.175368, -0.385188],
+          "secondaryHandContactRequired": true
+        },
+        {
+          "id": "fishing-lift",
+          "sampleRatio": 0.3,
+          "expectedHandleAxis": [0.790921, -0.172358, 0.587143],
+          "expectedActionAxis": [-0.790921, 0.172358, -0.587143]
+        },
+        {
+          "id": "fishing",
+          "sampleRatio": 0.55,
+          "expectedHandleAxis": [0.879347, -0.422074, -0.220459],
+          "expectedActionAxis": [-0.879347, 0.422074, 0.220459],
+          "actionYMinimum": 0.35
+        },
+        {
+          "id": "fishing-follow-through",
+          "sampleRatio": 0.7,
+          "expectedHandleAxis": [0.911609, -0.075046, -0.40415],
+          "expectedActionAxis": [-0.911609, 0.075046, 0.40415]
+        },
+        {
+          "id": "fishing-recovery",
+          "sampleRatio": 0.85,
+          "expectedHandleAxis": [0.907787, 0.383358, 0.170175],
+          "expectedActionAxis": [-0.907787, -0.383358, -0.170175],
+          "secondaryHandContactRequired": true
+        }
+      ]
+    },
+    {
+      "id": "small-fishing-net",
+      "itemIds": ["small_fishing_net"],
+      "grip": "one-hand",
+      "motionManifest": "scripts/steve-small-fishing-net-cycle-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [1, 0, 0],
+      "actionSemantic": "net-face",
+      "actionAxisSymmetry": "directed",
+      "requireMetadataHandleAxis": false,
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.001,
+      "visualReviewPhaseId": "net-release",
+      "phases": [
+        {
+          "id": "net-windup",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0, -1, 0],
+          "expectedActionAxis": [0, 0, -1]
+        },
+        {
+          "id": "net-early-release",
+          "sampleRatio": 0.35,
+          "expectedHandleAxis": [-0.417552, -0.827693, -0.374932],
+          "expectedActionAxis": [0.788938, -0.125524, -0.601515]
+        },
+        {
+          "id": "net-release",
+          "sampleRatio": 0.65,
+          "expectedHandleAxis": [-0.183258, -0.927059, 0.327076],
+          "expectedActionAxis": [-0.565887, -0.172579, -0.806219]
+        },
+        {
+          "id": "net-recovery",
+          "sampleRatio": 0.9,
+          "expectedHandleAxis": [0.01598, -0.987272, 0.158235],
+          "expectedActionAxis": [-0.19086, -0.158357, -0.96876]
+        },
+        {
+          "id": "net-retrieve-approach",
+          "sampleRatio": 0.1,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.174557, -0.98223, 0.068943],
+          "expectedActionAxis": [-0.147115, -0.095248, -0.984523]
+        },
+        {
+          "id": "net-retrieve-contact",
+          "sampleRatio": 0.35,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.366081, -0.907367, -0.206566],
+          "expectedActionAxis": [-0.140725, 0.165443, -0.976128]
+        },
+        {
+          "id": "net-retrieve-lift",
+          "sampleRatio": 0.65,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.301473, -0.938282, -0.169533],
+          "expectedActionAxis": [-0.06205, 0.158122, -0.985468]
+        },
+        {
+          "id": "net-retrieve-standing",
+          "sampleRatio": 0.9,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.02896, -0.999328, 0.022473],
+          "expectedActionAxis": [-0.032825, -0.023421, -0.999187]
+        }
+      ]
+    },
+    {
+      "id": "lobster-pot",
+      "itemIds": ["lobster_pot"],
+      "grip": "one-hand",
+      "motionManifest": "scripts/steve-lobster-pot-motion-audit.json",
+      "sourceHandleAxis": [0, -1, 0],
+      "sourceActionAxis": [1, 0, 0],
+      "actionSemantic": "cage-face-world-placement",
+      "actionAxisSymmetry": "directed",
+      "requireMetadataHandleAxis": false,
+      "maximumPrimaryHandSurfaceDistanceMetres": 0.001,
+      "visualReviewPhaseId": "pot-deploy-contact",
+      "phases": [
+        {
+          "id": "pot-deploy-standing",
+          "sampleRatio": 0.1,
+          "expectedHandleAxis": [0, -1, 0],
+          "expectedActionAxis": [0, 0, -1]
+        },
+        {
+          "id": "pot-deploy-lowering",
+          "sampleRatio": 0.35,
+          "expectedHandleAxis": [0.272984, -0.942623, -0.192203],
+          "expectedActionAxis": [-0.036919, 0.189379, -0.98121]
+        },
+        {
+          "id": "pot-deploy-contact",
+          "sampleRatio": 0.65,
+          "expectedHandleAxis": [0.336597, -0.91378, -0.227395],
+          "expectedActionAxis": [-0.118038, 0.198637, -0.972939]
+        },
+        {
+          "id": "pot-deploy-release",
+          "sampleRatio": 0.9,
+          "expectedHandleAxis": [0.143539, -0.988361, 0.050383],
+          "expectedActionAxis": [-0.118321, -0.067684, -0.990666]
+        },
+        {
+          "id": "pot-retrieve-approach",
+          "sampleRatio": 0.1,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.143539, -0.988361, 0.050383],
+          "expectedActionAxis": [-0.118321, -0.067684, -0.990666]
+        },
+        {
+          "id": "pot-retrieve-contact",
+          "sampleRatio": 0.35,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.336597, -0.91378, -0.227395],
+          "expectedActionAxis": [-0.118038, 0.198637, -0.972939]
+        },
+        {
+          "id": "pot-retrieve-lift",
+          "sampleRatio": 0.65,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0.272984, -0.942623, -0.192203],
+          "expectedActionAxis": [-0.036919, 0.189379, -0.98121]
+        },
+        {
+          "id": "pot-retrieve-standing",
+          "sampleRatio": 0.9,
+          "runtimeMotionRole": "retrieve",
+          "expectedHandleAxis": [0, -1, 0],
+          "expectedActionAxis": [0, 0, -1]
+        }
+      ]
+    }
+  ]
+}

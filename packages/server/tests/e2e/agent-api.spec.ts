@@ -380,7 +380,7 @@ test.describe("Agent API Integration Tests", () => {
         body: JSON.stringify({
           character: {
             name: character.name,
-            modelProvider: "ollama",
+            modelProvider: "openai",
             settings: {
               voice: { model: "en_US-male-medium" },
             },

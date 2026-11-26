@@ -41,7 +41,6 @@ CORS_CONFIG=$(cat <<'EOF'
           "https://*.hyperia-betting.pages.dev",
           "https://*.hyperbet.pages.dev",
           "https://*.hyperbet-solana.pages.dev",
-          "https://*.hyperbet-bsc.pages.dev",
           "http://localhost:3333",
           "http://localhost:5555",
           "http://127.0.0.1:3333",
@@ -83,5 +82,4 @@ echo "  - https://*.hyperia.pages.dev"
 echo "  - https://*.hyperia-betting.pages.dev"
 echo "  - https://*.hyperbet.pages.dev"
 echo "  - https://*.hyperbet-solana.pages.dev"
-echo "  - https://*.hyperbet-bsc.pages.dev"
 echo "  - http://localhost:*"

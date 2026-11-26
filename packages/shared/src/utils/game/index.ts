@@ -34,6 +34,8 @@ export {
 } from "./EntityUtils";
 
 export * from "./ComponentUtils";
+export * from "./ProcessingFireExtinguishRegistration";
+export * from "./AmmunitionShotRegistration";
 
 // Combat level calculation (rules-accurate)
 export * from "./CombatLevelCalculator";

@@ -130,6 +130,58 @@ export function isExactMatchFishingTool(category: string): boolean {
 }
 
 /**
+ * Resolve the item whose model must be presented for a gathering session.
+ *
+ * Fishing resources require distinct, non-interchangeable equipment. Their
+ * presentation must therefore follow the resource's exact `toolRequired`
+ * authority, even when another fishing item has a better manifest priority.
+ * Woodcutting and mining continue to present the best usable tier selected by
+ * the gathering system.
+ */
+export function resolveGatheringPresentationItemId(
+  skill: string,
+  requiredToolId: string | null | undefined,
+  selectedToolItemId: string | null | undefined,
+): string | null {
+  if (skill === "fishing") {
+    if (!requiredToolId) return null;
+    const exactToolId = getToolCategory(requiredToolId);
+    return isExactMatchFishingTool(exactToolId) ? exactToolId : null;
+  }
+
+  const normalizedSelectedToolId = selectedToolItemId?.trim();
+  return normalizedSelectedToolId || null;
+}
+
+/**
+ * Resolve the symbolic emote carried by authoritative movement/entity state.
+ *
+ * Fishing uses the exact required item ID as its emote authority. The client
+ * deliberately maps only art-certified item IDs to animation assets; an exact
+ * but uncertified net, pot, or harpoon key therefore falls back to idle instead
+ * of displaying a misleading rod cast. Woodcutting and mining retain their
+ * established skill-family keys.
+ */
+export function resolveGatheringPresentationEmote(
+  skill: string,
+  requiredToolId: string | null | undefined,
+  selectedToolItemId: string | null | undefined,
+): string {
+  if (skill === "fishing") {
+    return (
+      resolveGatheringPresentationItemId(
+        skill,
+        requiredToolId,
+        selectedToolItemId,
+      ) ?? "idle"
+    );
+  }
+  if (skill === "woodcutting") return "chopping";
+  if (skill === "mining") return "mining";
+  return "idle";
+}
+
+/**
  * Check if an item ID matches the required tool category.
  *
  * Uses the tools.json manifest as the single source of truth:

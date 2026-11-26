@@ -63,6 +63,7 @@ RESPONSE=$(curl -s -X POST \
   "${SERVER_URL}/admin/maintenance/exit" \
   -H "Content-Type: application/json" \
   -H "x-admin-code: ${ADMIN_CODE}" \
+  --data '{}' \
   --max-time 30)
 
 # Check if curl succeeded

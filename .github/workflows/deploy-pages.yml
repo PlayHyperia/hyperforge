@@ -11,16 +11,16 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/client/**'
-      - 'packages/shared/**'
-      - 'package.json'
-      - 'bun.lock'
+      - "packages/client/**"
+      - "packages/shared/**"
+      - "package.json"
+      - "bun.lock"
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment'
+        description: "Deployment environment"
         required: true
-        default: 'production'
+        default: "production"
         type: choice
         options:
           - production
@@ -44,10 +44,15 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: 1.1.38
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -55,7 +60,7 @@ jobs:
       - name: Build client (includes shared + physx dependencies via turbo)
         run: bun run build:client
         env:
-          NODE_OPTIONS: '--max-old-space-size=4096'
+          NODE_OPTIONS: "--max-old-space-size=4096"
           PUBLIC_PRIVY_APP_ID: ${{ secrets.PUBLIC_PRIVY_APP_ID || 'cmgk4zu56005kjj0bcaae0rei' }}
           PUBLIC_API_URL: ${{ vars.PRODUCTION_PUBLIC_API_URL || 'https://hyperia-production.up.railway.app' }}
           PUBLIC_WS_URL: ${{ vars.PRODUCTION_PUBLIC_WS_URL || 'wss://hyperia-production.up.railway.app/ws' }}

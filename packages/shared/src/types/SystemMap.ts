@@ -56,11 +56,13 @@ import type { ClientCameraSystem } from "../systems/client/ClientCameraSystem";
 import type { ClientGraphics } from "../systems/client/ClientGraphics";
 import type { ClientNetwork } from "../systems/client/ClientNetwork";
 import type { ClientActions } from "../systems/client/ClientActions";
+import type { CombatAudioSystem } from "../systems/client/CombatAudioSystem";
 import type { DamageSplatSystem } from "../systems/client";
 import type { DuelCountdownSplatSystem } from "../systems/client";
 import type { ProjectileRenderer } from "../systems/client";
 import type { SocialSystem } from "../systems/client";
 import type { DuelArenaVisualsSystem } from "../systems/client";
+import type { EquipmentVisualSystem } from "../systems/client";
 import type { InteractionRouter } from "../systems/client";
 import type { HealthBars } from "../systems/client/HealthBars";
 
@@ -156,6 +158,7 @@ export interface SystemMap {
   graphics: ClientGraphics;
   network: ClientNetwork;
   actions: ClientActions;
+  "combat-audio": CombatAudioSystem;
   "client-camera-system": ClientCameraSystem;
   interaction: InteractionRouter;
   "inventory-interaction": InventoryInteractionSystem;
@@ -164,6 +167,7 @@ export interface SystemMap {
   "duel-countdown-splat": DuelCountdownSplatSystem;
   social: SocialSystem;
   "duel-arena-visuals": DuelArenaVisualsSystem;
+  "equipment-visual": EquipmentVisualSystem;
   healthbars: HealthBars;
 
   // Shared systems with key access

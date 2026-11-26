@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-19T23:30:00.000Z",
+  "title": "Active Steve fishing world-presentation lifecycle",
+  "avatar": {
+    "id": "steve",
+    "asset": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207"
+  },
+  "idleMotion": {
+    "asset": "packages/server/world/assets/emotes/emote-idle.glb",
+    "sha256": "fcdce02c4527c09f9f01a33d65820c2bec8932d9682719b23437480b70130a55"
+  },
+  "retrievalMotion": {
+    "asset": "packages/server/world/assets/emotes/emote-steve-fishing-retrieve.glb",
+    "sha256": "4753a5232d9a36cf606ee4fcfedfab610be2673e72fa8e549315dbe24e78428c"
+  },
+  "items": [
+    {
+      "itemId": "small_fishing_net",
+      "heldAsset": "packages/server/world/assets/models/tools/fishing-interactions/small-fishing-net-steve-fitted.glb",
+      "heldSha256": "8138de01389b4e9c417420eeb8fe03ed3c609242e3e352a6e2fe7016a051528a",
+      "worldAsset": "packages/server/world/assets/models/tools/fishing-interactions/small-fishing-net-world.glb",
+      "worldSha256": "6855ba8bf48b30a3fc65e26fead6cef51f8fc85a054db540e0633d7c34fa1d8b",
+      "deployMotionAsset": "packages/server/world/assets/emotes/emote-steve-small-fishing-net-release.glb",
+      "deployMotionSha256": "5d56e2c78665da11f37968928790c5a4866c75f841ec31923a118142a1250da7",
+      "avatarPosition": [-0.72, 0, 0],
+      "targetPosition": [-0.82, 0.08, 0.72],
+      "releaseDelaySeconds": 0.18,
+      "releaseArcHeightMetres": 0.35
+    },
+    {
+      "itemId": "lobster_pot",
+      "heldAsset": "packages/server/world/assets/models/tools/fishing-interactions/lobster-pot-steve-fitted.glb",
+      "heldSha256": "03bece6576202454c964391adcd29b33d5ee1e93895103707fb59fcc6ea7a1e8",
+      "worldAsset": "packages/server/world/assets/models/tools/fishing-interactions/lobster-pot-world.glb",
+      "worldSha256": "2c56e8b5ac393a1550ba77f11eacfb37b9bffdc5bf15be091fa1456ed5fef30a",
+      "deployMotionAsset": "packages/server/world/assets/emotes/emote-steve-lobster-pot-deploy.glb",
+      "deployMotionSha256": "bdc01e9545c57992433e6e7da7ff41803099452262bf1b9de6b76aff22565748",
+      "avatarPosition": [0.72, 0, 0],
+      "targetPosition": [0.82, 0.08, 0.72],
+      "releaseDelaySeconds": 0.48,
+      "releaseArcHeightMetres": 0.06
+    }
+  ],
+  "retrievalPickupDelaySeconds": 0.42,
+  "pose": {
+    "minimumHeldArmDeviationDegrees": 5,
+    "minimumActionArmDeviationDegrees": 12
+  },
+  "performance": {
+    "iterations": 180,
+    "maximumP95FrameWorkMs": 20,
+    "maximumSingleFrameWorkMs": 100
+  }
+}

@@ -128,7 +128,7 @@ export class FriendRepository extends BaseRepository {
     const now = Date.now();
 
     // Insert both directions in a transaction
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       // Player -> Friend
       await tx
         .insert(schema.friendships)
@@ -401,7 +401,7 @@ export class FriendRepository extends BaseRepository {
     if (request.toPlayerId !== playerId) return false;
 
     // Create friendship and delete request in transaction
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       const now = Date.now();
 
       // Create bidirectional friendship
@@ -556,7 +556,7 @@ export class FriendRepository extends BaseRepository {
   async addToIgnoreAsync(playerId: string, targetId: string): Promise<void> {
     this.ensureDatabase();
 
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       // Add to ignore list
       await tx
         .insert(schema.ignoreList)

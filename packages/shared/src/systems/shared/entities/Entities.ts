@@ -304,8 +304,7 @@ export class Entities extends SystemBase implements IEntities {
       const rawScale = (
         data as {
           scale?:
-            | { x: number; y: number; z: number }
-            | [number, number, number];
+            { x: number; y: number; z: number } | [number, number, number];
         }
       ).scale;
       let finalScale = { x: 1, y: 1, z: 1 };
@@ -434,6 +433,20 @@ export class Entities extends SystemBase implements IEntities {
       const modelPath = (networkData.model as string) || null;
       const modelScale = networkData.modelScale as number | undefined;
       const groundOffset = networkData.groundOffset as number | undefined;
+      const networkProperties =
+        networkData.properties && typeof networkData.properties === "object"
+          ? (networkData.properties as Record<string, unknown>)
+          : {};
+      const custodyPolicy =
+        (networkData.custodyPolicy as string | undefined) ??
+        (networkProperties.custodyPolicy as string | undefined);
+      const custodySourceId =
+        (networkData.custodySourceId as string | undefined) ??
+        (networkProperties.custodySourceId as string | undefined);
+      const pickupEnabled =
+        networkData.interactable !== false &&
+        custodyPolicy !== "display_only" &&
+        custodyPolicy !== "diagnostic_only";
 
       const itemConfig: ItemEntityConfig = {
         id: data.id,
@@ -452,8 +465,8 @@ export class Entities extends SystemBase implements IEntities {
         },
         scale: { x: 1, y: 1, z: 1 },
         visible: true,
-        interactable: true,
-        interactionType: InteractionType.PICKUP,
+        interactable: pickupEnabled,
+        interactionType: pickupEnabled ? InteractionType.PICKUP : null,
         interactionDistance: 2,
         description: name,
         model: modelPath,
@@ -483,6 +496,9 @@ export class Entities extends SystemBase implements IEntities {
           level: 1,
           // ItemEntityProperties required fields
           itemId: itemId,
+          custodyPolicy: custodyPolicy as
+            "durable_ground" | "display_only" | "diagnostic_only" | undefined,
+          custodySourceId,
           harvestable: false,
           dialogue: [],
           quantity: quantity,
@@ -524,6 +540,7 @@ export class Entities extends SystemBase implements IEntities {
       const networkData = data as {
         npcType?: string;
         npcId?: string;
+        storeId?: string;
         services?: string[];
       };
 
@@ -582,6 +599,7 @@ export class Entities extends SystemBase implements IEntities {
         // Use network data for NPCEntity fields
         npcType: derivedNPCType,
         npcId: npcId,
+        storeId: networkData.storeId,
         dialogueLines: ["Hello there!"],
         services: services,
         questIds: questIds,

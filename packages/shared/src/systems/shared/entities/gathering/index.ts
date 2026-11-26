@@ -14,6 +14,8 @@ export {
   getToolDisplayName,
   isExactMatchFishingTool,
   itemMatchesToolCategory,
+  resolveGatheringPresentationEmote,
+  resolveGatheringPresentationItemId,
   EXACT_FISHING_TOOLS,
   type FishingToolId,
 } from "./ToolUtils";

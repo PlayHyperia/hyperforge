@@ -251,6 +251,17 @@ describe("AmmunitionService", () => {
       expect(data?.requiredRangedLevel).toBe(30);
       expect(data?.requiredBowTier).toBe(30);
     });
+
+    it("matches the rune arrow values in the item manifest", () => {
+      const data = service.getArrowData("rune_arrow");
+      expect(data).toEqual({
+        id: "rune_arrow",
+        name: "Rune arrow",
+        rangedStrength: 49,
+        requiredRangedLevel: 40,
+        requiredBowTier: 40,
+      });
+    });
   });
 
   describe("getBowTier", () => {
@@ -268,6 +279,13 @@ describe("AmmunitionService", () => {
 
     it("returns 30 for maple shortbow", () => {
       expect(service.getBowTier("maple_shortbow")).toBe(30);
+    });
+
+    it("covers the high-tier shortbow and longbow manifests", () => {
+      expect(service.getBowTier("yew_shortbow")).toBe(40);
+      expect(service.getBowTier("magic_shortbow")).toBe(50);
+      expect(service.getBowTier("yew_longbow")).toBe(40);
+      expect(service.getBowTier("magic_longbow")).toBe(50);
     });
 
     it("returns 1 for unknown bow", () => {
@@ -298,6 +316,18 @@ describe("AmmunitionService", () => {
       expect(
         service.areArrowsCompatible("maple_shortbow", "adamant_arrow"),
       ).toBe(true);
+    });
+
+    it("accepts rune arrows only with a compatible high-tier bow", () => {
+      expect(service.areArrowsCompatible("yew_shortbow", "rune_arrow")).toBe(
+        true,
+      );
+      expect(service.areArrowsCompatible("magic_longbow", "rune_arrow")).toBe(
+        true,
+      );
+      expect(service.areArrowsCompatible("maple_shortbow", "rune_arrow")).toBe(
+        false,
+      );
     });
 
     it("returns false for unknown arrow type", () => {

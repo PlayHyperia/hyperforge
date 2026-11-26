@@ -1,22 +1,10 @@
 export type DuelArenaOracleProfile = "local" | "testnet" | "mainnet" | "all";
 
 export type DuelArenaOracleChainKey =
-  | "anvil"
-  | "baseSepolia"
-  | "bscTestnet"
-  | "avaxFuji"
-  | "base"
-  | "bsc"
-  | "avax"
-  | "solanaLocalnet"
-  | "solanaDevnet"
-  | "solanaMainnet";
+  "solanaLocalnet" | "solanaDevnet" | "solanaMainnet";
 
 export type DuelArenaOracleStatus =
-  | "BETTING_OPEN"
-  | "LOCKED"
-  | "RESOLVED"
-  | "CANCELLED";
+  "BETTING_OPEN" | "LOCKED" | "RESOLVED" | "CANCELLED";
 
 export type DuelArenaOracleWinnerSide = "A" | "B";
 
@@ -28,7 +16,7 @@ export interface DuelArenaOracleParticipant {
 
 export interface DuelArenaOracleChainState {
   target: DuelArenaOracleChainKey;
-  kind: "evm" | "solana";
+  kind: "solana";
   label: string;
   lastAction: "UPSERT" | "RESOLVE" | "CANCEL" | null;
   lastTxHash: string | null;
@@ -101,10 +89,11 @@ export interface DuelArenaOracleResolutionEvent {
   duelId: string;
   duelKeyHex: string;
   duelEndTime: number;
-  winnerId: string;
-  loserId: string;
-  winnerName: string;
-  loserName: string;
+  outcome: "win" | "draw";
+  winnerId: string | null;
+  loserId: string | null;
+  winnerName: string | null;
+  loserName: string | null;
   winReason: "kill" | "hp_advantage" | "damage_advantage" | "draw";
   seed: string | null;
   replayHash: string | null;
@@ -119,23 +108,6 @@ export interface DuelArenaOracleAbortEvent {
   agent2Id: string | null;
   agent1Name: string | null;
   agent2Name: string | null;
-}
-
-export interface DuelArenaOracleEvmTargetConfig {
-  key: Extract<
-    DuelArenaOracleChainKey,
-    | "anvil"
-    | "baseSepolia"
-    | "bscTestnet"
-    | "avaxFuji"
-    | "base"
-    | "bsc"
-    | "avax"
-  >;
-  label: string;
-  rpcUrl: string;
-  contractAddress: `0x${string}`;
-  privateKey: `0x${string}`;
 }
 
 export interface DuelArenaOracleSolanaTargetConfig {
@@ -156,7 +128,6 @@ export interface DuelArenaOracleConfig {
   profile: DuelArenaOracleProfile;
   metadataBaseUrl: string;
   storePath: string;
-  evmTargets: DuelArenaOracleEvmTargetConfig[];
   solanaTargets: DuelArenaOracleSolanaTargetConfig[];
   settlementDelayMs: number;
 }

@@ -23,7 +23,6 @@ import {
   hasHides,
   hasEssence,
 } from "../utils/item-detection.js";
-import { getRuneTypes } from "../utils/world-data.js";
 
 function getDistance2D(
   posA: [number, number, number] | null | undefined,
@@ -35,20 +34,65 @@ function getDistance2D(
   return Math.sqrt(dx * dx + dz * dz);
 }
 
+function getTileDistance(
+  posA: [number, number, number] | null | undefined,
+  posB: [number, number, number] | null | undefined,
+): number | null {
+  if (!posA || !posB) return null;
+  return Math.max(Math.abs(posA[0] - posB[0]), Math.abs(posA[2] - posB[2]));
+}
+
+const WORKSTATION_MOVE_POLL_MS = 200;
+const WORKSTATION_MOVE_MIN_TIMEOUT_MS = 5_000;
+const WORKSTATION_MOVE_MAX_TIMEOUT_MS = 30_000;
+
+async function moveIntoWorkstationRange(
+  service: HyperiaService,
+  target: Entity,
+  interactionRange: number,
+): Promise<boolean> {
+  const initialPlayer = service.getPlayerEntity();
+  const initialDistance = getTileDistance(
+    initialPlayer?.position,
+    target.position,
+  );
+  if (initialDistance === null) return false;
+  if (initialDistance <= interactionRange) return true;
+
+  const timeoutMs = Math.min(
+    WORKSTATION_MOVE_MAX_TIMEOUT_MS,
+    Math.max(
+      WORKSTATION_MOVE_MIN_TIMEOUT_MS,
+      Math.ceil(initialDistance * 800 + 2_000),
+    ),
+  );
+  await service.executeMove({ target: target.position, runMode: true });
+  const deadline = Date.now() + timeoutMs;
+  while (service.isConnected() && Date.now() <= deadline) {
+    const player = service.getPlayerEntity();
+    const currentTarget = service
+      .getNearbyEntities()
+      .find((entity) => entity.id === target.id);
+    if (!currentTarget) return false;
+    const distance = getTileDistance(player?.position, currentTarget.position);
+    if (distance !== null && distance <= interactionRange) return true;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, WORKSTATION_MOVE_POLL_MS),
+    );
+  }
+  return false;
+}
+
 function isFurnace(entity: Entity): boolean {
   const type = (entity.type || "").toLowerCase();
   const entityType = (entity.entityType || "").toLowerCase();
-  const name = (entity.name || "").toLowerCase();
-  return (
-    type === "furnace" || entityType === "furnace" || name.includes("furnace")
-  );
+  return type === "furnace" || entityType === "furnace";
 }
 
 function isAnvil(entity: Entity): boolean {
   const type = (entity.type || "").toLowerCase();
   const entityType = (entity.entityType || "").toLowerCase();
-  const name = (entity.name || "").toLowerCase();
-  return type === "anvil" || entityType === "anvil" || name.includes("anvil");
+  return type === "anvil" || entityType === "anvil";
 }
 
 function findNearestEntity(
@@ -100,73 +144,57 @@ function detectBarType(
 }
 
 function isTanner(entity: Entity): boolean {
-  const n = (entity.name || "").toLowerCase();
-  const t = (entity.entityType || "").toLowerCase();
-  return n.includes("tanner") || t === "tanner";
+  return (entity.npcType || "").toLowerCase() === "tanner";
 }
 
 function isRuneAltar(entity: Entity): boolean {
-  const n = (entity.name || "").toLowerCase();
-  return n.includes("altar") && n.includes("rune");
+  const type = (entity.type || "").toLowerCase();
+  const entityType = (entity.entityType || "").toLowerCase();
+  return (
+    (type === "runecrafting_altar" || entityType === "runecrafting_altar") &&
+    typeof entity.runeType === "string" &&
+    /^[a-z][a-z0-9_]{0,31}$/.test(entity.runeType)
+  );
 }
 
-function detectFletchProduct(
+function detectFletchRecipe(
   text: string,
-  items: Array<{ name?: string; itemId?: string }>,
-): string {
-  if (text.includes("arrow")) return "arrow shafts";
-  if (text.includes("longbow")) return "longbow";
-  if (text.includes("shortbow")) return "shortbow";
-  if (text.includes("crossbow")) return "crossbow";
+  items: Array<{ name?: string; itemId?: string; quantity?: number }>,
+): { recipeId: string; product: string } | null {
+  let logItemId: string | null = null;
+  for (const item of items) {
+    const itemId = (item.itemId || "").toLowerCase();
+    if (
+      Number(item.quantity ?? 0) > 0 &&
+      (itemId === "logs" || /^[a-z]+_logs$/.test(itemId))
+    ) {
+      logItemId = itemId;
+      break;
+    }
+  }
+  if (!logItemId) return null;
 
-  const logType = detectLogType(items);
-  return logType ? `${logType} shortbow` : "shortbow";
+  const prefix = logItemId === "logs" ? "" : logItemId.replace(/_logs$/, "_");
+  const output = text.includes("longbow")
+    ? `${prefix}longbow_u`
+    : text.includes("shortbow")
+      ? `${prefix}shortbow_u`
+      : "arrow_shaft";
+  const product = output.replace(/_u$/, "").replace(/_/g, " ");
+  return { recipeId: `${output}:${logItemId}`, product };
 }
 
-function detectLogType(
-  items: Array<{ name?: string; itemId?: string }>,
-): string | null {
+function detectHideInput(
+  items: Array<{ name?: string; itemId?: string; quantity?: number }>,
+): { itemId: "cowhide" | "green_dragonhide"; quantity: number } | null {
   for (const item of items) {
-    const name = (item.name || item.itemId || "").toLowerCase();
-    if (!name.includes("log")) continue;
-    if (name.includes("yew")) return "yew";
-    if (name.includes("maple")) return "maple";
-    if (name.includes("willow")) return "willow";
-    if (name.includes("oak")) return "oak";
-    return "normal";
+    const itemId = (item.itemId || "").toLowerCase();
+    const quantity = Number(item.quantity ?? 0);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) continue;
+    if (itemId === "green_dragonhide") return { itemId, quantity };
+    if (itemId === "cowhide") return { itemId, quantity };
   }
   return null;
-}
-
-function detectHideType(
-  items: Array<{ name?: string; itemId?: string }>,
-): string {
-  for (const item of items) {
-    const name = (item.name || item.itemId || "").toLowerCase();
-    if (name.includes("dragonhide") || name.includes("dragon hide"))
-      return "dragonhide";
-    if (name.includes("cowhide") || name.includes("cow hide"))
-      return "cowhides";
-    if (name.includes("hide")) return "hides";
-  }
-  return "hides";
-}
-
-function detectRuneType(text: string, altarName: string): string {
-  // Use manifest-driven rune types with hardcoded fallback
-  const manifestTypes = getRuneTypes();
-  const runeTypes =
-    manifestTypes.length > 0
-      ? manifestTypes
-      : ["air", "water", "earth", "fire", "mind", "body"];
-  for (const rune of runeTypes) {
-    if (text.includes(rune)) return rune;
-  }
-  const altarLower = altarName.toLowerCase();
-  for (const rune of runeTypes) {
-    if (altarLower.includes(rune)) return rune;
-  }
-  return "air";
 }
 
 export const smeltOreAction: Action = {
@@ -218,10 +246,12 @@ export const smeltOreAction: Action = {
         return { success: false, error: "No furnace nearby" };
       }
 
-      const distance = getDistance2D(player.position, furnace.position);
-      if (distance !== null && distance > 5) {
-        await service.executeMove({ target: furnace.position, runMode: false });
-        await new Promise((r) => setTimeout(r, 2000));
+      if (!(await moveIntoWorkstationRange(service, furnace, 2))) {
+        await callback?.({
+          text: "I could not reach the furnace safely.",
+          action: "SMELT_ORE",
+        });
+        return { success: false, error: "Furnace was not reached" };
       }
 
       const barType = getSmeltableBar(player.items);
@@ -233,7 +263,17 @@ export const smeltOreAction: Action = {
         return { success: false, error: "No valid ore combination" };
       }
 
-      service.interactWithEntity(furnace.id, "smelt");
+      const completed = await service.executeSmelting(furnace.id, barType, 1);
+      if (!completed) {
+        await callback?.({
+          text: "Smelting did not complete; I will reassess before trying again.",
+          action: "SMELT_ORE",
+        });
+        return {
+          success: false,
+          error: "Authoritative smelting completion was not received",
+        };
+      }
 
       const responseText = `Smelting ${barType.replace("_", " ")} at the furnace`;
       await callback?.({ text: responseText, action: "SMELT_ORE" });
@@ -305,10 +345,12 @@ export const smithItemAction: Action = {
         return { success: false, error: "No anvil nearby" };
       }
 
-      const distance = getDistance2D(player.position, anvil.position);
-      if (distance !== null && distance > 5) {
-        await service.executeMove({ target: anvil.position, runMode: false });
-        await new Promise((r) => setTimeout(r, 2000));
+      if (!(await moveIntoWorkstationRange(service, anvil, 2))) {
+        await callback?.({
+          text: "I could not reach the anvil safely.",
+          action: "SMITH_ITEM",
+        });
+        return { success: false, error: "Anvil was not reached" };
       }
 
       const barType = detectBarType(player.items);
@@ -320,16 +362,32 @@ export const smithItemAction: Action = {
         return { success: false, error: "No bars in inventory" };
       }
 
-      service.interactWithEntity(anvil.id, "smith");
-
       const metalName = barType.replace("_bar", "");
-      const responseText = `Smithing ${metalName} equipment at the anvil`;
+      const recipeId = `${metalName}_dagger`;
+      const completed = await service.executeSmithing(anvil.id, recipeId, 1);
+      if (!completed) {
+        await callback?.({
+          text: "Smithing did not complete; I will reassess before trying again.",
+          action: "SMITH_ITEM",
+        });
+        return {
+          success: false,
+          error: "Authoritative smithing completion was not received",
+        };
+      }
+
+      const responseText = `Smithing a ${metalName} dagger at the anvil`;
       await callback?.({ text: responseText, action: "SMITH_ITEM" });
 
       return {
         success: true,
         text: responseText,
-        data: { action: "SMITH_ITEM", barType, anvilId: anvil.id },
+        data: {
+          action: "SMITH_ITEM",
+          barType,
+          recipeId,
+          anvilId: anvil.id,
+        },
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -401,34 +459,23 @@ export const fletchItemAction: Action = {
         return { success: false, error: "No logs in inventory" };
       }
 
-      const nearbyEntities = service.getNearbyEntities();
-      const fletchingStation = findNearestEntity(
-        nearbyEntities,
-        player.position,
-        (e) => {
-          const n = (e.name || "").toLowerCase();
-          return n.includes("fletch") || n.includes("workbench");
-        },
-      );
-
-      if (fletchingStation) {
-        const distance = getDistance2D(
-          player.position,
-          fletchingStation.position,
-        );
-        if (distance !== null && distance > 5) {
-          await service.executeMove({
-            target: fletchingStation.position,
-            runMode: false,
-          });
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-        service.interactWithEntity(fletchingStation.id, "fletch");
-      }
-
       const text = (message.content.text || "").toLowerCase();
-      const fletchProduct = detectFletchProduct(text, player.items);
-      const responseText = `Fletching ${fletchProduct}`;
+      const recipe = detectFletchRecipe(text, player.items);
+      if (!recipe) {
+        return { success: false, error: "No supported logs in inventory" };
+      }
+      const completed = await service.executeFletching(recipe.recipeId, 1);
+      if (!completed) {
+        await callback?.({
+          text: "Fletching did not complete; I will reassess before trying again.",
+          action: "FLETCH_ITEM",
+        });
+        return {
+          success: false,
+          error: "Authoritative fletching completion was not received",
+        };
+      }
+      const responseText = `Fletching ${recipe.product}`;
       await callback?.({ text: responseText, action: "FLETCH_ITEM" });
 
       return {
@@ -436,8 +483,8 @@ export const fletchItemAction: Action = {
         text: responseText,
         data: {
           action: "FLETCH_ITEM",
-          product: fletchProduct,
-          stationId: fletchingStation?.id ?? null,
+          product: recipe.product,
+          recipeId: recipe.recipeId,
         },
       };
     } catch (error) {
@@ -477,7 +524,7 @@ export const tanHideAction: Action = {
 
     const player = service.getPlayerEntity();
     if (!player?.position) return false;
-    if (!hasHides(player)) return false;
+    if (!hasHides(player) || !detectHideInput(player.items)) return false;
 
     const nearbyEntities = service.getNearbyEntities();
     const tanner = findNearestEntity(nearbyEntities, player.position, isTanner);
@@ -506,6 +553,10 @@ export const tanHideAction: Action = {
         });
         return { success: false, error: "No hides in inventory" };
       }
+      const hide = detectHideInput(player.items);
+      if (!hide) {
+        return { success: false, error: "No supported hides in inventory" };
+      }
 
       const nearbyEntities = service.getNearbyEntities();
       const tanner = findNearestEntity(
@@ -521,22 +572,42 @@ export const tanHideAction: Action = {
         return { success: false, error: "No tanner nearby" };
       }
 
-      const distance = getDistance2D(player.position, tanner.position);
-      if (distance !== null && distance > 5) {
-        await service.executeMove({ target: tanner.position, runMode: false });
-        await new Promise((r) => setTimeout(r, 2000));
+      if (!(await moveIntoWorkstationRange(service, tanner, 2))) {
+        await callback?.({
+          text: "I could not reach the Tanner safely.",
+          action: "TAN_HIDE",
+        });
+        return { success: false, error: "Tanner was not reached" };
       }
 
-      service.interactWithEntity(tanner.id, "tan");
+      const completed = await service.executeTanning(
+        tanner.id,
+        hide.itemId,
+        hide.quantity,
+      );
+      if (!completed) {
+        await callback?.({
+          text: "Tanning did not complete; I will reassess before trying again.",
+          action: "TAN_HIDE",
+        });
+        return {
+          success: false,
+          error: "Authoritative tanning completion was not received",
+        };
+      }
 
-      const hideType = detectHideType(player.items);
-      const responseText = `Tanning ${hideType} into leather at the tanner`;
+      const responseText = `Submitted ${hide.quantity} ${hide.itemId.replace(/_/g, " ")} for authoritative tanning`;
       await callback?.({ text: responseText, action: "TAN_HIDE" });
 
       return {
         success: true,
         text: responseText,
-        data: { action: "TAN_HIDE", hideType, tannerId: tanner.id },
+        data: {
+          action: "TAN_HIDE",
+          hideType: hide.itemId,
+          quantity: hide.quantity,
+          tannerId: tanner.id,
+        },
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -619,18 +690,26 @@ export const runecraftAction: Action = {
         return { success: false, error: "No altar nearby" };
       }
 
-      const distance = getDistance2D(player.position, altar.position);
-      if (distance !== null && distance > 5) {
-        await service.executeMove({ target: altar.position, runMode: false });
-        await new Promise((r) => setTimeout(r, 2000));
+      if (!(await moveIntoWorkstationRange(service, altar, 2))) {
+        await callback?.({
+          text: "I could not reach the runecrafting altar safely.",
+          action: "RUNECRAFT",
+        });
+        return { success: false, error: "Altar was not reached" };
       }
 
-      service.interactWithEntity(altar.id, "runecraft");
-
-      const runeType = detectRuneType(
-        (message.content.text || "").toLowerCase(),
-        altar.name,
-      );
+      const runeType = altar.runeType as string;
+      const completed = await service.executeRunecrafting(altar.id, runeType);
+      if (!completed) {
+        await callback?.({
+          text: "Runecrafting did not complete; I will reassess before trying again.",
+          action: "RUNECRAFT",
+        });
+        return {
+          success: false,
+          error: "Authoritative runecrafting completion was not received",
+        };
+      }
       const responseText = `Crafting ${runeType} runes at the altar`;
       await callback?.({ text: responseText, action: "RUNECRAFT" });
 

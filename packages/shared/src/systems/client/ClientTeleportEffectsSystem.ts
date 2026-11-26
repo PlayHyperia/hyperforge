@@ -16,7 +16,7 @@ import THREE, {
   length,
   vec2,
 } from "../../extras/three/three";
-import type { ShaderNode } from "../../extras/three/three";
+import type { UniformNode } from "three/webgpu";
 import { World } from "../../core/World";
 import { HOME_TELEPORT_CONSTANTS } from "../../constants/GameConstants";
 import { SystemBase } from "../shared/infrastructure/SystemBase";
@@ -78,6 +78,8 @@ interface BurstParticle {
   velocity: THREE.Vector3;
 }
 
+type FloatUniform = UniformNode<"float", number>;
+
 interface PooledEffect {
   group: THREE.Group;
   mode: "burst" | "channel";
@@ -98,17 +100,17 @@ interface PooledEffect {
 
   // Per-effect materials with own uniforms
   perEffectMaterials: InstanceType<typeof MeshBasicNodeMaterial>[];
-  uRuneOpacity: ReturnType<typeof uniform>;
-  uGlowOpacity: ReturnType<typeof uniform>;
-  uInnerBeamOpacity: ReturnType<typeof uniform>;
-  uOuterBeamOpacity: ReturnType<typeof uniform>;
-  uFlashOpacity: ReturnType<typeof uniform>;
-  uShock1Opacity: ReturnType<typeof uniform>;
-  uShock2Opacity: ReturnType<typeof uniform>;
-  uPortalVeilOpacity: ReturnType<typeof uniform>;
-  uPortalBandLowerOpacity: ReturnType<typeof uniform>;
-  uPortalBandUpperOpacity: ReturnType<typeof uniform>;
-  uPortalCrownOpacity: ReturnType<typeof uniform>;
+  uRuneOpacity: FloatUniform;
+  uGlowOpacity: FloatUniform;
+  uInnerBeamOpacity: FloatUniform;
+  uOuterBeamOpacity: FloatUniform;
+  uFlashOpacity: FloatUniform;
+  uShock1Opacity: FloatUniform;
+  uShock2Opacity: FloatUniform;
+  uPortalVeilOpacity: FloatUniform;
+  uPortalBandLowerOpacity: FloatUniform;
+  uPortalBandUpperOpacity: FloatUniform;
+  uPortalCrownOpacity: FloatUniform;
 
   // Particles (share materials across pool, fade via scale)
   helixParticles: HelixParticle[];
@@ -1216,8 +1218,8 @@ export class ClientTeleportEffectsSystem extends SystemBase {
     );
 
     const colorVec = vec3(float(color.r), float(color.g), float(color.b));
-    material.colorNode = mul(colorVec, glow) as ShaderNode;
-    material.opacityNode = mul(glow, float(0.8)) as ShaderNode;
+    material.colorNode = colorVec.mul(glow);
+    material.opacityNode = glow.mul(0.8);
 
     return material;
   }
@@ -1226,7 +1228,7 @@ export class ClientTeleportEffectsSystem extends SystemBase {
   private createTexturedMaterial(
     tex: THREE.Texture,
     color: THREE.Color,
-    uOpacity: ReturnType<typeof uniform>,
+    uOpacity: FloatUniform,
   ): InstanceType<typeof MeshBasicNodeMaterial> {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
@@ -1237,11 +1239,8 @@ export class ClientTeleportEffectsSystem extends SystemBase {
 
     const texNode = THREE.TSL.texture(tex, uv());
     const colorVec = vec3(float(color.r), float(color.g), float(color.b));
-    material.colorNode = mul(texNode.rgb as ShaderNode, colorVec) as ShaderNode;
-    material.opacityNode = mul(
-      texNode.a as ShaderNode,
-      uOpacity as ShaderNode,
-    ) as ShaderNode;
+    material.colorNode = texNode.rgb.mul(colorVec);
+    material.opacityNode = texNode.a.mul(uOpacity);
 
     return material;
   }
@@ -1249,7 +1248,7 @@ export class ClientTeleportEffectsSystem extends SystemBase {
   /** Structural glow with per-effect opacity uniform (glow disc, flash). */
   private createStructuralGlowMaterial(
     color: THREE.Color,
-    uOpacity: ReturnType<typeof uniform>,
+    uOpacity: FloatUniform,
   ): InstanceType<typeof MeshBasicNodeMaterial> {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
@@ -1266,8 +1265,8 @@ export class ClientTeleportEffectsSystem extends SystemBase {
     );
 
     const colorVec = vec3(float(color.r), float(color.g), float(color.b));
-    material.colorNode = mul(colorVec, glow) as ShaderNode;
-    material.opacityNode = mul(glow, uOpacity as ShaderNode) as ShaderNode;
+    material.colorNode = colorVec.mul(glow);
+    material.opacityNode = glow.mul(uOpacity);
 
     return material;
   }
@@ -1276,7 +1275,7 @@ export class ClientTeleportEffectsSystem extends SystemBase {
   private createBeamMaterial(
     baseColor: THREE.Color,
     topColor: THREE.Color,
-    uOpacity: ReturnType<typeof uniform>,
+    uOpacity: FloatUniform,
   ): InstanceType<typeof MeshBasicNodeMaterial> {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
@@ -1298,7 +1297,7 @@ export class ClientTeleportEffectsSystem extends SystemBase {
       float(topColor.g),
       float(topColor.b),
     );
-    const gradientColor = mix(baseVec, topVec, yNorm) as ShaderNode;
+    const gradientColor = mix(baseVec, topVec, yNorm);
 
     const pulse = add(
       float(0.86),
@@ -1311,14 +1310,11 @@ export class ClientTeleportEffectsSystem extends SystemBase {
       max(sub(float(1.0), mul(yNorm, float(2.0))), float(0.0)),
     );
 
-    material.colorNode = mul(gradientColor, pulse) as ShaderNode;
-    material.opacityNode = mul(
-      mul(
-        mul(sub(float(1.0), mul(yNorm, float(0.3))), bottomFade),
-        uOpacity as ShaderNode,
-      ),
-      pulse,
-    ) as ShaderNode;
+    material.colorNode = gradientColor.mul(pulse);
+    material.opacityNode = sub(float(1.0), mul(yNorm, float(0.3)))
+      .mul(bottomFade)
+      .mul(uOpacity)
+      .mul(pulse);
 
     return material;
   }
@@ -1326,7 +1322,7 @@ export class ClientTeleportEffectsSystem extends SystemBase {
   /** Simple additive material with uniform opacity (shockwave rings). */
   private createBasicAdditiveMaterial(
     color: THREE.Color,
-    uOpacity: ReturnType<typeof uniform>,
+    uOpacity: FloatUniform,
   ): InstanceType<typeof MeshBasicNodeMaterial> {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
@@ -1336,8 +1332,8 @@ export class ClientTeleportEffectsSystem extends SystemBase {
     material.fog = false;
 
     const colorVec = vec3(float(color.r), float(color.g), float(color.b));
-    material.colorNode = colorVec as ShaderNode;
-    material.opacityNode = uOpacity as ShaderNode;
+    material.colorNode = colorVec;
+    material.opacityNode = uOpacity;
 
     return material;
   }

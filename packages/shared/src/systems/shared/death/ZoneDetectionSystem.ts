@@ -13,6 +13,7 @@ import {
   type ZoneData,
 } from "../../../data/world-structure";
 import { ALL_WORLD_AREAS } from "../../../data/world-areas";
+import { getDuelArenaProtectionBounds } from "../../../data/duel-manifest";
 import type { ZoneType, ZoneProperties } from "../../../types/death";
 import { ZoneType as ZoneTypeEnum } from "../../../types/death";
 import type { WorldArea } from "../../../types/core/core";
@@ -62,7 +63,11 @@ export class ZoneDetectionSystem extends SystemBase {
     this.zoneBoundaries = [];
 
     for (const area of Object.values(ALL_WORLD_AREAS) as WorldArea[]) {
-      if (area.bounds) {
+      if (area.id === "duel_arena") {
+        // Include every facility edge: the enclosing arena rectangle does not
+        // describe the unprotected gaps between its individual floors.
+        this.zoneBoundaries.push(...getDuelArenaProtectionBounds());
+      } else if (area.bounds) {
         this.zoneBoundaries.push({
           minX: area.bounds.minX,
           maxX: area.bounds.maxX,
@@ -181,40 +186,33 @@ export class ZoneDetectionSystem extends SystemBase {
     let bestMatch: { area: WorldArea; size: number } | null = null;
     const allAreas = Object.values(ALL_WORLD_AREAS) as WorldArea[];
 
-    // Debug: log all available zones
-    console.log(
-      `[ZoneDetection] Checking ${allAreas.length} zones for position (${position.x.toFixed(1)}, ${position.z.toFixed(1)})`,
-    );
-    console.log(
-      `[ZoneDetection] Available zones: ${allAreas.map((a) => a.id).join(", ")}`,
-    );
-
     for (const area of allAreas) {
-      if (area.bounds) {
-        const { minX, maxX, minZ, maxZ } = area.bounds;
+      const isDuelArena = area.id === "duel_arena";
+      const boundsList = isDuelArena
+        ? getDuelArenaProtectionBounds()
+        : area.bounds
+          ? [area.bounds]
+          : [];
+      // Only the explicitly selected facility policy includes its lower edges.
+      // Historical arena and non-arena zones keep their exclusive minima.
+      const inclusiveMinima =
+        isDuelArena && area.duelProtection === "facility-floors-v1";
+      for (const { minX, maxX, minZ, maxZ } of boundsList) {
         const inBounds =
-          position.x > minX &&
+          (inclusiveMinima ? position.x >= minX : position.x > minX) &&
           position.x <= maxX &&
-          position.z > minZ &&
+          (inclusiveMinima ? position.z >= minZ : position.z > minZ) &&
           position.z <= maxZ;
 
         if (inBounds) {
-          // Calculate zone area (smaller = more specific)
+          // Compare the actual matching component, not its enclosing rectangle.
           const zoneSize = (maxX - minX) * (maxZ - minZ);
-          console.log(`[ZoneDetection] MATCH: ${area.id} (size: ${zoneSize})`);
-
           // Keep the smallest matching zone
           if (!bestMatch || zoneSize < bestMatch.size) {
             bestMatch = { area, size: zoneSize };
           }
         }
       }
-    }
-
-    if (bestMatch) {
-      console.log(
-        `[ZoneDetection] Selected: ${bestMatch.area.id} (smallest match)`,
-      );
     }
 
     // Return the smallest matching zone

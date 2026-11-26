@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { EventType } from "@hyperforge/shared";
 import { EmbeddedHyperiaService } from "../EmbeddedHyperiaService";
+import { loadWorldProfileTestFixture } from "./worldProfileTestFixture";
+
+beforeEach(loadWorldProfileTestFixture);
 
 type TestEntity = {
   id: string;
@@ -20,6 +23,7 @@ function createMockQuestSystem() {
     getQuestDefinition: vi.fn().mockReturnValue(undefined),
     getAllQuestDefinitions: vi.fn().mockReturnValue([]),
     getQuestStatus: vi.fn().mockReturnValue("not_started"),
+    canStartQuest: vi.fn().mockReturnValue(true),
     completeQuest: vi.fn().mockResolvedValue(false),
     startQuest: vi.fn().mockResolvedValue(true),
   };
@@ -411,6 +415,11 @@ describe("EmbeddedHyperiaService quest methods", () => {
           description: "Kill goblins",
           difficulty: "novice",
           startNpc: "captain_rowan",
+          requirements: {
+            quests: [],
+            skills: { attack: 3 },
+            items: ["bronze_shortsword"],
+          },
           stages: [
             {
               id: "kill",
@@ -438,6 +447,16 @@ describe("EmbeddedHyperiaService quest methods", () => {
       expect(result[0].questId).toBe("goblin_slayer");
       expect(result[0].name).toBe("Goblin Slayer");
       expect(result[0].status).toBe("not_started");
+      expect(result[0].canStart).toBe(true);
+      expect(result[0].requirements).toEqual({
+        quests: [],
+        skills: { attack: 3 },
+        items: ["bronze_shortsword"],
+      });
+      expect(questSystem.canStartQuest).toHaveBeenCalledWith(
+        "agent-1",
+        "goblin_slayer",
+      );
       expect(result[0].startNpc).toBe("captain_rowan");
       expect(result[0].onStartItems).toEqual([
         { itemId: "bronze_shortsword", quantity: 1 },
@@ -447,6 +466,35 @@ describe("EmbeddedHyperiaService quest methods", () => {
       ]);
       expect(result[0].stages).toHaveLength(1);
       expect(result[0].stages[0].type).toBe("kill");
+    });
+
+    it("fails closed when the authoritative eligibility query rejects a quest", async () => {
+      const questSystem = createMockQuestSystem();
+      questSystem.canStartQuest.mockReturnValue(false);
+      questSystem.getAllQuestDefinitions.mockReturnValue([
+        {
+          id: "locked_quest",
+          name: "Locked Quest",
+          description: "Requires more training",
+          difficulty: "novice",
+          startNpc: "trainer",
+          requirements: {
+            quests: [],
+            skills: { crafting: 7 },
+            items: [],
+          },
+          stages: [],
+          rewards: { questPoints: 0, items: [], xp: {} },
+        },
+      ]);
+
+      const { service } = await createInitializedService({ questSystem });
+
+      expect(service.getAvailableQuests()[0]).toMatchObject({
+        questId: "locked_quest",
+        status: "not_started",
+        canStart: false,
+      });
     });
 
     it("returns correct status for each quest (completed, in_progress, not_started)", async () => {

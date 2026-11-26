@@ -18,11 +18,16 @@ import type {
 } from "../../shared/types";
 import {
   EventType,
+  DataManager,
+  DEFAULT_AVATAR_URL,
   uuid,
   getItem,
   TerrainSystem,
   Entity,
   World,
+  getDuelArenaConfig,
+  isPositionInsideCombatArena,
+  resolveWorldSpawnPosition,
   type EquipmentSyncData,
   type InventorySyncData,
 } from "@hyperforge/shared";
@@ -199,8 +204,7 @@ export async function loadCharacterList(
 ): Promise<CharacterData[]> {
   try {
     const databaseSystem = world.getSystem("database") as
-      | import("../DatabaseSystem").DatabaseSystem
-      | undefined;
+      import("../DatabaseSystem").DatabaseSystem | undefined;
     if (!databaseSystem) return [];
     const chars = await databaseSystem.getCharactersAsync(accountId);
     return chars.map((c) => ({
@@ -314,8 +318,7 @@ export async function handleCharacterCreate(
 
   try {
     const databaseSystem = world.getSystem("database") as
-      | import("../DatabaseSystem").DatabaseSystem
-      | undefined;
+      import("../DatabaseSystem").DatabaseSystem | undefined;
     if (!databaseSystem) {
       console.error("[CharacterSelection] ❌ ERROR: DatabaseSystem not found!");
       sendToFn(socket.id, "showToast", {
@@ -392,10 +395,24 @@ export function handleCharacterSelected(
   sendToFn: (socketId: string, name: string, data: unknown) => void,
 ): void {
   const payload = (data as { characterId?: string }) || {};
+  const credentialCharacterId = socket.agentCredentialCharacterId;
+  if (
+    credentialCharacterId &&
+    payload.characterId &&
+    payload.characterId !== credentialCharacterId
+  ) {
+    socket.selectedCharacterId = undefined;
+    sendToFn(socket.id, "enterWorldRejected", {
+      reason: "credential_character_mismatch",
+      message: "This agent credential cannot select that character.",
+    });
+    return;
+  }
   // Store selection in socket for subsequent enterWorld
-  socket.selectedCharacterId = payload.characterId || undefined;
+  socket.selectedCharacterId =
+    payload.characterId || credentialCharacterId || undefined;
   sendToFn(socket.id, "characterSelected", {
-    characterId: payload.characterId || null,
+    characterId: socket.selectedCharacterId || null,
   });
 }
 
@@ -407,8 +424,7 @@ function clearClientReadyTimeout(socket: ServerSocket): void {
 
 function isSocketStillActive(socket: ServerSocket, world: World): boolean {
   const networkSystem = world.getSystem("network") as
-    | { sockets?: Map<string, ServerSocket> }
-    | undefined;
+    { sockets?: Map<string, ServerSocket> } | undefined;
 
   if (!networkSystem?.sockets) return false;
   if (networkSystem.sockets.get(socket.id) !== socket) return false;
@@ -489,11 +505,19 @@ export async function handleEnterWorld(
     payload.characterId ||
     socket.selectedCharacterId ||
     socket.characterId ||
+    socket.agentCredentialCharacterId ||
     null;
-  // Load test bots can skip character DB lookup regardless of LOAD_TEST_MODE setting
-  const loadTestBotParam = payload.loadTestBot;
-  const isLoadTestBot =
-    loadTestBotParam === true || loadTestBotParam === "true";
+  const credentialCharacterId = socket.agentCredentialCharacterId;
+  if (credentialCharacterId && characterId !== credentialCharacterId) {
+    sendToFn(socket.id, "enterWorldRejected", {
+      reason: "credential_character_mismatch",
+      message: "This agent credential cannot enter as that character.",
+    });
+    return;
+  }
+  // Only the connection handler may grant the local test bypass. Never trust
+  // the packet flag by itself because this path can skip persistent identity.
+  const isLoadTestBot = socket.isLoadTestBot === true;
   // SECURITY: Determine agent/duel-bot status from server-side registries
   // instead of trusting the client-supplied `duelBot` flag.
   // Check both embedded AgentManager and ModelAgentSpawner registries.
@@ -508,6 +532,9 @@ export async function handleEnterWorld(
     characterId && getAgentRuntimeByCharacterId(characterId)
   );
   const agentIsDuelBot = isEmbeddedAgent || isModelAgent;
+  const isAuthenticatedAgent =
+    credentialCharacterId !== undefined &&
+    characterId === credentialCharacterId;
   const loadTestDuelBot =
     isLoadTestBot && (payload.duelBot === true || payload.duelBot === "true");
   const trustedAccountDuelBot =
@@ -556,8 +583,7 @@ export async function handleEnterWorld(
 
     try {
       const databaseSystem = world.getSystem("database") as
-        | import("../DatabaseSystem").DatabaseSystem
-        | undefined;
+        import("../DatabaseSystem").DatabaseSystem | undefined;
       if (databaseSystem) {
         const existingCharacters =
           await databaseSystem.getCharactersAsync(accountId);
@@ -617,8 +643,7 @@ export async function handleEnterWorld(
   if (characterId) {
     // First check: Look for active socket with this character
     const networkSystem = world.getSystem("network") as
-      | { sockets: Map<string, ServerSocket> }
-      | undefined;
+      { sockets: Map<string, ServerSocket> } | undefined;
     let existingActiveSocket: ServerSocket | undefined = undefined;
 
     if (networkSystem?.sockets) {
@@ -731,42 +756,12 @@ export async function handleEnterWorld(
   } else if (characterId) {
     try {
       const databaseSystem = world.getSystem("database") as
-        | import("../DatabaseSystem").DatabaseSystem
-        | undefined;
+        import("../DatabaseSystem").DatabaseSystem | undefined;
       if (databaseSystem) {
         // First try: Look up characters by accountId (normal flow)
         if (accountId) {
           const characters = await databaseSystem.getCharactersAsync(accountId);
           characterData = characters.find((c) => c.id === characterId) || null;
-        }
-
-        // Second try: If not found by accountId, look up character directly
-        // This handles agents where JWT verification may fail and create anonymous accountId
-        if (!characterData) {
-          console.log(
-            `[CharacterSelection] Character ${characterId} not found for account ${accountId}, trying direct lookup...`,
-          );
-
-          // Try to find the character directly by ID (any account)
-          // This is safe because the agent already has the characterId in its settings
-          const db = databaseSystem.getDb ? databaseSystem.getDb() : null;
-          if (db) {
-            // Use Drizzle query to find character by ID
-            const directLookup = await db.query.characters.findFirst({
-              where: (characters, { eq }) => eq(characters.id, characterId),
-            });
-            if (directLookup) {
-              characterData = directLookup as {
-                id: string;
-                name: string;
-                avatar?: string | null;
-                wallet?: string | null;
-              };
-              console.log(
-                `[CharacterSelection] ✅ Found character via direct lookup: ${characterData.name} (${characterId})`,
-              );
-            }
-          }
         }
 
         if (characterData) {
@@ -808,10 +803,26 @@ export async function handleEnterWorld(
     );
   }
 
+  // Projectile costs must be reconciled before any player state is read or
+  // published. A fired receipt needs an explicit resolution policy, so fail
+  // closed before terrain work, entity creation, timers, spatial registration,
+  // or PLAYER_JOINED can expose a partially hydrated player.
+  const dbSys = world.getSystem?.("database") as
+    DatabaseSystemOperations | undefined;
+  const custodyPersistenceId = characterId || entityId;
+  if (dbSys?.recoverPendingProjectileRuneCostOperationsAsync) {
+    await dbSys.recoverPendingProjectileRuneCostOperationsAsync(
+      custodyPersistenceId,
+    );
+  }
+  if (dbSys?.recoverPendingAmmunitionShotOperationsAsync) {
+    await dbSys.recoverPendingAmmunitionShotOperationsAsync(
+      custodyPersistenceId,
+    );
+  }
+
   // Load saved position from character data if available
-  let position = Array.isArray(spawn.position)
-    ? ([...spawn.position] as [number, number, number])
-    : [0, 50, 0];
+  let requestedPosition: unknown = spawn.position;
   const quaternion = Array.isArray(spawn.quaternion)
     ? ([...spawn.quaternion] as [number, number, number, number])
     : [0, 0, 0, 1];
@@ -823,25 +834,16 @@ export async function handleEnterWorld(
   if (characterId && accountId && !isLoadTestBot) {
     try {
       const databaseSystem = world.getSystem("database") as
-        | import("../DatabaseSystem").DatabaseSystem
-        | undefined;
+        import("../DatabaseSystem").DatabaseSystem | undefined;
       if (databaseSystem) {
         const savedData = await databaseSystem.getPlayerAsync(characterId);
         if (savedData) {
           // Load position
-          if (savedData.positionX !== undefined) {
-            const savedY =
-              savedData.positionY !== undefined && savedData.positionY !== null
-                ? Number(savedData.positionY)
-                : 10;
-            if (savedY >= 5 && savedY <= 200) {
-              position = [
-                Number(savedData.positionX) || 0,
-                savedY,
-                Number(savedData.positionZ) || 0,
-              ];
-            }
-          }
+          requestedPosition = [
+            savedData.positionX,
+            savedData.positionY,
+            savedData.positionZ,
+          ];
           // Load skills
           savedSkills = {
             attack: { level: savedData.attackLevel, xp: savedData.attackXp },
@@ -923,21 +925,35 @@ export async function handleEnterWorld(
 
   // Check if player logged out inside a combat arena (server restart edge case)
   // If so, teleport them to the duel arena lobby spawn point
-  const { isPositionInsideCombatArena, getDuelArenaConfig } =
-    await import("@hyperforge/shared");
+  const lobbySpawn = getDuelArenaConfig().lobbySpawnPoint;
+  const lobbyPosition: [number, number, number] = [
+    lobbySpawn.x,
+    lobbySpawn.y,
+    lobbySpawn.z,
+  ];
 
   // Duel harness bots should always begin from the normal duel arena lobby.
   if (isLoadTestBot && isDuelBot) {
-    const lobby = getDuelArenaConfig().lobbySpawnPoint;
-    position = [lobby.x, lobby.y, lobby.z];
+    requestedPosition = lobbyPosition;
+  }
+
+  const spawnAdmission = resolveWorldSpawnPosition(
+    requestedPosition,
+    lobbyPosition,
+    DataManager.getWorldTerrainProfile(),
+  );
+  let position = spawnAdmission.position;
+  if (spawnAdmission.rehomed) {
+    console.warn(
+      `[CharacterSelection] Rehoming ${characterId || entityId} to the world lobby: ${spawnAdmission.reason}`,
+    );
   }
 
   if (isPositionInsideCombatArena(position[0], position[2])) {
-    const lobbySpawn = getDuelArenaConfig().lobbySpawnPoint;
     console.log(
       `[CharacterSelection] Player ${characterId} was inside combat arena, teleporting to lobby`,
     );
-    position = [lobbySpawn.x, lobbySpawn.y, lobbySpawn.z];
+    position = [...lobbyPosition];
   }
 
   // Ground to terrain (wait briefly for terrain readiness to avoid below-ground spawns)
@@ -1001,10 +1017,7 @@ export async function handleEnterWorld(
         name,
         health: playerHealth, // Use constitution level instead of HEALTH_MAX
         maxHealth: playerHealth, // Also set maxHealth
-        avatar:
-          avatar ||
-          world.settings.avatar?.url ||
-          "asset://avatars/avatar-male-01.vrm",
+        avatar: avatar || world.settings.avatar?.url || DEFAULT_AVATAR_URL,
         sessionAvatar: avatar || undefined, // ✅ Also set sessionAvatar for runtime override
         wallet: walletAddress, // ✅ Character's HD wallet address
         roles,
@@ -1024,9 +1037,11 @@ export async function handleEnterWorld(
   const spawnedPlayer = socket.player;
   if (spawnedPlayer) {
     socket.player.data.isLoading = true;
+    if (isAuthenticatedAgent || isDuelBot) {
+      socket.player.data.isAgent = true;
+    }
     if (isDuelBot) {
       socket.player.data.isDuelBot = true;
-      socket.player.data.isAgent = true;
     }
   }
 
@@ -1104,15 +1119,10 @@ export async function handleEnterWorld(
     // CRITICAL: Load equipment and inventory from DB BEFORE emitting PLAYER_JOINED
     // This ensures systems receive the data via event payload (single source of truth)
     // and eliminates the race condition where two systems query the DB independently
-    const dbSys = world.getSystem?.("database") as
-      | DatabaseSystemOperations
-      | undefined;
-    const persistenceId = characterId || spawnedPlayer.id;
-
     let equipmentRows: EquipmentSyncData[] | undefined;
     try {
       equipmentRows = dbSys?.getPlayerEquipmentAsync
-        ? await dbSys.getPlayerEquipmentAsync(persistenceId)
+        ? await dbSys.getPlayerEquipmentAsync(custodyPersistenceId)
         : undefined;
     } catch (err) {
       console.error("[CharacterSelection] ❌ Failed to load equipment:", err);
@@ -1123,7 +1133,7 @@ export async function handleEnterWorld(
     let inventoryRows: InventorySyncData[] | undefined;
     try {
       const rawRows = dbSys?.getPlayerInventoryAsync
-        ? await dbSys.getPlayerInventoryAsync(persistenceId)
+        ? await dbSys.getPlayerInventoryAsync(custodyPersistenceId)
         : undefined;
       // Transform to InventorySyncData format (slotIndex, itemId, quantity)
       inventoryRows = rawRows?.map((row) => ({
@@ -1162,7 +1172,7 @@ export async function handleEnterWorld(
       equipment: equipmentRows,
       inventory: inventoryRows,
       isLoadTestBot,
-      isAgent: isDuelBot,
+      isAgent: isAuthenticatedAgent || isDuelBot,
     });
 
     try {
@@ -1255,8 +1265,7 @@ export async function handleEnterWorld(
       // Send inventory snapshot immediately from persistence to avoid races
       try {
         const dbSys = world.getSystem?.("database") as
-          | DatabaseSystemOperations
-          | undefined;
+          DatabaseSystemOperations | undefined;
         const persistenceId = characterId || spawnedPlayer.id;
         const rows = dbSys?.getPlayerInventoryAsync
           ? await dbSys.getPlayerInventoryAsync(persistenceId)

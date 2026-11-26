@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.server"
   },
   "deploy": {
-    "startCommand": "node --import /app/packages/server/scripts/register-hooks.mjs /app/packages/server/dist/index.js",
+    "startCommand": "node --import /app/packages/server/scripts/register-hooks.mjs /app/scripts/start-hyperia-server.mjs",
     "healthcheckPath": "/status",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",

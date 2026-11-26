@@ -8,7 +8,6 @@ import type {
 import { EntityType, InteractionType } from "../../../types/entities/entities";
 import { EventType } from "../../../types/events";
 import type { World } from "../../../types/index";
-import type { EntitySpawnedEvent } from "../../../types/systems/system-interfaces";
 import { SystemBase } from "../infrastructure/SystemBase";
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { EntityManager } from "./EntityManager";
@@ -34,6 +33,7 @@ type SpawnedMobDetail = {
   position: { x: number; y: number; z: number };
   levelRange: LevelRange;
   isBoss: boolean;
+  sourceTileKey?: string;
 };
 
 type SpawnMobOptions = {
@@ -41,12 +41,15 @@ type SpawnMobOptions = {
   levelRange?: LevelRange;
   isBoss?: boolean;
   spawnKey?: string;
+  sourceTileKey?: string;
 };
 
 export class MobNPCSpawnerSystem extends SystemBase {
-  private spawnedMobs = new Map<string, string>(); // mobId -> entityId
+  private spawnedMobs = new Map<string, string>(); // spawnKey -> entityId
   private spawnedMobDetails = new Map<string, SpawnedMobDetail>();
   private entityIdToSpawnKey = new Map<string, string>();
+  private tileSpawnKeys = new Map<string, Set<string>>();
+  private activeMobTiles = new Set<string>();
   private spawnedBossHotspots = new Set<string>();
   private mobIdCounter = 0;
   private terrainSystem!: TerrainSystem;
@@ -54,6 +57,15 @@ export class MobNPCSpawnerSystem extends SystemBase {
   private lastSpawnTime = 0;
   private readonly SPAWN_COOLDOWN = 5000; // 5 seconds between spawns
   private readonly BIOME_SPAWNS_PER_TILE = 3;
+  private npcSpawningStopped = false;
+  private startPromise: Promise<void> | null = null;
+
+  // EntityManager publishes only after async Entity.init. Reserve before that
+  // await, across spawner instances sharing the same authoritative manager.
+  private static readonly pendingNPCPlacements = new WeakMap<
+    EntityManager,
+    Map<string, Promise<boolean>>
+  >();
 
   private static readonly banditCapIds = new Set<string>(
     MOB_CONSTANTS.BANDIT_MOB_IDS_FOR_GLOBAL_CAP,
@@ -88,30 +100,96 @@ export class MobNPCSpawnerSystem extends SystemBase {
     // Subscribe to terrain generation to spawn mobs for new tiles
     this.subscribe(EventType.TERRAIN_TILE_GENERATED, (data) =>
       this.onTileGenerated(
-        data as { tileX: number; tileZ: number; biome: string },
+        data as {
+          tileX: number;
+          tileZ: number;
+          biome: string;
+          contentGenerated?: boolean;
+        },
       ),
     );
-
-    // Listen for entity spawned events to track our mobs
-    this.subscribe<EntitySpawnedEvent>(EventType.ENTITY_SPAWNED, (data) => {
-      // Only handle mob entities
-      if (data.entityType === "mob") {
-        this.handleEntitySpawned(data);
-      }
-    });
+    this.subscribe(EventType.TERRAIN_TILE_UNLOADED, (data) =>
+      this.onTileUnloaded(data as { tileX: number; tileZ: number }),
+    );
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
     // Spawn NPCs immediately at world start (they're static, not reactive to terrain)
     // NPCs like bank clerks, shopkeepers should be available from the start
-    if (this.world.isServer) {
+    if (!this.world.isServer || this.npcSpawningStopped)
+      return Promise.resolve();
+    if (this.startPromise) return this.startPromise;
+    const start = Promise.resolve().then(async () => {
       await this.spawnAllNPCsFromManifest();
+      if (this.npcSpawningStopped) return;
       // Spawn procedural building NPCs inside town buildings
       await this.spawnBuildingNPCs();
+      if (this.npcSpawningStopped) return;
       // Spawn a default test goblin near origin for testing combat
       await this.spawnDefaultMob();
-    }
+    });
+    this.startPromise = start.finally(() => {
+      this.startPromise = null;
+    });
     // Additional mobs are spawned reactively as terrain tiles generate via biomes.json
+    return this.startPromise;
+  }
+
+  /** Static NPCs remain resident across tile reloads and spawner replacement. */
+  private static async npcPlacementId(
+    prefix: string,
+    placement: readonly (string | number)[],
+  ): Promise<string> {
+    // A deterministic 160-bit SHA-256 suffix keeps the established prefix and
+    // current manifest IDs within the entity protocol's 64-character alphabet.
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify(placement)),
+    );
+    const suffix = Array.from(new Uint8Array(digest).subarray(0, 20), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return `${prefix}${suffix}`;
+  }
+
+  private async spawnNPCPlacement(
+    manager: EntityManager,
+    config: Parameters<EntityManager["spawnEntity"]>[0],
+    onSpawn?: (
+      entity: NonNullable<Awaited<ReturnType<EntityManager["spawnEntity"]>>>,
+    ) => void,
+  ): Promise<boolean> {
+    if (this.npcSpawningStopped) return false;
+    let pending = MobNPCSpawnerSystem.pendingNPCPlacements.get(manager);
+    if (!pending) {
+      pending = new Map();
+      MobNPCSpawnerSystem.pendingNPCPlacements.set(manager, pending);
+    }
+    const existing = pending.get(config.id);
+    if (existing) {
+      await existing;
+      // An old owner may have been destroyed while initializing. A live
+      // replacement can retry after that owner's cleanup, never concurrently.
+      return this.spawnNPCPlacement(manager, config, onSpawn);
+    }
+    if (manager.getEntity(config.id)) return false;
+    const spawn = Promise.resolve().then(async () => {
+      if (this.npcSpawningStopped) return false;
+      const entity = await manager.spawnEntity(config);
+      if (!entity) return false;
+      if (this.npcSpawningStopped) {
+        if (manager.getEntity(config.id) === entity)
+          manager.destroyEntity(config.id);
+        return false;
+      }
+      onSpawn?.(entity);
+      return true;
+    });
+    const reservation = spawn.finally(() => {
+      if (pending.get(config.id) === reservation) pending.delete(config.id);
+    });
+    pending.set(config.id, reservation);
+    return reservation;
   }
 
   /**
@@ -123,12 +201,13 @@ export class MobNPCSpawnerSystem extends SystemBase {
     let entityManager = this.world.getSystem<EntityManager>("entity-manager");
     let attempts = 0;
 
-    while (!entityManager && attempts < 50) {
+    while (!entityManager && attempts < 50 && !this.npcSpawningStopped) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       entityManager = this.world.getSystem<EntityManager>("entity-manager");
       attempts++;
     }
 
+    if (this.npcSpawningStopped) return;
     if (!entityManager) {
       console.error(
         "[MobNPCSpawnerSystem] ❌ EntityManager not available for NPC spawning",
@@ -142,6 +221,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
       if (!area.npcs || area.npcs.length === 0) continue;
 
       for (const npc of area.npcs) {
+        if (this.npcSpawningStopped) return;
         // Get ground height at NPC position
         const groundY = terrainSystem.getHeightAt(
           npc.position.x,
@@ -164,13 +244,19 @@ export class MobNPCSpawnerSystem extends SystemBase {
           "asset://models/human/human_rigged.glb";
         const npcServices = npcManifestData.services?.types || [];
         const npcQuestIds = npcManifestData.services?.questIds as
-          | string[]
-          | undefined;
+          string[] | undefined;
         const npcDescription = npcManifestData.description || npc.id;
         const npcName = npcManifestData.name || npc.id;
 
         const npcConfig = {
-          id: `npc_${npc.id}_${Date.now()}`,
+          // Authored physical placement, not mutable service metadata or the
+          // terrain-resolved height. Array reordering must not change identity.
+          id: await MobNPCSpawnerSystem.npcPlacementId(`npc_${npc.id}_`, [
+            area.id,
+            npc.position.x,
+            npc.position.y,
+            npc.position.z,
+          ]),
           type: EntityType.NPC,
           name: npcName, // From npcs.json
           position: { x: npc.position.x, y: spawnY, z: npc.position.z },
@@ -192,6 +278,10 @@ export class MobNPCSpawnerSystem extends SystemBase {
           },
           npcType: npc.type, // From world-areas (bank, store, etc.)
           npcId: npc.id, // Manifest ID for dialogue lookup
+          // Preserve the exact store identity from world-areas.json. The
+          // secure store handler binds every purchase to this identity; a
+          // positional or NPC-type guess could select the wrong inventory.
+          storeId: npc.storeId,
           dialogueLines: [],
           services: npcServices, // From npcs.json
           questIds: npcQuestIds, // Quest IDs from npcs.json
@@ -201,7 +291,22 @@ export class MobNPCSpawnerSystem extends SystemBase {
         };
 
         try {
-          await entityManager.spawnEntity(npcConfig);
+          const spawned = await this.spawnNPCPlacement(
+            entityManager,
+            npcConfig,
+            (spawnedNPC) => {
+              if (npc.storeId) {
+                this.emitTypedEvent(EventType.STORE_REGISTER_NPC, {
+                  npcId: spawnedNPC.id,
+                  storeId: npc.storeId,
+                  position: npc.position,
+                  name: npcName,
+                  area: area.id,
+                });
+              }
+            },
+          );
+          if (!spawned) continue;
           console.log(
             `[MobNPCSpawnerSystem] ✅ Spawned NPC ${npc.id} (${npcName}) at (${npc.position.x}, ${spawnY.toFixed(2)}, ${npc.position.z})`,
           );
@@ -314,6 +419,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
 
     let spawnedCount = 0;
     for (const point of spawnPoints) {
+      if (this.npcSpawningStopped) return;
       const config = MobNPCSpawnerSystem.BUILDING_NPC_CONFIG[point.npcType];
       if (!config) {
         console.warn(
@@ -324,7 +430,10 @@ export class MobNPCSpawnerSystem extends SystemBase {
 
       // Unique NPC name per building: e.g. "Innkeeper of Oakvale"
       const npcName = `${config.name} of ${point.townName}`;
-      const npcId = `building_npc_${point.buildingId}_${Date.now()}`;
+      const npcId = await MobNPCSpawnerSystem.npcPlacementId("building_npc_", [
+        point.townId,
+        point.buildingId,
+      ]);
 
       // Convert rotation (radians) to quaternion for Y-axis rotation
       const halfAngle = point.rotation / 2;
@@ -362,8 +471,8 @@ export class MobNPCSpawnerSystem extends SystemBase {
       };
 
       try {
-        await entityManager.spawnEntity(npcConfig);
-        spawnedCount++;
+        if (await this.spawnNPCPlacement(entityManager, npcConfig))
+          spawnedCount++;
       } catch (err) {
         console.error(
           `[MobNPCSpawnerSystem] ❌ Failed to spawn building NPC ${npcId}:`,
@@ -618,6 +727,13 @@ export class MobNPCSpawnerSystem extends SystemBase {
     position: { x: number; y: number; z: number },
     options?: SpawnMobOptions,
   ): Promise<void> {
+    if (
+      options?.sourceTileKey &&
+      !this.activeMobTiles.has(options.sourceTileKey)
+    ) {
+      return;
+    }
+
     // Check if position is in a procedural town safe zone - don't spawn mobs there
     if (
       this.townSystem &&
@@ -670,12 +786,20 @@ export class MobNPCSpawnerSystem extends SystemBase {
       position,
       levelRange: resolvedRange,
       isBoss,
+      sourceTileKey: options?.sourceTileKey,
     });
+    if (options?.sourceTileKey) {
+      const ownedSpawns =
+        this.tileSpawnKeys.get(options.sourceTileKey) ?? new Set<string>();
+      ownedSpawns.add(spawnKey);
+      this.tileSpawnKeys.set(options.sourceTileKey, ownedSpawns);
+    }
 
     // Get EntityManager to spawn directly (like original spawnDefaultMob)
     const entityManager = this.world.getSystem<EntityManager>("entity-manager");
     if (!entityManager) {
       console.error("[MobNPCSpawnerSystem] EntityManager not available");
+      this.forgetSpawnKey(spawnKey);
       return;
     }
 
@@ -746,24 +870,44 @@ export class MobNPCSpawnerSystem extends SystemBase {
 
     try {
       await entityManager.spawnEntity(mobConfig);
+      // Terrain can unload while an async entity spawn is in flight. Never let
+      // a late completion resurrect an entity owned by an inactive tile.
+      if (
+        options?.sourceTileKey &&
+        !this.activeMobTiles.has(options.sourceTileKey)
+      ) {
+        entityManager.destroyEntity(mobId);
+        this.forgetSpawnKey(spawnKey);
+      }
     } catch (err) {
+      this.forgetSpawnKey(spawnKey);
       console.error(`[MobNPCSpawnerSystem] Error spawning ${mobData.id}:`, err);
     }
   }
 
-  private handleEntitySpawned(data: EntitySpawnedEvent): void {
-    // Track mobs spawned by the EntityManager
-    if (data.entityType === "mob" && data.entityData?.mobType) {
-      // Find matching request based on mob type and position
-      for (const [mobId] of this.spawnedMobs) {
-        if (
-          !this.spawnedMobs.get(mobId) &&
-          mobId.includes(data.entityData.mobType as string)
-        ) {
-          this.spawnedMobs.set(mobId, data.entityId!);
-          break;
-        }
+  private forgetSpawnKey(spawnKey: string): void {
+    const entityId = this.spawnedMobs.get(spawnKey);
+    const detail = this.spawnedMobDetails.get(spawnKey);
+    if (entityId) this.entityIdToSpawnKey.delete(entityId);
+    if (detail?.sourceTileKey) {
+      const ownedSpawns = this.tileSpawnKeys.get(detail.sourceTileKey);
+      ownedSpawns?.delete(spawnKey);
+      if (ownedSpawns?.size === 0) {
+        this.tileSpawnKeys.delete(detail.sourceTileKey);
       }
+    }
+    if (detail?.isBoss && spawnKey.startsWith("boss_")) {
+      this.spawnedBossHotspots.delete(spawnKey.slice("boss_".length));
+    }
+    this.spawnedMobs.delete(spawnKey);
+    this.spawnedMobDetails.delete(spawnKey);
+  }
+
+  private despawnSpawnKey(spawnKey: string): void {
+    const entityId = this.spawnedMobs.get(spawnKey);
+    this.forgetSpawnKey(spawnKey);
+    if (entityId) {
+      this.emitTypedEvent(EventType.ENTITY_DEATH, { entityId });
     }
   }
 
@@ -771,24 +915,10 @@ export class MobNPCSpawnerSystem extends SystemBase {
   // recursive re-emission loops. It only produces spawn requests via spawnMobFromData.
 
   private despawnMob(mobId: string): void {
-    const entityId = this.spawnedMobs.get(mobId) ?? mobId;
-    this.emitTypedEvent(EventType.ENTITY_DEATH, { entityId });
-    let spawnKey = this.entityIdToSpawnKey.get(mobId);
-    if (!spawnKey) {
-      for (const [key, value] of this.spawnedMobs.entries()) {
-        if (value === mobId) {
-          spawnKey = key;
-          break;
-        }
-      }
-    }
-
-    if (spawnKey) {
-      this.spawnedMobs.delete(spawnKey);
-      this.spawnedMobDetails.delete(spawnKey);
-    }
-
-    this.entityIdToSpawnKey.delete(mobId);
+    const spawnKey = this.spawnedMobs.has(mobId)
+      ? mobId
+      : this.entityIdToSpawnKey.get(mobId);
+    if (spawnKey) this.despawnSpawnKey(spawnKey);
   }
 
   private respawnAllMobs(): void {
@@ -799,6 +929,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
     this.spawnedMobs.clear();
     this.spawnedMobDetails.clear();
     this.entityIdToSpawnKey.clear();
+    this.tileSpawnKeys.clear();
     this.spawnedBossHotspots.clear();
 
     // Mobs will respawn naturally as terrain tiles remain loaded
@@ -857,11 +988,21 @@ export class MobNPCSpawnerSystem extends SystemBase {
     tileX: number;
     tileZ: number;
     biome: string;
+    contentGenerated?: boolean;
   }): void {
     // CRITICAL: Only server should spawn mobs - clients receive them via network sync
     if (!this.world.isServer) {
       return;
     }
+
+    // Horizon tiles contain geometry only. Treat legacy events without this
+    // flag as full-content events for backwards compatibility.
+    if (tileData.contentGenerated === false) {
+      return;
+    }
+
+    const sourceTileKey = `${tileData.tileX}_${tileData.tileZ}`;
+    this.activeMobTiles.add(sourceTileKey);
 
     const TILE_SIZE = this.terrainSystem.getTileSize();
     const tileBounds = {
@@ -889,7 +1030,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
     }
 
     if (overlappingAreas.length > 0) {
-      this.generateContentForTile(tileData, overlappingAreas);
+      this.generateContentForTile(tileData, overlappingAreas, sourceTileKey);
     }
 
     // Don't spawn biome mobs or bosses inside safe zones (e.g. duel arena, lobby, hospital).
@@ -897,9 +1038,23 @@ export class MobNPCSpawnerSystem extends SystemBase {
     // mirrors that check for terrain-based biome mobs which bypass the area filter entirely.
     const tileInSafeZone = overlappingAreas.some((area) => area.safeZone);
     if (!tileInSafeZone) {
-      this.spawnBiomeMobsForTile(tileData);
-      this.spawnBossForTile(tileData);
+      this.spawnBiomeMobsForTile(tileData, sourceTileKey);
+      this.spawnBossForTile(tileData, sourceTileKey);
     }
+  }
+
+  private onTileUnloaded(tileData: { tileX: number; tileZ: number }): void {
+    if (!this.world.isServer) return;
+    const sourceTileKey = `${tileData.tileX}_${tileData.tileZ}`;
+    this.activeMobTiles.delete(sourceTileKey);
+    const spawnKeys = this.tileSpawnKeys.get(sourceTileKey);
+    if (!spawnKeys) return;
+
+    // Copy before despawning because forgetSpawnKey mutates the ownership set.
+    for (const spawnKey of [...spawnKeys]) {
+      this.despawnSpawnKey(spawnKey);
+    }
+    this.tileSpawnKeys.delete(sourceTileKey);
   }
 
   /**
@@ -908,17 +1063,21 @@ export class MobNPCSpawnerSystem extends SystemBase {
   private generateContentForTile(
     tileData: { tileX: number; tileZ: number },
     areas: Array<(typeof ALL_WORLD_AREAS)[keyof typeof ALL_WORLD_AREAS]>,
+    sourceTileKey: string,
   ): void {
     for (const area of areas) {
       // Spawn mobs from world-areas.ts data if they fall within this tile
-      this.generateMobSpawnsForArea(area, tileData);
+      this.generateMobSpawnsForArea(area, tileData, sourceTileKey);
     }
   }
 
-  private spawnBiomeMobsForTile(tileData: {
-    tileX: number;
-    tileZ: number;
-  }): void {
+  private spawnBiomeMobsForTile(
+    tileData: {
+      tileX: number;
+      tileZ: number;
+    },
+    sourceTileKey: string,
+  ): void {
     const spawnPositions = this.terrainSystem.getMobSpawnPositionsForTile(
       tileData.tileX,
       tileData.tileZ,
@@ -930,7 +1089,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
       "biome-mobs",
     );
 
-    for (const spawn of spawnPositions) {
+    for (const [spawnIndex, spawn] of spawnPositions.entries()) {
       if (!spawn.mobTypes || spawn.mobTypes.length === 0) continue;
 
       const difficultySample = this.terrainSystem.getDifficultyAtWorldPosition(
@@ -951,11 +1110,16 @@ export class MobNPCSpawnerSystem extends SystemBase {
       this.spawnMobFromData(selection.mobData, spawn.position, {
         level: difficultySample.level,
         levelRange: selection.levelRange,
+        sourceTileKey,
+        spawnKey: `biome_${sourceTileKey}_${spawnIndex}`,
       });
     }
   }
 
-  private spawnBossForTile(tileData: { tileX: number; tileZ: number }): void {
+  private spawnBossForTile(
+    tileData: { tileX: number; tileZ: number },
+    sourceTileKey: string,
+  ): void {
     const tileSize = this.terrainSystem.getTileSize();
     const tileMinX = tileData.tileX * tileSize;
     const tileMaxX = (tileData.tileX + 1) * tileSize;
@@ -997,6 +1161,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
           levelRange,
           isBoss: true,
           spawnKey: `boss_${hotspot.id}`,
+          sourceTileKey,
         },
       );
     }
@@ -1008,6 +1173,7 @@ export class MobNPCSpawnerSystem extends SystemBase {
   private generateMobSpawnsForArea(
     area: (typeof ALL_WORLD_AREAS)[keyof typeof ALL_WORLD_AREAS],
     tileData: { tileX: number; tileZ: number },
+    sourceTileKey: string,
   ): void {
     if (area.safeZone || area.difficultyLevel <= 0) {
       return;
@@ -1067,6 +1233,8 @@ export class MobNPCSpawnerSystem extends SystemBase {
             {
               level: difficultySample.level,
               levelRange,
+              sourceTileKey,
+              spawnKey: `area_${sourceTileKey}_${mobData.id}_${Math.round(spawnPoint.position.x)}_${Math.round(spawnPoint.position.z)}_${i}`,
             },
           );
         }
@@ -1083,10 +1251,13 @@ export class MobNPCSpawnerSystem extends SystemBase {
    * Cleanup when system is destroyed
    */
   destroy(): void {
+    this.npcSpawningStopped = true;
     // Clear all spawn tracking
     this.spawnedMobs.clear();
     this.spawnedMobDetails.clear();
     this.entityIdToSpawnKey.clear();
+    this.tileSpawnKeys.clear();
+    this.activeMobTiles.clear();
     this.spawnedBossHotspots.clear();
 
     // Reset counter

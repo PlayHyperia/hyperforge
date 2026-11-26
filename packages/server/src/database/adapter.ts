@@ -13,7 +13,8 @@
  * **Supported Tables**:
  * - `storage`: Key-value store for world settings and configuration
  * - `config`: System configuration and feature flags
- * - Other tables: Minimal stub implementation (use DatabaseSystem directly for these)
+ * - `agent_credential_sessions`: read-only active-session authentication lookup
+ * - Other tables: rejected (use DatabaseSystem directly for these)
  *
  * **Migration Path**:
  * This adapter is a temporary bridge. New code should use DatabaseSystem methods directly.
@@ -48,7 +49,8 @@
  * **Supported tables**:
  * - `storage` - Key-value storage for system state
  * - `config` - Server configuration (spawn points, settings, etc.)
- * - Other tables return minimal no-op implementations
+ * - `agent_credential_sessions` - read-only credential-session lookup
+ * - Other tables fail closed
  *
  * **Architecture**:
  * The adapter mimics Knex's chaining API:
@@ -352,6 +354,50 @@ export function createDrizzleAdapter(db: NodePgDatabase<typeof schema>) {
           } catch (error) {
             return onrejected(error);
           }
+        },
+      };
+    }
+
+    // ========================================================================
+    // AGENT_CREDENTIAL_SESSIONS TABLE ADAPTER
+    // ========================================================================
+    // Agent WebSocket authentication is wired through this production adapter.
+    // Keep the surface deliberately read-only and limited to the exact primary-
+    // key lookup used by verifyAgentCredentialSessionWithSystemDatabase().
+    // Drizzle returns camelCase fields while the legacy SystemDatabase verifier
+    // consumes database column names, so normalize the row at this boundary.
+    if (tableName === "agent_credential_sessions") {
+      const readBySessionId = async (sessionId: unknown) => {
+        if (typeof sessionId !== "string") return undefined;
+        const rows = await db
+          .select()
+          .from(schema.agentCredentialSessions)
+          .where(eq(schema.agentCredentialSessions.sessionId, sessionId))
+          .limit(1);
+        const row = rows[0];
+        if (!row) return undefined;
+        return {
+          session_id: row.sessionId,
+          account_id: row.accountId,
+          character_id: row.characterId,
+          auth_method: row.authMethod,
+          issued_at: row.issuedAt,
+          expires_at: row.expiresAt,
+          revoked_at: row.revokedAt,
+          revoked_reason: row.revokedReason,
+        };
+      };
+
+      return {
+        where: (key: string, value: unknown) => {
+          if (key !== "session_id") {
+            throw new Error(
+              `[DatabaseAdapter] Unsupported agent credential session lookup column "${key}"`,
+            );
+          }
+          return {
+            first: () => readBySessionId(value),
+          };
         },
       };
     }

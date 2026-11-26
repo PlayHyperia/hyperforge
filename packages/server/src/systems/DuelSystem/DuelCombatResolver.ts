@@ -15,10 +15,13 @@
  */
 
 import type { World, StakedItem } from "@hyperforge/shared";
-import { EventType, PlayerEntity } from "@hyperforge/shared";
+import {
+  EventType,
+  PlayerEntity,
+  getDuelArenaLobbyReturnPosition,
+} from "@hyperforge/shared";
 import type { ServerDuelSession } from "./DuelSessionManager";
 import { AuditLogger, Logger } from "../ServerNetwork/services";
-import { LOBBY_SPAWN_WINNER, LOBBY_SPAWN_LOSER } from "./config";
 import crypto from "node:crypto";
 
 // ============================================================================
@@ -48,7 +51,23 @@ export interface DuelResolutionResult {
 // ============================================================================
 
 export class DuelCombatResolver {
+  private readonly resolutionBarriers = new Map<string, Promise<void>>();
+  private isDestroyed = false;
+
   constructor(private world: World) {}
+
+  hasPendingResolution(duelId: string): boolean {
+    return this.resolutionBarriers.has(duelId);
+  }
+
+  waitForResolution(duelId: string): Promise<void> {
+    return this.resolutionBarriers.get(duelId) ?? Promise.resolve();
+  }
+
+  destroy(): void {
+    this.isDestroyed = true;
+    this.resolutionBarriers.clear();
+  }
 
   // ==========================================================================
   // Public API
@@ -123,8 +142,18 @@ export class DuelCombatResolver {
     // restorePlayerHealth emits PLAYER_RESPAWNED and PLAYER_SET_DEAD which clear
     // the client's death state and unfreeze physics — if skipped, the player
     // appears stuck in the arena with frozen physics and death animation.
+    const prayerRestores: Array<{
+      playerId: string;
+      promise: Promise<void>;
+    }> = [];
     try {
-      this.restorePlayerHealth(winnerId, LOBBY_SPAWN_WINNER);
+      const restore = this.restorePlayerHealth(
+        winnerId,
+        getDuelArenaLobbyReturnPosition(true),
+        `ordinary-duel-resolution-prayer:${session.duelId}:${winnerId}`,
+      );
+      if (restore)
+        prayerRestores.push({ playerId: winnerId, promise: restore });
     } catch (err) {
       Logger.error(
         "DuelCombatResolver",
@@ -134,7 +163,12 @@ export class DuelCombatResolver {
       );
     }
     try {
-      this.restorePlayerHealth(loserId, LOBBY_SPAWN_LOSER);
+      const restore = this.restorePlayerHealth(
+        loserId,
+        getDuelArenaLobbyReturnPosition(false),
+        `ordinary-duel-resolution-prayer:${session.duelId}:${loserId}`,
+      );
+      if (restore) prayerRestores.push({ playerId: loserId, promise: restore });
     } catch (err) {
       Logger.error(
         "DuelCombatResolver",
@@ -204,65 +238,96 @@ export class DuelCombatResolver {
       0,
     );
 
-    // Emit duel completed event
-    try {
-      this.world.emit("duel:completed", {
-        duelId: session.duelId,
-        winnerId,
-        winnerName,
-        loserId,
-        loserName,
-        reason,
-        seed: duelSeed,
-        replayHash: replayHashHex,
-        forfeit: reason === "forfeit",
-        winnerReceives: loserStakes,
-        winnerReceivesValue,
-        challengerStakes: session.challengerStakes,
-        targetStakes: session.targetStakes,
-        challengerId: session.challengerId,
-        opponentId: session.targetId,
-        challengerStakeValue,
-        opponentStakeValue,
-        summary: {
-          duration:
-            session.finishedAt! - (session.fightStartedAt || session.createdAt),
-          rules: session.rules,
-          challengerStakeValue: winnerIsChallenger
-            ? winnerStakes.reduce((s, i) => s + i.value, 0)
-            : winnerReceivesValue,
-          targetStakeValue: winnerIsChallenger
-            ? winnerReceivesValue
-            : winnerStakes.reduce((s, i) => s + i.value, 0),
-        },
-      });
-    } catch (err) {
-      Logger.error(
-        "DuelCombatResolver",
-        "Completion event failed",
-        err instanceof Error ? err : null,
-        { duelId: session.duelId },
-      );
-    }
+    const publishCompletion = () => {
+      if (this.isDestroyed) return;
+      try {
+        this.world.emit("duel:completed", {
+          duelId: session.duelId,
+          winnerId,
+          winnerName,
+          loserId,
+          loserName,
+          reason,
+          seed: duelSeed,
+          replayHash: replayHashHex,
+          forfeit: reason === "forfeit",
+          winnerReceives: loserStakes,
+          winnerReceivesValue,
+          challengerStakes: session.challengerStakes,
+          targetStakes: session.targetStakes,
+          challengerId: session.challengerId,
+          opponentId: session.targetId,
+          challengerStakeValue,
+          opponentStakeValue,
+          summary: {
+            duration:
+              session.finishedAt! -
+              (session.fightStartedAt || session.createdAt),
+            rules: session.rules,
+            challengerStakeValue: winnerIsChallenger
+              ? winnerStakes.reduce((s, i) => s + i.value, 0)
+              : winnerReceivesValue,
+            targetStakeValue: winnerIsChallenger
+              ? winnerReceivesValue
+              : winnerStakes.reduce((s, i) => s + i.value, 0),
+          },
+        });
+      } catch (err) {
+        Logger.error(
+          "DuelCombatResolver",
+          "Completion event failed",
+          err instanceof Error ? err : null,
+          { duelId: session.duelId },
+        );
+      }
 
-    // Audit log for economic tracking
-    try {
-      AuditLogger.getInstance().logDuelComplete(
-        session.duelId,
-        winnerId,
-        loserId,
-        loserStakes,
-        winnerStakes,
-        winnerReceivesValue,
-        reason,
-      );
-    } catch (err) {
-      Logger.error(
-        "DuelCombatResolver",
-        "Audit logging failed",
-        err instanceof Error ? err : null,
-        { duelId: session.duelId },
-      );
+      try {
+        AuditLogger.getInstance().logDuelComplete(
+          session.duelId,
+          winnerId,
+          loserId,
+          loserStakes,
+          winnerStakes,
+          winnerReceivesValue,
+          reason,
+        );
+      } catch (err) {
+        Logger.error(
+          "DuelCombatResolver",
+          "Audit logging failed",
+          err instanceof Error ? err : null,
+          { duelId: session.duelId },
+        );
+      }
+    };
+
+    if (prayerRestores.length === 0) {
+      publishCompletion();
+    } else {
+      let barrier!: Promise<void>;
+      barrier = Promise.allSettled(prayerRestores.map(({ promise }) => promise))
+        .then((results) => {
+          for (const [index, result] of results.entries()) {
+            if (result.status === "fulfilled") continue;
+            Logger.error(
+              "DuelCombatResolver",
+              "Prayer restoration failed during duel resolution",
+              result.reason instanceof Error ? result.reason : null,
+              {
+                duelId: session.duelId,
+                playerId: prayerRestores[index].playerId,
+              },
+            );
+          }
+          publishCompletion();
+        })
+        .finally(() => {
+          if (this.resolutionBarriers.get(session.duelId) === barrier) {
+            this.resolutionBarriers.delete(session.duelId);
+          }
+        });
+      this.resolutionBarriers.set(session.duelId, barrier);
+      void barrier;
     }
 
     return {
@@ -481,7 +546,9 @@ export class DuelCombatResolver {
   private restorePlayerHealth(
     playerId: string,
     spawnPosition: { x: number; y: number; z: number },
-  ): void {
+    operationId: string,
+  ): Promise<void> | null {
+    let prayerRestore: Promise<void> | null = null;
     // Clear death state using PlayerEntity helper method (Law of Demeter)
     const playerEntity = this.world.entities?.get?.(playerId);
     if (playerEntity instanceof PlayerEntity) {
@@ -496,13 +563,25 @@ export class DuelCombatResolver {
 
       // Restore prayer points to max
       const prayerSystem = this.world.getSystem?.("prayer") as {
-        restorePrayerPoints?: (playerId: string, amount: number) => void;
+        restorePrayerPoints?: (
+          playerId: string,
+          amount: number,
+          operationId: string,
+        ) => Promise<{ success: boolean; reason?: string }>;
         getMaxPrayerPoints?: (playerId: string) => number;
       } | null;
 
       if (prayerSystem?.restorePrayerPoints) {
         const maxPrayer = prayerSystem.getMaxPrayerPoints?.(playerId) ?? 99;
-        prayerSystem.restorePrayerPoints(playerId, maxPrayer);
+        prayerRestore = prayerSystem
+          .restorePrayerPoints(playerId, maxPrayer, operationId)
+          .then((receipt) => {
+            if (!receipt.success) {
+              throw new Error(
+                `ordinary_duel_prayer_restore_rejected:${receipt.reason ?? "unknown"}`,
+              );
+            }
+          });
       }
 
       playerEntity.markNetworkDirty();
@@ -520,6 +599,8 @@ export class DuelCombatResolver {
       playerId,
       isDead: false,
     });
+
+    return prayerRestore;
   }
 
   /**
@@ -527,7 +608,7 @@ export class DuelCombatResolver {
    * Uses different spawn positions so winner and loser don't overlap
    */
   private teleportToLobby(playerId: string, isWinner: boolean): void {
-    const lobbySpawn = isWinner ? LOBBY_SPAWN_WINNER : LOBBY_SPAWN_LOSER;
+    const lobbySpawn = getDuelArenaLobbyReturnPosition(isWinner);
 
     this.world.emit("player:teleport", {
       playerId,

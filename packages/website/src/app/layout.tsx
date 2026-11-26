@@ -83,7 +83,7 @@ const structuredData = {
       "@type": "Organization",
       name: "Hyperia",
       url: "https://hyperia.club",
-      logo: "https://hyperia.club/images/logo.png",
+      logo: "https://hyperia.club/images/hyperia-wordmark.svg",
       sameAs: [
         "https://x.com/playhyperia",
         "https://discord.gg/f4ZwhAbKye",

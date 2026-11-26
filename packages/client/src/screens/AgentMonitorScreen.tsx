@@ -6,6 +6,12 @@
  */
 
 import { GAME_API_URL } from "@/lib/api-config";
+import {
+  formatDuelReason,
+  formatTerminalMatchup,
+  getCancellationPresentation,
+  type DuelTerminalNotice,
+} from "@/lib/duel-outcome-presentation";
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   Swords,
@@ -155,16 +161,17 @@ interface DuelContestant {
   maxHp: number;
 }
 
-interface DuelCycle {
+export interface DuelCycle {
   phase: string;
   contestants: DuelContestant[];
   startedAt: number;
   phaseStartedAt: number;
   winner: { characterId: string; name: string } | null;
+  outcome: "win" | "draw" | null;
   winReason: string | null;
 }
 
-interface LeaderboardEntry {
+export interface LeaderboardEntry {
   rank: number;
   characterId: string;
   name: string;
@@ -172,28 +179,67 @@ interface LeaderboardEntry {
   model: string;
   wins: number;
   losses: number;
+  draws: number;
   winRate: number;
   combatLevel: number;
   currentStreak: number;
 }
 
-interface RecentDuelEntry {
+export interface RecentDuelEntry {
   cycleId: string;
   duelId: string | null;
   finishedAt: number;
-  winnerId: string;
-  winnerName: string;
-  loserId: string;
-  loserName: string;
-  winReason: string;
-  damageWinner: number;
-  damageLoser: number;
+  outcome: "win" | "draw" | "cancelled";
+  agent1Id: string | null;
+  agent1Name: string | null;
+  agent2Id: string | null;
+  agent2Name: string | null;
+  winnerId: string | null;
+  winnerName: string | null;
+  loserId: string | null;
+  loserName: string | null;
+  winReason: string | null;
+  cancellationReason: string | null;
+  damageAgent1: number;
+  damageAgent2: number;
+  damageWinner: number | null;
+  damageLoser: number | null;
 }
 
-interface DuelStatusResponse {
+export interface DuelOperationalMetrics {
+  emittedAt: number;
+  historyWindow: {
+    size: number;
+    maxSize: number;
+    wins: number;
+    draws: number;
+    completed: number;
+    cancelled: number;
+    terminal: number;
+    completionRate: number | null;
+    cancellationReasons: Record<string, number>;
+  };
+  engagement: {
+    checks: number;
+    retries: number;
+    recoveries: number;
+    failures: number;
+    proximityCorrections: number;
+    currentRetryCount: number;
+  };
+  current: {
+    cycleId: string | null;
+    phase: string;
+    firstHitLatencyMs: number | null;
+  };
+}
+
+export interface DuelStatusResponse {
   currentCycle: DuelCycle | null;
+  terminalNotice: DuelTerminalNotice | null;
   leaderboard: LeaderboardEntry[];
   recentDuels: RecentDuelEntry[];
+  operationalMetrics: DuelOperationalMetrics | null;
   streamHealth: { rtmpConnected: boolean; viewerCount: number } | null;
 }
 
@@ -299,6 +345,7 @@ const PHASE_COLORS: Record<string, string> = {
   COUNTDOWN: "#eab308",
   FIGHTING: "#ef4444",
   RESOLUTION: "#22c55e",
+  CANCELLED: "#94a3b8",
 };
 
 // ─── Confirm Modal ─────────────────────────────────────────────────────────
@@ -478,17 +525,22 @@ function ResetModal({
 
 // ─── Duel Status Bar ────────────────────────────────────────────────────────
 
-function DuelStatusBar({
+export function DuelStatusBar({
   duelStatus,
 }: {
   duelStatus: DuelStatusResponse | null;
 }) {
   if (!duelStatus) return null;
-  const { currentCycle, streamHealth } = duelStatus;
-  if (!currentCycle) return null;
+  const { currentCycle, streamHealth, terminalNotice } = duelStatus;
+  if (!currentCycle && !terminalNotice) return null;
 
-  const phase = currentCycle.phase;
+  const phase = terminalNotice ? "CANCELLED" : (currentCycle?.phase ?? "IDLE");
   const color = PHASE_COLORS[phase] ?? "#55556a";
+  const cancellationPresentation = terminalNotice
+    ? getCancellationPresentation(terminalNotice.reason)
+    : null;
+  const phaseStartedAt =
+    terminalNotice?.occurredAt ?? currentCycle?.phaseStartedAt;
 
   return (
     <div className="duel-status-bar">
@@ -498,7 +550,9 @@ function DuelStatusBar({
       >
         {phase}
       </span>
-      {currentCycle.contestants.length === 2 && (
+      {terminalNotice ? (
+        <span className="matchup">{formatTerminalMatchup(terminalNotice)}</span>
+      ) : currentCycle && currentCycle.contestants.length === 2 ? (
         <span className="matchup">
           <strong>{currentCycle.contestants[0].name}</strong>
           {" (Cb "}
@@ -519,18 +573,26 @@ function DuelStatusBar({
             </>
           )}
         </span>
-      )}
-      {currentCycle.winner && (
+      ) : null}
+      {cancellationPresentation ? (
+        <span className="cancelled-tag">
+          {cancellationPresentation.title} — no winner declared
+        </span>
+      ) : currentCycle?.outcome === "draw" ? (
+        <span className="draw-tag">Draw — no winner</span>
+      ) : currentCycle?.winner ? (
         <span className="winner-tag">
           {currentCycle.winner.name} wins
           {currentCycle.winReason
             ? ` (${currentCycle.winReason.replace(/_/g, " ")})`
             : ""}
         </span>
+      ) : null}
+      {phaseStartedAt && (
+        <span className="timer">
+          {formatDuration(Date.now() - phaseStartedAt)}
+        </span>
       )}
-      <span className="timer">
-        {formatDuration(Date.now() - currentCycle.phaseStartedAt)}
-      </span>
       {streamHealth && (
         <span className="stream-status">
           <span
@@ -618,6 +680,7 @@ function SidebarLeaderboard({
         <span>#</span>
         <span>Name</span>
         <span>W</span>
+        <span>D</span>
         <span>L</span>
         <span>%</span>
       </div>
@@ -629,6 +692,7 @@ function SidebarLeaderboard({
           <span className="rank">{e.rank}</span>
           <span className="name">{e.name}</span>
           <span className="wins">{e.wins}</span>
+          <span className="draws">{e.draws ?? 0}</span>
           <span className="losses">{e.losses}</span>
           <span className="rate">{(e.winRate * 100).toFixed(0)}</span>
         </div>
@@ -639,7 +703,7 @@ function SidebarLeaderboard({
 
 // ─── Sidebar Recent Duels ───────────────────────────────────────────────────
 
-function SidebarRecentDuels({ duels }: { duels: RecentDuelEntry[] }) {
+export function SidebarRecentDuels({ duels }: { duels: RecentDuelEntry[] }) {
   if (duels.length === 0) return null;
 
   return (
@@ -648,7 +712,21 @@ function SidebarRecentDuels({ duels }: { duels: RecentDuelEntry[] }) {
       {duels.slice(0, 8).map((d) => (
         <div className="sidebar-duel-row" key={d.cycleId}>
           <span className="duel-names">
-            <strong>{d.winnerName}</strong> beat {d.loserName}
+            {d.outcome === "cancelled" ? (
+              <>
+                <strong>No contest:</strong>{" "}
+                {d.agent1Name ?? "Contestant unavailable"} vs{" "}
+                {d.agent2Name ?? "Contestant unavailable"}
+              </>
+            ) : d.outcome === "draw" ? (
+              <>
+                <strong>{d.agent1Name}</strong> drew with {d.agent2Name}
+              </>
+            ) : (
+              <>
+                <strong>{d.winnerName}</strong> beat {d.loserName}
+              </>
+            )}
           </span>
           <span className="duel-time">{formatTimeAgo(d.finishedAt)}</span>
         </div>
@@ -1154,7 +1232,7 @@ function KillsTab({
 
 // ─── Duels Tab ──────────────────────────────────────────────────────────────
 
-function DuelsTab({
+export function DuelsTab({
   characterId,
   duelStatus,
 }: {
@@ -1174,11 +1252,82 @@ function DuelsTab({
     (e) => e.characterId === characterId,
   );
   const agentDuels = duelStatus.recentDuels.filter(
-    (d) => d.winnerId === characterId || d.loserId === characterId,
+    (d) => d.agent1Id === characterId || d.agent2Id === characterId,
   );
 
   return (
     <div>
+      {duelStatus.operationalMetrics && (
+        <section className="duel-ops-summary" aria-label="Duel operations">
+          <div className="duel-ops-heading">
+            Operations window
+            <span>
+              {duelStatus.operationalMetrics.historyWindow.size}/
+              {duelStatus.operationalMetrics.historyWindow.maxSize} terminals
+            </span>
+          </div>
+          <div className="overview-grid">
+            <div className="overview-row">
+              <span className="overview-label">Completion</span>
+              <span className="overview-value green">
+                {duelStatus.operationalMetrics.historyWindow.completionRate ==
+                null
+                  ? "—"
+                  : `${(
+                      duelStatus.operationalMetrics.historyWindow
+                        .completionRate * 100
+                    ).toFixed(1)}%`}
+              </span>
+            </div>
+            <div className="overview-row">
+              <span className="overview-label">Resolved</span>
+              <span className="overview-value">
+                {duelStatus.operationalMetrics.historyWindow.completed}
+              </span>
+            </div>
+            <div className="overview-row">
+              <span className="overview-label">No contests</span>
+              <span className="overview-value red">
+                {duelStatus.operationalMetrics.historyWindow.cancelled}
+              </span>
+            </div>
+            <div className="overview-row">
+              <span className="overview-label">Engagement retries</span>
+              <span className="overview-value">
+                {duelStatus.operationalMetrics.engagement.retries}
+              </span>
+            </div>
+            <div className="overview-row">
+              <span className="overview-label">Retry recoveries</span>
+              <span className="overview-value green">
+                {duelStatus.operationalMetrics.engagement.recoveries}
+              </span>
+            </div>
+            <div className="overview-row">
+              <span className="overview-label">Engagement failures</span>
+              <span className="overview-value red">
+                {duelStatus.operationalMetrics.engagement.failures}
+              </span>
+            </div>
+          </div>
+          {Object.keys(
+            duelStatus.operationalMetrics.historyWindow.cancellationReasons,
+          ).length > 0 && (
+            <div className="duel-ops-reasons">
+              {Object.entries(
+                duelStatus.operationalMetrics.historyWindow.cancellationReasons,
+              )
+                .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+                .map(([reason, count]) => (
+                  <span key={reason}>
+                    {formatDuelReason(reason)}: {count}
+                  </span>
+                ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {agentEntry ? (
         <div className="agent-duel-stats">
           <div className="overview-grid">
@@ -1197,6 +1346,12 @@ function DuelsTab({
               <span className="overview-value green">{agentEntry.wins}</span>
             </div>
             <div className="overview-row">
+              <span className="overview-label">Draws</span>
+              <span className="overview-value draw">
+                {agentEntry.draws ?? 0}
+              </span>
+            </div>
+            <div className="overview-row">
               <span className="overview-label">Losses</span>
               <span className="overview-value red">{agentEntry.losses}</span>
             </div>
@@ -1207,7 +1362,7 @@ function DuelsTab({
             <div className="overview-row">
               <span className="overview-label">Total</span>
               <span className="overview-value">
-                {agentEntry.wins + agentEntry.losses}
+                {agentEntry.wins + (agentEntry.draws ?? 0) + agentEntry.losses}
               </span>
             </div>
           </div>
@@ -1223,19 +1378,28 @@ function DuelsTab({
           <h3>Recent Duels</h3>
           <div className="duel-recent-list">
             {agentDuels.slice(0, 10).map((d) => {
+              const drew = d.outcome === "draw";
+              const cancelled = d.outcome === "cancelled";
               const won = d.winnerId === characterId;
+              const opponentName =
+                (d.agent1Id === characterId ? d.agent2Name : d.agent1Name) ??
+                "Contestant unavailable";
               return (
                 <div
-                  className={`duel-recent-entry ${won ? "won" : "lost"}`}
+                  className={`duel-recent-entry ${cancelled ? "cancelled" : drew ? "draw" : won ? "won" : "lost"}`}
                   key={d.cycleId}
                 >
-                  <span className={`duel-result ${won ? "win" : "loss"}`}>
-                    {won ? "W" : "L"}
+                  <span
+                    className={`duel-result ${cancelled ? "cancelled" : drew ? "draw" : won ? "win" : "loss"}`}
+                  >
+                    {cancelled ? "C" : drew ? "D" : won ? "W" : "L"}
                   </span>
-                  <span className="duel-opponent">
-                    vs {won ? d.loserName : d.winnerName}
+                  <span className="duel-opponent">vs {opponentName}</span>
+                  <span className="duel-reason">
+                    {formatDuelReason(
+                      cancelled ? d.cancellationReason : d.winReason,
+                    )}
                   </span>
-                  <span className="duel-reason">{d.winReason}</span>
                   <span className="duel-time">
                     {formatTimeAgo(d.finishedAt)}
                   </span>
@@ -1365,11 +1529,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 type DecisionPath =
-  | "short-circuit"
-  | "llm"
-  | "planner"
-  | "curiosity"
-  | "scripted";
+  "short-circuit" | "llm" | "planner" | "curiosity" | "scripted";
 
 const PATH_COLORS: Record<DecisionPath, string> = {
   "short-circuit": "#3b82f6",

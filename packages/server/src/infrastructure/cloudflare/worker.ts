@@ -51,6 +51,7 @@
  */
 
 import { Container, getRandom } from "@cloudflare/containers";
+import { prepareOriginRequest } from "./origin-request.js";
 
 // ============================================================================
 // CLOUDFLARE WORKER TYPE DEFINITIONS
@@ -148,6 +149,8 @@ interface Env {
   PRIVY_APP_SECRET: string;
   DATABASE_URL: string;
   PUBLIC_CDN_URL: string;
+  /** Edge-owned credential injected into every request sent to the origin. */
+  CLOUDFLARE_ORIGIN_SECRET?: string;
 }
 
 /**
@@ -213,13 +216,17 @@ export default {
       const container = await getRandom(env.GAME_SERVER, MAX_INSTANCES);
 
       // Forward WebSocket upgrade to container
-      return container.fetch(request);
+      return container.fetch(
+        prepareOriginRequest(request, env.CLOUDFLARE_ORIGIN_SECRET),
+      );
     }
 
     // ===== API ROUTES → Game Server Container =====
     if (url.pathname.startsWith("/api/")) {
       const container = await getRandom(env.GAME_SERVER, 5);
-      return container.fetch(request);
+      return container.fetch(
+        prepareOriginRequest(request, env.CLOUDFLARE_ORIGIN_SECRET),
+      );
     }
 
     // ===== STATIC ASSETS → R2 CDN (Bypass container!) =====
@@ -322,7 +329,9 @@ export default {
     // ===== EVERYTHING ELSE → Container =====
     // This includes: /, /env.js, /upload, etc.
     const container = await getRandom(env.GAME_SERVER, 5);
-    return container.fetch(request);
+    return container.fetch(
+      prepareOriginRequest(request, env.CLOUDFLARE_ORIGIN_SECRET),
+    );
   },
 };
 

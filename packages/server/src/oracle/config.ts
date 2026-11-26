@@ -2,41 +2,24 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import type {
   DuelArenaOracleConfig,
-  DuelArenaOracleEvmTargetConfig,
   DuelArenaOracleProfile,
   DuelArenaOracleSolanaTargetConfig,
 } from "./types.js";
 
 function normalizeProfile(value: string | undefined): DuelArenaOracleProfile {
   const normalized = value?.trim().toLowerCase();
+  if (!normalized) return "testnet";
   if (normalized === "local") return "local";
+  if (normalized === "testnet") return "testnet";
   if (normalized === "mainnet") return "mainnet";
   if (normalized === "all") return "all";
-  return "testnet";
+  throw new Error(
+    `DUEL_ARENA_ORACLE_PROFILE must be local, testnet, mainnet, or all; received ${value}`,
+  );
 }
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
-}
-
-function normalizeHexPrivateKey(
-  value: string | undefined,
-): `0x${string}` | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  const prefixed = trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
-  if (!/^0x[0-9a-fA-F]{64}$/.test(prefixed)) {
-    return null;
-  }
-  return prefixed as `0x${string}`;
-}
-
-function normalizeEvmAddress(value: string | undefined): `0x${string}` | null {
-  const trimmed = value?.trim();
-  if (!trimmed || !/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
-    return null;
-  }
-  return trimmed as `0x${string}`;
 }
 
 function readFirstEnvValue(...keys: string[]): string | undefined {
@@ -78,41 +61,6 @@ function resolveStorePath(): string {
   return path.resolve(currentDir, "../../data/duel-arena-oracle/records.json");
 }
 
-function maybePushEvmTarget(
-  targets: DuelArenaOracleEvmTargetConfig[],
-  target: DuelArenaOracleEvmTargetConfig | null,
-): void {
-  if (target) {
-    targets.push(target);
-  }
-}
-
-function buildEvmTarget(
-  key: DuelArenaOracleEvmTargetConfig["key"],
-  label: string,
-  rpcUrlEnv: string,
-  fallbackRpcUrl: string,
-  contractEnv: string,
-  privateKeyEnv: string,
-  fallbackPrivateKeyEnvs: string[] = [],
-): DuelArenaOracleEvmTargetConfig | null {
-  const contractAddress = normalizeEvmAddress(process.env[contractEnv]);
-  const privateKey = normalizeHexPrivateKey(
-    readFirstEnvValue(privateKeyEnv, ...fallbackPrivateKeyEnvs),
-  );
-  if (!contractAddress || !privateKey) {
-    return null;
-  }
-
-  return {
-    key,
-    label,
-    rpcUrl: process.env[rpcUrlEnv]?.trim() || fallbackRpcUrl,
-    contractAddress,
-    privateKey,
-  };
-}
-
 function buildSolanaTarget(
   key: DuelArenaOracleSolanaTargetConfig["key"],
   label: string,
@@ -152,24 +100,21 @@ function buildSolanaTarget(
 export function getDuelArenaOracleConfig(): DuelArenaOracleConfig {
   const enabled = process.env.DUEL_ARENA_ORACLE_ENABLED === "true";
   const profile = normalizeProfile(process.env.DUEL_ARENA_ORACLE_PROFILE);
-  const rawDelay = process.env.ORACLE_SETTLEMENT_DELAY_MS;
-  const settlementDelayMs = rawDelay ? Number.parseInt(rawDelay, 10) : 7000;
-  const evmTargets: DuelArenaOracleEvmTargetConfig[] = [];
+  const rawDelay = process.env.ORACLE_SETTLEMENT_DELAY_MS?.trim();
+  if (rawDelay && !/^\d+$/.test(rawDelay)) {
+    throw new Error(
+      "ORACLE_SETTLEMENT_DELAY_MS must be a non-negative integer",
+    );
+  }
+  const settlementDelayMs = rawDelay ? Number(rawDelay) : 7000;
+  if (!Number.isSafeInteger(settlementDelayMs)) {
+    throw new Error(
+      "ORACLE_SETTLEMENT_DELAY_MS must be a non-negative safe integer",
+    );
+  }
   const solanaTargets: DuelArenaOracleSolanaTargetConfig[] = [];
 
   if (profile === "local" || profile === "all") {
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "anvil",
-        "Local Anvil",
-        "DUEL_ARENA_ORACLE_ANVIL_RPC_URL",
-        "http://127.0.0.1:8545",
-        "DUEL_ARENA_ORACLE_ANVIL_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_ANVIL_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
     const localnetTarget = buildSolanaTarget(
       "solanaLocalnet",
       "Solana Localnet",
@@ -190,42 +135,6 @@ export function getDuelArenaOracleConfig(): DuelArenaOracleConfig {
   }
 
   if (profile === "testnet" || profile === "all") {
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "baseSepolia",
-        "Base Sepolia",
-        "DUEL_ARENA_ORACLE_BASE_SEPOLIA_RPC_URL",
-        "https://sepolia.base.org",
-        "DUEL_ARENA_ORACLE_BASE_SEPOLIA_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_BASE_SEPOLIA_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "bscTestnet",
-        "BSC Testnet",
-        "DUEL_ARENA_ORACLE_BSC_TESTNET_RPC_URL",
-        "https://data-seed-prebsc-1-s1.binance.org:8545",
-        "DUEL_ARENA_ORACLE_BSC_TESTNET_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_BSC_TESTNET_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "avaxFuji",
-        "Avalanche Fuji",
-        "DUEL_ARENA_ORACLE_AVAX_FUJI_RPC_URL",
-        "https://api.avax-test.network/ext/bc/C/rpc",
-        "DUEL_ARENA_ORACLE_AVAX_FUJI_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_AVAX_FUJI_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
     const devnetTarget = buildSolanaTarget(
       "solanaDevnet",
       "Solana Devnet",
@@ -246,42 +155,6 @@ export function getDuelArenaOracleConfig(): DuelArenaOracleConfig {
   }
 
   if (profile === "mainnet" || profile === "all") {
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "base",
-        "Base Mainnet",
-        "DUEL_ARENA_ORACLE_BASE_MAINNET_RPC_URL",
-        "https://mainnet.base.org",
-        "DUEL_ARENA_ORACLE_BASE_MAINNET_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_BASE_MAINNET_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "bsc",
-        "BSC Mainnet",
-        "DUEL_ARENA_ORACLE_BSC_MAINNET_RPC_URL",
-        "https://bsc-dataseed.binance.org",
-        "DUEL_ARENA_ORACLE_BSC_MAINNET_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_BSC_MAINNET_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
-    maybePushEvmTarget(
-      evmTargets,
-      buildEvmTarget(
-        "avax",
-        "Avalanche Mainnet",
-        "DUEL_ARENA_ORACLE_AVAX_MAINNET_RPC_URL",
-        "https://api.avax.network/ext/bc/C/rpc",
-        "DUEL_ARENA_ORACLE_AVAX_MAINNET_CONTRACT_ADDRESS",
-        "DUEL_ARENA_ORACLE_AVAX_MAINNET_PRIVATE_KEY",
-        ["DUEL_ARENA_ORACLE_EVM_PRIVATE_KEY"],
-      ),
-    );
     const mainnetTarget = buildSolanaTarget(
       "solanaMainnet",
       "Solana Mainnet",
@@ -301,12 +174,17 @@ export function getDuelArenaOracleConfig(): DuelArenaOracleConfig {
     }
   }
 
+  if (enabled && solanaTargets.length === 0) {
+    throw new Error(
+      `Duel arena oracle is enabled for ${profile}, but no Solana authority or reporter secret is configured`,
+    );
+  }
+
   return {
     enabled,
     profile,
     metadataBaseUrl: resolveMetadataBaseUrl(),
     storePath: resolveStorePath(),
-    evmTargets,
     solanaTargets,
     settlementDelayMs,
   };

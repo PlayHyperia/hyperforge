@@ -78,7 +78,7 @@ class PhysXManager extends EventEmitter {
   private error: Error | null = null;
 
   /** Map of system names to cleanup functions for systems waiting on PhysX */
-  private waitingDependencies = new Map<string, () => void>();
+  private waitingDependencies = new Map<string | symbol, () => void>();
 
   /**
    * Private constructor for singleton pattern.
@@ -222,7 +222,12 @@ class PhysXManager extends EventEmitter {
    * @returns Promise that resolves when PhysX is loaded
    * @throws Error if PhysX loading failed or timeout reached
    */
-  async waitForPhysX(systemName: string, timeout?: number): Promise<PhysXInfo> {
+  async waitForPhysX(
+    systemName: string,
+    timeout?: number,
+    signal?: AbortSignal,
+  ): Promise<PhysXInfo> {
+    if (signal?.aborted) throw signal.reason;
     // If already loaded, return immediately
     if (this.isReady()) {
       return this.physxInfo!; // Non-null assertion safe here because isReady() checks this.physxInfo !== null
@@ -233,60 +238,55 @@ class PhysXManager extends EventEmitter {
       throw this.error || new Error("PhysX loading failed with unknown error");
     }
 
-    // Create a promise that resolves when PhysX is ready
-    const waitPromise = new Promise<PhysXInfo>((resolve, reject) => {
-      const onLoaded = (info: PhysXInfo) => {
+    return new Promise<PhysXInfo>((resolve, reject) => {
+      // A caller owns its timer and listeners, never the shared module load.
+      // Symbols distinguish concurrent consumers with the same diagnostic name.
+      const owner = Symbol(systemName);
+      const deadline = timeout ? performance.now() + timeout : undefined;
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
         this.off("loaded", onLoaded);
         this.off("failed", onFailed);
+        signal?.removeEventListener("abort", onAbort);
+        this.waitingDependencies.delete(owner);
+      };
+      const onLoaded = (info: PhysXInfo) => {
+        if (settled) return;
+        // A synchronous WASM step can delay timer delivery; completion still
+        // must meet this caller's original allowance, not a renewed timeout.
+        if (deadline !== undefined && performance.now() >= deadline) {
+          onFailed(new Error(`PhysX load timeout for ${systemName}`));
+          return;
+        }
+        settled = true;
+        cleanup();
         resolve(info);
       };
 
-      const onFailed = (error: Error) => {
-        this.off("loaded", onLoaded);
-        this.off("failed", onFailed);
+      const onFailed = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(error);
       };
+      const onAbort = () => onFailed(signal?.reason);
 
       this.once("loaded", onLoaded);
       this.once("failed", onFailed);
-
-      // Track waiting dependency
-      this.waitingDependencies.set(systemName, () => {
-        this.off("loaded", onLoaded);
-        this.off("failed", onFailed);
-      });
-    });
-
-    // If not loading, trigger load
-    if (this.state === PhysXState.NOT_LOADED) {
-      await this.load();
-    }
-
-    // Apply timeout if specified
-    if (timeout) {
-      return new Promise<PhysXInfo>((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-          reject(new Error(`PhysX load timeout for ${systemName}`));
+      this.waitingDependencies.set(owner, cleanup);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (timeout) {
+        timeoutId = setTimeout(() => {
+          onFailed(new Error(`PhysX load timeout for ${systemName}`));
         }, timeout);
-
-        const cleanup = () => {
-          clearTimeout(timeoutId);
-        };
-
-        waitPromise.then(
-          (info) => {
-            cleanup();
-            resolve(info);
-          },
-          (error) => {
-            cleanup();
-            reject(error);
-          },
-        );
-      });
-    }
-
-    return waitPromise;
+      }
+      // Install the deadline and rejection handler before triggering shared
+      // loading; neither a slow load nor another caller renews this allowance.
+      if (this.state === PhysXState.NOT_LOADED)
+        void this.load().catch(onFailed);
+    });
   }
 
   /**
@@ -570,8 +570,9 @@ export async function loadPhysX(): Promise<PhysXInfo> {
 export async function waitForPhysX(
   systemName: string,
   timeout?: number,
+  signal?: AbortSignal,
 ): Promise<PhysXInfo> {
-  return physxManager.waitForPhysX(systemName, timeout);
+  return physxManager.waitForPhysX(systemName, timeout, signal);
 }
 
 /**

@@ -1304,7 +1304,7 @@ const SecretsTab: React.FC<{
             })
           }
           className="w-full bg-[#1a1005] border border-[#8b4513]/30 rounded-lg p-3 text-[#e8ebf4] focus:border-[#f2d08a] outline-none transition-colors"
-          placeholder="/avatars/avatar-male-01.vrm"
+          placeholder="/avatars/duel-candidates/duel-bandit.vrm"
         />
         <p className="text-xs text-[#f2d08a]/40">
           Path to the character's VRM 3D avatar model
@@ -1378,35 +1378,6 @@ const SecretsTab: React.FC<{
             />
             <p className="text-xs text-[#f2d08a]/40">
               Required for @elizaos/plugin-anthropic (Claude 3, Claude 2, etc.)
-            </p>
-          </div>
-
-          {/* OpenRouter API Key */}
-          <div className="space-y-2">
-            <label className="block text-sm font-medium text-[#f2d08a]/80">
-              OpenRouter API Key
-            </label>
-            <input
-              type="password"
-              value={character.settings.secrets.OPENROUTER_API_KEY || ""}
-              onChange={(e) =>
-                onChange({
-                  ...character,
-                  settings: {
-                    ...character.settings,
-                    secrets: {
-                      ...character.settings.secrets,
-                      OPENROUTER_API_KEY: e.target.value,
-                    },
-                  },
-                })
-              }
-              className="w-full bg-[#1a1005] border border-[#8b4513]/30 rounded-lg p-3 text-[#e8ebf4] focus:border-[#f2d08a] outline-none transition-colors font-mono text-sm"
-              placeholder="sk-or-..."
-            />
-            <p className="text-xs text-[#f2d08a]/40">
-              Required for @elizaos/plugin-openrouter (Access to multiple LLM
-              providers)
             </p>
           </div>
         </div>

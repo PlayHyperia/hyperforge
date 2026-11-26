@@ -379,6 +379,377 @@
       "when": 1772300000000,
       "tag": "0054_add_agent_thoughts",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1785750000000,
+      "tag": "0055_add_streaming_duel_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1785873551000,
+      "tag": "0056_add_streaming_scheduler_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1785882000000,
+      "tag": "0057_retire_in_server_betting_integration",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1785915253000,
+      "tag": "0058_add_streaming_duel_cancellations",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1785993000000,
+      "tag": "0059_add_agent_bank_operation_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1785994200000,
+      "tag": "0060_add_streaming_duel_preparations",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1786170426362,
+      "tag": "0061_add_prayer_point_units",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1786257000000,
+      "tag": "0062_preserve_fractional_gathering_xp",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1786264200000,
+      "tag": "0063_preserve_fractional_processing_xp",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1786267800000,
+      "tag": "0064_persist_processing_consumable_uses",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1786271400000,
+      "tag": "0065_persist_active_processing_fires",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1786275000000,
+      "tag": "0066_add_streaming_duel_competitive_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1786341600000,
+      "tag": "0067_add_agent_autonomy_checkpoints",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1786345200000,
+      "tag": "0068_add_streaming_duel_opening_styles",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1786348800000,
+      "tag": "0069_add_streaming_duel_lifecycle_timestamps",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1786352400000,
+      "tag": "0070_add_streaming_duel_transition_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1786356000000,
+      "tag": "0071_add_agent_autonomy_action_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1786359600000,
+      "tag": "0072_add_agent_autonomy_progression_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1786363200000,
+      "tag": "0073_harden_ordinary_agent_banking",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1786366800000,
+      "tag": "0074_add_atomic_bone_burial",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1786370400000,
+      "tag": "0075_add_agent_autonomy_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1786374000000,
+      "tag": "0076_add_ordinary_bank_withdrawal",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1786377600000,
+      "tag": "0077_add_atomic_composite_bank_withdrawal",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1786381200000,
+      "tag": "0078_add_agent_store_operation_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1786384800000,
+      "tag": "0079_add_durable_gathering_resource_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1786388400000,
+      "tag": "0080_add_durable_quest_gathering_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1786392000000,
+      "tag": "0081_add_durable_quest_processing_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1786395600000,
+      "tag": "0082_add_atomic_safe_death_custody",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1786399200000,
+      "tag": "0083_bind_duel_bank_receipts_to_preparations",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1786402800000,
+      "tag": "0084_add_durable_preparation_bank_open_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1786406400000,
+      "tag": "0085_add_streaming_duel_action_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1786410000000,
+      "tag": "0086_add_latest_agent_autonomy_action_to_lifecycle_head",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1786413600000,
+      "tag": "0087_allow_autocast_agent_lifecycle_action",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1786417200000,
+      "tag": "0088_allow_zero_effect_committed_duel_food_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1786420800000,
+      "tag": "0089_require_unique_agent_character_mapping",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1786424400000,
+      "tag": "0090_default_agent_streaming_duel_participation_off",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1786428000000,
+      "tag": "0091_add_replay_safe_solana_agent_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1786431600000,
+      "tag": "0092_add_revocable_agent_credential_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1786435200000,
+      "tag": "0093_add_distributed_rate_limit_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1788076800000,
+      "tag": "0094_add_compacted_prayer_state_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1788080400000,
+      "tag": "0095_add_duel_preparation_unavailability_reports",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1788084000000,
+      "tag": "0096_add_ground_item_pickup_source_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1788087600000,
+      "tag": "0097_add_durable_ground_item_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1788091200000,
+      "tag": "0098_add_duel_preparation_agent_host_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1788094800000,
+      "tag": "0099_add_duel_preparation_public_activities",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1788098400000,
+      "tag": "0100_add_duel_preparation_strategy_contexts",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1788102000000,
+      "tag": "0101_require_duel_preparation_strategy_v4",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1788105600000,
+      "tag": "0102_bind_duel_preparation_opponent_history_summary",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1788109200000,
+      "tag": "0103_bind_duel_preparation_host_executable_build",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1788112800000,
+      "tag": "0104_add_durable_quest_kill_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1788116400000,
+      "tag": "0105_add_streaming_duel_action_observation_heads",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1788120000000,
+      "tag": "0106_allow_longrange_duel_style_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1788249600000,
+      "tag": "0107_index_unresolved_projectile_cost_custody",
+      "breakpoints": true
     }
   ]
 }

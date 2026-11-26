@@ -18,6 +18,7 @@ import { EventBus } from "../../infrastructure/EventBus";
 import { EventType } from "../../../../types/events";
 import type { World } from "../../../../types/index";
 import { processingDataProvider } from "../../../../data/ProcessingDataProvider";
+import type { AtomicProcessingActionReceipt } from "../../character/InventorySystem";
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
@@ -48,10 +49,47 @@ function createMockWorld(
     inventory?: MockInventoryItem[];
     skills?: Record<string, { level: number; xp: number }>;
     currentTick?: number;
+    inDuel?: boolean;
+    inStreamingDuel?: boolean;
   } = {},
 ) {
   const eventBus = new EventBus();
   const inventory = options.inventory || [];
+  const commitProcessingActionAtomic = vi.fn(
+    async (
+      playerId: string,
+      operationId: string,
+      input: {
+        skill: "fletching";
+        xpAmount: number;
+        inputs: Array<{ itemId: string; quantity: number }>;
+        requiredItems: Array<{ itemId: string; quantity: number }>;
+        consumables: [];
+        outputs: Array<{ itemId: string; quantity: number }>;
+      },
+    ): Promise<AtomicProcessingActionReceipt> => ({
+      ok: true,
+      committed: true,
+      liveInventoryApplied: true,
+      playerId,
+      operationId,
+      replayed: false,
+      skill: "fletching",
+      xpAmount: input.xpAmount,
+      inputs: input.inputs,
+      requiredItems: input.requiredItems,
+      consumables: [],
+      consumableStates: [],
+      outputs: input.outputs.map((output) => ({
+        ...output,
+        stackable: true,
+      })),
+      awardedXp: input.xpAmount,
+      operationCommittedXp: input.xpAmount,
+      currentXp: input.xpAmount,
+      currentLevel: 1,
+    }),
+  );
 
   const world = {
     isServer: true,
@@ -61,19 +99,26 @@ function createMockWorld(
     on: vi.fn(),
     off: vi.fn(),
     emit: vi.fn(),
-    getSystem: vi.fn(() => undefined),
+    getSystem: vi.fn((name: string) => {
+      if (name === "inventory") return { commitProcessingActionAtomic };
+      if (name === "duel") {
+        return { isPlayerInDuel: () => options.inDuel ?? false };
+      }
+      return undefined;
+    }),
     getPlayer: vi.fn((id: string) => {
-      if (!options.skills) return undefined;
       return {
         id,
-        skills: options.skills,
+        position: { x: 0, y: 0, z: 0 },
+        data: { inStreamingDuel: options.inStreamingDuel ?? false },
+        ...(options.skills ? { skills: options.skills } : {}),
       };
     }),
     getInventory: vi.fn(() => inventory),
     network: { send: vi.fn() },
   };
 
-  return { world, eventBus };
+  return { world, eventBus, commitProcessingActionAtomic };
 }
 
 function emitEvent(
@@ -84,12 +129,18 @@ function emitEvent(
   eventBus.emitEvent(type, data, "test");
 }
 
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────
 
 describe("FletchingSystem", () => {
   let system: FletchingSystem;
   let eventBus: EventBus;
   let mockWorld: ReturnType<typeof createMockWorld>["world"];
+  let commitProcessingActionAtomic: ReturnType<typeof vi.fn>;
 
   // Track emitted events
   const emittedEvents: Array<{ type: string; data: unknown }> = [];
@@ -114,6 +165,7 @@ describe("FletchingSystem", () => {
     const mock = createMockWorld(options);
     mockWorld = mock.world;
     eventBus = mock.eventBus;
+    commitProcessingActionAtomic = mock.commitProcessingActionAtomic;
     system = new FletchingSystem(mockWorld as unknown as World);
     await system.init();
 
@@ -381,7 +433,7 @@ describe("FletchingSystem", () => {
   // ─── completeFletching + update loop ──────────────────────────────
 
   describe("completeFletching via update", () => {
-    it("completes a fletch: removes inputs, adds output, grants XP", async () => {
+    it("completes a fletch only after the durable receipt", async () => {
       const recipe =
         processingDataProvider.getFletchingRecipe("arrow_shaft:logs");
       if (!recipe) return;
@@ -403,24 +455,30 @@ describe("FletchingSystem", () => {
       // Advance tick past completion
       mockWorld.currentTick = 100 + recipe.ticks;
       system.update(0);
+      await flushPromises();
+      mockWorld.currentTick++;
+      system.update(0);
 
-      // Should have emitted input removal, item added, XP gained
+      // Durable custody owns inventory mutation; only the committed XP/result
+      // events are emitted by FletchingSystem.
       const itemsRemoved = findEmitted(EventType.INVENTORY_ITEM_REMOVED);
-      expect(itemsRemoved.length).toBeGreaterThan(0);
+      expect(itemsRemoved).toHaveLength(0);
 
       const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBe(1);
+      expect(itemsAdded).toHaveLength(0);
 
-      const xpGained = findEmitted(EventType.SKILLS_XP_GAINED);
+      const xpGained = findEmitted(EventType.SKILLS_PROGRESS_COMMITTED);
       expect(xpGained.length).toBe(1);
-      expect((xpGained[0].data as { amount: number }).amount).toBe(recipe.xp);
+      expect((xpGained[0].data as { awardedXp: number }).awardedXp).toBe(
+        recipe.xp,
+      );
 
       // For quantity 1, session should complete
       const completes = findEmitted(EventType.FLETCHING_COMPLETE);
       expect(completes.length).toBe(1);
     });
 
-    it("multi-output: arrow shafts produce correct outputQuantity", async () => {
+    it("submits the exact multi-output quantity atomically", async () => {
       const recipe =
         processingDataProvider.getFletchingRecipe("arrow_shaft:logs");
       if (!recipe) return;
@@ -440,13 +498,16 @@ describe("FletchingSystem", () => {
       mockWorld.currentTick = 100 + recipe.ticks;
       system.update(0);
 
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBe(1);
-
-      // Arrow shafts produce 15 per log
-      const addedItem = (itemsAdded[0].data as { item: { quantity: number } })
-        .item;
-      expect(addedItem.quantity).toBe(recipe.outputQuantity);
+      expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+      expect(commitProcessingActionAtomic.mock.calls[0][2]).toEqual({
+        skill: "fletching",
+        xpAmount: recipe.xp,
+        inputs: [{ itemId: "logs", quantity: 1 }],
+        requiredItems: [{ itemId: "knife", quantity: 1 }],
+        consumables: [],
+        outputs: [{ itemId: "arrow_shaft", quantity: recipe.outputQuantity }],
+      });
+      expect(findEmitted(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
     });
 
     it("schedules next action if quantity remaining", async () => {
@@ -466,30 +527,21 @@ describe("FletchingSystem", () => {
         quantity: 3,
       });
 
-      // Complete first fletch
-      mockWorld.currentTick = 100 + recipe.ticks;
-      system.update(0);
-
-      // Should still be fletching (2 remaining)
-      expect(system.isPlayerFletching("player1")).toBe(true);
-
-      // Complete second fletch
-      mockWorld.currentTick = 100 + recipe.ticks * 2;
-      system.update(0);
-
-      // Still fletching (1 remaining)
-      expect(system.isPlayerFletching("player1")).toBe(true);
-
-      // Complete third fletch
-      mockWorld.currentTick = 100 + recipe.ticks * 3;
-      system.update(0);
+      for (let index = 0; index < 3; index++) {
+        mockWorld.currentTick += recipe.ticks;
+        system.update(0);
+        await flushPromises();
+        mockWorld.currentTick++;
+        system.update(0);
+        if (index < 2) expect(system.isPlayerFletching("player1")).toBe(true);
+      }
 
       // Session should be done
       const completes = findEmitted(EventType.FLETCHING_COMPLETE);
       expect(completes.length).toBe(1);
     });
 
-    it("generates unique item IDs across fletches", async () => {
+    it("uses a unique durable operation identity for each fletch", async () => {
       const recipe =
         processingDataProvider.getFletchingRecipe("arrow_shaft:logs");
       if (!recipe) return;
@@ -508,24 +560,60 @@ describe("FletchingSystem", () => {
 
       // Complete 3 fletches
       for (let i = 0; i < 3; i++) {
-        mockWorld.currentTick = 100 + recipe.ticks * (i + 1);
+        mockWorld.currentTick += recipe.ticks;
+        system.update(0);
+        await flushPromises();
+        mockWorld.currentTick++;
         system.update(0);
       }
 
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      const ids = itemsAdded.map(
-        (e) => (e.data as { item: { id: string } }).item.id,
+      const ids = commitProcessingActionAtomic.mock.calls.map(
+        (call) => call[1] as string,
       );
-      // All IDs should be unique
+      expect(ids).toHaveLength(3);
       expect(new Set(ids).size).toBe(ids.length);
-      // IDs should use the fletch_ prefix with counter
       for (const id of ids) {
-        expect(id).toMatch(/^fletch_/);
+        expect(id).toMatch(/^fletching-action:/);
       }
     });
   });
 
   // ─── Movement cancellation ────────────────────────────────────────
+
+  describe("preparation authority", () => {
+    it.each([
+      { label: "ordinary duel", options: { inDuel: true } },
+      {
+        label: "streaming duel",
+        options: { inStreamingDuel: true },
+      },
+    ])("rejects fletching during $label", async ({ options }) => {
+      await setupSystem({
+        inventory: [createItem("knife", 1), createItem("logs", 5)],
+        skills: { fletching: { level: 99, xp: 0 } },
+        ...options,
+      });
+
+      emitEvent(eventBus, EventType.PROCESSING_FLETCHING_REQUEST, {
+        playerId: "player1",
+        recipeId: "arrow_shaft:logs",
+        quantity: 1,
+        requestId: "9a0b4a87-66f7-4ba7-bb60-31b5229547a5",
+      });
+
+      expect(system.isPlayerFletching("player1")).toBe(false);
+      expect(commitProcessingActionAtomic).not.toHaveBeenCalled();
+      expect(findEmitted(EventType.PROCESSING_REQUEST_REJECTED)).toEqual([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            playerId: "player1",
+            skill: "fletching",
+            reason: "not_authorized",
+          }),
+        }),
+      ]);
+    });
+  });
 
   describe("movement cancellation", () => {
     it("cancels fletching when player moves", async () => {
@@ -694,10 +782,13 @@ describe("FletchingSystem", () => {
       // Complete first fletch
       mockWorld.currentTick = 100 + recipe.ticks;
       system.update(0);
+      await flushPromises();
+      mockWorld.currentTick++;
+      system.update(0);
 
-      // Should have added items (session continues until materials run out)
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBeGreaterThan(0);
+      expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+      expect(findEmitted(EventType.SKILLS_PROGRESS_COMMITTED)).toHaveLength(1);
+      expect(system.isPlayerFletching("player1")).toBe(true);
     });
   });
 
@@ -744,9 +835,8 @@ describe("FletchingSystem", () => {
       system.update(0);
       system.update(0);
 
-      // Should only process once
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBe(1);
+      expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+      expect(findEmitted(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
     });
 
     it("does nothing on client", async () => {

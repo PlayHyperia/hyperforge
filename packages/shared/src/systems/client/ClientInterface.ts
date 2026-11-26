@@ -7,6 +7,7 @@ import { storage } from "../../platform/shared/storage";
 import StatsGL from "../../libs/stats-gl";
 import Panel from "../../libs/stats-gl/panel";
 import type { World, WorldOptions, ControlBinding, Entity } from "../../types";
+import type { StreamingRenderPreferences } from "../../runtime/clientViewportMode";
 
 // Pre-allocated temp objects
 const _v3_1 = new THREE.Vector3();
@@ -103,6 +104,10 @@ export class ClientInterface extends SystemBase {
   v: number = 0;
   changes: Record<string, { prev: PrefsValue; value: PrefsValue }> | null =
     null;
+  private streamingRenderPreferences: Readonly<StreamingRenderPreferences> | null =
+    null;
+  private persistedRenderPreferences: StreamingRenderPreferences | null = null;
+  private preferencesInitialized = false;
 
   // Stats display
   statsPanel: {
@@ -187,6 +192,56 @@ export class ClientInterface extends SystemBase {
         this.waterReflections = parsed.waterReflections;
       if (parsed.v !== undefined) this.v = parsed.v;
     }
+    // onSetup runs before init. Stored ordinary-user preferences must not win
+    // over the startup broadcast contract, nor be replaced by it on persist.
+    if (this.streamingRenderPreferences && this.persistedRenderPreferences) {
+      const parsed = stored as ClientPrefsData | null;
+      for (const key of Object.keys(
+        this.streamingRenderPreferences,
+      ) as (keyof StreamingRenderPreferences)[]) {
+        if (
+          parsed &&
+          Object.prototype.hasOwnProperty.call(parsed, key) &&
+          parsed[key] !== undefined
+        ) {
+          Object.assign(this.persistedRenderPreferences, { [key]: this[key] });
+        }
+      }
+      Object.assign(this, this.streamingRenderPreferences);
+    }
+    this.preferencesInitialized = true;
+  }
+
+  /** Startup-only, non-persistent render policy; it does not reload or create a renderer. */
+  configureStreamingRenderPreferences(
+    preferences: StreamingRenderPreferences,
+  ): void {
+    if (this.preferencesInitialized) {
+      throw new Error(
+        "Streaming render preferences must be configured before initialization",
+      );
+    }
+    if (
+      !Number.isFinite(preferences.dpr) ||
+      preferences.dpr <= 0 ||
+      preferences.dpr > 1
+    ) {
+      throw new Error("Invalid streaming render DPR");
+    }
+    if (!this.persistedRenderPreferences) {
+      this.persistedRenderPreferences = {
+        dpr: this.dpr,
+        shadows: this.shadows,
+        postprocessing: this.postprocessing,
+        bloom: this.bloom,
+        colorGrading: this.colorGrading,
+        depthBlur: this.depthBlur,
+        waterReflections: this.waterReflections,
+        entityHighlighting: this.entityHighlighting,
+      };
+    }
+    this.streamingRenderPreferences = Object.freeze({ ...preferences });
+    Object.assign(this, this.streamingRenderPreferences);
   }
 
   start() {
@@ -203,8 +258,7 @@ export class ClientInterface extends SystemBase {
       keyC.onPress = () => this.toggleVisible();
     }
     const keyEscape = this.control.keyEscape as
-      | { onPress: () => void }
-      | undefined;
+      { onPress: () => void } | undefined;
     if (keyEscape) {
       keyEscape.onPress = () => this.toggleActive(false);
     }
@@ -511,6 +565,19 @@ export class ClientInterface extends SystemBase {
   }
 
   modify(key: PrefsKey, value: PrefsValue) {
+    if (
+      this.streamingRenderPreferences &&
+      Object.prototype.hasOwnProperty.call(this.streamingRenderPreferences, key)
+    ) {
+      const expected =
+        this.streamingRenderPreferences[
+          key as keyof StreamingRenderPreferences
+        ];
+      if (value !== expected) {
+        throw new Error(`Streaming render preference ${key} is startup-fixed`);
+      }
+      return;
+    }
     if (!this.changes) this.changes = {};
 
     const prev = (this as any)[key];
@@ -546,7 +613,7 @@ export class ClientInterface extends SystemBase {
     };
 
     // storage.set already does JSON.stringify internally
-    storage.set("prefs", data);
+    storage.set("prefs", { ...data, ...this.persistedRenderPreferences });
   }
 
   // Preference setters

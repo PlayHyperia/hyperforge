@@ -1,5 +1,5 @@
 /**
- * WaterSystem - AAA Lake Water Shader (WebGPU TSL)
+ * WaterSystem - Lake Water Shader (WebGPU TSL)
  *
  * Features: Gerstner waves (5-wave), Phong specular, cosine-gradient depth
  * colour, flow-mapped 4-scroll detail normals (two-phase crossfade via
@@ -44,15 +44,26 @@ import THREE, {
   linearDepth,
   cameraNear,
   cameraFar,
-  type ShaderNode,
-  type ShaderNodeInput,
 } from "../../../extras/three/three";
+import type { Node, NodeBuilder, NodeFrame, UniformNode } from "three/webgpu";
+import { NodeUpdateType, select, positionView, exp2, fwidth } from "three/tsl";
+import {
+  alignCroppedReflectionRect,
+  cropReflectionProjection,
+  croppedReflectionScreen,
+  ReflectionCropCapacity,
+} from "../../../extras/three/CroppedReflectionScreen";
+import { isOwnedUniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
 import type { World } from "../../../types";
 import type { TerrainTile } from "../../../types/world/terrain";
 import type { Wind } from "./Wind";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { SUN_SHADE, NIGHT, applySunShade } from "./LightingConfig";
+import { WorldIlluminationUniforms } from "./WorldIlluminationUniforms";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
+import type { CanonicalGroundLease } from "./CoastalBathymetry";
+import { CoastalBathymetryOwner } from "./CoastalBathymetryOwner";
+import { createCoastalWaterOpticalDistanceNode } from "./CoastalWaterOptics";
 
 // ============================================================================
 // CONFIGURATION
@@ -94,6 +105,19 @@ const WATER = {
 
   // Normal noise strength (xz multiplier for surface normal)
   NORMAL_STRENGTH: 1.5,
+
+  // Sheltered freshwater detail, selected per draw by the existing pond owner.
+  // Retain the same normal samples, geometry and wave bounds.
+  QUIET_NORMAL_STRENGTH: 0.65,
+  QUIET_SURFACE_SPEED: 0.55,
+  QUIET_REFLECTION_DISTORTION: 0.006,
+  REFLECTION_DISTORTION: 0.015,
+
+  // Homogeneous neutral attenuation along the unrefracted viewing ray. These
+  // are art controls, not spectral absorption or a full scattering solution.
+  QUIET_HALF_TRANSMITTANCE_METRES: 3,
+  QUIET_DEEP_TINT: [0.02, 0.085, 0.095] as const,
+  QUIET_REFRACTIVE_INDEX: 1.333,
 
   // Foam
   FOAM_SHORE_DISTANCE: 2.5,
@@ -162,16 +186,87 @@ const WAVES: WaveParams[] = [
 // TYPES
 // ============================================================================
 
-type UniformFloat = { value: number };
-type UniformVec3 = { value: THREE.Vector3 };
+// Component-wise bounds of the unchanged ocean positionNode. X/Z do not
+// depend on wind; Y uses the actual ocean uniform rather than a default cap.
+const OCEAN_WAVE_EXTENT = Object.freeze(
+  WAVES.reduce(
+    (extent, wave) => {
+      extent.x += Math.abs(wave.QADx * 1.3);
+      extent.y += Math.abs(wave.A * 1.3);
+      extent.z += Math.abs(wave.QADz * 1.3);
+      return extent;
+    },
+    { x: 0, y: 0, z: 0 },
+  ),
+);
+
+const LAKE_WAVE_EXTENT = Object.freeze(
+  WAVES.reduce(
+    (extent, wave) => {
+      extent.x += Math.abs(wave.QADx);
+      extent.y += Math.abs(wave.A);
+      extent.z += Math.abs(wave.QADz);
+      return extent;
+    },
+    { x: 0, y: 0, z: 0 },
+  ),
+);
+
+interface OceanDisplacementBounds {
+  mesh: THREE.Mesh;
+  geometry: THREE.BufferGeometry;
+  base: THREE.Box3;
+  box: THREE.Box3;
+  sphere: THREE.Sphere;
+  wind: number;
+}
+
+type LakePlaneSource = {
+  geometry: THREE.BufferGeometry;
+  position: THREE.BufferAttribute | THREE.InterleavedBufferAttribute;
+  version: number;
+  localHeight: number;
+  bounds: THREE.Box3;
+};
+
+type LakeReflectionOwner = {
+  frameId: number;
+  renderId: number;
+  camera: THREE.Camera;
+  scene: THREE.Scene | null;
+  mesh: THREE.Mesh;
+  plane: THREE.Plane;
+  captured: boolean;
+};
+
+type LakeGrassFootprint = {
+  renderer: NonNullable<NodeFrame["renderer"]>;
+  scene: THREE.Scene;
+  camera: THREE.Camera;
+  target: THREE.RenderTarget;
+  width: number;
+  height: number;
+  projection: THREE.Matrix4;
+  view: THREE.Matrix4;
+  full: THREE.Frustum;
+  crop: THREE.Frustum;
+  before: THREE.Scene["onBeforeRender"];
+  after: THREE.Scene["onAfterRender"];
+};
+
+type UniformFloat = UniformNode<"float", number>;
+type UniformVec3 = UniformNode<"vec3", THREE.Vector3>;
+type UniformColor = UniformNode<"color", THREE.Color>;
 
 export type WaterUniforms = {
+  illumination: WorldIlluminationUniforms;
   time: UniformFloat;
   sunDirection: UniformVec3;
   windStrength: UniformFloat;
   reflectionIntensity: UniformFloat;
   dayIntensity: UniformFloat;
   sunIntensity: UniformFloat;
+  shadeColor: UniformColor;
 };
 
 /**
@@ -181,6 +276,13 @@ export type WaterUniforms = {
  */
 export type WaterBodyType = "lake" | "ocean";
 
+/** Per-draw state: an elevated quiet pond must not recolour another lake mesh. */
+export function createQuietPondUniform() {
+  return uniform(0).onObjectUpdate(({ object }) =>
+    object?.userData.compactQuietPond === true ? 1 : 0,
+  );
+}
+
 // ============================================================================
 // WATER SYSTEM
 // ============================================================================
@@ -189,17 +291,51 @@ export class WaterSystem {
   private world: World;
   private waterTime = 0;
   private lakeMaterial?: MeshStandardNodeMaterial;
+  private quietPondUniform: ReturnType<typeof createQuietPondUniform> | null =
+    null;
   private oceanMaterial?: MeshStandardNodeMaterial;
   private uniforms: WaterUniforms | null = null;
   private oceanUniforms: WaterUniforms | null = null;
   private normalTex?: THREE.Texture;
   private foamTex?: THREE.Texture;
   private flowTex?: THREE.Texture;
+  private coastalBathymetry: CoastalBathymetryOwner | null = null;
 
   // TSL planar reflection (Three.js ReflectorNode handles camera, RT, clipping)
   private reflection?: ReturnType<typeof reflector>;
   private waterLevel: number = TERRAIN_CONSTANTS.WATER_THRESHOLD;
   private waterMeshes: THREE.Mesh[] = [];
+  private lakePlaneSources = new Map<THREE.Mesh, LakePlaneSource>();
+  private lakeReflectionOwners = new WeakMap<
+    NodeFrame,
+    WeakMap<THREE.Camera, LakeReflectionOwner>
+  >();
+  private lastLakeReflectionOwner: LakeReflectionOwner | null = null;
+  private lakeReflectionPlaneUniform: UniformFloat | null = null;
+  private readonly reflectionPlane = new THREE.Plane();
+  private readonly reflectionNormalMatrix = new THREE.Matrix3();
+  private readonly reflectionPoint = new THREE.Vector3();
+  private readonly reflectionRotation = new THREE.Quaternion();
+  private readonly reflectionAxis = new THREE.Vector3(0, 0, 1);
+  private readonly reflectionScale = new THREE.Vector3(1, 1, 1);
+  private reflectionFootprintEnabled = false;
+  private reflectionCropEnabled = croppedReflectionScreen.enabled;
+  // Candidate-only capacity state: the default graph allocates no planner.
+  private reflectionCropCapacities: WeakMap<
+    THREE.RenderTarget,
+    ReflectionCropCapacity
+  > | null = null;
+  private readonly reflectionCropUv = uniform(new THREE.Vector4(1, 1, 0, 0));
+  private reflectionGrassFootprintEnabled = false;
+  private reflectionGrassFootprint: LakeGrassFootprint | null = null;
+  private lakeWavePositionNode: Node | null = null;
+  private lakeReflectionUvNode: Node | null = null;
+  private readonly reflectionViewProjection = new THREE.Matrix4();
+  private readonly reflectionLocalProjection = new THREE.Matrix4();
+  private readonly reflectionCorner = new THREE.Vector4();
+  private readonly reflectionFootprintPlane = new THREE.Plane();
+  // Optional bound records do not own or dispose geometry/materials.
+  private oceanDisplacementBounds: OceanDisplacementBounds[] = [];
 
   private reflectionActive = false;
 
@@ -222,14 +358,449 @@ export class WaterSystem {
     return this._reflectionsEnabled;
   }
 
+  /** Opt-in until native moving-view pixel and cost qualification is complete. */
+  setReflectionFootprintEnabled(enabled: boolean): void {
+    this.reflectionFootprintEnabled = enabled;
+  }
+
+  /** Runtime comparison is allowed only with the opt-in shader graph loaded. */
+  setReflectionCropEnabled(enabled: boolean): void {
+    if (enabled && !croppedReflectionScreen.enabled)
+      throw new Error("Cropped reflection requires the opt-in shader graph");
+    if (enabled !== this.reflectionCropEnabled)
+      this.reflectionCropCapacities = null;
+    this.reflectionCropEnabled = enabled;
+  }
+
+  /** Submission-only experiment. Never enables the separate raster scissor. */
+  setReflectionGrassFootprintEnabled(enabled: boolean): void {
+    this.reflectionGrassFootprintEnabled = enabled;
+    if (!enabled) this.reflectionGrassFootprint = null;
+  }
+
+  /** Called only for grass with an admitted, wind-swept world-space bound.
+   * The renderer shares its Frustum across passes: identity alone is unsafe. */
+  readonly intersectsReflectionGrassBounds = (
+    frustum: THREE.Frustum,
+    bounds: THREE.Box3,
+  ): boolean => {
+    const scope = this.reflectionGrassFootprint;
+    if (
+      !this.reflectionGrassFootprintEnabled ||
+      !scope ||
+      scope.renderer.getRenderTarget() !== scope.target ||
+      scope.target.width !== scope.width ||
+      scope.target.height !== scope.height ||
+      scope.scene.onBeforeRender !== scope.before ||
+      scope.scene.onAfterRender !== scope.after ||
+      !scope.camera.projectionMatrix.equals(scope.projection) ||
+      !scope.camera.matrixWorldInverse.equals(scope.view) ||
+      !frustum.planes.every((plane, index) =>
+        plane.equals(scope.full.planes[index]),
+      ) ||
+      ![
+        bounds.min.x,
+        bounds.min.y,
+        bounds.min.z,
+        bounds.max.x,
+        bounds.max.y,
+        bounds.max.z,
+      ].every(Number.isFinite)
+    )
+      return true;
+    return scope.crop.intersectsBox(bounds);
+  };
+
+  /** Own only the mirror capture; never virtualize native framebuffer samplers.
+   * This opt-in pilot admits ordinary meshes, not transmission/custom shadow
+   * filters. Issued-shader and moving-view pixel qualification remains required. */
+  private beginLakeCroppedCapture(
+    renderer: NonNullable<NodeFrame["renderer"]>,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    target: THREE.RenderTarget,
+    fullWidth: number,
+    fullHeight: number,
+    pixels: THREE.Vector4,
+  ): (() => void) | null {
+    if (
+      !this.reflectionCropEnabled ||
+      this.reflectionGrassFootprintEnabled ||
+      scene.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+      scene.onAfterRender !== THREE.Object3D.prototype.onAfterRender ||
+      renderer.getScissorTest() ||
+      target.scissorTest ||
+      target.samples !== 0 ||
+      camera instanceof THREE.ArrayCamera ||
+      renderer.shadowMap.type !== THREE.PCFShadowMap ||
+      ![fullWidth, fullHeight, ...pixels.toArray()].every(
+        Number.isSafeInteger,
+      ) ||
+      fullWidth <= 0 ||
+      fullHeight <= 0 ||
+      pixels.x < 0 ||
+      pixels.y < 0 ||
+      pixels.z <= 0 ||
+      pixels.w <= 0 ||
+      pixels.x % 8 !== 0 ||
+      pixels.y % 8 !== 0 ||
+      pixels.x + pixels.z > fullWidth ||
+      pixels.y + pixels.w > fullHeight
+    )
+      return null;
+    let supported = true;
+    scene.traverseVisible((object) => {
+      if (!supported) return;
+      if (object instanceof THREE.Light && object.castShadow) {
+        supported =
+          object instanceof THREE.DirectionalLight &&
+          isOwnedUniformDirectionalShadowNode(
+            object.shadow.shadowNode,
+            object,
+          ) &&
+          Reflect.get(object.shadow, "filterNode") == null;
+      }
+      if (
+        object instanceof THREE.Points ||
+        object instanceof THREE.Sprite ||
+        object instanceof THREE.Line
+      )
+        supported = false;
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material)
+        ? object.material
+        : [object.material];
+      for (const material of materials) {
+        // Built-in transmission samples a local framebuffer/mip domain. It is
+        // deliberately not claimed equivalent by the original-screen aliases.
+        const transmission: unknown = Reflect.get(material, "transmission");
+        if (
+          material instanceof THREE.ShaderMaterial ||
+          (transmission !== undefined && transmission !== 0) ||
+          Reflect.get(material, "transmissionNode") != null
+        )
+          supported = false;
+      }
+    });
+    if (!supported) return null;
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onBeforeRender",
+    );
+    const afterDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onAfterRender",
+    );
+    if (
+      !Object.isExtensible(scene) ||
+      [beforeDescriptor, afterDescriptor].some(
+        (descriptor) =>
+          descriptor && (!descriptor.configurable || !("value" in descriptor)),
+      )
+    )
+      return null;
+    const x = pixels.x,
+      y = pixels.y,
+      width = pixels.z,
+      height = pixels.w;
+    const crop = cropReflectionProjection(
+      new THREE.Matrix4(),
+      pixels,
+      fullWidth,
+      fullHeight,
+    );
+    const projection = new THREE.Matrix4();
+    const inverse = new THREE.Matrix4();
+    let active = false;
+    let released = false;
+    let endCoordinates: (() => void) | null = null;
+    // Admission/lease validation must finish BEFORE ReflectorNode starts its
+    // nested render: r186 has no exception cleanup around that native call.
+    if (target.width !== width || target.height !== height)
+      target.setSize(width, height);
+    target.viewport.set(0, 0, width, height);
+    target.scissor.set(0, 0, width, height);
+    try {
+      endCoordinates = croppedReflectionScreen.begin({
+        renderer,
+        target,
+        camera,
+        fullWidth,
+        fullHeight,
+        x,
+        y,
+        width,
+        height,
+      });
+    } catch {
+      return null;
+    }
+    const restore = () => {
+      try {
+        endCoordinates?.();
+      } finally {
+        endCoordinates = null;
+        if (active) {
+          camera.projectionMatrix.copy(projection);
+          camera.projectionMatrixInverse.copy(inverse);
+          active = false;
+        }
+      }
+    };
+    const owns = (args: unknown[]) =>
+      args[0] === renderer &&
+      args[1] === scene &&
+      args[2] === camera &&
+      args[3] === target;
+    const before: THREE.Scene["onBeforeRender"] = (...args: unknown[]) => {
+      if (!owns(args)) return;
+      // Native ReflectorNode has finished its oblique Z-row at this point.
+      projection.copy(camera.projectionMatrix);
+      inverse.copy(camera.projectionMatrixInverse);
+      active = true;
+      camera.projectionMatrix.premultiply(crop);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+    };
+    const after: THREE.Scene["onAfterRender"] = (...args: unknown[]) => {
+      if (owns(args)) restore();
+    };
+    Object.defineProperty(scene, "onBeforeRender", {
+      configurable: true,
+      writable: true,
+      value: before,
+    });
+    Object.defineProperty(scene, "onAfterRender", {
+      configurable: true,
+      writable: true,
+      value: after,
+    });
+    return () => {
+      if (released) return;
+      released = true;
+      try {
+        restore();
+      } finally {
+        if (scene.onBeforeRender === before) {
+          if (beforeDescriptor)
+            Object.defineProperty(scene, "onBeforeRender", beforeDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onBeforeRender;
+        }
+        if (scene.onAfterRender === after) {
+          if (afterDescriptor)
+            Object.defineProperty(scene, "onAfterRender", afterDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onAfterRender;
+        }
+      }
+    };
+  }
+
+  /** Lease only the synchronous reflection traversal. The mirror camera is
+   * still stale at _updateResolution; the scene callback observes its final
+   * oblique projection, immediately before r186 builds the render list. */
+  private beginLakeGrassFootprint(
+    renderer: NonNullable<NodeFrame["renderer"]>,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    target: THREE.RenderTarget,
+    pixels: THREE.Vector4,
+  ): (() => void) | null {
+    if (
+      !this.reflectionGrassFootprintEnabled ||
+      !this._reflectionsEnabled ||
+      // Unknown scene callbacks can change the sampled lake footprint after
+      // admission. Do not compose this experiment with those side effects.
+      scene.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+      scene.onAfterRender !== THREE.Object3D.prototype.onAfterRender ||
+      renderer.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+      renderer.xr?.isPresenting ||
+      camera instanceof THREE.ArrayCamera ||
+      !this.hasBilinearLakeReflectionSampler(target.texture) ||
+      ![
+        target.width,
+        target.height,
+        pixels.x,
+        pixels.y,
+        pixels.z,
+        pixels.w,
+      ].every(Number.isSafeInteger) ||
+      target.width <= 0 ||
+      target.height <= 0 ||
+      pixels.x < 0 ||
+      pixels.y < 0 ||
+      pixels.z <= 0 ||
+      pixels.w <= 0 ||
+      pixels.x + pixels.z > target.width ||
+      pixels.y + pixels.w > target.height
+    )
+      return null;
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onBeforeRender",
+    );
+    const afterDescriptor = Object.getOwnPropertyDescriptor(
+      scene,
+      "onAfterRender",
+    );
+    if (
+      !Object.isExtensible(scene) ||
+      [beforeDescriptor, afterDescriptor].some(
+        (descriptor) =>
+          descriptor && (!descriptor.configurable || !("value" in descriptor)),
+      )
+    )
+      return null;
+    const originalBefore = scene.onBeforeRender;
+    const originalAfter = scene.onAfterRender;
+    const previous = this.reflectionGrassFootprint;
+    const stack: Array<LakeGrassFootprint | null> = [];
+    const water = this;
+    const width = target.width;
+    const height = target.height;
+    const cropMatrix = new THREE.Matrix4().set(
+      width / pixels.z,
+      0,
+      0,
+      (width - 2 * pixels.x - pixels.z) / pixels.z,
+      0,
+      height / pixels.w,
+      0,
+      (2 * pixels.y + pixels.w - height) / pixels.w,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+    );
+    let released = false;
+    const before: THREE.Scene["onBeforeRender"] = function (
+      this: THREE.Scene,
+      ...args: unknown[]
+    ) {
+      stack.push(water.reflectionGrassFootprint);
+      water.reflectionGrassFootprint = null;
+      const result = Reflect.apply(originalBefore, this, args);
+      if (
+        released ||
+        !water.reflectionGrassFootprintEnabled ||
+        this !== scene ||
+        args[0] !== renderer ||
+        args[1] !== scene ||
+        args[2] !== camera ||
+        args[3] !== target ||
+        renderer.getRenderTarget() !== target ||
+        scene.onBeforeRender !== before ||
+        scene.onAfterRender !== after ||
+        target.width !== width ||
+        target.height !== height ||
+        camera.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+        camera instanceof THREE.ArrayCamera ||
+        ![
+          ...camera.projectionMatrix.elements,
+          ...camera.matrixWorldInverse.elements,
+          ...cropMatrix.elements,
+        ].every(Number.isFinite)
+      )
+        return result;
+      const projection = camera.projectionMatrix.clone();
+      const view = camera.matrixWorldInverse.clone();
+      const vp = new THREE.Matrix4().multiplyMatrices(projection, view);
+      const full = new THREE.Frustum().setFromProjectionMatrix(
+        vp,
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      const crop = new THREE.Frustum().setFromProjectionMatrix(
+        vp.premultiply(cropMatrix),
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      );
+      if (
+        ![...full.planes, ...crop.planes].every(
+          (plane) =>
+            [
+              plane.normal.x,
+              plane.normal.y,
+              plane.normal.z,
+              plane.constant,
+            ].every(Number.isFinite) &&
+            Math.abs(plane.normal.lengthSq() - 1) < 1e-6,
+        )
+      )
+        return result;
+      water.reflectionGrassFootprint = {
+        renderer,
+        scene,
+        camera,
+        target,
+        width,
+        height,
+        projection,
+        view,
+        full,
+        crop,
+        before,
+        after,
+      };
+      return result;
+    };
+    const after: THREE.Scene["onAfterRender"] = function (
+      this: THREE.Scene,
+      ...args: unknown[]
+    ) {
+      try {
+        return Reflect.apply(originalAfter, this, args);
+      } finally {
+        water.reflectionGrassFootprint = stack.pop() ?? null;
+      }
+    };
+    Object.defineProperty(scene, "onBeforeRender", {
+      configurable: true,
+      writable: true,
+      value: before,
+    });
+    Object.defineProperty(scene, "onAfterRender", {
+      configurable: true,
+      writable: true,
+      value: after,
+    });
+    return () => {
+      if (released) return;
+      released = true;
+      water.reflectionGrassFootprint = previous;
+      stack.length = 0;
+      // A foreign replacement owns its new callback; never overwrite it.
+      try {
+        if (scene.onBeforeRender === before) {
+          if (beforeDescriptor)
+            Object.defineProperty(scene, "onBeforeRender", beforeDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onBeforeRender;
+        }
+      } finally {
+        if (scene.onAfterRender === after) {
+          if (afterDescriptor)
+            Object.defineProperty(scene, "onAfterRender", afterDescriptor);
+          else delete (scene as Partial<THREE.Scene>).onAfterRender;
+        }
+      }
+    };
+  }
+
   /**
    * Enable or disable realtime water reflections for lake/pond water
    * Ocean water never has reflections regardless of this setting
    */
   setReflectionsEnabled(enabled: boolean): void {
+    if (enabled !== this._reflectionsEnabled) {
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
     this._reflectionsEnabled = enabled;
 
-    // Update reflection intensity uniform - this actually disables reflections in the shader
+    // Keep the visual blend and the reflector's runtime update gate in sync.
+    // Zero intensity alone still submits a complete reflected scene in Three.
     if (this.uniforms) {
       this.uniforms.reflectionIntensity.value = enabled
         ? WATER.REFLECTION_INTENSITY
@@ -248,10 +819,28 @@ export class WaterSystem {
   }
 
   /**
+   * Snapshot of both live uniform records, including materials with no meshes.
+   * Record references are read-only; the existing uniform values remain live.
+   * Read again after initialization or destruction to discover current records.
+   */
+  get waterUniformsByType(): Readonly<
+    Record<WaterBodyType, Readonly<WaterUniforms> | null>
+  > {
+    return Object.freeze({
+      lake: this.uniforms,
+      ocean: this.oceanUniforms,
+    });
+  }
+
+  /**
    * Get the material for a specific water body type
    */
   getMaterial(type: WaterBodyType): MeshStandardNodeMaterial | undefined {
     return type === "ocean" ? this.oceanMaterial : this.lakeMaterial;
+  }
+
+  getQuietPondUniform() {
+    return this.quietPondUniform;
   }
 
   /**
@@ -273,25 +862,462 @@ export class WaterSystem {
    * Set the Y level used for the reflection mirror plane.
    */
   setWaterLevel(y: number): void {
+    if (!Number.isFinite(y)) throw new Error("Water level must be finite");
+    if (
+      this.coastalBathymetry?.getReadiness().required &&
+      y !== this.waterLevel
+    )
+      throw new Error(
+        "Configured coastal water level must match its immutable terrain profile",
+      );
     this.waterLevel = y;
     if (this.reflection?.target) {
       this.reflection.target.position.y = y;
     }
   }
 
+  /** Initial compact field is requested only after authored grades are loaded. */
+  configureCoastalBathymetry(
+    sourceFactory: () => CanonicalGroundLease,
+  ): Promise<boolean> {
+    if (!this.coastalBathymetry)
+      return Promise.reject(
+        new Error("Coastal material must initialize before its field"),
+      );
+    return this.coastalBathymetry.configure(() => {
+      const source = sourceFactory();
+      if (source.profile.water.threshold !== this.waterLevel)
+        throw new Error(
+          "Coastal source sea level differs from its water owner",
+        );
+      return source;
+    });
+  }
+
+  invalidateCoastalBathymetry(): void {
+    this.coastalBathymetry?.invalidate();
+  }
+
+  getCoastalBathymetryReadiness() {
+    return (
+      this.coastalBathymetry?.getReadiness() ?? {
+        required: false,
+        ready: true,
+        status: "inactive",
+        sourceRevision: null,
+        pendingRevision: null,
+        progressSamples: 0,
+        domain: null,
+        statistics: null,
+        textureId: null,
+        error: null,
+        scope: "No compact coastal field configured",
+      }
+    );
+  }
+
+  /** Borrowed texture for bounded native binding/filtering verification. */
+  getCoastalBathymetryTexture(): THREE.DataTexture | null {
+    return this.coastalBathymetry?.getTexture() ?? null;
+  }
+
   /**
    * Register an externally-created water mesh for reflection visibility tracking.
    */
-  registerWaterMesh(mesh: THREE.Mesh): void {
+  registerWaterMesh(mesh: THREE.Mesh, trackOceanDisplacement = false): void {
+    if (trackOceanDisplacement) {
+      if (mesh.material !== this.oceanMaterial || !this.oceanUniforms)
+        throw new Error(
+          "Ocean displacement bounds require the live ocean material",
+        );
+      if (this.oceanDisplacementBounds.some((entry) => entry.mesh === mesh))
+        return;
+      const geometry = mesh.geometry;
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox!;
+      if (
+        box.isEmpty() ||
+        ![
+          box.min.x,
+          box.min.y,
+          box.min.z,
+          box.max.x,
+          box.max.y,
+          box.max.z,
+        ].every(Number.isFinite)
+      )
+        throw new Error("Ocean displacement bounds require finite geometry");
+      const sphere = geometry.boundingSphere ?? new THREE.Sphere();
+      const entry: OceanDisplacementBounds = {
+        mesh,
+        geometry,
+        base: box.clone(),
+        box,
+        sphere,
+        wind: NaN,
+      };
+      geometry.boundingSphere = sphere;
+      this.refreshOceanDisplacementBounds(
+        entry,
+        this.oceanUniforms.windStrength.value,
+      );
+      this.oceanDisplacementBounds.push(entry);
+    }
+    this.registerLakePlaneSource(mesh);
     this.waterMeshes.push(mesh);
+  }
+
+  /** Admit the actual undeformed local water plane once, not by body metadata. */
+  private registerLakePlaneSource(mesh: THREE.Mesh): void {
+    if (this.lakePlaneSources.has(mesh)) {
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
+    this.lakePlaneSources.delete(mesh);
+    if (mesh.material !== this.lakeMaterial) return;
+    const position = mesh.geometry.getAttribute("position");
+    if (!position || position.count < 3) return;
+    let low = Infinity;
+    let high = -Infinity;
+    const bounds = new THREE.Box3();
+    const point = new THREE.Vector3();
+    for (let index = 0; index < position.count; index++) {
+      const x = position.getX(index);
+      const y = position.getY(index);
+      const z = position.getZ(index);
+      if (![x, y, z].every(Number.isFinite)) return;
+      bounds.expandByPoint(point.set(x, y, z));
+      low = Math.min(low, y);
+      high = Math.max(high, y);
+    }
+    // Circle/PlaneGeometry rotateX leaves sub-picometre Y roundoff. Curved
+    // geometry is not an admitted planar reflector and must not borrow one.
+    if (high - low > 1e-6) return;
+    this.lakePlaneSources.set(mesh, {
+      geometry: mesh.geometry,
+      position,
+      version:
+        position instanceof THREE.InterleavedBufferAttribute
+          ? position.data.version
+          : position.version,
+      localHeight: low / 2 + high / 2,
+      bounds,
+    });
+  }
+
+  /**
+   * Conservative sampled region, not a cropped camera or smaller texture.
+   * All coplanar consumers share one capture. Near-eye/unknown deformation
+   * keeps the full capture; no visibility or first-plane arbitration changes.
+   */
+  private hasBilinearLakeReflectionSampler(texture: THREE.Texture): boolean {
+    // r186 maps non-mip LinearFilter to native mipmapFilter="nearest", so
+    // maxAnisotropy remains 1 even when the game's texture default is 16.
+    // Check the effective sampling mode without changing the texture settings.
+    return (
+      !texture.generateMipmaps &&
+      texture.mipmaps.length === 0 &&
+      texture.minFilter === THREE.LinearFilter &&
+      texture.magFilter === THREE.LinearFilter &&
+      texture.wrapS === THREE.ClampToEdgeWrapping &&
+      texture.wrapT === THREE.ClampToEdgeWrapping
+    );
+  }
+
+  private computeLakeReflectionScissor(
+    camera: THREE.Camera,
+    ownerPlane: THREE.Plane,
+    width: number,
+    height: number,
+    target: THREE.Vector4,
+  ): boolean {
+    const wind = this.uniforms?.windStrength.value;
+    if (
+      wind === undefined ||
+      !Number.isFinite(wind) ||
+      !Number.isSafeInteger(width) ||
+      !Number.isSafeInteger(height) ||
+      width <= 0 ||
+      height <= 0 ||
+      camera instanceof THREE.ArrayCamera ||
+      ![
+        ownerPlane.normal.x,
+        ownerPlane.normal.y,
+        ownerPlane.normal.z,
+        ownerPlane.constant,
+      ].every(Number.isFinite) ||
+      Math.abs(ownerPlane.normal.lengthSq() - 1) > 1e-6 ||
+      this.lakeMaterial?.vertexNode ||
+      this.lakeMaterial?.positionNode !== this.lakeWavePositionNode ||
+      !this.lakeWavePositionNode
+    )
+      return false;
+    this.reflectionViewProjection.multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse,
+    );
+    if (!this.reflectionViewProjection.elements.every(Number.isFinite))
+      return false;
+    let minU = Infinity;
+    let minV = Infinity;
+    let maxU = -Infinity;
+    let maxV = -Infinity;
+    for (const [mesh, source] of this.lakePlaneSources) {
+      // A stale source cannot establish its plane or its displaced footprint.
+      if (!this.readLakeReflectionPlane(mesh, this.reflectionFootprintPlane))
+        return false;
+      const alignment = ownerPlane.normal.dot(
+        this.reflectionFootprintPlane.normal,
+      );
+      if (
+        Math.abs(alignment) < 1 - 1e-10 ||
+        Math.abs(
+          this.reflectionFootprintPlane.constant -
+            (alignment < 0 ? -ownerPlane.constant : ownerPlane.constant),
+        ) > 1e-5
+      )
+        continue;
+      if (
+        mesh instanceof THREE.InstancedMesh ||
+        mesh instanceof THREE.SkinnedMesh ||
+        mesh instanceof THREE.BatchedMesh ||
+        mesh.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender ||
+        mesh.geometry.morphAttributes.position?.length
+      )
+        return false;
+      this.reflectionLocalProjection.multiplyMatrices(
+        this.reflectionViewProjection,
+        mesh.matrixWorld,
+      );
+      const { min, max } = source.bounds;
+      const dy = LAKE_WAVE_EXTENT.y * Math.abs(wind);
+      for (let corner = 0; corner < 8; corner++) {
+        this.reflectionCorner
+          .set(
+            corner & 1
+              ? max.x + LAKE_WAVE_EXTENT.x
+              : min.x - LAKE_WAVE_EXTENT.x,
+            corner & 2 ? max.y + dy : min.y - dy,
+            corner & 4
+              ? max.z + LAKE_WAVE_EXTENT.z
+              : min.z - LAKE_WAVE_EXTENT.z,
+            1,
+          )
+          .applyMatrix4(this.reflectionLocalProjection);
+        const { x, y, w } = this.reflectionCorner;
+        if (![x, y, w].every(Number.isFinite) || w <= 1e-6) return false;
+        // WGSL screenUV uses top-left coordinates; ReflectorNode flips X only.
+        const u = (1 - x / w) * 0.5;
+        const v = (1 - y / w) * 0.5;
+        minU = Math.min(minU, u);
+        maxU = Math.max(maxU, u);
+        minV = Math.min(minV, v);
+        maxV = Math.max(maxV, v);
+      }
+    }
+    if (![minU, minV, maxU, maxV].every(Number.isFinite)) return false;
+    // Keep clamp-to-edge samples and a two-texel bilinear/raster guard. No
+    // mipmapped or anisotropic reflection sampling is admitted by the caller.
+    const distortion = Math.max(
+      WATER.REFLECTION_DISTORTION,
+      WATER.QUIET_REFLECTION_DISTORTION,
+    );
+    const left = Math.max(0, Math.floor((minU - distortion) * width - 2));
+    const top = Math.max(0, Math.floor((minV - distortion) * height - 2));
+    const right = Math.min(width, Math.ceil((maxU + distortion) * width + 2));
+    const bottom = Math.min(
+      height,
+      Math.ceil((maxV + distortion) * height + 2),
+    );
+    if (
+      right <= left ||
+      bottom <= top ||
+      (left === 0 && top === 0 && right === width && bottom === height)
+    )
+      return false;
+    target.set(left, top, right - left, bottom - top);
+    return true;
+  }
+
+  private readLakeReflectionPlane(
+    mesh: THREE.Mesh,
+    plane: THREE.Plane,
+  ): boolean {
+    const source = this.lakePlaneSources.get(mesh);
+    if (
+      !source ||
+      mesh.material !== this.lakeMaterial ||
+      mesh.geometry !== source.geometry ||
+      mesh.geometry.getAttribute("position") !== source.position ||
+      (source.position instanceof THREE.InterleavedBufferAttribute
+        ? source.position.data.version
+        : source.position.version) !== source.version ||
+      !mesh.matrixWorld.elements.every(Number.isFinite) ||
+      mesh.matrixWorld.determinant() === 0
+    )
+      return false;
+    this.reflectionNormalMatrix.getNormalMatrix(mesh.matrixWorld);
+    plane.setComponents(0, 1, 0, -source.localHeight);
+    plane.applyMatrix4(mesh.matrixWorld, this.reflectionNormalMatrix);
+    return (
+      [plane.normal.x, plane.normal.y, plane.normal.z, plane.constant].every(
+        Number.isFinite,
+      ) && plane.normal.lengthSq() > 0.999999
+    );
+  }
+
+  /**
+   * One capture per native render, not one per water mesh. The first admitted
+   * lake in Three's actual draw order owns that capture. Other coplanar lakes
+   * share it; different planes use the existing reflection-disabled blend.
+   * Full simultaneous multi-height reflections would require extra captures.
+   */
+  private bindLakeReflectionPlane(
+    frame: NodeFrame,
+    target: THREE.Object3D,
+  ): LakeReflectionOwner | null {
+    const { object, camera } = frame;
+    if (
+      !this._reflectionsEnabled ||
+      !(object instanceof THREE.Mesh) ||
+      !camera ||
+      !this.readLakeReflectionPlane(object, this.reflectionPlane)
+    )
+      return null;
+    let owners = this.lakeReflectionOwners.get(frame);
+    if (!owners) {
+      owners = new WeakMap();
+      this.lakeReflectionOwners.set(frame, owners);
+    }
+    const previous = owners.get(camera);
+    if (
+      previous?.renderId === frame.renderId &&
+      previous.frameId === frame.frameId &&
+      previous.scene === frame.scene
+    )
+      return null;
+    const owner: LakeReflectionOwner = previous ?? {
+      frameId: frame.frameId,
+      renderId: frame.renderId,
+      camera,
+      scene: frame.scene,
+      mesh: object,
+      plane: new THREE.Plane(),
+      captured: false,
+    };
+    owner.frameId = frame.frameId;
+    owner.renderId = frame.renderId;
+    owner.scene = frame.scene;
+    owner.mesh = object;
+    owner.plane.copy(this.reflectionPlane);
+    owner.captured = false;
+    owners.set(camera, owner);
+    this.lastLakeReflectionOwner = owner;
+
+    // ReflectorNode reads matrixWorld directly before its nested render. Build
+    // an orthonormal frame from the inverse-transpose plane normal, including
+    // transformed parents/nonuniform scale, rather than copying a sheared frame.
+    owner.plane.coplanarPoint(this.reflectionPoint);
+    this.reflectionRotation.setFromUnitVectors(
+      this.reflectionAxis,
+      owner.plane.normal,
+    );
+    target.matrixWorld.compose(
+      this.reflectionPoint,
+      this.reflectionRotation,
+      this.reflectionScale,
+    );
+    return owner;
+  }
+
+  private matchesLakeReflectionPlane(frame: NodeFrame): boolean {
+    const { object, camera } = frame;
+    if (!this._reflectionsEnabled || !(object instanceof THREE.Mesh) || !camera)
+      return false;
+    const owner = this.lakeReflectionOwners.get(frame)?.get(camera);
+    if (
+      !owner ||
+      owner.frameId !== frame.frameId ||
+      owner.renderId !== frame.renderId ||
+      owner.scene !== frame.scene ||
+      !this.lakePlaneSources.has(owner.mesh) ||
+      !this.readLakeReflectionPlane(object, this.reflectionPlane)
+    )
+      return false;
+    const alignment = owner.plane.normal.dot(this.reflectionPlane.normal);
+    return (
+      Math.abs(alignment) >= 1 - 1e-10 &&
+      Math.abs(
+        this.reflectionPlane.constant -
+          (alignment < 0 ? -owner.plane.constant : owner.plane.constant),
+      ) <= 1e-5
+    );
   }
 
   /**
    * Unregister an externally-created water mesh from reflection tracking.
    */
   unregisterWaterMesh(mesh: THREE.Mesh): void {
+    if (this.lakePlaneSources.delete(mesh)) {
+      // Do not revive an old render's capture if this mesh is registered again.
+      this.lakeReflectionOwners = new WeakMap();
+      this.lastLakeReflectionOwner = null;
+    }
     const idx = this.waterMeshes.indexOf(mesh);
     if (idx !== -1) this.waterMeshes.splice(idx, 1);
+    const boundsIndex = this.oceanDisplacementBounds.findIndex(
+      (entry) => entry.mesh === mesh,
+    );
+    if (boundsIndex !== -1) this.oceanDisplacementBounds.splice(boundsIndex, 1);
+  }
+
+  /** Refresh the same native bound objects without allocating per-frame data. */
+  private refreshOceanDisplacementBounds(
+    entry: OceanDisplacementBounds,
+    wind: number,
+  ): void {
+    if (
+      entry.mesh.material !== this.oceanMaterial ||
+      entry.mesh.geometry !== entry.geometry ||
+      entry.geometry.boundingBox !== entry.box ||
+      entry.geometry.boundingSphere !== entry.sphere
+    )
+      throw new Error("Tracked ocean geometry bounds changed ownership");
+    if (!Number.isFinite(wind) || !Number.isFinite(Math.fround(wind)))
+      throw new Error(
+        "Cannot bound a non-finite or non-Float32 ocean wind uniform",
+      );
+    if (entry.wind === wind) return;
+    // Absolute and relative allowance for Float32 shader arithmetic, in
+    // addition to the analytic sum of all five wave component amplitudes.
+    const dx = OCEAN_WAVE_EXTENT.x * 1.00001 + 0.001;
+    const dy = OCEAN_WAVE_EXTENT.y * Math.abs(wind) * 1.00001 + 0.001;
+    const dz = OCEAN_WAVE_EXTENT.z * 1.00001 + 0.001;
+    const base = entry.base;
+    const radius = Math.hypot(
+      (base.max.x - base.min.x) / 2 + dx,
+      (base.max.y - base.min.y) / 2 + dy,
+      (base.max.z - base.min.z) / 2 + dz,
+    );
+    if (
+      !Number.isFinite(radius) ||
+      !Number.isFinite(base.min.x - dx) ||
+      !Number.isFinite(base.min.y - dy) ||
+      !Number.isFinite(base.min.z - dz) ||
+      !Number.isFinite(base.max.x + dx) ||
+      !Number.isFinite(base.max.y + dy) ||
+      !Number.isFinite(base.max.z + dz)
+    )
+      throw new Error("Ocean displacement bounds overflow");
+    entry.box.min.set(base.min.x - dx, base.min.y - dy, base.min.z - dz);
+    entry.box.max.set(base.max.x + dx, base.max.y + dy, base.max.z + dz);
+    entry.sphere.center.set(
+      base.min.x / 2 + base.max.x / 2,
+      base.min.y / 2 + base.max.y / 2,
+      base.min.z / 2 + base.max.z / 2,
+    );
+    entry.sphere.radius = radius;
+    entry.wind = wind;
   }
 
   /**
@@ -351,13 +1377,294 @@ export class WaterSystem {
         : this.createFlowFallback(256);
     this.foamTex = await this.createFoamTexture(128);
 
-    // TSL reflector: handles render target, camera mirroring, oblique clipping
-    this.reflection = reflector({ resolutionScale: 0.5 });
-    this.reflection.target.rotateX(-Math.PI / 2);
-    this.reflection.target.position.y = this.waterLevel;
-
+    this.reflection = this.createReflection();
     this.lakeMaterial = this.createLakeMaterial();
     this.oceanMaterial = this.createOceanMaterial();
+  }
+
+  private createReflection(): ReturnType<typeof reflector> {
+    // TSL reflector: handles render target, camera mirroring, oblique clipping.
+    const node = reflector({ resolutionScale: 0.5 });
+    // Retain updateBeforeType so Three registers this node even when the initial
+    // preference is disabled. NodeFrame queries this method each render, allowing
+    // live re-enabling without rebuilding the shader or replacing the reflector.
+    const reflection = node.reflector;
+    // r186 resets the target's scissor on every _updateResolution call. Apply
+    // only after that owned resize, keeping the full viewport and all samples.
+    // The upstream declaration omits this internal method; guard its presence.
+    const nativeResize: unknown = Reflect.get(reflection, "_updateResolution");
+    type CaptureScope = {
+      renderer: NonNullable<NodeFrame["renderer"]>;
+      owner: LakeReflectionOwner;
+      target: THREE.RenderTarget | null;
+      scissored: boolean;
+      endGrassFootprint: (() => void) | null;
+      endCroppedCapture: (() => void) | null;
+      previousTargetScissorTest: boolean;
+      previousRendererScissorTest: boolean;
+    };
+    let captureScope: CaptureScope | null = null;
+    let resizeRenderer: NodeFrame["renderer"] = null;
+    let resizeCamera: THREE.Camera | null = null;
+    const scissor = new THREE.Vector4();
+    const viewport = new THREE.Vector4();
+    const size = new THREE.Vector2();
+    if (typeof nativeResize === "function") {
+      const sizedReflection = reflection as typeof reflection & {
+        _updateResolution(
+          target: THREE.RenderTarget,
+          renderer: NonNullable<NodeFrame["renderer"]>,
+        ): void;
+      };
+      sizedReflection._updateResolution = (target, renderer) => {
+        const cropEnabled = this.reflectionCropEnabled;
+        const resizeFull = (invalidateCapacity = true) => {
+          Reflect.apply(nativeResize, reflection, [target, renderer]);
+          // r186 setup also sizes a shared default target, including after a
+          // real capture. Only the active camera's target owns the sampled UV
+          // and capacity state; shader compilation must not reset either.
+          const camera =
+            resizeRenderer === renderer && resizeCamera
+              ? reflection.virtualCameras.get(resizeCamera)
+              : undefined;
+          if (!camera || reflection.renderTargets.get(camera) !== target)
+            return;
+          this.reflectionCropUv.value.set(1, 1, 0, 0);
+          if (invalidateCapacity)
+            this.reflectionCropCapacities
+              ?.get(target)
+              ?.select(null, target.width, target.height);
+        };
+        // Choose the attachment size BEFORE resizing. Full -> cropped resizing
+        // here would dispose/reallocate twice on every reflection capture.
+        if (!cropEnabled) resizeFull();
+        const scope = captureScope;
+        if (!scope || scope.renderer !== renderer || scope.target) {
+          if (cropEnabled) resizeFull();
+          return;
+        }
+        const virtualCamera = reflection.virtualCameras.get(scope.owner.camera);
+        if (
+          !virtualCamera ||
+          reflection.renderTargets.get(virtualCamera) !== target
+        ) {
+          if (cropEnabled) resizeFull();
+          return;
+        }
+        const source = renderer.getRenderTarget();
+        if (source) {
+          size.set(source.width, source.height);
+          viewport.copy(source.viewport);
+        } else {
+          renderer.getDrawingBufferSize(size);
+          renderer
+            .getViewport(viewport)
+            .multiplyScalar(renderer.getPixelRatio());
+        }
+        // Native r186 derives reflection dimensions from the drawing buffer,
+        // even when the primary pass is rendering into an offscreen target.
+        const drawingSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+        const fullWidth = Math.round(
+          drawingSize.x * reflection.resolutionScale,
+        );
+        const fullHeight = Math.round(
+          drawingSize.y * reflection.resolutionScale,
+        );
+        const texture = target.texture;
+        if (
+          renderer.coordinateSystem !== THREE.WebGPUCoordinateSystem ||
+          renderer.xr?.isPresenting ||
+          viewport.x !== 0 ||
+          viewport.y !== 0 ||
+          viewport.z !== size.x ||
+          viewport.w !== size.y ||
+          !this.hasBilinearLakeReflectionSampler(texture) ||
+          node.uvNode !== this.lakeReflectionUvNode ||
+          node.updateMatrix ||
+          !node.sampler ||
+          node.levelNode ||
+          node.biasNode ||
+          node.gradNode ||
+          Reflect.get(node, "offsetNode") ||
+          this.normalTex?.type !== THREE.UnsignedByteType ||
+          !this.computeLakeReflectionScissor(
+            scope.owner.camera,
+            scope.owner.plane,
+            fullWidth,
+            fullHeight,
+            scissor,
+          )
+        ) {
+          if (cropEnabled) resizeFull();
+          return;
+        }
+        if (cropEnabled) {
+          // Eight-pixel origin alignment also preserves legacy ordered fades.
+          // Expand outward only: never discard any admitted bilinear footprint.
+          const aligned = alignCroppedReflectionRect(
+            scissor,
+            fullWidth,
+            fullHeight,
+          );
+          if (!aligned) {
+            resizeFull();
+            return;
+          }
+          this.reflectionCropCapacities ??= new WeakMap();
+          let capacity = this.reflectionCropCapacities.get(target);
+          if (!capacity) {
+            capacity = new ReflectionCropCapacity();
+            this.reflectionCropCapacities.set(target, capacity);
+          }
+          const allocation = capacity.select(aligned, fullWidth, fullHeight);
+          if (!allocation) {
+            // A stable re-entry interval is not another admission failure.
+            // Resetting it here would permanently prevent cropped captures.
+            resizeFull(false);
+            return;
+          }
+          scissor.copy(allocation);
+          const scene = scope.owner.scene;
+          const direction = scope.owner.camera.getWorldDirection(
+            new THREE.Vector3(),
+          );
+          const eye = new THREE.Vector3().setFromMatrixPosition(
+            scope.owner.camera.matrixWorld,
+          );
+          scope.endCroppedCapture =
+            scene &&
+            Math.abs(direction.dot(scope.owner.plane.normal)) > 1e-4 &&
+            scope.owner.plane.distanceToPoint(eye) > 1e-5
+              ? this.beginLakeCroppedCapture(
+                  renderer,
+                  scene,
+                  virtualCamera,
+                  target,
+                  fullWidth,
+                  fullHeight,
+                  scissor,
+                )
+              : null;
+          if (!scope.endCroppedCapture) {
+            resizeFull();
+            return;
+          }
+          scope.target = target;
+          this.reflectionCropUv.value.set(
+            fullWidth / scissor.z,
+            fullHeight / scissor.w,
+            -scissor.x / scissor.z,
+            -scissor.y / scissor.w,
+          );
+          return;
+        }
+        scope.target = target;
+        if (this.reflectionGrassFootprintEnabled && scope.owner.scene) {
+          const direction = scope.owner.camera.getWorldDirection(
+            new THREE.Vector3(),
+          );
+          const eye = new THREE.Vector3().setFromMatrixPosition(
+            scope.owner.camera.matrixWorld,
+          );
+          // No tight crop at an unsupported/grazing mirror view.
+          if (
+            Math.abs(direction.dot(scope.owner.plane.normal)) > 1e-4 &&
+            scope.owner.plane.distanceToPoint(eye) > 1e-5
+          )
+            scope.endGrassFootprint = this.beginLakeGrassFootprint(
+              renderer,
+              scope.owner.scene,
+              virtualCamera,
+              target,
+              scissor,
+            );
+        }
+        if (!this.reflectionFootprintEnabled) return;
+        scope.scissored = true;
+        scope.previousTargetScissorTest = target.scissorTest;
+        target.scissor.copy(scissor);
+        target.scissorTest = true;
+        // r186's renderer uses its canvas flag even for an offscreen target.
+        // Nested shadows retain their own full-size target rectangles.
+        renderer.setScissorTest(true);
+      };
+    }
+    reflection.getUpdateBeforeType = () =>
+      this._reflectionsEnabled
+        ? reflection.updateBeforeType
+        : NodeUpdateType.NONE;
+    const nativeUpdate = reflection.updateBefore;
+    reflection.updateBefore = (frame) => {
+      const owner = this.bindLakeReflectionPlane(frame, node.target);
+      // Returning false leaves native NodeFrame admission open for a later
+      // valid lake, without issuing a capture for an unsupported surface.
+      if (!owner) return false;
+      const previousWorldAutoUpdate = node.target.matrixWorldAutoUpdate;
+      const previousScope = captureScope;
+      const previousResizeRenderer = resizeRenderer;
+      const previousResizeCamera = resizeCamera;
+      const scope: CaptureScope | null =
+        (this.reflectionFootprintEnabled ||
+          this.reflectionGrassFootprintEnabled ||
+          this.reflectionCropEnabled) &&
+        frame.renderer &&
+        !previousScope
+          ? {
+              renderer: frame.renderer,
+              owner,
+              target: null,
+              scissored: false,
+              endGrassFootprint: null,
+              endCroppedCapture: null,
+              previousTargetScissorTest: false,
+              previousRendererScissorTest: frame.renderer.getScissorTest(),
+            }
+          : null;
+      captureScope = scope;
+      // Keep authentic full/fallback captures owned even when all optional
+      // footprint modes are off and no CaptureScope is allocated.
+      resizeRenderer = frame.renderer;
+      resizeCamera = owner.camera;
+      node.target.matrixWorldAutoUpdate = false;
+      try {
+        const result = nativeUpdate.call(reflection, frame);
+        owner.captured = result !== false && reflection.hasOutput;
+        return result;
+      } finally {
+        try {
+          try {
+            scope?.endCroppedCapture?.();
+          } finally {
+            scope?.endGrassFootprint?.();
+          }
+        } finally {
+          try {
+            if (scope?.scissored && scope.target) {
+              // The native resize just set this exact full-sized rectangle, even
+              // after a resize. Do not restore stale pre-resize pixel dimensions.
+              scope.target.scissor.set(
+                0,
+                0,
+                scope.target.width,
+                scope.target.height,
+              );
+              scope.target.scissorTest = scope.previousTargetScissorTest;
+              scope.renderer.setScissorTest(scope.previousRendererScissorTest);
+            }
+          } finally {
+            captureScope = previousScope;
+            resizeRenderer = previousResizeRenderer;
+            resizeCamera = previousResizeCamera;
+            // The nested render must not rebuild this world-owned plane from the
+            // legacy ocean-level target transform. Restore its exact owner flag.
+            node.target.matrixWorldAutoUpdate = previousWorldAutoUpdate;
+          }
+        }
+      }
+    };
+    node.target.rotateX(-Math.PI / 2);
+    node.target.position.y = this.waterLevel;
+    return node;
   }
 
   /**
@@ -605,24 +1912,37 @@ export class WaterSystem {
    * MeshStandardNodeMaterial + outputNode override + applySunShade + nightDim.
    */
   private createLakeMaterial(): MeshStandardNodeMaterial {
-    const uTime = uniform(float(0));
-    const uSunDir = uniform(vec3(0.4, 0.8, 0.4));
-    const uWind = uniform(float(1.0));
-    const uDayIntensity = uniform(float(1.0));
-    const uSunIntensity = uniform(float(1.0));
+    const quietPond = createQuietPondUniform();
+    this.quietPondUniform = quietPond;
+    const illumination = new WorldIlluminationUniforms();
+    const uTime = uniform(0);
+    const uSunDir = uniform(new THREE.Vector3(0.4, 0.8, 0.4));
+    const uWind = uniform(1.0);
+    const uDayIntensity = uniform(1.0);
+    const uSunIntensity = uniform(1.0);
     const uShadeColor = uniform(new THREE.Color(...SUN_SHADE.TINT_COLOR));
     const fogTexNode = texture(fogRenderTarget.texture, screenUV);
     const uReflectionIntensity = uniform(
-      float(this._reflectionsEnabled ? WATER.REFLECTION_INTENSITY : 0.0),
+      this._reflectionsEnabled ? WATER.REFLECTION_INTENSITY : 0.0,
     );
+    const reflectionPlaneWeight = uniform(0).onObjectUpdate((frame) => {
+      if (!this.matchesLakeReflectionPlane(frame) || !frame.camera) return 0;
+      return this.lakeReflectionOwners.get(frame)?.get(frame.camera)?.captured
+        ? 1
+        : 0;
+    });
+    this.lakeReflectionPlaneUniform = reflectionPlaneWeight;
+    const reflectionIntensity = uReflectionIntensity.mul(reflectionPlaneWeight);
 
     this.uniforms = {
+      illumination,
       time: uTime,
-      sunDirection: uSunDir as unknown as UniformVec3,
+      sunDirection: uSunDir,
       windStrength: uWind,
       reflectionIntensity: uReflectionIntensity,
       dayIntensity: uDayIntensity,
       sunIntensity: uSunIntensity,
+      shadeColor: uShadeColor,
     };
 
     const material = new MeshStandardNodeMaterial();
@@ -637,41 +1957,61 @@ export class WaterSystem {
     const fTex = this.flowTex!;
     const foamTex = this.foamTex!;
 
+    const surfaceTime = uTime
+      .mul(mix(float(1), float(WATER.QUIET_SURFACE_SPEED), quietPond))
+      .toVar("lakeSurfaceDetailTime");
+    const normalStrength = mix(
+      float(WATER.NORMAL_STRENGTH),
+      float(WATER.QUIET_NORMAL_STRENGTH),
+      quietPond,
+    ).toVar("lakeSurfaceNormalStrength");
+    const reflectionDistortion = mix(
+      float(WATER.REFLECTION_DISTORTION),
+      float(WATER.QUIET_REFLECTION_DISTORTION),
+      quietPond,
+    ).toVar("lakeSurfaceReflectionDistortion");
+
     const reflNode = this.reflection!;
     const worldUV0 = vec2(positionWorld.x, positionWorld.z);
     const normalOffset = texture(nTex, mul(worldUV0, float(0.02))).xy;
     const normalDistortion = sub(mul(normalOffset, float(2)), float(1));
-    reflNode.uvNode = reflNode.uvNode!.add(mul(normalDistortion, float(0.015)));
+    reflNode.uvNode = reflNode.uvNode!.add(
+      mul(normalDistortion, reflectionDistortion),
+    );
+    if (croppedReflectionScreen.enabled) {
+      // The native reflected UV has already flipped X and applied distortion.
+      // Convert that full-frame coordinate to the owned cropped attachment.
+      reflNode.uvNode = reflNode.uvNode
+        .mul(this.reflectionCropUv.xy)
+        .add(this.reflectionCropUv.zw);
+    }
+    this.lakeReflectionUvNode = reflNode.uvNode;
     const reflectionNode = reflNode;
 
     // Wind affects amplitude only — phase speed is purely from dispersion relation
     const wavePhase = (
-      wp: ShaderNodeInput,
-      t: ShaderNodeInput,
-      _w: ShaderNodeInput,
+      wp: Node<"vec3">,
+      t: Node<"float">,
+      _w: Node<"float">,
       wave: WaveParams,
     ) => {
-      const wpNode = wp as ShaderNode;
-      const dotDP = add(
-        mul(wpNode.x, float(wave.Dx)),
-        mul(wpNode.z, float(wave.Dz)),
-      );
+      const dotDP = add(mul(wp.x, float(wave.Dx)), mul(wp.z, float(wave.Dz)));
       return add(mul(float(wave.w), dotDP), mul(float(wave.phi), t));
     };
 
     // VERTEX: Gerstner Displacement
-    material.positionNode = Fn(() => {
+    const lakePositionNode = Fn(() => {
       const pos = positionLocal.xyz;
       const wp = positionWorld;
       const shoreMask = smoothstep(
         float(0),
         float(WATER.WAVE_DAMP_DISTANCE),
-        attribute("shoreDistance", "float"),
+        attribute<"float">("shoreDistance", "float"),
       );
 
-      let dx: ShaderNode = float(0),
-        dy: ShaderNode = float(0),
-        dz: ShaderNode = float(0);
+      let dx: Node<"float"> = float(0),
+        dy: Node<"float"> = float(0),
+        dz: Node<"float"> = float(0);
       for (const wave of WAVES) {
         const phase = wavePhase(wp, uTime, uWind, wave);
         const c = cos(phase),
@@ -687,15 +2027,33 @@ export class WaterSystem {
         add(pos.z, mul(dz, shoreMask)),
       );
     })();
+    material.positionNode = lakePositionNode;
+    this.lakeWavePositionNode = lakePositionNode;
 
-    // Screen-space water depth
-    const gpuShoreDist = Fn(() => {
+    // Linear depth is camera-axis separation, not vertical water depth. Share
+    // the existing sample; ordinary water/foam keep their original clamp.
+    const axisDepthGap = Fn(() => {
       const sceneDepth = linearDepth(viewportDepthTexture());
       const waterDepth = linearDepth();
       const depthDiff = sub(sceneDepth, waterDepth);
-      const worldDist = mul(depthDiff, sub(cameraFar, cameraNear));
-      return clamp(worldDist, float(0), float(WATER.MAX_DEPTH));
-    })();
+      return mul(depthDiff, sub(cameraFar, cameraNear));
+    })().toVar("lakeAxisDepthGap");
+    const gpuShoreDist = clamp(axisDepthGap, float(0), float(WATER.MAX_DEPTH));
+    const pondRayLength = Fn((_: readonly [], builder: NodeBuilder) => {
+      // Perspective depth belongs to a screen ray. Do not divide by N.V:
+      // surface tilt changes neither the pixel's ray nor its depth encoding.
+      // NodeBuilder owns the active camera at runtime; the installed upstream
+      // declarations omit it, so narrow the runtime field without an any cast.
+      const camera: unknown = Reflect.get(builder, "camera");
+      const rayScale =
+        camera instanceof THREE.PerspectiveCamera
+          ? length(positionView).div(positionView.z.negate().max(0.0001))
+          : float(1);
+      return axisDepthGap.max(0).mul(rayScale).clamp(0, WATER.MAX_DEPTH);
+    })().toVar("compactPondRayLength");
+    const pondTransmittance = exp2(
+      pondRayLength.div(-WATER.QUIET_HALF_TRANSMITTANCE_METRES),
+    ).toVar("compactPondTransmittance");
 
     const distToCam = length(sub(cameraPosition, positionWorld));
     const waterOpColorLerp = clamp(
@@ -711,15 +2069,31 @@ export class WaterSystem {
         saturate(sub(float(1), div(shoreDist, float(WATER.OP_DEPTH_SCALE)))),
         float(WATER.OP_DEPTH_FALLOFF),
       );
-      return sub(float(1), opDepth);
+      return select(
+        quietPond.greaterThan(0),
+        float(1).sub(pondTransmittance),
+        sub(float(1), opDepth),
+      );
     })();
 
-    // OUTPUT: Same pattern as tree shader — pbrOut = output, replace RGB, keep pbrOut.a
+    // OUTPUT: Ordinary lakes retain PBR alpha; the quiet pond composes surface
+    // radiance and transmitted background with its own straight-alpha coverage.
     material.outputNode = Fn(() => {
       const pbrOut = output;
       const wp = positionWorld;
       const shoreDist = gpuShoreDist;
       const wUV = vec2(wp.x, wp.z);
+      // Append this derivative to the unconditional fragment stack, before any
+      // pond selection. Reuse the existing depth sample; nonpositive gaps have
+      // no coverage, with a one-pixel feather at opaque shore/foreground edges.
+      const pondDepthPixelWidth = fwidth(axisDepthGap).toVar(
+        "compactPondDepthPixelWidth",
+      );
+      const pondCoverage = smoothstep(
+        float(0),
+        max(pondDepthPixelWidth, float(0.001)),
+        axisDepthGap,
+      ).toVar("compactPondCoverage");
 
       // --- Cosine gradient water colour ---
       const colorDepth = pow(
@@ -775,7 +2149,18 @@ export class WaterSystem {
         float(0),
         float(1),
       );
-      const waterColor = vec3(cosR, cosG, cosB);
+      // A constant source tint lets the real bottom, through transmittance,
+      // supply shallow colour. Only the compact pond bypasses the historical
+      // camera-distance/cosine tint. Framebuffer transmission is neutral,
+      // not wavelength-dependent absorption or screen-space refraction.
+      const pondBodyColor = vec3(...WATER.QUIET_DEEP_TINT).toVar(
+        "compactPondBodyColor",
+      );
+      const waterColor = select(
+        quietPond.greaterThan(0),
+        pondBodyColor,
+        vec3(cosR, cosG, cosB),
+      );
 
       // --- Flow-mapped 4-scroll normal noise (FlowUVW two-phase crossfade) ---
       const flowSampleUV = mul(wUV, float(WATER.FLOW_UV_SCALE));
@@ -784,7 +2169,10 @@ export class WaterSystem {
         sub(mul(flowSample.rg, float(2)), float(1)),
         float(WATER.FLOW_STRENGTH),
       );
-      const flowTime = add(mul(uTime, float(WATER.FLOW_SPEED)), flowSample.a);
+      const flowTime = add(
+        mul(surfaceTime, float(WATER.FLOW_SPEED)),
+        flowSample.a,
+      );
 
       const progressA = fract(flowTime);
       const progressB = fract(add(flowTime, float(0.5)));
@@ -825,20 +2213,26 @@ export class WaterSystem {
       // Phase A: scroll layers 0 + 2 (large + ultra-fine scale)
       const nUV0 = add(
         div(baseA, float(103)),
-        vec2(div(uTime, float(17)), div(uTime, float(29))),
+        vec2(div(surfaceTime, float(17)), div(surfaceTime, float(29))),
       );
       const nUV2 = add(
         vec2(div(baseA.x, float(8907)), div(baseA.y, float(9803))),
-        vec2(div(uTime, float(101)), div(uTime, float(97))),
+        vec2(div(surfaceTime, float(101)), div(surfaceTime, float(97))),
       );
       // Phase B: scroll layers 1 + 3 (large + medium-fine scale)
       const nUV1 = add(
         div(baseB, float(107)),
-        vec2(div(uTime, float(19)), mul(div(uTime, float(31)), float(-1))),
+        vec2(
+          div(surfaceTime, float(19)),
+          mul(div(surfaceTime, float(31)), float(-1)),
+        ),
       );
       const nUV3 = add(
         vec2(div(baseB.x, float(1091)), div(baseB.y, float(1027))),
-        vec2(mul(div(uTime, float(109)), float(-1)), div(uTime, float(113))),
+        vec2(
+          mul(div(surfaceTime, float(109)), float(-1)),
+          div(surfaceTime, float(113)),
+        ),
       );
 
       const noiseSum = mul(
@@ -851,9 +2245,9 @@ export class WaterSystem {
       const noise = sub(mul(noiseSum, float(0.5)), float(1));
       const surfaceNormal = normalize(
         vec3(
-          mul(noise.x, float(WATER.NORMAL_STRENGTH)),
+          mul(noise.x, normalStrength),
           noise.z,
-          mul(noise.y, float(WATER.NORMAL_STRENGTH)),
+          mul(noise.y, normalStrength),
         ),
       );
 
@@ -863,8 +2257,8 @@ export class WaterSystem {
         float(WATER.WAVE_DAMP_DISTANCE),
         shoreDist,
       );
-      let nx: ShaderNode = float(0),
-        nz: ShaderNode = float(0);
+      let nx: Node<"float"> = float(0),
+        nz: Node<"float"> = float(0);
       for (const wave of WAVES) {
         const c = cos(wavePhase(wp, uTime, uWind, wave));
         nx = add(nx, mul(float(wave.wADx), c));
@@ -929,6 +2323,14 @@ export class WaterSystem {
         max(shoreFoam, mul(crestFoam, float(WATER.FOAM_CREST_MULTIPLIER))),
         foamPattern,
       );
+      // Sheltered freshwater ponds have no surf. Keep existing lake/ocean foam
+      // unchanged and remove the broad screen-depth white halo only for the
+      // explicitly tagged compact elevated mesh. One scalar, no new textures.
+      const foamOpacity = clamp(
+        foamIntensity,
+        float(0),
+        float(WATER.FOAM_MAX_OPACITY),
+      ).mul(float(1).sub(quietPond));
 
       // --- Composite ---
       const diffusePart = add(mul(diffuseLight, float(0.3)), scatter);
@@ -938,25 +2340,181 @@ export class WaterSystem {
       );
       const albedo = mix(
         diffusePart,
-        mul(reflectPart, uReflectionIntensity),
+        mul(reflectPart, reflectionIntensity),
         reflectance,
       );
-      let color: ShaderNode = mix(albedo, waterColor, float(0.8));
+      let color: Node<"vec3"> = mix(albedo, waterColor, float(0.8));
+
+      // Compact pond only: a direct highlight must not disappear with the
+      // planar capture, or be multiplied by its sampled RGB. Keep the legacy
+      // Fresnel/body mix for this isolated Phong-shaped correction, not a PBR
+      // claim. The cosine makes the horizon limit continuous. Environment uses
+      // the same light for the moon, so intensity/nightDim alone is not a sun
+      // gate. Do not apply this daylight gate to the existing lake expression.
+      const pondNdotV = dot(surfaceNormal, V).toVar("compactPondNdotV");
+      const pondFront = select(pondNdotV.greaterThan(0), float(1), float(0));
+      const pondDay = clamp(uDayIntensity, float(0), float(1)).toVar(
+        "compactPondDaylight",
+      );
+      const pondDirect = specularLight
+        .mul(clamp(NdotL, float(0), float(1)))
+        .mul(pondDay)
+        .mul(div(clamp(uSunIntensity, float(0), float(2)), float(2)))
+        .mul(pondFront)
+        .toVar("compactPondLegacyDirectLight");
+      const pondReflectionSample = reflectionSample.toVar(
+        "compactPondReflectionSample",
+      );
+      // Air/water dielectric Fresnel, independent of optical thickness and of
+      // whether this draw owns a valid planar capture. Retain ordinary water's
+      // historical art Fresnel above; this split belongs only to the quiet pond.
+      const pondF0 =
+        ((WATER.QUIET_REFRACTIVE_INDEX - 1) /
+          (WATER.QUIET_REFRACTIVE_INDEX + 1)) **
+        2;
+      const pondFresnel = float(pondF0)
+        .add(float(1 - pondF0).mul(float(1).sub(pondNdotV.clamp(0, 1)).pow(5)))
+        .toVar("compactPondFresnel");
+      const pondOpacity = float(1)
+        .sub(float(1).sub(pondFresnel).mul(pondTransmittance))
+        .toVar("compactPondCompositeOpacity");
+      const pondReflectionWeight = reflectionIntensity
+        .clamp(0, 1)
+        .toVar("compactPondCaptureWeight");
+      const composePond = (
+        body: Node<"vec3">,
+        ambient: Node<"vec3">,
+        direct: Node<"vec3">,
+      ): Node<"vec3"> => {
+        // Missing/disabled captures use the existing ambient approximation, not
+        // stale planar radiance or black. This is not a new environment map.
+        const reflected = mix(
+          ambient,
+          pondReflectionSample,
+          pondReflectionWeight,
+        );
+        const premultiplied = body
+          .mul(float(1).sub(pondFresnel))
+          .mul(float(1).sub(pondTransmittance))
+          .add(reflected.add(direct).mul(pondFresnel));
+        // NormalBlending is straight alpha. Dividing here makes the framebuffer
+        // receive P + (1-A)*destination, rather than attenuating reflection by T.
+        return premultiplied.div(pondOpacity.max(0.000001));
+      };
 
       // Foam
       color = mix(
         color,
         vec3(WATER.FOAM_COLOR.r, WATER.FOAM_COLOR.g, WATER.FOAM_COLOR.b),
-        clamp(foamIntensity, float(0), float(WATER.FOAM_MAX_OPACITY)),
+        foamOpacity,
       );
 
       // --- applySunShade (same as tree shader) ---
-      color = applySunShade(color, uDayIntensity, vec3(uShadeColor));
+      color = applySunShade(color, uDayIntensity, uShadeColor.rgb);
 
       // --- nightDim (same as tree shader: mix(NIGHT.BRIGHTNESS, 1.0, dayFactor)) ---
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));
       const nightDim = mix(float(NIGHT.BRIGHTNESS), float(1.0), dayFactor);
       color = mul(color, nightDim);
+      const pondLegacyBody = applySunShade(
+        mix(diffusePart, waterColor, float(0.8)),
+        uDayIntensity,
+        uShadeColor.rgb,
+      ).mul(nightDim);
+      const pondLegacyAmbient = applySunShade(
+        vec3(0.1, 0.1, 0.1),
+        uDayIntensity,
+        uShadeColor.rgb,
+      ).mul(nightDim);
+      const pondLegacySource = composePond(
+        pondLegacyBody,
+        pondLegacyAmbient,
+        applySunShade(pondDirect, uDayIntensity, uShadeColor.rgb).mul(nightDim),
+      ).toVar("compactPondLegacySource");
+      color = select(quietPond.greaterThan(0), pondLegacySource, color).toVar(
+        "lakeSelectedLegacyLighting",
+      );
+
+      // Opt-in custom radiometry: light the dominant depth/scatter contribution,
+      // not merely the old small white Phong term. Reuse existing normal samples.
+      // Planar reflection is already radiance and is NOT multiplied by diffuse
+      // fill. Keep its existing Fresnel/strength/mix; no new reflection capture.
+      const worldDiffuse = illumination.diffuse(waterColor, surfaceNormal);
+      const worldScatter = mul(
+        worldDiffuse,
+        max(dot(surfaceNormal, V), float(0)),
+      );
+      const worldKey = normalize(illumination.keyDirection);
+      const worldNdotL = dot(surfaceNormal, worldKey);
+      const worldReflectDir = normalize(
+        add(
+          mul(worldKey, float(-1)),
+          mul(surfaceNormal, mul(float(2), worldNdotL)),
+        ),
+      );
+      // Retained Phong-shaped approximation, not an energy-conserving BRDF:
+      // actual key direction/color and no below-surface direct highlight.
+      const worldSpecular = mul(
+        illumination.keyColor.rgb,
+        mul(
+          pow(
+            max(dot(V, worldReflectDir), float(0)),
+            float(WATER.SPECULAR_SHININESS),
+          ),
+          mul(float(WATER.SPECULAR_STRENGTH), max(worldNdotL, float(0))),
+        ),
+      );
+      const worldReflect = add(
+        add(
+          mul(illumination.fillRadiance(), float(0.1)),
+          mul(reflectionSample, float(0.9)),
+        ),
+        mul(reflectionSample, worldSpecular),
+      );
+      let worldColor = mix(
+        mix(
+          add(
+            mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+            worldScatter,
+          ),
+          mul(worldReflect, reflectionIntensity),
+          reflectance,
+        ),
+        worldDiffuse,
+        float(0.8),
+      );
+      // worldSpecular already contains the actual key irradiance and N.L.
+      // Apply neither again: only the shared daylight/front-side gates remain.
+      const pondWorldDirect = worldSpecular
+        .mul(pondDay)
+        .mul(pondFront)
+        .toVar("compactPondWorldDirectLight");
+      const pondWorldSource = composePond(
+        mix(
+          add(
+            mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+            worldScatter,
+          ),
+          worldDiffuse,
+          float(0.8),
+        ),
+        illumination.fillRadiance(),
+        pondWorldDirect,
+      ).toVar("compactPondWorldSource");
+      worldColor = mix(
+        worldColor,
+        illumination.diffuse(
+          vec3(WATER.FOAM_COLOR.r, WATER.FOAM_COLOR.g, WATER.FOAM_COLOR.b),
+          surfaceNormal,
+        ),
+        foamOpacity,
+      );
+      worldColor = select(
+        quietPond.greaterThan(0),
+        pondWorldSource,
+        worldColor,
+      ).toVar("lakeSelectedWorldLighting");
+      color = illumination.select(color, worldColor);
 
       // --- Fog ---
       const toCam = sub(cameraPosition, wp);
@@ -967,7 +2525,14 @@ export class WaterSystem {
         fogDistSq,
       );
       const foggedColor = mix(color, fogTexNode.rgb, fogFactor);
-      const foggedAlpha = mix(pbrOut.a, float(1.0), fogFactor);
+      // The opaque destination is already fogged. Fogging straight source RGB
+      // with the same factor composes correctly; increasing its alpha to one
+      // would apply fog twice to the transmitted background.
+      const foggedAlpha = select(
+        quietPond.greaterThan(0),
+        pondCoverage.mul(pondOpacity),
+        mix(pbrOut.a, float(1.0), fogFactor),
+      );
 
       return vec4(foggedColor, foggedAlpha);
     })();
@@ -981,22 +2546,25 @@ export class WaterSystem {
    * Uses MeshBasicNodeMaterial with ALL computation in outputNode (no PBR).
    */
   private createOceanMaterial(): MeshStandardNodeMaterial {
-    const uTime = uniform(float(0));
-    const uSunDir = uniform(vec3(0.4, 0.8, 0.4));
-    const uWind = uniform(float(1.2));
-    const uDayIntensity = uniform(float(1.0));
-    const uSunIntensity = uniform(float(1.0));
+    const illumination = new WorldIlluminationUniforms();
+    const uTime = uniform(0);
+    const uSunDir = uniform(new THREE.Vector3(0.4, 0.8, 0.4));
+    const uWind = uniform(1.2);
+    const uDayIntensity = uniform(1.0);
+    const uSunIntensity = uniform(1.0);
     const uShadeColor = uniform(new THREE.Color(...SUN_SHADE.TINT_COLOR));
-    const uReflectionIntensity = uniform(float(0));
+    const uReflectionIntensity = uniform(0);
     const fogTexNode = texture(fogRenderTarget.texture, screenUV);
 
     this.oceanUniforms = {
+      illumination,
       time: uTime,
-      sunDirection: uSunDir as unknown as UniformVec3,
+      sunDirection: uSunDir,
       windStrength: uWind,
       reflectionIntensity: uReflectionIntensity,
       dayIntensity: uDayIntensity,
       sunIntensity: uSunIntensity,
+      shadeColor: uShadeColor,
     };
 
     const material = new MeshStandardNodeMaterial();
@@ -1010,18 +2578,23 @@ export class WaterSystem {
     const nTex = this.normalTex!;
     const fTex = this.flowTex!;
     const foamTex = this.foamTex!;
+    const coast = (this.coastalBathymetry ??= new CoastalBathymetryOwner());
+    // Reuse one fragment sample and one optical parameter across both branches.
+    // Vertex displacement and crest normals retain their original attribute.
+    const opticalShoreDistance = createCoastalWaterOpticalDistanceNode(
+      attribute<"float">("shoreDistance", "float"),
+      coast.signedDepth,
+      positionWorld.y.sub(coast.seaLevel),
+      coast.enabled,
+    );
 
     const wavePhase = (
-      wp: ShaderNodeInput,
-      t: ShaderNodeInput,
-      _w: ShaderNodeInput,
+      wp: Node<"vec3">,
+      t: Node<"float">,
+      _w: Node<"float">,
       wave: WaveParams,
     ) => {
-      const wpNode = wp as ShaderNode;
-      const dotDP = add(
-        mul(wpNode.x, float(wave.Dx)),
-        mul(wpNode.z, float(wave.Dz)),
-      );
+      const dotDP = add(mul(wp.x, float(wave.Dx)), mul(wp.z, float(wave.Dz)));
       return add(mul(float(wave.w), dotDP), mul(float(wave.phi), t));
     };
 
@@ -1032,12 +2605,12 @@ export class WaterSystem {
       const shoreMask = smoothstep(
         float(0),
         float(6),
-        attribute("shoreDistance", "float"),
+        attribute<"float">("shoreDistance", "float"),
       );
 
-      let dx: ShaderNode = float(0),
-        dy: ShaderNode = float(0),
-        dz: ShaderNode = float(0);
+      let dx: Node<"float"> = float(0),
+        dy: Node<"float"> = float(0),
+        dz: Node<"float"> = float(0);
       for (const wave of WAVES) {
         const phase = wavePhase(wp, uTime, uWind, wave);
         const c = cos(phase),
@@ -1056,7 +2629,7 @@ export class WaterSystem {
 
     // OPACITY (feeds into PBR → output.a)
     material.opacityNode = Fn(() => {
-      const shoreDist = attribute("shoreDistance", "float");
+      const shoreDist = opticalShoreDistance;
       const edgeFade = smoothstep(float(0), float(0.4), shoreDist);
       const depthFade = smoothstep(float(0.4), float(8.0), shoreDist);
       const depthOpacity = mix(float(0.3), float(0.85), depthFade);
@@ -1067,18 +2640,25 @@ export class WaterSystem {
         float(1.0),
         pow(sub(float(1), NdotV0), float(3)),
       );
-      return mul(mul(edgeFade, depthOpacity), fresnelOpacity);
+      const shallowOpacity = mul(mul(edgeFade, depthOpacity), fresnelOpacity);
+      // Offshore water must not expose the finite terrain seabed/sky boundary.
+      // Retain the existing shallow expression, then fade to exact opacity 1
+      // at optical parameter >= 8 for every view angle. The shared field blends
+      // back to the exact legacy parameter offshore, independently of wave Y.
+      return mix(shallowOpacity, float(1), depthFade);
     })();
 
     // OUTPUT: Same pattern as tree shader — pbrOut = output, replace RGB, keep pbrOut.a
     material.outputNode = Fn(() => {
       const pbrOut = output;
       const wp = positionWorld;
-      const shoreDist = attribute("shoreDistance", "float");
+      const shoreDist = attribute<"float">("shoreDistance", "float");
       const shoreMask = smoothstep(float(0), float(6), shoreDist);
       const wUV = vec2(wp.x, wp.z);
 
-      // --- Cosine gradient — deeper bias for ocean ---
+      // Keep the established ocean tint. Local depth controls transmission;
+      // feeding its nearshore band into this much deeper color curve paints
+      // a bright strip along steep banks instead of revealing the substrate.
       const colorDepth = pow(
         saturate(sub(float(1), div(shoreDist, float(80)))),
         float(4),
@@ -1209,8 +2789,8 @@ export class WaterSystem {
       );
 
       // --- Gerstner wave normals for foam ---
-      let nx: ShaderNode = float(0),
-        nz: ShaderNode = float(0);
+      let nx: Node<"float"> = float(0),
+        nz: Node<"float"> = float(0);
       for (const wave of WAVES) {
         const c = cos(wavePhase(wp, uTime, uWind, wave));
         nx = add(nx, mul(float(wave.wADx), c));
@@ -1245,7 +2825,7 @@ export class WaterSystem {
         mul(vec3(1, 1, 1), mul(diffuseLight, float(0.3))),
         scatter,
       );
-      let color: ShaderNode = mix(albedo, waterColor, float(0.8));
+      let color: Node<"vec3"> = mix(albedo, waterColor, float(0.8));
 
       // Fresnel sky approximation
       const NdotV = max(dot(surfaceNormal, V), float(0));
@@ -1277,12 +2857,39 @@ export class WaterSystem {
       );
 
       // --- applySunShade (same as tree shader) ---
-      color = applySunShade(color, uDayIntensity, vec3(uShadeColor));
+      color = applySunShade(color, uDayIntensity, uShadeColor.rgb);
 
       // --- nightDim (same as tree shader) ---
       const dayFactor = div(clamp(uSunIntensity, float(0), float(2)), float(2));
       const nightDim = mix(float(NIGHT.BRIGHTNESS), float(1.0), dayFactor);
       color = mul(color, nightDim);
+
+      // Same diffuse convention as lake/trees, including depth color and foam.
+      // Ocean has no environment/reflection sampler: replace its fixed blue
+      // Fresnel surrogate with isotropic fill radiance, not a PBR/IBL claim.
+      const worldDiffuse = illumination.diffuse(waterColor, surfaceNormal);
+      const worldScatter = mul(
+        worldDiffuse,
+        max(dot(surfaceNormal, V), float(0)),
+      );
+      let worldColor = mix(
+        add(
+          mul(worldDiffuse, float(0.3 * WATER.DIFFUSE_STRENGTH)),
+          worldScatter,
+        ),
+        worldDiffuse,
+        float(0.8),
+      );
+      worldColor = add(
+        worldColor,
+        mul(illumination.fillRadiance(), mul(fresnelSky, float(0.2))),
+      );
+      worldColor = mix(
+        worldColor,
+        illumination.diffuse(vec3(0.9, 0.91, 0.96), surfaceNormal),
+        clamp(foamIntensity, float(0), float(0.75)),
+      );
+      color = illumination.select(color, worldColor);
 
       // --- Fog ---
       const toCam = sub(cameraPosition, wp);
@@ -1329,7 +2936,7 @@ export class WaterSystem {
         tileSize,
         waterType,
       );
-      this.waterMeshes.push(mesh);
+      this.registerWaterMesh(mesh);
       return mesh;
     }
 
@@ -1472,7 +3079,7 @@ export class WaterSystem {
     geom.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
 
     const mesh = this.createMesh(geom, tile, waterThreshold, waterType);
-    this.waterMeshes.push(mesh);
+    this.registerWaterMesh(mesh);
     return mesh;
   }
 
@@ -1560,6 +3167,7 @@ export class WaterSystem {
   // ==========================================================================
 
   update(deltaTime: number): void {
+    this.coastalBathymetry?.update();
     const dt =
       typeof deltaTime === "number" && isFinite(deltaTime) ? deltaTime : 1 / 60;
     this.waterTime += dt;
@@ -1601,6 +3209,16 @@ export class WaterSystem {
     if (this.uniforms) updateUniforms(this.uniforms, 1.0);
     if (this.oceanUniforms) updateUniforms(this.oceanUniforms, 1.2);
 
+    if (this.oceanUniforms) {
+      const wind = this.oceanUniforms.windStrength.value;
+      for (let i = 0; i < this.oceanDisplacementBounds.length; i++) {
+        this.refreshOceanDisplacementBounds(
+          this.oceanDisplacementBounds[i],
+          wind,
+        );
+      }
+    }
+
     this.updateReflectionVisibility();
   }
 
@@ -1622,12 +3240,24 @@ export class WaterSystem {
       mesh.geometry.dispose();
     }
     this.waterMeshes = [];
+    this.lakePlaneSources.clear();
+    this.lakeReflectionOwners = new WeakMap();
+    this.lastLakeReflectionOwner = null;
+    this.lakeReflectionPlaneUniform = null;
+    this.lakeWavePositionNode = null;
+    this.lakeReflectionUvNode = null;
+    this.reflectionGrassFootprint = null;
+    this.oceanDisplacementBounds.length = 0;
+    this.reflectionCropCapacities = null;
 
     // Dispose materials
     this.lakeMaterial?.dispose();
     this.lakeMaterial = undefined;
+    this.quietPondUniform = null;
     this.oceanMaterial?.dispose();
     this.oceanMaterial = undefined;
+    this.coastalBathymetry?.destroy();
+    this.coastalBathymetry = null;
 
     // Dispose textures
     this.normalTex?.dispose();
@@ -1642,11 +3272,9 @@ export class WaterSystem {
       if (this.reflection.target) {
         this.reflection.target.removeFromParent();
       }
-      // Dispose the reflector's internal WebGPU render target (GPU framebuffer)
-      const reflectorNode = this.reflection as unknown as {
-        renderTarget?: { dispose(): void };
-      };
-      reflectorNode.renderTarget?.dispose();
+      // r186 ReflectorNode owns a per-camera target map through its base node.
+      // Its public disposal path retires those targets, not the global fog RTT.
+      this.reflection.dispose();
     }
     this.reflection = undefined;
 

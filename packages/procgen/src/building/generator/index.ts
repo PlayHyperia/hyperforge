@@ -13,3 +13,4 @@ export * from "./uvUtils";
 export * from "./WindowGeometry";
 export * from "./DoorTrimGeometry";
 export * from "./InteriorLighting";
+export * from "./OpenWorkshop";

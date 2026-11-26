@@ -1,0 +1,52 @@
+{
+  "id": "haven-understory-v1",
+  "terrainProfileId": "compact-duel-island-v6",
+  "bounds": { "minX": 300, "maxX": 332, "minZ": 303, "maxZ": 365 },
+  "toeAnchors": [
+    [308, 310],
+    [311, 319],
+    [311, 328],
+    [312, 337],
+    [310, 349],
+    [307, 359]
+  ],
+  "treeAnchors": [
+    { "instanceId": "tree_373_313", "x": 318.5, "z": 312.5 },
+    { "instanceId": "tree_375_299", "x": 318.5, "z": 344.5 }
+  ],
+  "rockAnchors": [
+    { "id": "workshop-approach-01", "x": 326, "z": 328 },
+    { "id": "workshop-approach-04", "x": 326.8, "z": 331.6 }
+  ],
+  "composition": {
+    "schemaVersion": 1,
+    "pockets": [
+      {
+        "id": "north-root-toe",
+        "vertices": [
+          [305, 305],
+          [316, 303],
+          [324, 311],
+          [332, 331],
+          [318, 342],
+          [303, 327]
+        ],
+        "edgeWidth": 3.4,
+        "strength": 0.38
+      },
+      {
+        "id": "south-root-toe",
+        "vertices": [
+          [304, 326],
+          [318, 325],
+          [329, 338],
+          [323, 355],
+          [308, 364],
+          [300, 349]
+        ],
+        "edgeWidth": 3.8,
+        "strength": 0.46
+      }
+    ]
+  }
+}

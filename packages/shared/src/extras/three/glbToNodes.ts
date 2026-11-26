@@ -59,8 +59,8 @@ import {
   mul,
   div,
   Fn,
-  type ShaderNode,
 } from "./three";
+import type { Node as TSLNode } from "three/webgpu";
 import { World } from "../../core/World";
 import type { Node } from "../../nodes/Node";
 import type { NodeData, GLBData } from "../../types";
@@ -94,7 +94,12 @@ type GLBNodeData =
  * Used for splatmap terrain materials
  * Lazily initialized because TSL (Fn, vec2, etc.) is only available in the browser.
  */
-type TSLShaderFn = (...args: unknown[]) => ShaderNode;
+type TSLShaderFn = (
+  texture: THREE.Texture,
+  scale: TSLNode<"float">,
+  normal: TSLNode<"vec3">,
+  position: TSLNode<"vec3">,
+) => TSLNode<"vec4">;
 let _triplanarSampleFn: TSLShaderFn | null = null;
 
 /** Lazily create and return the triplanar sampling TSL function (browser only) */
@@ -118,8 +123,8 @@ function getTriplanarSample(): TSLShaderFn {
         const zProjection = texture(tex, uvZ);
 
         // Calculate blend weights based on normal direction
-        const weight = abs(normal);
-        const weightPow = pow(weight, vec3(4.0));
+        const weight = normal.abs();
+        const weightPow = weight.pow(vec3(4.0));
         const weightSum = add(add(weightPow.x, weightPow.y), weightPow.z);
         const normalizedWeight = div(weightPow, weightSum);
 
@@ -380,11 +385,15 @@ function setupSplatmapTSL(mesh: THREE.Mesh) {
   const bTex = original.normalMap;
   const aTex = original.transmissionMap;
 
-  // Get scale values from mesh userData
-  const rScale = uniform(float(mesh.userData.red_scale || 1));
-  const gScale = uniform(float(mesh.userData.green_scale || 1));
-  const bScale = uniform(float(mesh.userData.blue_scale || 1));
-  const aScale = uniform(float(mesh.userData.alpha_scale || 1));
+  // GLB extras are untyped input; only finite numeric UV scales become uniforms.
+  const scaleValue = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) && value !== 0
+      ? value
+      : 1;
+  const rScale = uniform(scaleValue(mesh.userData.red_scale));
+  const gScale = uniform(scaleValue(mesh.userData.green_scale));
+  const bScale = uniform(scaleValue(mesh.userData.blue_scale));
+  const aScale = uniform(scaleValue(mesh.userData.alpha_scale));
 
   // Create TSL Node Material
   const material = new MeshStandardNodeMaterial();
@@ -401,30 +410,30 @@ function setupSplatmapTSL(mesh: THREE.Mesh) {
     const splat = splatTex ? texture(splatTex, uvCoord) : vec4(1, 0, 0, 0);
 
     // Initialize result color
-    let result: ShaderNode = vec4(0, 0, 0, 1);
+    let result: TSLNode<"vec4"> = vec4(0, 0, 0, 1);
 
     // Red channel texture
     if (rTex) {
       const rSample = triplanarSample(rTex, rScale, norm, pos);
-      result = add(result, mul(splat.r, rSample));
+      result = add(result, rSample.mul(splat.r));
     }
 
     // Green channel texture
     if (gTex) {
       const gSample = triplanarSample(gTex, gScale, norm, pos);
-      result = add(result, mul(splat.g, gSample));
+      result = add(result, gSample.mul(splat.g));
     }
 
     // Blue channel texture
     if (bTex) {
       const bSample = triplanarSample(bTex, bScale, norm, pos);
-      result = add(result, mul(splat.b, bSample));
+      result = add(result, bSample.mul(splat.b));
     }
 
     // Alpha channel texture (optional)
     if (aTex) {
       const aSample = triplanarSample(aTex, aScale, norm, pos);
-      result = add(result, mul(splat.a, aSample));
+      result = add(result, aSample.mul(splat.a));
     }
 
     return result.rgb;

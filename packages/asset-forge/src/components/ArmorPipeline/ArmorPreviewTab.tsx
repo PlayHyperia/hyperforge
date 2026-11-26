@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import React, { useRef, useState, useCallback } from "react";
 import type { VRM } from "@pixiv/three-vrm";
-import type * as THREE from "three";
 
 import { ShellExtractionService } from "../../services/armor-pipeline/ShellExtractionService";
 import { ShellRiggingService } from "../../services/armor-pipeline/ShellRiggingService";
@@ -42,6 +41,27 @@ interface ArmorPreviewTabProps {
   armorKit: Map<string, ArmorKitPiece>;
 }
 
+function getPublishedSlotItemName(
+  slot: string,
+  tier: string,
+): { itemId: string; itemName: string } {
+  const nameMap: Record<string, string> = {
+    helmet: "full_helm",
+    body: "platebody",
+    legs: "platelegs",
+    boots: "boots",
+    gloves: "gloves",
+  };
+  const suffix = nameMap[slot] ?? slot;
+  const itemId = `${tier}_${suffix}`;
+  const tierLabel =
+    MATERIAL_TIERS.find((entry) => entry.id === tier)?.label ?? tier;
+  const suffixLabel = suffix
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+  return { itemId, itemName: `${tierLabel} ${suffixLabel}` };
+}
+
 export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
   armorKit,
 }) => {
@@ -65,6 +85,8 @@ export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
   const [uploadBulk, setUploadBulk] = useState<BulkClass>("plate");
   const [extractionCache, setExtractionCache] =
     useState<ShellExtractionResult | null>(null);
+  const selectedAvatarId =
+    AVATAR_OPTIONS.find((avatar) => avatar.url === avatarUrl)?.id ?? null;
 
   // Per-piece state
   const [riggedPieces, setRiggedPieces] = useState<
@@ -233,7 +255,15 @@ export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
       if (!visiblePieces.has(key)) continue;
       try {
         addLog(`Exporting ${pieceLabel(key)}...`);
-        const blob = await riggingServiceRef.current.exportRiggedGLB(result);
+        if (!selectedAvatarId) throw new Error("Selected avatar is unknown");
+        const { itemId } = getPublishedSlotItemName(
+          result.slotName,
+          publishTier,
+        );
+        const blob = await riggingServiceRef.current.exportRiggedGLB(result, {
+          itemId,
+          compatibleAvatarIds: [selectedAvatarId],
+        });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -245,29 +275,7 @@ export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
         addLog(`Export error for ${key}: ${err}`);
       }
     }
-  }, [riggedPieces, visiblePieces, addLog]);
-
-  /** classic MMORPG-style item name mapping from slot */
-  const slotItemName = (
-    slot: string,
-    tier: string,
-  ): { itemId: string; itemName: string } => {
-    const nameMap: Record<string, string> = {
-      helmet: "full_helm",
-      body: "platebody",
-      legs: "platelegs",
-      boots: "boots",
-      gloves: "gloves",
-    };
-    const suffix = nameMap[slot] ?? slot;
-    const itemId = `${tier}_${suffix}`;
-    const tierLabel = MATERIAL_TIERS.find((t) => t.id === tier)?.label ?? tier;
-    const suffixLabel = suffix
-      .replace(/_/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-    const itemName = `${tierLabel} ${suffixLabel}`;
-    return { itemId, itemName };
-  };
+  }, [riggedPieces, visiblePieces, selectedAvatarId, publishTier, addLog]);
 
   /** Publish all visible rigged pieces to the game's model directory + update armor manifest */
   const handlePublishToGame = useCallback(async () => {
@@ -285,9 +293,15 @@ export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
       if (!visiblePieces.has(key)) continue;
       try {
         addLog(`  Exporting ${pieceLabel(key)}...`);
-        const blob = await riggingServiceRef.current.exportRiggedGLB(result);
-
-        const { itemId, itemName } = slotItemName(result.slotName, publishTier);
+        const { itemId, itemName } = getPublishedSlotItemName(
+          result.slotName,
+          publishTier,
+        );
+        if (!selectedAvatarId) throw new Error("Selected avatar is unknown");
+        const blob = await riggingServiceRef.current.exportRiggedGLB(result, {
+          itemId,
+          compatibleAvatarIds: [selectedAvatarId],
+        });
         addLog(`  Publishing ${itemName} (${itemId})...`);
 
         const resp = await riggingServiceRef.current.publishToGame(blob, {
@@ -316,7 +330,7 @@ export const ArmorPreviewTab: React.FC<ArmorPreviewTabProps> = ({
         : `Published ${successCount}/${total} — some failed, check logs.`,
     );
     setIsPublishing(false);
-  }, [riggedPieces, visiblePieces, publishTier, addLog]);
+  }, [riggedPieces, visiblePieces, publishTier, selectedAvatarId, addLog]);
 
   /** Load a local GLB — extracts shell on the fly if no kit piece exists for the slot */
   const handleLoadGLB = useCallback(() => {

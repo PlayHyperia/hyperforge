@@ -7,12 +7,12 @@
     "moduleResolution": "bundler",
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    
+
     // Type Checking
     "strict": true,
     "ignoreDeprecations": "6.0",
     "downlevelIteration": true,
-    
+
     // Modules
     "baseUrl": ".",
     "paths": {
@@ -22,45 +22,37 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    
+
     // Emit - disable emission for this config (used for type checking only)
     "noEmit": true,
-    
+
     // JavaScript Support
     "allowJs": true,
     "checkJs": false,
 
     "noImplicitAny": true,
-    
+
     // Interop Constraints
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
-    
+
     // Skip Lib Check - needed due to conflicting types from parent directories
     "skipLibCheck": true,
-    
+
     // Advanced
     "typeRoots": [
       "./node_modules/@types",
       "../../node_modules/@types",
       "../../node_modules"
     ],
-    "types": ["node", "vitest/globals", "bun-types"],
+    "types": ["node", "vitest/globals", "bun-types", "@webgpu/types"],
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },
-  "include": [
-    "src/**/*",
-    "src/types/**/*.d.ts",
-    "src/types/core.d.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "build"
-  ],
+  "include": ["src/**/*", "src/types/**/*.d.ts", "src/types/core.d.ts"],
+  "exclude": ["node_modules", "dist", "build"],
   "ts-node": {
     "esm": true,
     "experimentalSpecifierResolution": "node"
   }
-} 
+}

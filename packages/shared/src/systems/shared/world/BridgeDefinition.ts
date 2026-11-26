@@ -28,19 +28,7 @@ export interface BridgeDefinition {
 }
 
 /**
- * Bridge placements — devs define exact start/end coordinates.
- * Add entries here to place bridges anywhere on the map.
+ * The compact island currently has no authored bridge placements.
+ * Future placements must fit the admitted terrain profile.
  */
-export const ISLAND_BRIDGES: BridgeDefinition[] = [
-  {
-    id: "bridge_river_crossing",
-    startX: 877.5,
-    startZ: 512.5,
-    endX: 1057.5,
-    endZ: 603.5,
-    width: 8,
-    railingHeight: 1.2,
-    archHeight: 2.0,
-    style: "wood",
-  },
-];
+export const ISLAND_BRIDGES: BridgeDefinition[] = [];

@@ -62,6 +62,8 @@ export const GATHERING_CONSTANTS = {
   PROXIMITY_SEARCH_RADIUS: 15,
   /** Default interaction range for gathering (world units, legacy) */
   DEFAULT_INTERACTION_RANGE: 4.0,
+  /** Horizontal shore-to-water reach permitted for fishing interactions. */
+  FISHING_INTERACTION_RANGE: 4.0,
   /** Floating point tolerance for position comparison (classic MMORPG: any movement cancels) */
   POSITION_EPSILON: 0.01,
 
@@ -147,7 +149,7 @@ export const GATHERING_CONSTANTS = {
    * - Coal: ~16.4% at L30, ~39.5% at L99
    * - Mithril: ~11.7% at L55, ~19.9% at L99
    * - Adamantite: ~7.4% at L70, ~10.2% at L99
-   * - Runite: 17/256 (~6.64%) at L85, 19/256 (~7.42%) at L97+ (confirmed by Mod Ash)
+   * - Runite: 17/256 (~6.64%) at L85, 19/256 (~7.42%) at L97+
    *
    */
   MINING_SUCCESS_RATES: {
@@ -164,7 +166,7 @@ export const GATHERING_CONSTANTS = {
     // Adamantite ore (level 70) - 7.4% at L70, 10.2% at L99
     ore_adamant: { low: 19, high: 26 },
     // Runite ore (level 85) - 6.64% at L85, 7.42% at L97+
-    // Confirmed by Mod Ash: 17/256 at L85, 19/256 at L97+
+    // 17/256 at L85, 19/256 at L97+
     ore_runite: { low: 17, high: 19 },
   } as const,
 
@@ -252,10 +254,12 @@ export const GATHERING_CONSTANTS = {
     baseTicks: 300,
     /** Random variance in ticks (±100 ticks = ±1 minute) */
     varianceTicks: 100,
-    /** Maximum distance to search for new spot position (tiles) */
-    relocateRadius: 3,
-    /** Minimum distance from current position (tiles) */
-    relocateMinDistance: 1,
+    /** Maximum distance to search for a new spot across a compact water body. */
+    relocateRadius: 15,
+    /** Keep a relocation visually distinct from the current position. */
+    relocateMinDistance: 3.5,
+    /** Keep simultaneous pond interactions comfortably separated. */
+    shoreMinSpacing: 3.5,
   } as const,
 } as const;
 

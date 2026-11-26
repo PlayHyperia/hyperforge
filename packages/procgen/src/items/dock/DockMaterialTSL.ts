@@ -12,7 +12,8 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
+import type { UniformNode } from "three/webgpu";
 import {
   Fn,
   positionWorld,
@@ -41,19 +42,19 @@ import { WoodType } from "../types";
 // TSL TYPES
 // ============================================================================
 
-type TSLUniform<T> = ReturnType<typeof uniform<T>> & { value: T };
+type TSLUniform<TNodeType, TValue> = UniformNode<TNodeType, TValue>;
 
 /**
  * Uniform values for TSL dock material
  */
 export interface DockMaterialUniforms {
-  woodColor: TSLUniform<THREE.Color>;
-  woodColorSecondary: TSLUniform<THREE.Color>;
-  grainScale: TSLUniform<number>;
-  grainIntensity: TSLUniform<number>;
-  weathering: TSLUniform<number>;
-  wetness: TSLUniform<number>;
-  waterLevel: TSLUniform<number>;
+  woodColor: TSLUniform<"color", THREE.Color>;
+  woodColorSecondary: TSLUniform<"color", THREE.Color>;
+  grainScale: TSLUniform<"float", number>;
+  grainIntensity: TSLUniform<"float", number>;
+  weathering: TSLUniform<"float", number>;
+  wetness: TSLUniform<"float", number>;
+  waterLevel: TSLUniform<"float", number>;
 }
 
 /**
@@ -71,14 +72,14 @@ export interface DockMaterialResult {
 /**
  * Hash function for pseudo-random values (TSL)
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
 /**
  * 2D noise function (TSL)
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -94,7 +95,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * 1D noise for wood grain
  */
-const tslNoise1D = Fn(([x]: [ReturnType<typeof float>]) => {
+const tslNoise1D = Fn(([x]: [Node<"float">]) => {
   const i = floor(x);
   const f = fract(x);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -108,7 +109,7 @@ const tslNoise1D = Fn(([x]: [ReturnType<typeof float>]) => {
 /**
  * FBM noise (2 octaves for performance)
  */
-const tslFBM2 = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslFBM2 = Fn(([p]: [Node<"vec2">]) => {
   const value = float(0.0).toVar();
 
   value.addAssign(tslNoise2D(p).mul(0.5));
@@ -131,9 +132,9 @@ const tslFBM2 = Fn(([p]: [ReturnType<typeof vec2>]) => {
  */
 const woodGrainPattern = Fn(
   ([uvCoord, grainScale, grainIntensity]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
+    Node<"vec2">,
+    Node<"float">,
+    Node<"float">,
   ]) => {
     // Scale UV for grain density
     const scaledUV = uvCoord.mul(grainScale);
@@ -166,10 +167,7 @@ const woodGrainPattern = Fn(
  * Generate wood knot pattern (rare, circular features)
  */
 const woodKnotPattern = Fn(
-  ([uvCoord, knotSeed]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-  ]) => {
+  ([uvCoord, knotSeed]: [Node<"vec2">, Node<"float">]) => {
     // Check for knot presence based on position hash
     const knotHash = tslHash(floor(uvCoord.mul(2.0)).add(vec2(knotSeed, 0.0)));
     const hasKnot = step(0.85, knotHash); // 15% chance of knot
@@ -199,9 +197,9 @@ const woodKnotPattern = Fn(
  */
 const applyWeathering = Fn(
   ([baseColor, worldPos, weatheringAmount]: [
-    ReturnType<typeof vec3>,
-    ReturnType<typeof vec3>,
-    ReturnType<typeof float>,
+    Node<"vec3">,
+    Node<"vec3">,
+    Node<"float">,
   ]) => {
     // Sample noise for weathering variation
     const weatherNoise = tslFBM2(vec2(worldPos.x, worldPos.z).mul(0.5));
@@ -232,10 +230,10 @@ const applyWeathering = Fn(
  */
 const applyWetness = Fn(
   ([baseColor, worldPos, wetnessAmount, isMossy]: [
-    ReturnType<typeof vec3>,
-    ReturnType<typeof vec3>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
+    Node<"vec3">,
+    Node<"vec3">,
+    Node<"float">,
+    Node<"float">,
   ]) => {
     // Wetness darkens wood
     const darkened = baseColor.mul(float(1.0).sub(wetnessAmount.mul(0.3)));
@@ -299,17 +297,13 @@ export function createDockMaterial(
 
   // Create uniforms
   const uniforms: DockMaterialUniforms = {
-    woodColor: uniform(colors.primary) as TSLUniform<THREE.Color>,
-    woodColorSecondary: uniform(colors.secondary) as TSLUniform<THREE.Color>,
-    grainScale: uniform(1.0) as TSLUniform<number>,
-    grainIntensity: uniform(0.4) as TSLUniform<number>,
-    weathering: uniform(
-      woodType === WoodType.Weathered ? 0.6 : 0.2,
-    ) as TSLUniform<number>,
-    wetness: uniform(
-      woodType === WoodType.Mossy ? 0.5 : 0.1,
-    ) as TSLUniform<number>,
-    waterLevel: uniform(5.0) as TSLUniform<number>,
+    woodColor: uniform(colors.primary),
+    woodColorSecondary: uniform(colors.secondary),
+    grainScale: uniform(1.0),
+    grainIntensity: uniform(0.4),
+    weathering: uniform(woodType === WoodType.Weathered ? 0.6 : 0.2),
+    wetness: uniform(woodType === WoodType.Mossy ? 0.5 : 0.1),
+    waterLevel: uniform(5.0),
   };
 
   const isMossy = float(woodType === WoodType.Mossy ? 1.0 : 0.0);
@@ -322,7 +316,7 @@ export function createDockMaterial(
   material.colorNode = Fn(() => {
     const worldPos = positionWorld;
     const uvCoord = uv();
-    const vertexColor = attribute("color");
+    const vertexColor = attribute<"vec3">("color", "vec3");
 
     // Get base wood color from uniform, modulated by vertex color
     const baseWood = mix(

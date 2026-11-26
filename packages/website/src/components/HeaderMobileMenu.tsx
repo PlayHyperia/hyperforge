@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import Link from "next/link";
 import { m, AnimatePresence, useReducedMotion } from "@/lib/motion";
 import { links } from "@/lib/links";
 import {
@@ -92,14 +91,16 @@ export function HeaderMobileMenu() {
             transition={reducedMotion ? { duration: 0 } : { duration: 0.2 }}
           >
             <nav className="px-4 py-4 space-y-4" aria-label="Mobile navigation">
-              <Link
-                href="/gold/"
-                className="block font-body"
-                style={{ color: "var(--gold-essence)" }}
+              <a
+                href={links.hyperbet}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block footer-link font-body"
+                aria-label="Duel Arena (opens in new tab)"
                 onClick={close}
               >
-                $GOLD
-              </Link>
+                Duel Arena
+              </a>
               <a
                 href={links.docs}
                 target="_blank"

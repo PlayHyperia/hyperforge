@@ -20,6 +20,7 @@ import THREE, {
   uniform,
   vec3,
 } from "../../../extras/three/three";
+import type { UniformNode } from "three/webgpu";
 import { System } from "../infrastructure/System";
 import type { SystemDependencies } from "../infrastructure/System";
 import type { World } from "../../../types";
@@ -763,7 +764,7 @@ export class ProceduralTownLandmarksSystem extends System {
   private lamppostLightPositions: THREE.Vector3[] = [];
   private townDestinations: Map<string, string> = new Map(); // townId -> townName for signposts
   private scene: THREE.Scene | null = null;
-  private lamppostNightMix: ReturnType<typeof uniform<number>> | null = null;
+  private lamppostNightMix: UniformNode<"float", number> | null = null;
   private lastNightMix = -1;
 
   // Geometry cache

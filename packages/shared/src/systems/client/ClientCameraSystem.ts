@@ -16,7 +16,17 @@ import {
   isEmbeddedSpectatorViewport,
   isStreamPageRoute,
 } from "../../runtime/clientViewportMode";
-import { getDuelArenaConfig } from "../../data/duel-manifest";
+import {
+  hasActiveStreamingPreparationPresentation,
+  resolveStreamingPreparationFocus,
+  type StreamingPreparationEntity,
+  type StreamingPreparationFocus,
+  type StreamingPreparationPosition,
+} from "../../runtime/streamingPreparationFocus";
+import {
+  getDuelArenaConfig,
+  isPositionInsideCombatArena,
+} from "../../data/duel-manifest";
 import { RaycastService } from "./interaction/services/RaycastService";
 // CameraTarget interface moved to shared types
 
@@ -26,7 +36,12 @@ interface TerrainSystem extends System {
   getNormalAt(x: number, z: number): { x: number; y: number; z: number };
 }
 
-interface StreamingCameraStateUpdate {
+export interface StreamingArenaPositions {
+  agent1: [number, number, number];
+  agent2: [number, number, number];
+}
+
+export interface StreamingCameraStateUpdate {
   cameraTarget?: string | null;
   cycle?: {
     phase?: "IDLE" | "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION";
@@ -41,7 +56,1082 @@ interface StreamingCameraStateUpdate {
       maxHp?: number | null;
     } | null;
     winnerId?: string | null;
+    arenaPositions?: StreamingArenaPositions | null;
   };
+  preparation?: {
+    status?: "preparing" | "ready" | string;
+    agent1?: { id?: string | null } | null;
+    agent2?: { id?: string | null } | null;
+  } | null;
+}
+
+/**
+ * Keep the authored preparation lens for the complete public preparation
+ * lifecycle. Tool/processing presentation is intentionally transient and may
+ * finish before the scheduler's public ready hold; it can enrich the shot but
+ * must never decide whether the selected preparation still exists.
+ */
+export function hasAuthoritativeStreamingPreparation(
+  state: StreamingCameraStateUpdate | null | undefined,
+): boolean {
+  const cycle = state?.cycle;
+  const preparation = state?.preparation;
+  if (
+    cycle?.phase !== "IDLE" ||
+    (preparation?.status !== "preparing" && preparation?.status !== "ready")
+  ) {
+    return false;
+  }
+  const cycleAgent1Id = cycle.agent1?.id;
+  const cycleAgent2Id = cycle.agent2?.id;
+  const preparationAgent1Id = preparation.agent1?.id;
+  const preparationAgent2Id = preparation.agent2?.id;
+  return Boolean(
+    cycleAgent1Id &&
+    cycleAgent2Id &&
+    preparationAgent1Id === cycleAgent1Id &&
+    preparationAgent2Id === cycleAgent2Id,
+  );
+}
+
+/**
+ * Keep only the exact published preparation contestants paired after their
+ * transient gathering/processing presentation ends. A ready hold is still an
+ * authoritative two-subject shot; unrelated combat targets or bystanders must
+ * not gain camera authority from the broader IDLE phase.
+ */
+export function isAuthoritativeStreamingPreparationPair(
+  state: StreamingCameraStateUpdate | null | undefined,
+  actorId: string | null | undefined,
+  opponentId: string | null | undefined,
+): boolean {
+  if (
+    !actorId ||
+    !opponentId ||
+    actorId === opponentId ||
+    !hasAuthoritativeStreamingPreparation(state)
+  ) {
+    return false;
+  }
+
+  const agent1Id = state?.preparation?.agent1?.id;
+  const agent2Id = state?.preparation?.agent2?.id;
+  return (
+    (actorId === agent1Id && opponentId === agent2Id) ||
+    (actorId === agent2Id && opponentId === agent1Id)
+  );
+}
+
+export function resolveAuthoritativeStreamingPreparationOpponentId(
+  state: StreamingCameraStateUpdate | null | undefined,
+  actorId: string | null | undefined,
+): string | null {
+  if (!actorId || !hasAuthoritativeStreamingPreparation(state)) return null;
+  const agent1Id = state?.preparation?.agent1?.id ?? null;
+  const agent2Id = state?.preparation?.agent2?.id ?? null;
+  if (actorId === agent1Id) return agent2Id;
+  if (actorId === agent2Id) return agent1Id;
+  return null;
+}
+
+/**
+ * Honor the server broadcast director's exact preparation cut while keeping a
+ * stable local fallback before that target arrives. The published target is
+ * accepted only when it belongs to the authoritative two-contestant pair.
+ */
+export function resolveStreamingPreparationCameraActorId(
+  state: StreamingCameraStateUpdate | null | undefined,
+  participantIds: readonly string[],
+  currentTargetId: string | null | undefined,
+): string | null {
+  const directedTarget = state?.cameraTarget;
+  if (
+    typeof directedTarget === "string" &&
+    participantIds.includes(directedTarget)
+  ) {
+    return directedTarget;
+  }
+  if (currentTargetId && participantIds.includes(currentTargetId)) {
+    return currentTargetId;
+  }
+  return participantIds[0] ?? null;
+}
+
+/**
+ * Streaming cycle participants are addressed by persistent character IDs.
+ * Client entities may also expose a runtime/network ID; that identifier must
+ * never outrank the character ID when the cinematic director binds a cycle.
+ */
+export function resolveStreamingEntityIdentity(entity: unknown): string | null {
+  if (!entity || typeof entity !== "object") return null;
+  const data = entity as {
+    id?: string;
+    characterId?: string;
+    data?: { id?: string; characterId?: string };
+  };
+  for (const candidate of [
+    data.data?.characterId,
+    data.characterId,
+    data.data?.id,
+    data.id,
+  ]) {
+    if (typeof candidate === "string" && candidate.length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+type StreamingEntityCollection = {
+  get?: (id: string) => unknown;
+  values?: () => IterableIterator<unknown>;
+};
+
+type StreamingEntityRegistry = StreamingEntityCollection & {
+  players?: StreamingEntityCollection;
+  items?: StreamingEntityCollection;
+  getAllEntities?: () => StreamingEntityCollection;
+};
+
+/**
+ * Resolve a cycle participant even when the client registry is keyed by a
+ * transient network ID. Duel authority publishes persistent character IDs,
+ * so every available collection must fall back to identity comparison rather
+ * than assuming its map key shares the authority namespace.
+ */
+export function resolveStreamingEntityByIdentity(
+  entities: StreamingEntityRegistry | null | undefined,
+  entityId: string,
+): unknown | null {
+  if (!entities || typeof entityId !== "string" || entityId.length === 0) {
+    return null;
+  }
+
+  const collections: StreamingEntityCollection[] = [
+    entities,
+    ...(entities.players ? [entities.players] : []),
+    ...(entities.items ? [entities.items] : []),
+  ];
+  const allEntities = entities.getAllEntities?.();
+  if (allEntities) collections.push(allEntities);
+
+  for (const collection of collections) {
+    const direct = collection.get?.(entityId);
+    if (direct) return direct;
+  }
+  for (const collection of collections) {
+    if (!collection.values) continue;
+    for (const entity of collection.values()) {
+      if (resolveStreamingEntityIdentity(entity) === entityId) return entity;
+    }
+  }
+  return null;
+}
+
+export interface StreamingArenaFocus {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export function hasValidStreamingArenaPositions(
+  arenaPositions: StreamingArenaPositions | null | undefined,
+): arenaPositions is StreamingArenaPositions {
+  const first = arenaPositions?.agent1;
+  const second = arenaPositions?.agent2;
+  return Boolean(
+    first &&
+    second &&
+    first.length >= 3 &&
+    second.length >= 3 &&
+    Number.isFinite(first[0]) &&
+    Number.isFinite(first[1]) &&
+    Number.isFinite(first[2]) &&
+    Number.isFinite(second[0]) &&
+    Number.isFinite(second[1]) &&
+    Number.isFinite(second[2]),
+  );
+}
+
+export function shouldHoldStreamingArenaCamera(
+  phase: StreamingCinematicPhase | undefined,
+  dashboardFollowMode: boolean,
+  arenaPositions?: StreamingArenaPositions | null,
+  hasActivePreparation = false,
+  hasAuthoritativeIdleTarget = false,
+): boolean {
+  return (
+    !dashboardFollowMode &&
+    ((phase === "IDLE" &&
+      !hasActivePreparation &&
+      !hasAuthoritativeIdleTarget) ||
+      (phase === "ANNOUNCEMENT" &&
+        !hasValidStreamingArenaPositions(arenaPositions)))
+  );
+}
+
+/**
+ * Resolve a stable broadcast focus for the duel ring. Active-cycle spawn
+ * positions are authoritative and include the terrain-adjusted Y coordinate.
+ * Before the first cycle reaches the arena, fall back to arena one.
+ */
+export function getStreamingArenaFocus(
+  arenaPositions: StreamingArenaPositions | null | undefined,
+): StreamingArenaFocus {
+  if (hasValidStreamingArenaPositions(arenaPositions)) {
+    const first = arenaPositions.agent1;
+    const second = arenaPositions.agent2;
+    return {
+      x: (first[0] + second[0]) / 2,
+      y: (first[1] + second[1]) / 2,
+      z: (first[2] + second[2]) / 2,
+    };
+  }
+
+  const config = getDuelArenaConfig();
+  return {
+    x: config.baseX + config.arenaWidth / 2,
+    y: config.baseY,
+    z: config.baseZ + config.arenaLength / 2,
+  };
+}
+
+export interface StreamingResolutionArenaPair {
+  actor: [number, number, number];
+  opponent: [number, number, number];
+}
+
+export interface StreamingCameraPosition {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Keep the result camera on the fighters where the fight actually ended. The
+ * server deliberately leaves both contestants in the ring for the full result
+ * phase so the final combat composition remains visible. Only abandon those
+ * transforms after cleanup has moved either contestant out of a combat arena.
+ */
+export function shouldUseStreamingResolutionLivePositions(
+  phase: StreamingCinematicPhase | undefined,
+  actorPosition: StreamingCameraPosition | null | undefined,
+  opponentPosition: StreamingCameraPosition | null | undefined,
+): boolean {
+  const isFinitePosition = (
+    position: StreamingCameraPosition | null | undefined,
+  ): position is StreamingCameraPosition =>
+    Boolean(
+      position &&
+      Number.isFinite(position.x) &&
+      Number.isFinite(position.y) &&
+      Number.isFinite(position.z),
+    );
+
+  return Boolean(
+    phase === "RESOLUTION" &&
+    isFinitePosition(actorPosition) &&
+    isFinitePosition(opponentPosition) &&
+    isPositionInsideCombatArena(actorPosition.x, actorPosition.z) &&
+    isPositionInsideCombatArena(opponentPosition.x, opponentPosition.z),
+  );
+}
+
+/**
+ * Resolve an immutable ring fallback for the narrow cleanup/state handoff. The
+ * result shot normally follows live final positions; this pair is used only if
+ * either transform is missing or has already left every combat arena.
+ */
+export function getStreamingResolutionArenaPair(
+  phase: StreamingCinematicPhase | undefined,
+  arenaPositions: StreamingArenaPositions | null | undefined,
+  agent1Id: string | null | undefined,
+  agent2Id: string | null | undefined,
+  actorId: string | null | undefined,
+): StreamingResolutionArenaPair | null {
+  if (
+    phase !== "RESOLUTION" ||
+    !hasValidStreamingArenaPositions(arenaPositions) ||
+    !actorId
+  ) {
+    return null;
+  }
+  if (actorId === agent1Id) {
+    return {
+      actor: arenaPositions.agent1,
+      opponent: arenaPositions.agent2,
+    };
+  }
+  if (actorId === agent2Id) {
+    return {
+      actor: arenaPositions.agent2,
+      opponent: arenaPositions.agent1,
+    };
+  }
+  return null;
+}
+
+export type StreamingCinematicPhase =
+  "IDLE" | "ANNOUNCEMENT" | "COUNTDOWN" | "FIGHTING" | "RESOLUTION";
+
+export interface StreamingCinematicPhaseParams {
+  radiusMin: number;
+  radiusMax: number;
+  basePhi: number;
+  driftSpeed: number;
+  targetFov: number;
+  orbitAmplitude: number;
+  focusBias: number;
+}
+
+export interface StreamingAspectFraming {
+  radius: number;
+  targetFov: number;
+}
+
+const STREAMING_REFERENCE_ASPECT = 16 / 9;
+const STREAMING_UNCOMPENSATED_MIN_ASPECT = 4 / 3;
+const STREAMING_MIN_SUPPORTED_ASPECT = 9 / 16;
+const STREAMING_MAX_CINEMATIC_RADIUS = 16;
+
+/**
+ * Preserve canonical subject scale through 4:3, where the launch combat range
+ * still fits the safe crop. Below 4:3, Three's vertical FOV needs progressively
+ * stronger horizontal compensation. A squared response avoids making square
+ * fighters unnecessarily tiny while retaining the proven 9:16 endpoint and
+ * preventing ultra-narrow/invalid measurements from moving without bounds.
+ */
+export function getStreamingAspectFraming(
+  baseRadius: number,
+  baseFov: number,
+  aspect: number | null | undefined,
+  maxRadius = STREAMING_MAX_CINEMATIC_RADIUS,
+): StreamingAspectFraming {
+  const resolvedAspect =
+    typeof aspect === "number" && Number.isFinite(aspect) && aspect > 0
+      ? clamp(
+          aspect,
+          STREAMING_MIN_SUPPORTED_ASPECT,
+          STREAMING_REFERENCE_ASPECT,
+        )
+      : STREAMING_REFERENCE_ASPECT;
+  const narrowness = clamp(
+    (STREAMING_UNCOMPENSATED_MIN_ASPECT - resolvedAspect) /
+      (STREAMING_UNCOMPENSATED_MIN_ASPECT - STREAMING_MIN_SUPPORTED_ASPECT),
+    0,
+    1,
+  );
+  const compensation = narrowness * narrowness;
+
+  return {
+    radius: clamp(
+      baseRadius * (1 + compensation * 0.75),
+      baseRadius,
+      maxRadius,
+    ),
+    targetFov: clamp(baseFov + compensation * 11, baseFov, 62),
+  };
+}
+
+/**
+ * Guarantee enough horizontal room for the live contestant pair without
+ * changing the canonical close-combat shot. Arena staging and legal kiting can
+ * briefly exceed the normal fighting radius; deriving the exceptional pullback
+ * from perspective projection keeps those moments inside a conservative safe
+ * crop on every supported aspect ratio.
+ */
+export function getStreamingSeparationAwareRadius(
+  baseRadius: number,
+  separation: number,
+  verticalFovDegrees: number,
+  aspect: number | null | undefined,
+  maxRadius = STREAMING_MAX_CINEMATIC_RADIUS,
+  safeHorizontalNdc = 0.6,
+): number {
+  const resolvedBaseRadius =
+    Number.isFinite(baseRadius) && baseRadius > 0 ? baseRadius : 0;
+  const resolvedSeparation =
+    Number.isFinite(separation) && separation > 0 ? separation : 0;
+  const resolvedAspect =
+    typeof aspect === "number" && Number.isFinite(aspect) && aspect > 0
+      ? clamp(
+          aspect,
+          STREAMING_MIN_SUPPORTED_ASPECT,
+          STREAMING_REFERENCE_ASPECT,
+        )
+      : STREAMING_REFERENCE_ASPECT;
+  const resolvedFov =
+    Number.isFinite(verticalFovDegrees) && verticalFovDegrees > 0
+      ? clamp(verticalFovDegrees, 1, 179)
+      : 50;
+  const resolvedSafeNdc =
+    Number.isFinite(safeHorizontalNdc) && safeHorizontalNdc > 0
+      ? clamp(safeHorizontalNdc, 0.1, 0.95)
+      : 0.6;
+  const resolvedMaxRadius =
+    Number.isFinite(maxRadius) && maxRadius >= resolvedBaseRadius
+      ? maxRadius
+      : resolvedBaseRadius;
+  const halfHorizontalSpanAtUnitRadius =
+    Math.tan((resolvedFov * Math.PI) / 360) * resolvedAspect;
+  const requiredRadius =
+    resolvedSeparation / (2 * halfHorizontalSpanAtUnitRadius * resolvedSafeNdc);
+
+  return clamp(
+    Math.max(resolvedBaseRadius, requiredRadius),
+    resolvedBaseRadius,
+    resolvedMaxRadius,
+  );
+}
+
+/**
+ * Keep a nearby preparation pair meaningfully separated on screen without
+ * over-tightening every open-world shot. Terrain-height compensation can
+ * legitimately select the wider preparation envelope even when both full
+ * bodies have ample HUD clearance; for a close horizontal pair that wider
+ * radius can make two otherwise readable contestants merge into one visual
+ * stack. Derive an upper radius from perspective projection and retain the
+ * measured 4.25-unit body-size floor, which keeps the largest observed launch
+ * avatar below the existing 0.75 NDC body-span ceiling.
+ */
+export function getStreamingPreparationSeparationRadius(
+  baseRadius: number,
+  horizontalSeparation: number,
+  verticalFovDegrees: number,
+  aspect: number | null | undefined,
+  minimumRadius = 4.25,
+  targetHorizontalNdcSeparation = 0.26,
+): number {
+  if (!Number.isFinite(baseRadius) || baseRadius <= 0) return 0;
+  if (!Number.isFinite(horizontalSeparation) || horizontalSeparation <= 0) {
+    return baseRadius;
+  }
+
+  const resolvedAspect =
+    typeof aspect === "number" && Number.isFinite(aspect) && aspect > 0
+      ? clamp(
+          aspect,
+          STREAMING_MIN_SUPPORTED_ASPECT,
+          STREAMING_REFERENCE_ASPECT,
+        )
+      : STREAMING_REFERENCE_ASPECT;
+  const resolvedFov =
+    Number.isFinite(verticalFovDegrees) && verticalFovDegrees > 0
+      ? clamp(verticalFovDegrees, 1, 179)
+      : 50;
+  const resolvedMinimumRadius =
+    Number.isFinite(minimumRadius) && minimumRadius > 0
+      ? Math.min(minimumRadius, baseRadius)
+      : Math.min(4.25, baseRadius);
+  const resolvedTargetSeparation =
+    Number.isFinite(targetHorizontalNdcSeparation) &&
+    targetHorizontalNdcSeparation > 0
+      ? clamp(targetHorizontalNdcSeparation, 0.1, 0.95)
+      : 0.26;
+  const horizontalSpanAtUnitRadius =
+    Math.tan((resolvedFov * Math.PI) / 360) * resolvedAspect;
+  const maximumRadiusForTargetSeparation =
+    horizontalSeparation /
+    (horizontalSpanAtUnitRadius * resolvedTargetSeparation);
+
+  return clamp(
+    Math.min(baseRadius, maximumRadiusForTargetSeparation),
+    resolvedMinimumRadius,
+    baseRadius,
+  );
+}
+
+/**
+ * Project contestant spacing onto the ground plane before applying any
+ * horizontal camera-fit policy. Open-world preparation can place two valid
+ * staging tiles on meaningfully different terrain heights; including that Y
+ * delta in a horizontal-fit decision can falsely reject an otherwise readable
+ * side-by-side shot and fall back to a depth-stacked single-subject camera.
+ * Vertical terrain compensation remains a separate, explicit lens concern.
+ */
+export function getStreamingHorizontalSeparation(
+  first: Pick<StreamingCameraPosition, "x" | "z">,
+  second: Pick<StreamingCameraPosition, "x" | "z">,
+): number {
+  const deltaX = first.x - second.x;
+  const deltaZ = first.z - second.z;
+  return Number.isFinite(deltaX) && Number.isFinite(deltaZ)
+    ? Math.hypot(deltaX, deltaZ)
+    : 0;
+}
+
+/**
+ * Keep a second preparation subject only while the established cinematic
+ * envelope can place both silhouettes inside the same horizontal safe crop.
+ * Open-world preparation can separate contestants farther than the arena
+ * camera's maximum pullback; in that case the director-selected actor must
+ * remain readable instead of accepting a mathematically impossible wide shot.
+ */
+export function shouldFrameStreamingPreparationOpponent(
+  separation: number,
+  verticalFovDegrees: number,
+  aspect: number | null | undefined,
+  maxRadius = STREAMING_MAX_CINEMATIC_RADIUS,
+  safeHorizontalNdc = 0.6,
+): boolean {
+  if (!Number.isFinite(separation) || separation <= 0) return false;
+  const resolvedAspect =
+    typeof aspect === "number" && Number.isFinite(aspect) && aspect > 0
+      ? clamp(
+          aspect,
+          STREAMING_MIN_SUPPORTED_ASPECT,
+          STREAMING_REFERENCE_ASPECT,
+        )
+      : STREAMING_REFERENCE_ASPECT;
+  const resolvedFov =
+    Number.isFinite(verticalFovDegrees) && verticalFovDegrees > 0
+      ? clamp(verticalFovDegrees, 1, 179)
+      : 50;
+  const resolvedMaxRadius =
+    Number.isFinite(maxRadius) && maxRadius > 0
+      ? maxRadius
+      : STREAMING_MAX_CINEMATIC_RADIUS;
+  const resolvedSafeNdc =
+    Number.isFinite(safeHorizontalNdc) && safeHorizontalNdc > 0
+      ? clamp(safeHorizontalNdc, 0.1, 0.95)
+      : 0.6;
+  const halfHorizontalSpanAtUnitRadius =
+    Math.tan((resolvedFov * Math.PI) / 360) * resolvedAspect;
+  const requiredRadius =
+    separation / (2 * halfHorizontalSpanAtUnitRadius * resolvedSafeNdc);
+  return requiredRadius <= resolvedMaxRadius;
+}
+
+/**
+ * Expand framing immediately when contestants separate, then release the extra
+ * room gradually when they close. This keeps a legal kite/orbit step from
+ * leaving the crop while avoiding the repeated push-in/pull-out that a raw
+ * tile-by-tile separation signal would produce.
+ */
+export function getStreamingAdaptiveFramingSeparation(
+  previous: number | null,
+  current: number,
+  deltaSeconds: number,
+): number {
+  const next = Number.isFinite(current) ? Math.max(0, current) : 0;
+  if (previous === null || !Number.isFinite(previous) || next >= previous) {
+    return next;
+  }
+
+  const releaseAlpha = 1 - Math.exp(-0.9 * Math.max(0, deltaSeconds));
+  return previous + (next - previous) * releaseAlpha;
+}
+
+/**
+ * Pull back faster than the camera pushes in. Expansion remains visibly
+ * damped, but reaches a newly required two-subject radius before the next
+ * server movement interval can compound the crop.
+ */
+export function dampStreamingCinematicRadius(
+  current: number,
+  target: number,
+  deltaSeconds: number,
+  transitionMultiplier = 1,
+): number {
+  const rate = target > current ? 18 : 3.5;
+  const alpha = clamp(
+    1 -
+      Math.exp(
+        -rate * Math.max(0, transitionMultiplier) * Math.max(0, deltaSeconds),
+      ),
+    0,
+    1,
+  );
+  return current + (target - current) * alpha;
+}
+
+/** Follow active combat midpoints fast enough to survive coordinated wall arcs. */
+export function getStreamingCinematicPositionDampingRate(
+  phase: StreamingCinematicPhase,
+): number {
+  return phase === "FIGHTING" ? 36 : 5;
+}
+
+/** Keep a moving pair side-on before perspective makes one fighter unreadable. */
+export function getStreamingCinematicFacingTurnRate(
+  phase: StreamingCinematicPhase,
+): number {
+  return phase === "FIGHTING" ? 6 : 1.9;
+}
+
+/**
+ * Resolve a wrapped cinematic angle without ever letting a preparation pair
+ * drift away from its projection-safe side-on axis. A preparation camera is
+ * established before publication, so retaining an older solo/pair heading in
+ * either smoothing cache can put one contestant behind the other even though
+ * the LOS candidate itself is locked.
+ */
+export function resolveStreamingCinematicTheta(
+  currentTheta: number,
+  targetTheta: number,
+  maximumSpeedRadPerSecond: number,
+  deltaSeconds: number,
+  lockToTarget = false,
+): number {
+  if (lockToTarget) return targetTheta;
+
+  const delta = Math.atan2(
+    Math.sin(targetTheta - currentTheta),
+    Math.cos(targetTheta - currentTheta),
+  );
+  const maximumStep = Math.max(
+    0,
+    maximumSpeedRadPerSecond * Math.max(0, deltaSeconds),
+  );
+  return currentTheta + clamp(delta, -maximumStep, maximumStep);
+}
+
+/** Track the authored combat angle promptly while retaining weighted interludes. */
+export function getStreamingCinematicAngleDampingRate(
+  phase: StreamingCinematicPhase,
+  preparationPairShot = false,
+): number {
+  // The preparation LOS solver locks the camera to the live pair axis, but
+  // the final spherical smoother is a separate layer. Letting that last layer
+  // retain the ordinary IDLE rate makes it trail two nearby moving agents,
+  // reintroducing a depth-stacked composition after the projection-safe
+  // side-on angle has already been selected. Match the proven combat response
+  // for a live preparation pair while retaining authored weight for solo and
+  // non-combat presentation shots.
+  return phase === "FIGHTING" || preparationPairShot ? 12 : 3.5;
+}
+
+/**
+ * Apply the final spherical theta damping while bounding how far a live
+ * preparation pair may trail its already-selected side-on axis. Ordinary
+ * exponential damping remains active inside the residual envelope; outside
+ * it, the camera catches up only far enough to preserve a readable two-shot.
+ */
+export function dampStreamingCinematicTheta(
+  currentTheta: number,
+  targetTheta: number,
+  ratePerSecond: number,
+  deltaSeconds: number,
+  maximumResidualRadians = Number.POSITIVE_INFINITY,
+): number {
+  if (!Number.isFinite(targetTheta)) {
+    return Number.isFinite(currentTheta) ? currentTheta : 0;
+  }
+  if (!Number.isFinite(currentTheta)) return targetTheta;
+
+  const delta = Math.atan2(
+    Math.sin(targetTheta - currentTheta),
+    Math.cos(targetTheta - currentTheta),
+  );
+  const resolvedRate =
+    Number.isFinite(ratePerSecond) && ratePerSecond > 0 ? ratePerSecond : 0;
+  const resolvedDeltaSeconds =
+    Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0;
+  const alpha = clamp(1 - Math.exp(-resolvedRate * resolvedDeltaSeconds), 0, 1);
+  let nextTheta = currentTheta + delta * alpha;
+
+  if (Number.isFinite(maximumResidualRadians) && maximumResidualRadians >= 0) {
+    const residual = Math.atan2(
+      Math.sin(targetTheta - nextTheta),
+      Math.cos(targetTheta - nextTheta),
+    );
+    const boundedResidual = clamp(
+      residual,
+      -maximumResidualRadians,
+      maximumResidualRadians,
+    );
+    nextTheta = targetTheta - boundedResidual;
+  }
+
+  return nextTheta;
+}
+
+/**
+ * Duel phases retain the established full separation response so legal kiting
+ * remains framed. Preparation uses a tighter open-world two-subject shot.
+ */
+export function getStreamingCinematicSeparationRadiusScale(
+  _phase: StreamingCinematicPhase,
+  preparationShot = false,
+): number {
+  if (preparationShot) return 0.2;
+  return 1.1;
+}
+
+/**
+ * Keep live combat side-on so both contestants share the same perspective
+ * scale and vertical margins. Non-combat phases retain a small authored
+ * three-quarter angle for presentation variety.
+ */
+export function getStreamingCinematicSideAngle(
+  phase: StreamingCinematicPhase,
+): number {
+  return phase === "FIGHTING" ? Math.PI * 0.5 : Math.PI * 0.56;
+}
+
+/**
+ * Derive a stable pair direction from the authoritative contestant ordering.
+ * The broadcast director may switch its tracked actor during a fight, but that
+ * must not reverse the pair vector and ask the camera to orbit 180 degrees.
+ */
+export function getStreamingCanonicalPairFacingTheta(
+  actorPosition: Pick<THREE.Vector3, "x" | "z">,
+  opponentPosition: Pick<THREE.Vector3, "x" | "z">,
+  actorId: string | null,
+  agent1Id: string | null | undefined,
+  agent2Id: string | null | undefined,
+): number {
+  const actorIsAuthoritativeAgent2 =
+    Boolean(actorId) &&
+    Boolean(agent1Id) &&
+    Boolean(agent2Id) &&
+    actorId === agent2Id;
+  const deltaX = actorIsAuthoritativeAgent2
+    ? actorPosition.x - opponentPosition.x
+    : opponentPosition.x - actorPosition.x;
+  const deltaZ = actorIsAuthoritativeAgent2
+    ? actorPosition.z - opponentPosition.z
+    : opponentPosition.z - actorPosition.z;
+  return Math.atan2(deltaX, deltaZ);
+}
+
+/**
+ * A live two-contestant fight must remain centered on the pair. Leading only
+ * the camera target makes one legal kite step push the opposite silhouette
+ * into the HUD crop. Presentation and preparation shots can retain authored
+ * anticipation because they do not have the same symmetric combat envelope.
+ */
+export function getStreamingCinematicLeadScale(
+  phase: StreamingCinematicPhase,
+  preparationPairShot = false,
+): number {
+  // A two-subject preparation lens is composed around the pair midpoint. A
+  // velocity lead shifts the camera's spherical origin while lookAt remains on
+  // that midpoint, rotating the real view away from the side-on axis and
+  // allowing the silhouettes to overlap despite a correct theta.
+  if (preparationPairShot) return 0;
+  if (phase === "FIGHTING") return 0;
+  return phase === "IDLE" ? 1.5 : 0.8;
+}
+
+/**
+ * Resolve the authored lens plus transient combat feedback. A hit punch-in
+ * must narrow the lens; increasing vertical FOV would visually pull the
+ * contestants away at the exact moment the impact should read more clearly.
+ */
+export function getStreamingCinematicTargetFov(
+  phase: StreamingCinematicPhase,
+  baseFov: number,
+  punchIn: number,
+): number {
+  const resolvedBaseFov = Number.isFinite(baseFov)
+    ? clamp(baseFov, 40, 62)
+    : 48;
+  if (phase !== "FIGHTING") return resolvedBaseFov;
+
+  const resolvedPunchIn = Number.isFinite(punchIn) ? clamp(punchIn, 0, 1) : 0;
+  return clamp(resolvedBaseFov - resolvedPunchIn * 1.5, 40, 62);
+}
+
+/** Broadcast-safe framing bounds for each authoritative duel phase. */
+export function getStreamingCinematicPhaseParams(
+  phase: StreamingCinematicPhase,
+): StreamingCinematicPhaseParams {
+  switch (phase) {
+    case "ANNOUNCEMENT":
+      return {
+        // Keep the staged shot inside the active ring. Wider orbits can place
+        // the camera behind neighbouring arena geometry even when both
+        // contestants themselves remain technically visible.
+        radiusMin: 7,
+        radiusMax: 8.25,
+        basePhi: Math.PI * 0.3,
+        driftSpeed: 0.02,
+        targetFov: 48,
+        orbitAmplitude: 0.08,
+        focusBias: 0.35,
+      };
+    case "COUNTDOWN":
+      return {
+        radiusMin: 7,
+        radiusMax: 9,
+        basePhi: Math.PI * 0.34,
+        driftSpeed: 0,
+        targetFov: 48,
+        orbitAmplitude: 0.02,
+        focusBias: 0.5,
+      };
+    case "FIGHTING":
+      return {
+        radiusMin: 5.5,
+        // Keep ordinary five-metre exchanges large enough to read on stream.
+        // Wider kite diagonals still pull back independently through the
+        // projection-derived separation envelope below, so this close-combat
+        // cap does not trade away the 0.72 HUD-safe boundary.
+        radiusMax: 7.2,
+        basePhi: Math.PI * 0.3,
+        driftSpeed: 0.018,
+        // The compressed silhouette in ranged attack/run poses remains
+        // readable with margin while the widest observed duel still stays
+        // comfortably inside the 0.72 horizontal HUD-safe boundary.
+        targetFov: 46,
+        orbitAmplitude: 0.055,
+        focusBias: 0.5,
+      };
+    case "RESOLUTION":
+      return {
+        // The result overlay already supplies the wide presentation layer;
+        // keep the 3D cutaway inside the same proven clear envelope as the
+        // countdown instead of exposing adjacent arena floors.
+        radiusMin: 6.75,
+        radiusMax: 8.25,
+        basePhi: Math.PI * 0.4,
+        driftSpeed: 0.02,
+        targetFov: 48,
+        orbitAmplitude: 0.045,
+        focusBias: 0.5,
+      };
+    default:
+      return {
+        // Anonymous inter-cycle coverage should read as a clean empty ring,
+        // not a map-wide establishing shot through neighbouring structures.
+        radiusMin: 8,
+        radiusMax: 9,
+        basePhi: Math.PI * 0.28,
+        driftSpeed: 0.015,
+        targetFov: 52,
+        orbitAmplitude: 0.08,
+        focusBias: 0.5,
+      };
+  }
+}
+
+/**
+ * Aim live combat at the contestants' torso center. The lower target keeps the
+ * full-body pair vertically balanced under the broadcast HUD at close radius.
+ */
+export function getStreamingCinematicLookAtHeight(
+  phase: StreamingCinematicPhase,
+  preparationShot = false,
+  preparationVerticalSeparation = 0,
+): number {
+  // The preparation HUD reserves more space below than an arena fight. Aim at
+  // the avatars' body midpoint, then lower the aim point boundedly as uneven
+  // terrain moves one contestant toward the lower status card. A retained
+  // full-3D HLS frame with 0.75m+ vertical separation still put the lower
+  // contestant's feet behind that card at the ordinary 0.96m aim point. The
+  // 0.24m correction moves the complete pair into the established broadcast
+  // corridor while preserving the level-ground composition unchanged. The
+  // first 0.14m correction cleared the initial crop, but activating the true
+  // side-on pair lens exposed the lower root a few pixels inside the -0.68 NDC
+  // status-card boundary at a measured 5.252975m radius. The additional 0.10m
+  // produces roughly 0.052 NDC of clearance at the authored 40-degree lens;
+  // the retained upper silhouette had substantially more than that margin to
+  // the +0.48 identity-panel boundary.
+  if (preparationShot) {
+    const resolvedVerticalSeparation =
+      Number.isFinite(preparationVerticalSeparation) &&
+      preparationVerticalSeparation > 0
+        ? preparationVerticalSeparation
+        : 0;
+    const unevenTerrainBlend = clamp(
+      (resolvedVerticalSeparation - 0.25) / 0.5,
+      0,
+      1,
+    );
+    return 0.96 - unevenTerrainBlend * 0.24;
+  }
+  return phase === "FIGHTING" ? 1.02 : 1.12;
+}
+
+/**
+ * Preparation happens in the open world, but it is still a deliberate
+ * two-subject broadcast shot. Keep both contestants comfortably inside the
+ * 16:9 safe crop without using the much wider anonymous IDLE arena framing.
+ */
+export function getStreamingPreparationCinematicParams(): StreamingCinematicPhaseParams {
+  return {
+    // The preparation HUD leaves a deliberate center stage between its top
+    // identity panel and lower status card. The first close-envelope live pass
+    // reached 0.799879 NDC at radius 3.877 and a later orbit cropped both
+    // contestants at radius 3.523. The open-world preparation pair can also
+    // stand at different terrain heights; the 4.5-4.75 envelope left one
+    // otherwise complete body on a HUD boundary in repeated real captures.
+    // This slightly wider envelope projects the measured bodies to roughly
+    // 0.56-0.60 NDC: still readable, with real head/foot clearance for both.
+    radiusMin: 5.15,
+    radiusMax: 5.3,
+    basePhi: Math.PI * 0.4,
+    driftSpeed: 0.012,
+    targetFov: 40,
+    orbitAmplitude: 0.035,
+    focusBias: 0.5,
+  };
+}
+
+/**
+ * Bring a nearly level preparation pair close enough to read side by side,
+ * while retaining the wider proven envelope when open-world terrain places
+ * their feet at meaningfully different heights. The transition is derived
+ * only from the two authoritative positions and does not introduce a product
+ * timing or director decision.
+ */
+export function getStreamingPreparationPairRadiusBounds(
+  verticalSeparation: number,
+): { radiusMin: number; radiusMax: number } {
+  if (!Number.isFinite(verticalSeparation) || verticalSeparation < 0) {
+    return { radiusMin: 5.15, radiusMax: 5.3 };
+  }
+  const terrainBlend = clamp((verticalSeparation - 0.25) / 0.5, 0, 1);
+  return {
+    radiusMin: 4.55 + terrainBlend * 0.6,
+    radiusMax: 4.6 + terrainBlend * 0.7,
+  };
+}
+
+/**
+ * Put the preparation camera on the contestants' land-side of the interaction
+ * target. For shoreline activities this looks through the actors toward the
+ * authored water/resource context instead of pointing away from it.
+ */
+export function getStreamingPreparationCameraTheta(
+  subjectFocus: Pick<StreamingPreparationPosition, "x" | "z">,
+  activityTarget: Pick<StreamingPreparationPosition, "x" | "z"> | null,
+  fallbackTheta: number,
+): number {
+  if (!activityTarget) return fallbackTheta;
+  const awayX = subjectFocus.x - activityTarget.x;
+  const awayZ = subjectFocus.z - activityTarget.z;
+  if (awayX * awayX + awayZ * awayZ < 0.0625) return fallbackTheta;
+  return Math.atan2(awayX, awayZ) + Math.PI * 0.05;
+}
+
+/**
+ * Keep a two-subject preparation shot close to side-on while still revealing
+ * the selected actor's authoritative activity context. An unconstrained
+ * target-facing angle can put one contestant much nearer the lens, turning a
+ * valid pair shot into a cropped foreground body plus a small background body.
+ * Solo preparation shots retain the full contextual angle above.
+ */
+export function getStreamingPreparationPairCameraTheta(
+  subjectFocus: Pick<StreamingPreparationPosition, "x" | "z">,
+  activityTarget: Pick<StreamingPreparationPosition, "x" | "z"> | null,
+  sideOnTheta: number,
+  maximumContextOffset = Math.PI / 18,
+): number {
+  const contextualTheta = getStreamingPreparationCameraTheta(
+    subjectFocus,
+    activityTarget,
+    sideOnTheta,
+  );
+  const resolvedMaximumOffset =
+    Number.isFinite(maximumContextOffset) && maximumContextOffset >= 0
+      ? clamp(maximumContextOffset, 0, Math.PI)
+      : Math.PI / 18;
+  const shortestDelta = Math.atan2(
+    Math.sin(contextualTheta - sideOnTheta),
+    Math.cos(contextualTheta - sideOnTheta),
+  );
+  return (
+    sideOnTheta +
+    clamp(shortestDelta, -resolvedMaximumOffset, resolvedMaximumOffset)
+  );
+}
+
+/**
+ * A contestant outside the bounded two-subject envelope must not be allowed to
+ * linger as a cropped body at the edge of the selected actor's solo shot. Put
+ * the camera between the two contestants so the excluded body remains behind
+ * the lens, then admit only a small activity-context offset. The ordinary
+ * contextual angle remains the fallback when no second contestant exists.
+ */
+export function getStreamingPreparationSoloCameraTheta(
+  subjectFocus: Pick<StreamingPreparationPosition, "x" | "z">,
+  excludedContestant: Pick<StreamingPreparationPosition, "x" | "z"> | null,
+  activityTarget: Pick<StreamingPreparationPosition, "x" | "z"> | null,
+  fallbackTheta: number,
+  maximumContextOffset = Math.PI / 18,
+): number {
+  if (!excludedContestant) {
+    return getStreamingPreparationCameraTheta(
+      subjectFocus,
+      activityTarget,
+      fallbackTheta,
+    );
+  }
+  const towardExcludedX = excludedContestant.x - subjectFocus.x;
+  const towardExcludedZ = excludedContestant.z - subjectFocus.z;
+  if (
+    !Number.isFinite(towardExcludedX) ||
+    !Number.isFinite(towardExcludedZ) ||
+    towardExcludedX * towardExcludedX + towardExcludedZ * towardExcludedZ <
+      0.0625
+  ) {
+    return getStreamingPreparationCameraTheta(
+      subjectFocus,
+      activityTarget,
+      fallbackTheta,
+    );
+  }
+  const isolationTheta = Math.atan2(towardExcludedX, towardExcludedZ);
+  return getStreamingPreparationPairCameraTheta(
+    subjectFocus,
+    activityTarget,
+    isolationTheta,
+    maximumContextOffset,
+  );
+}
+
+/**
+ * Compose the public two-contestant preparation hold from the canonical pair
+ * axis, not the general IDLE orbit. The ordinary IDLE three-quarter angle,
+ * drift, and contextual offset can combine into enough depth perspective for
+ * one full body to enter the top HUD while the other approaches the lower HUD.
+ * Five degrees preserves a hint of activity context without compromising the
+ * equal-scale side-by-side read.
+ */
+export function getStreamingPreparationPairSideOnTheta(
+  pairFacingTheta: number,
+  subjectFocus: Pick<StreamingPreparationPosition, "x" | "z">,
+  activityTarget: Pick<StreamingPreparationPosition, "x" | "z"> | null,
+): number {
+  return getStreamingPreparationPairCameraTheta(
+    subjectFocus,
+    activityTarget,
+    pairFacingTheta + Math.PI * 0.5,
+    Math.PI / 36,
+  );
+}
+
+const STANDARD_STREAMING_LOS_THETA_OFFSETS = [
+  0,
+  0.35,
+  -0.35,
+  0.7,
+  -0.7,
+  1.05,
+  -1.05,
+  1.4,
+  -1.4,
+  1.75,
+  -1.75,
+  Math.PI,
+] as const;
+const LOCKED_STREAMING_LOS_THETA_OFFSETS = [0] as const;
+
+/**
+ * Preparation pairs must remain on their already-bounded side-on axis. Other
+ * open-world presentation shots search the complete orbit: a shoreline or
+ * hillside can obstruct every candidate within 60 degrees of the contextual
+ * angle, and accepting that partial search can place the camera inside terrain
+ * while projected avatar coordinates still look valid.
+ */
+export function getStreamingCinematicLosThetaOffsets(
+  preparationPairShot: boolean,
+): readonly number[] {
+  return preparationPairShot
+    ? LOCKED_STREAMING_LOS_THETA_OFFSETS
+    : STANDARD_STREAMING_LOS_THETA_OFFSETS;
 }
 
 const _v3_1 = new THREE.Vector3();
@@ -94,6 +1184,9 @@ export class ClientCameraSystem extends SystemBase {
     // modern MMORPG-like zoom bounds (further min to avoid getting too close)
     minDistance: 2.0,
     maxDistance: 15.0,
+    // Passive broadcast framing may back out farther than an interactive player
+    // camera so legal full-ring spacing stays inside supported portrait crops.
+    maxCinematicDistance: STREAMING_MAX_CINEMATIC_RADIUS,
     // Pitch limits: allow higher arc for more overhead viewing
     minPolarAngle: Math.PI * 0.15,
     maxPolarAngle: Math.PI * 0.48,
@@ -134,7 +1227,6 @@ export class ClientCameraSystem extends SystemBase {
   private cinematicLastHasOpponent = false;
   private cinematicFacingTheta = this.spherical.theta;
   private cinematicFacingThetaValid = false;
-  private cinematicLookSlerpReady = false;
   private cinematicLastActorSample = new THREE.Vector3();
   private cinematicLastOpponentSample = new THREE.Vector3();
   // Combat-reactive camera state
@@ -145,16 +1237,21 @@ export class ClientCameraSystem extends SystemBase {
   // Last known good target position (fallback when entity position unavailable)
   private lastKnownTargetPosition = new THREE.Vector3();
   private hasLastKnownPosition = false;
+  /** Stable virtual target used between duel cycles after agents leave the ring. */
+  private readonly streamingArenaTarget: CameraTarget = {
+    position: new THREE.Vector3(),
+    data: { id: "streaming-arena-anchor" },
+  };
+  private hasStreamingArenaFocus = false;
   // Cached terrain system reference
   private terrainSystemRef: TerrainSystem | null | undefined = undefined;
   // Phase-aware camera state
-  private cinematicPhase:
-    | "IDLE"
-    | "ANNOUNCEMENT"
-    | "COUNTDOWN"
-    | "FIGHTING"
-    | "RESOLUTION" = "IDLE";
+  private cinematicPhase: StreamingCinematicPhase = "IDLE";
   private cinematicPhaseChangedAt = 0;
+  /** Live replicated preparation authority for the current render frame. */
+  private streamingPreparationActive = false;
+  private streamingPreparationFocus: StreamingPreparationFocus | null = null;
+  private streamingPreparationPairShotActive = false;
   // Smart camera cuts
   private cinematicHardCutPending = false;
   private cinematicFastSnapRemaining = 0;
@@ -176,16 +1273,14 @@ export class ClientCameraSystem extends SystemBase {
   // and ClientNetwork direct writes all compete for entity.position.y, causing frame-to-frame noise.
   private cinematicLockedActorY: number | null = null;
   private cinematicLockedOpponentY: number | null = null;
-  // Locked separation during combat — prevents radius and phi from oscillating
-  // as agents reposition. Without this, every 1.2s agent movement causes ~2+ units
-  // of camera height swing via separation-dependent radius and phi calculations.
+  // Locked composition separation keeps the authored pitch stable while agents
+  // reposition. Framing separation expands immediately and releases slowly so
+  // legal ranged movement cannot outgrow the camera radius.
   private cinematicLockedSeparation: number | null = null;
+  private cinematicFramingSeparation: number | null = null;
   // Smoothed phase bias to prevent instant Y jumps when duel phase changes
   private cinematicSmoothedBias = 0.5;
   private cinematicSmoothedBiasValid = false;
-  // Reverse angle cuts during FIGHTING
-  private cinematicLastReverseAt = 0;
-  private cinematicNextReverseCooldown = 14000;
   /** Prior HP from streaming state — damage deltas drive punch/shake */
   private streamingPrevAgent1Hp: number | null = null;
   private streamingPrevAgent2Hp: number | null = null;
@@ -204,7 +1299,6 @@ export class ClientCameraSystem extends SystemBase {
     lookBaseSpeed: 9,
     lookDistanceSpeedGain: 0.85,
     lookMaxSpeed: 220,
-    lookSlerpRate: 2.5,
   } as const;
 
   // Mouse state
@@ -267,6 +1361,19 @@ export class ClientCameraSystem extends SystemBase {
       EventType.CAMERA_SET_TARGET,
       (data: { target?: CameraTarget }) => {
         if (!data?.target) {
+          return;
+        }
+        if (
+          this.cinematicEnabled &&
+          shouldHoldStreamingArenaCamera(
+            this.latestStreamingState?.cycle?.phase,
+            this.dashboardFollowMode,
+            this.latestStreamingState?.cycle?.arenaPositions,
+            this.hasActiveStreamingPreparation(),
+            this.hasAuthoritativeStreamingIdleTarget(),
+          )
+        ) {
+          this.setStreamingArenaTarget();
           return;
         }
         // Preserve full entity identity (id/characterId/data) so spectator
@@ -354,7 +1461,24 @@ export class ClientCameraSystem extends SystemBase {
           this.cinematicPhase = newPhase;
           this.cinematicPhaseChangedAt = Date.now();
         }
-        this.tryRetargetFromStreamingState();
+        this.rememberStreamingArenaFocus(state);
+        if (
+          shouldHoldStreamingArenaCamera(
+            newPhase,
+            this.dashboardFollowMode,
+            state.cycle?.arenaPositions,
+            this.hasActiveStreamingPreparation(),
+            this.hasAuthoritativeStreamingIdleTarget(state),
+          )
+        ) {
+          this.setStreamingArenaTarget();
+        } else if (newPhase === "IDLE") {
+          if (!this.tryRetargetStreamingPreparation()) {
+            this.tryRetargetFromStreamingState();
+          }
+        } else {
+          this.tryRetargetFromStreamingState();
+        }
         this.onStreamingStateHP(state);
       },
     );
@@ -420,8 +1544,7 @@ export class ClientCameraSystem extends SystemBase {
     // Get shared RaycastService from InteractionRouter for cache sharing
     // Both systems benefit from the same 16ms frame-based cache
     const interaction = this.world.getSystem("interaction") as
-      | { getRaycastService?: () => RaycastService }
-      | undefined;
+      { getRaycastService?: () => RaycastService } | undefined;
     const sharedService = interaction?.getRaycastService?.();
     if (sharedService) {
       this.raycastService = sharedService;
@@ -1074,7 +2197,6 @@ export class ClientCameraSystem extends SystemBase {
     this.targetPosition.copy(orbitCenter);
     this.smoothedTarget.copy(orbitCenter);
     this.lookAtTarget.copy(orbitCenter);
-    this.cinematicLookSlerpReady = false;
 
     this.cameraPosition.setFromSpherical(this.spherical);
     this.cameraPosition.add(orbitCenter);
@@ -1193,6 +2315,143 @@ export class ClientCameraSystem extends SystemBase {
     return this.setCinematicTarget(entity);
   }
 
+  private getStreamingPreparationFocus() {
+    const cycle = this.latestStreamingState?.cycle;
+    const participantIds = [cycle?.agent1?.id, cycle?.agent2?.id].filter(
+      (participantId): participantId is string =>
+        typeof participantId === "string" && participantId.length > 0,
+    );
+    const currentTargetId = this.target
+      ? (this.resolveEntityId(this.resolveTargetEntity(this.target)) ??
+        this.resolveEntityId(this.target))
+      : null;
+    const preferredActorId = resolveStreamingPreparationCameraActorId(
+      this.latestStreamingState,
+      participantIds,
+      currentTargetId,
+    );
+    const equipmentVisuals = this.world.getSystem?.("equipment-visual") as
+      | {
+          isStreamingPreparationPresentationActive?: (
+            playerId: string,
+          ) => boolean;
+          getStreamingPreparationActivityTargetPosition?: (
+            playerIds: readonly string[],
+          ) => StreamingPreparationPosition | null;
+        }
+      | undefined;
+    const focus = resolveStreamingPreparationFocus({
+      phase: cycle?.phase,
+      participantIds,
+      preferredActorId,
+      resolveEntity: (participantId) =>
+        this.resolveEntityById(
+          participantId,
+        ) as StreamingPreparationEntity | null,
+      isParticipantActive: (participantId, entity) =>
+        equipmentVisuals?.isStreamingPreparationPresentationActive?.(
+          participantId,
+        ) === true || hasActiveStreamingPreparationPresentation(entity),
+    });
+    if (!focus) return null;
+    const liveActivityTarget =
+      equipmentVisuals?.getStreamingPreparationActivityTargetPosition?.([
+        focus.actorId,
+      ]) ?? null;
+    return liveActivityTarget
+      ? { ...focus, activityTargetPosition: liveActivityTarget }
+      : focus;
+  }
+
+  private hasActiveStreamingPreparation(): boolean {
+    return this.getStreamingPreparationFocus() !== null;
+  }
+
+  private hasAuthoritativeStreamingIdleTarget(
+    state = this.latestStreamingState,
+  ): boolean {
+    return Boolean(
+      state?.cycle?.phase === "IDLE" &&
+      typeof state.cameraTarget === "string" &&
+      state.cameraTarget.trim().length > 0,
+    );
+  }
+
+  /**
+   * Follow the assigned contestants only while their replicated preparation
+   * presentation is active. Polling from update() is intentional: entity
+   * snapshots and activity events can arrive after the cycle state without a
+   * second streaming-state packet.
+   */
+  private tryRetargetStreamingPreparation(): boolean {
+    if (!this.cinematicEnabled || this.dashboardFollowMode) {
+      this.streamingPreparationActive = false;
+      this.streamingPreparationFocus = null;
+      return false;
+    }
+    const focus = this.getStreamingPreparationFocus();
+    if (!focus) {
+      this.streamingPreparationActive = false;
+      this.streamingPreparationFocus = null;
+      return false;
+    }
+    this.streamingPreparationActive = true;
+    this.streamingPreparationFocus = focus;
+
+    const currentTargetId = this.target
+      ? (this.resolveEntityId(this.resolveTargetEntity(this.target)) ??
+        this.resolveEntityId(this.target))
+      : null;
+    if (currentTargetId === focus.actorId) {
+      return true;
+    }
+
+    const entity = this.resolveEntityById(focus.actorId);
+    return entity ? this.setCinematicTarget(entity) : false;
+  }
+
+  private rememberStreamingArenaFocus(state: StreamingCameraStateUpdate): void {
+    const positions = state.cycle?.arenaPositions;
+    if (!positions) {
+      return;
+    }
+
+    const focus = getStreamingArenaFocus(positions);
+    this.streamingArenaTarget.position.set(focus.x, focus.y, focus.z);
+    this.hasStreamingArenaFocus = true;
+  }
+
+  /** Keep the stream on the ring while cleaned-up fighters return home. */
+  private setStreamingArenaTarget(): void {
+    if (!this.cinematicEnabled || this.dashboardFollowMode) {
+      return;
+    }
+
+    if (!this.hasStreamingArenaFocus) {
+      const focus = getStreamingArenaFocus(null);
+      const terrainHeight = this.getTerrainSystem()?.getHeightAt(
+        focus.x,
+        focus.z,
+      );
+      this.streamingArenaTarget.position.set(
+        focus.x,
+        Number.isFinite(terrainHeight) ? (terrainHeight as number) : focus.y,
+        focus.z,
+      );
+      this.hasStreamingArenaFocus = true;
+    }
+
+    if (this.target === this.streamingArenaTarget) {
+      return;
+    }
+
+    this.onSetTarget({ target: this.streamingArenaTarget });
+    this._arenaFallbackApplied = false;
+    this.emitTypedEvent(EventType.CAMERA_TARGET_CHANGED, {
+      target: this.streamingArenaTarget,
+    });
+  }
+
   private isLikelyAgentEntity(entity: unknown): boolean {
     if (!entity || typeof entity !== "object") {
       return false;
@@ -1306,15 +2565,19 @@ export class ClientCameraSystem extends SystemBase {
 
   private _arenaFallbackApplied = false;
 
-  /** Park the camera at the duel arena lobby when no entities exist. */
+  /** Park the camera at arena one when neither state nor entities exist. */
   private positionCameraAtArenaFallback(): void {
     if (this._arenaFallbackApplied || !this.camera) return;
-    const lobby = getDuelArenaConfig().lobbySpawnPoint;
-    const lobbyX = lobby.x;
-    const lobbyY = lobby.y;
-    const lobbyZ = lobby.z;
-    this.camera.position.set(lobbyX - 15, lobbyY + 20, lobbyZ + 25);
-    this.camera.lookAt(lobbyX, lobbyY + 2, lobbyZ);
+    const focus = getStreamingArenaFocus(null);
+    const terrainHeight = this.getTerrainSystem()?.getHeightAt(
+      focus.x,
+      focus.z,
+    );
+    const focusY = Number.isFinite(terrainHeight)
+      ? (terrainHeight as number)
+      : focus.y;
+    this.camera.position.set(focus.x - 15, focusY + 20, focus.z + 25);
+    this.camera.lookAt(focus.x, focusY + 2, focus.z);
     this._arenaFallbackApplied = true;
   }
 
@@ -1332,60 +2595,14 @@ export class ClientCameraSystem extends SystemBase {
   }
 
   private resolveEntityById(entityId: string): unknown | null {
-    const direct = this.world.entities.get(entityId);
-    if (direct) return direct;
-
-    const entities = this.world.entities as {
-      items?: Map<string, unknown>;
-      players?: Map<string, unknown>;
-      getAllEntities?: () => Map<string, unknown>;
-    };
-
-    const fromItems = entities.items?.get(entityId);
-    if (fromItems) return fromItems;
-
-    const fromPlayers = entities.players?.get(entityId);
-    if (fromPlayers) return fromPlayers;
-
-    if (entities.getAllEntities) {
-      for (const [id, entity] of entities.getAllEntities()) {
-        if (id === entityId || this.resolveEntityId(entity) === entityId) {
-          return entity;
-        }
-      }
-    }
-
-    return null;
+    return resolveStreamingEntityByIdentity(
+      this.world.entities as StreamingEntityRegistry,
+      entityId,
+    );
   }
 
   private resolveEntityId(entity: unknown): string | null {
-    if (!entity || typeof entity !== "object") {
-      return null;
-    }
-
-    const data = entity as {
-      id?: string;
-      characterId?: string;
-      data?: { id?: string; characterId?: string };
-    };
-
-    if (typeof data.id === "string" && data.id.length > 0) {
-      return data.id;
-    }
-    if (typeof data.characterId === "string" && data.characterId.length > 0) {
-      return data.characterId;
-    }
-    if (typeof data.data?.id === "string" && data.data.id.length > 0) {
-      return data.data.id;
-    }
-    if (
-      typeof data.data?.characterId === "string" &&
-      data.data.characterId.length > 0
-    ) {
-      return data.data.characterId;
-    }
-
-    return null;
+    return resolveStreamingEntityIdentity(entity);
   }
 
   private resolveTargetEntity(target: CameraTarget): unknown {
@@ -1512,7 +2729,14 @@ export class ClientCameraSystem extends SystemBase {
       };
     };
 
+    // Exact published preparation participants outrank stale combat metadata
+    // left on an open-world entity. Otherwise a valid ready hold can degrade
+    // to a solo shot even though both selected contestants are loaded.
     let opponentId =
+      resolveAuthoritativeStreamingPreparationOpponentId(
+        this.latestStreamingState,
+        actorId,
+      ) ||
       actorData.data?.combatTarget ||
       actorData.data?.ct ||
       actorData.data?.attackTarget ||
@@ -1526,6 +2750,28 @@ export class ClientCameraSystem extends SystemBase {
         opponentId = agent2Id;
       } else if (actorId === agent2Id && agent1Id) {
         opponentId = agent1Id;
+      }
+    }
+
+    if (this.latestStreamingState?.cycle?.phase === "IDLE" && opponentId) {
+      const opponent = this.resolveEntityById(
+        opponentId,
+      ) as StreamingPreparationEntity | null;
+      const activeParticipantIds = new Set(
+        this.getStreamingPreparationFocus()?.participants.map(
+          (participant) => participant.id,
+        ) ?? [],
+      );
+      if (
+        !isAuthoritativeStreamingPreparationPair(
+          this.latestStreamingState,
+          actorId,
+          opponentId,
+        ) &&
+        !activeParticipantIds.has(opponentId) &&
+        !hasActiveStreamingPreparationPresentation(opponent)
+      ) {
+        return null;
       }
     }
 
@@ -1561,6 +2807,7 @@ export class ClientCameraSystem extends SystemBase {
     this.cinematicLockedActorY = null;
     this.cinematicLockedOpponentY = null;
     this.cinematicLockedSeparation = null;
+    this.cinematicFramingSeparation = null;
     this.cinematicSmoothedBiasValid = false;
     this.cinematicVelocity.set(0, 0, 0);
     this.streamingPrevAgent1Hp = null;
@@ -1568,15 +2815,18 @@ export class ClientCameraSystem extends SystemBase {
   }
 
   private onCinematicPhaseChange(_oldPhase: string, newPhase: string): void {
-    // Phase transitions trigger hard cuts for dramatic effect
-    if (
-      newPhase === "ANNOUNCEMENT" ||
+    // Establish the first broadcast shot immediately, then use a fast damped
+    // transition for fight/result changes so phase boundaries do not teleport
+    // the camera while viewers are already watching.
+    if (newPhase === "ANNOUNCEMENT") {
+      this.cinematicHardCutPending = true;
+    } else if (
+      newPhase === "COUNTDOWN" ||
       newPhase === "FIGHTING" ||
       newPhase === "RESOLUTION"
     ) {
-      this.cinematicHardCutPending = true;
+      this.cinematicFastSnapRemaining = 0.45;
     }
-    this.cinematicLastReverseAt = Date.now();
     this.cinematicPunchIn = 0;
     this.cinematicDramaticLow = 0;
     this.cinematicShakeIntensity = 0;
@@ -1585,71 +2835,9 @@ export class ClientCameraSystem extends SystemBase {
     this.cinematicLockedActorY = null;
     this.cinematicLockedOpponentY = null;
     this.cinematicLockedSeparation = null;
+    this.cinematicFramingSeparation = null;
     this.streamingPrevAgent1Hp = null;
     this.streamingPrevAgent2Hp = null;
-  }
-
-  private getCinematicPhaseParams(): {
-    radiusMin: number;
-    radiusMax: number;
-    basePhi: number;
-    driftSpeed: number;
-    targetFov: number;
-    orbitAmplitude: number;
-    focusBias: number;
-  } {
-    switch (this.cinematicPhase) {
-      case "ANNOUNCEMENT":
-        return {
-          radiusMin: 10,
-          radiusMax: 14,
-          basePhi: Math.PI * 0.26,
-          driftSpeed: 0.02,
-          targetFov: 48,
-          orbitAmplitude: 0.08,
-          focusBias: 0.35,
-        };
-      case "COUNTDOWN":
-        return {
-          radiusMin: 4,
-          radiusMax: 6,
-          basePhi: Math.PI * 0.4,
-          driftSpeed: 0.0,
-          targetFov: 42,
-          orbitAmplitude: 0.02,
-          focusBias: 0.85,
-        };
-      case "FIGHTING":
-        return {
-          radiusMin: 4.0,
-          radiusMax: 7.5,
-          basePhi: Math.PI * 0.27,
-          driftSpeed: 0.018,
-          targetFov: 46,
-          orbitAmplitude: 0.07,
-          focusBias: 0.5,
-        };
-      case "RESOLUTION":
-        return {
-          radiusMin: 5.5,
-          radiusMax: 8,
-          basePhi: Math.PI * 0.44,
-          driftSpeed: 0.025,
-          targetFov: 45,
-          orbitAmplitude: 0.06,
-          focusBias: 0.5,
-        };
-      default:
-        return {
-          radiusMin: 8,
-          radiusMax: 12,
-          basePhi: Math.PI * 0.28,
-          driftSpeed: 0.015,
-          targetFov: 52,
-          orbitAmplitude: 0.1,
-          focusBias: 0.5,
-        };
-    }
   }
 
   private computeCameraShake(dt: number): THREE.Vector3 {
@@ -1728,6 +2916,61 @@ export class ClientCameraSystem extends SystemBase {
     target: THREE.Vector3,
     occlusionMargin = 0.55,
   ): boolean {
+    return this.hasLineOfSightAgainstMask(
+      source,
+      target,
+      occlusionMargin,
+      this.getCinematicLosMask(),
+    );
+  }
+
+  private hasEnvironmentLineOfSight(
+    source: THREE.Vector3,
+    target: THREE.Vector3,
+    occlusionMargin = 0.15,
+  ): boolean {
+    return (
+      this.hasLineOfSightAgainstMask(
+        source,
+        target,
+        occlusionMargin,
+        this.getCollisionProbeMask(),
+      ) && this.hasTerrainHeightLineOfSight(source, target)
+    );
+  }
+
+  private hasTerrainHeightLineOfSight(
+    source: THREE.Vector3,
+    target: THREE.Vector3,
+    minimumClearance = 0.08,
+  ): boolean {
+    const terrain = this.getTerrainSystem();
+    if (!terrain) return false;
+
+    const distance = source.distanceTo(target);
+    const sampleCount = clamp(Math.ceil(distance / 0.5), 8, 32);
+    for (let index = 1; index < sampleCount; index += 1) {
+      const alpha = index / sampleCount;
+      const x = THREE.MathUtils.lerp(source.x, target.x, alpha);
+      const y = THREE.MathUtils.lerp(source.y, target.y, alpha);
+      const z = THREE.MathUtils.lerp(source.z, target.z, alpha);
+      const terrainHeight = terrain.getHeightAt(x, z);
+      if (
+        !Number.isFinite(terrainHeight) ||
+        y <= terrainHeight + minimumClearance
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private hasLineOfSightAgainstMask(
+    source: THREE.Vector3,
+    target: THREE.Vector3,
+    occlusionMargin: number,
+    layerMask: number,
+  ): boolean {
     const direction = _cinematicProbeDir.copy(target).sub(source);
     const distance = direction.length();
     if (distance <= 0.001) {
@@ -1735,12 +2978,7 @@ export class ClientCameraSystem extends SystemBase {
     }
 
     direction.multiplyScalar(1 / distance);
-    const hit = this.world.raycast(
-      source,
-      direction,
-      distance,
-      this.getCinematicLosMask(),
-    );
+    const hit = this.world.raycast(source, direction, distance, layerMask);
     if (!hit) {
       return true;
     }
@@ -1799,6 +3037,7 @@ export class ClientCameraSystem extends SystemBase {
     focus: THREE.Vector3,
     actorPosition: THREE.Vector3,
     opponentPosition: THREE.Vector3 | null,
+    lockThetaToBase = false,
   ): { theta: number; phi: number } {
     // During active duel combat (COUNTDOWN/FIGHTING/RESOLUTION), skip the
     // periodic LOS grid search entirely. The duel arena is a controlled
@@ -1849,6 +3088,7 @@ export class ClientCameraSystem extends SystemBase {
         focus,
         actorPosition,
         opponentPosition,
+        lockThetaToBase,
       );
       const refreshDeltaSeconds = Math.max(
         0.016,
@@ -1856,11 +3096,12 @@ export class ClientCameraSystem extends SystemBase {
       );
 
       this.cinematicThetaCache = this.cinematicThetaCacheValid
-        ? this.moveAngleToward(
+        ? resolveStreamingCinematicTheta(
             this.cinematicThetaCache,
             selectedView.theta,
             this.cinematicTuning.thetaRefreshRate,
             refreshDeltaSeconds,
+            lockThetaToBase,
           )
         : selectedView.theta;
       this.cinematicPhiCache = this.cinematicPhiCacheValid
@@ -1890,17 +3131,20 @@ export class ClientCameraSystem extends SystemBase {
     // Between LOS refreshes (IDLE/ANNOUNCEMENT only): subtle theta drift,
     // phi stays locked to prevent down-blocked-up oscillation.
     const drift = this.shortestAngleDelta(this.cinematicThetaCache, baseTheta);
-    this.cinematicThetaCache = this.moveAngleToward(
+    this.cinematicThetaCache = resolveStreamingCinematicTheta(
       this.cinematicThetaCache,
       baseTheta,
       this.cinematicTuning.thetaIdleDriftRate,
       deltaSeconds,
+      lockThetaToBase,
     );
-    this.cinematicThetaCache += clamp(
-      drift * 0.05,
-      -this.cinematicTuning.maxDriftStep,
-      this.cinematicTuning.maxDriftStep,
-    );
+    if (!lockThetaToBase) {
+      this.cinematicThetaCache += clamp(
+        drift * 0.05,
+        -this.cinematicTuning.maxDriftStep,
+        this.cinematicTuning.maxDriftStep,
+      );
+    }
     return {
       theta: this.cinematicThetaCache,
       phi: this.cinematicPhiCache,
@@ -1914,10 +3158,20 @@ export class ClientCameraSystem extends SystemBase {
     focus: THREE.Vector3,
     actorPosition: THREE.Vector3,
     opponentPosition: THREE.Vector3 | null,
+    lockThetaToBase: boolean,
   ): { theta: number; phi: number } {
-    const coarseThetaOffsets = [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05];
+    // A two-contestant preparation shot has already selected a context-aware,
+    // pair-side theta. Letting the open-world LOS search rotate another 60°
+    // puts one contestant in front of the other and defeats that framing
+    // guarantee. Keep the pair-side angle exact while retaining vertical LOS
+    // alternatives; an obstructed result then fails the existing line-of-sight
+    // readiness gate instead of silently becoming an unreadable depth stack.
+    const coarseThetaOffsets =
+      getStreamingCinematicLosThetaOffsets(lockThetaToBase);
     const coarsePhiOffsets = [0, -0.1, 0.1];
-    const fineThetaOffsets = [0, 0.12, -0.12, 0.24, -0.24];
+    const fineThetaOffsets = lockThetaToBase
+      ? [0]
+      : [0, 0.12, -0.12, 0.24, -0.24];
     const finePhiOffsets = [0, -0.05, 0.05];
     let bestScore = -Infinity;
     let bestTheta = baseTheta;
@@ -2077,8 +3331,16 @@ export class ClientCameraSystem extends SystemBase {
       0.78,
     );
     score += actorVisible ? 6.2 : -7.6;
+    _cinematicProbeTarget.copy(actorPosition);
+    _cinematicProbeTarget.y += 0.32;
+    const actorLowerBodyVisible = this.hasEnvironmentLineOfSight(
+      _cinematicProbePos,
+      _cinematicProbeTarget,
+    );
+    score += actorLowerBodyVisible ? 6.2 : -9.2;
 
     let opponentVisible = false;
+    let opponentLowerBodyVisible = false;
     if (opponentPosition) {
       _cinematicProbeTarget.copy(opponentPosition);
       _cinematicProbeTarget.y += 1;
@@ -2088,11 +3350,25 @@ export class ClientCameraSystem extends SystemBase {
         0.78,
       );
       score += opponentVisible ? 3.1 : -2.4;
+      _cinematicProbeTarget.copy(opponentPosition);
+      _cinematicProbeTarget.y += 0.32;
+      opponentLowerBodyVisible = this.hasEnvironmentLineOfSight(
+        _cinematicProbePos,
+        _cinematicProbeTarget,
+      );
+      score += opponentLowerBodyVisible ? 3.1 : -4.2;
     }
 
-    if (actorVisible && (!opponentPosition || opponentVisible)) {
+    if (
+      actorVisible &&
+      actorLowerBodyVisible &&
+      (!opponentPosition || (opponentVisible && opponentLowerBodyVisible))
+    ) {
       score += 1.15;
-    } else if (!actorVisible && (!opponentPosition || !opponentVisible)) {
+    } else if (
+      (!actorVisible || !actorLowerBodyVisible) &&
+      (!opponentPosition || !opponentVisible || !opponentLowerBodyVisible)
+    ) {
       score -= 2.1;
     }
 
@@ -2129,7 +3405,7 @@ export class ClientCameraSystem extends SystemBase {
     current.add(_cinematicTransitionDir);
   }
 
-  private applyCinematicLookSlerp(deltaSeconds: number): void {
+  private applyCinematicLookDirection(): void {
     if (!this.camera) {
       return;
     }
@@ -2142,21 +3418,12 @@ export class ClientCameraSystem extends SystemBase {
     _cinematicOrientationQuat.setFromRotationMatrix(
       _cinematicOrientationMatrix,
     );
-
-    if (!this.cinematicLookSlerpReady) {
-      this.camera.quaternion.copy(_cinematicOrientationQuat);
-      this.cinematicLookSlerpReady = true;
-      return;
-    }
-
-    const alpha = this.getDampingAlpha(
-      this.cinematicTuning.lookSlerpRate,
-      deltaSeconds,
-    );
-    if (alpha <= 0) {
-      return;
-    }
-    this.camera.quaternion.slerp(_cinematicOrientationQuat, alpha);
+    // Position, focus, look-at, theta, and phi are already independently
+    // damped before this point. A second slower quaternion smoother lets the
+    // camera position orbit ahead of its view direction and can move both
+    // contestants outside the crop. Apply the orientation derived from those
+    // smoothed inputs exactly so the two-subject midpoint remains centered.
+    this.camera.quaternion.copy(_cinematicOrientationQuat);
   }
 
   /**
@@ -2207,15 +3474,44 @@ export class ClientCameraSystem extends SystemBase {
     theta: number;
     phi: number;
     radius: number;
+    preparationPairShot: boolean;
   } | null {
     if (!this.target || !this.isCinematicCameraActive()) {
       return null;
     }
 
     const actorEntity = this.resolveTargetEntity(this.target);
-    const hasActorPos =
+    const actorId =
+      this.resolveEntityId(actorEntity) ?? this.resolveEntityId(this.target);
+    const cycle = this.latestStreamingState?.cycle;
+    let hasActorPos =
       this.copyEntityPosition(actorEntity, _cinematicActorPos) ||
       this.copyEntityPosition(this.target, _cinematicActorPos);
+
+    const opponentEntity = this.resolveOpponentEntity(actorEntity, actorId);
+    let hasOpponent = opponentEntity
+      ? this.copyEntityPosition(opponentEntity, _cinematicOpponentPos)
+      : false;
+    const resolutionArenaPair = getStreamingResolutionArenaPair(
+      cycle?.phase,
+      cycle?.arenaPositions,
+      cycle?.agent1?.id,
+      cycle?.agent2?.id,
+      actorId,
+    );
+    if (
+      resolutionArenaPair &&
+      !shouldUseStreamingResolutionLivePositions(
+        cycle?.phase,
+        hasActorPos ? _cinematicActorPos : null,
+        hasOpponent ? _cinematicOpponentPos : null,
+      )
+    ) {
+      _cinematicActorPos.fromArray(resolutionArenaPair.actor);
+      _cinematicOpponentPos.fromArray(resolutionArenaPair.opponent);
+      hasActorPos = true;
+      hasOpponent = true;
+    }
     if (!hasActorPos) {
       if (this.hasLastKnownPosition) {
         _cinematicActorPos.copy(this.lastKnownTargetPosition);
@@ -2225,6 +3521,32 @@ export class ClientCameraSystem extends SystemBase {
     } else {
       this.lastKnownTargetPosition.copy(_cinematicActorPos);
       this.hasLastKnownPosition = true;
+    }
+
+    const preparationShot =
+      this.cinematicPhase === "IDLE" &&
+      (this.streamingPreparationActive ||
+        hasAuthoritativeStreamingPreparation(this.latestStreamingState));
+    let preparationExcludedOpponent = false;
+    if (preparationShot && hasOpponent) {
+      const preparationParams = getStreamingPreparationCinematicParams();
+      if (
+        !shouldFrameStreamingPreparationOpponent(
+          getStreamingHorizontalSeparation(
+            _cinematicActorPos,
+            _cinematicOpponentPos,
+          ),
+          preparationParams.targetFov,
+          this.camera?.aspect,
+          Math.min(
+            this.settings.maxCinematicDistance,
+            preparationParams.radiusMax,
+          ),
+        )
+      ) {
+        hasOpponent = false;
+        preparationExcludedOpponent = true;
+      }
     }
 
     // Track velocity for movement lead
@@ -2238,11 +3560,6 @@ export class ClientCameraSystem extends SystemBase {
     this.cinematicPrevActorPos.copy(_cinematicActorPos);
     this.cinematicHasPrevActorPos = true;
 
-    const actorId = this.resolveEntityId(actorEntity);
-    const opponentEntity = this.resolveOpponentEntity(actorEntity, actorId);
-    const hasOpponent = opponentEntity
-      ? this.copyEntityPosition(opponentEntity, _cinematicOpponentPos)
-      : false;
     const now = Date.now();
     const dt = Math.max(0.001, deltaTime || 0.016);
 
@@ -2276,6 +3593,7 @@ export class ClientCameraSystem extends SystemBase {
       this.cinematicLockedActorY = null;
       this.cinematicLockedOpponentY = null;
       this.cinematicLockedSeparation = null;
+      this.cinematicFramingSeparation = null;
 
       if (!this.cinematicHasSmoothedY) {
         this.cinematicSmoothedActorY = _cinematicActorPos.y;
@@ -2300,20 +3618,20 @@ export class ClientCameraSystem extends SystemBase {
     }
 
     // Phase-aware camera parameters
-    const pp = this.getCinematicPhaseParams();
-    this.cinematicTargetFov =
-      pp.targetFov +
-      (this.cinematicPhase === "FIGHTING"
-        ? this.cinematicPunchIn * 5.5
-        : this.cinematicPunchIn * 2);
+    const pp = preparationShot
+      ? getStreamingPreparationCinematicParams()
+      : getStreamingCinematicPhaseParams(this.cinematicPhase);
+    const baseTargetFov = getStreamingCinematicTargetFov(
+      this.cinematicPhase,
+      pp.targetFov,
+      this.cinematicPunchIn,
+    );
 
     // Movement lead offset (camera anticipates movement direction)
-    const leadScale =
-      this.cinematicPhase === "IDLE"
-        ? 1.5
-        : this.cinematicPhase === "FIGHTING"
-          ? 0.35
-          : 0.8;
+    const leadScale = getStreamingCinematicLeadScale(
+      this.cinematicPhase,
+      preparationShot && hasOpponent,
+    );
     const speed = Math.sqrt(
       this.cinematicVelocity.x * this.cinematicVelocity.x +
         this.cinematicVelocity.z * this.cinematicVelocity.z,
@@ -2331,20 +3649,32 @@ export class ClientCameraSystem extends SystemBase {
       const rawSeparation = _cinematicActorPos.distanceTo(
         _cinematicOpponentPos,
       );
+      const horizontalSeparation = getStreamingHorizontalSeparation(
+        _cinematicActorPos,
+        _cinematicOpponentPos,
+      );
 
-      // Lock separation during duel combat so radius and phi don't oscillate
-      // when agents reposition. Without this, every 1.2s movement tick causes
-      // separation to fluctuate (e.g., 2→3 units), which swings both the radius
-      // (via separation*1.1) and phi (via closeCombatBlend), producing ~2+ units
-      // of camera height change — the root cause of persistent Y-axis jitter.
+      // Keep the phase composition/pitch anchored to the opening separation,
+      // but never use that stale value to size a live two-subject frame. The
+      // framing envelope expands immediately as fighters kite apart and eases
+      // inward when they close, preventing both crop failures and radius pumping.
       if (inDuelCombat) {
         if (this.cinematicLockedSeparation === null) {
           this.cinematicLockedSeparation = rawSeparation;
         }
+        this.cinematicFramingSeparation = getStreamingAdaptiveFramingSeparation(
+          this.cinematicFramingSeparation,
+          rawSeparation,
+          dt,
+        );
       } else {
         this.cinematicLockedSeparation = null;
+        this.cinematicFramingSeparation = null;
       }
-      const separation = this.cinematicLockedSeparation ?? rawSeparation;
+      const compositionSeparation =
+        this.cinematicLockedSeparation ?? rawSeparation;
+      const framingSeparation =
+        this.cinematicFramingSeparation ?? rawSeparation;
 
       // Focus point: phase-aware bias between actor and opponent.
       // Smooth the bias transition to prevent Y jumps when phase changes
@@ -2374,23 +3704,30 @@ export class ClientCameraSystem extends SystemBase {
         .copy(_cinematicActorPos)
         .add(_cinematicOpponentPos)
         .multiplyScalar(0.5);
-      _cinematicLookAtPos.y += 1.12;
+      _cinematicLookAtPos.y += getStreamingCinematicLookAtHeight(
+        this.cinematicPhase,
+        preparationShot,
+        Math.abs(_cinematicActorPos.y - _cinematicOpponentPos.y),
+      );
 
       // Facing theta (smoothed toward opponent direction)
       let facingTheta = this.cinematicFacingTheta;
-      if (separation > 0.25) {
-        const rawFacingTheta = Math.atan2(
-          _cinematicOpponentPos.x - _cinematicActorPos.x,
-          _cinematicOpponentPos.z - _cinematicActorPos.z,
+      if (rawSeparation > 0.25) {
+        const rawFacingTheta = getStreamingCanonicalPairFacingTheta(
+          _cinematicActorPos,
+          _cinematicOpponentPos,
+          actorId,
+          cycle?.agent1?.id,
+          cycle?.agent2?.id,
         );
-        if (!this.cinematicFacingThetaValid) {
+        if (!this.cinematicFacingThetaValid || preparationShot) {
           this.cinematicFacingTheta = rawFacingTheta;
           this.cinematicFacingThetaValid = true;
         } else {
-          this.cinematicFacingTheta = this.moveAngleToward(
+          this.cinematicFacingTheta = resolveStreamingCinematicTheta(
             this.cinematicFacingTheta,
             rawFacingTheta,
-            1.9,
+            getStreamingCinematicFacingTurnRate(this.cinematicPhase),
             dt,
           );
         }
@@ -2414,45 +3751,70 @@ export class ClientCameraSystem extends SystemBase {
       const bigSwing =
         this.cinematicPhase === "FIGHTING" ? bigSwingRaw * 0.2 : bigSwingRaw;
 
-      // Reverse angle cuts during FIGHTING for visual variety (smaller, less frequent)
-      let reverseAngleBoost = 0;
-      if (this.cinematicPhase === "FIGHTING") {
-        const timeSinceReverse = now - this.cinematicLastReverseAt;
-        if (timeSinceReverse > this.cinematicNextReverseCooldown) {
-          reverseAngleBoost = Math.PI * 0.3;
-          this.cinematicLastReverseAt = now;
-          this.cinematicNextReverseCooldown = 18000 + Math.random() * 8000;
-          // Reset theta cache so LOS scorer accepts the new angle
-          this.cinematicThetaCacheValid = false;
-          this.cinematicLastLosRefreshAt = 0;
-        }
-      }
-
-      const baseTheta =
+      let baseTheta =
         facingTheta +
-        Math.PI * 0.56 +
+        getStreamingCinematicSideAngle(this.cinematicPhase) +
         orbitDrift +
-        bigSwing +
-        reverseAngleBoost;
+        bigSwing;
+      if (preparationShot) {
+        baseTheta = getStreamingPreparationPairSideOnTheta(
+          facingTheta,
+          _cinematicFocusPos,
+          this.streamingPreparationFocus?.activityTargetPosition ?? null,
+        );
+      }
 
       // Phase-aware radius — use smoothstep blend instead of hard threshold
       // to prevent discrete jumps when agents hover near 3 units apart
-      const closeCombatBlend = clamp((3.5 - separation) / 1.5, 0, 1);
+      const closeCombatBlend = clamp((3.5 - compositionSeparation) / 1.5, 0, 1);
       const combatTightening = closeCombatBlend * 1.2;
+      const separationRadiusScale = getStreamingCinematicSeparationRadiusScale(
+        this.cinematicPhase,
+        preparationShot,
+      );
+      const preparationRadiusBounds = preparationShot
+        ? getStreamingPreparationPairRadiusBounds(
+            Math.abs(_cinematicActorPos.y - _cinematicOpponentPos.y),
+          )
+        : { radiusMin: pp.radiusMin, radiusMax: pp.radiusMax };
       const baseRadius = clamp(
-        pp.radiusMin + separation * 1.1 - combatTightening,
-        pp.radiusMin,
-        pp.radiusMax,
+        pp.radiusMin +
+          framingSeparation * separationRadiusScale -
+          combatTightening,
+        preparationRadiusBounds.radiusMin,
+        preparationRadiusBounds.radiusMax,
       );
       let radius = clamp(
         baseRadius + Math.sin(t * 0.32) * 0.2,
-        pp.radiusMin,
-        pp.radiusMax,
+        preparationRadiusBounds.radiusMin,
+        preparationRadiusBounds.radiusMax,
       );
       if (this.cinematicPhase === "FIGHTING") {
-        radius *= 1 - this.cinematicPunchIn * 0.13;
+        radius *= 1 - this.cinematicPunchIn * 0.05;
         radius = clamp(radius, pp.radiusMin * 0.86, pp.radiusMax);
       }
+      const aspectFraming = getStreamingAspectFraming(
+        radius,
+        baseTargetFov,
+        this.camera?.aspect,
+        this.settings.maxCinematicDistance,
+      );
+      const preparationSeparationRadius = preparationShot
+        ? getStreamingPreparationSeparationRadius(
+            aspectFraming.radius,
+            horizontalSeparation,
+            aspectFraming.targetFov,
+            this.camera?.aspect,
+          )
+        : aspectFraming.radius;
+      radius = getStreamingSeparationAwareRadius(
+        preparationSeparationRadius,
+        preparationShot ? horizontalSeparation : framingSeparation,
+        aspectFraming.targetFov,
+        this.camera?.aspect,
+        this.settings.maxCinematicDistance,
+      );
+      this.cinematicTargetFov = aspectFraming.targetFov;
 
       // Phase-aware phi (pitch angle) — smooth blend for close combat
       let phi: number;
@@ -2471,11 +3833,16 @@ export class ClientCameraSystem extends SystemBase {
           this.settings.maxPolarAngle - 0.03,
         );
       } else {
-        // FIGHTING / ANNOUNCEMENT / IDLE — blend between base and close-combat phi.
+        // FIGHTING / IDLE blend toward a lower close-combat angle. Announcement
+        // deliberately keeps its authored elevated pitch: the contestants are
+        // staged close together, and treating that as combat made the opening
+        // shot too low, horizon-heavy, and visually small.
         // Use only time-based variation (no separation dependency) to prevent
         // discontinuous phi changes when agents move during combat.
         const closeCombatPhi =
-          pp.basePhi + closeCombatBlend * (Math.PI * 0.38 - pp.basePhi);
+          this.cinematicPhase === "ANNOUNCEMENT"
+            ? pp.basePhi
+            : pp.basePhi + closeCombatBlend * (Math.PI * 0.38 - pp.basePhi);
         const phiVariation =
           Math.sin(t * 0.13) * 0.015 + Math.sin(t * 0.07) * 0.01;
         phi = clamp(
@@ -2494,6 +3861,7 @@ export class ClientCameraSystem extends SystemBase {
         _cinematicFocusPos,
         _cinematicActorPos,
         _cinematicOpponentPos,
+        preparationShot,
       );
 
       return {
@@ -2502,6 +3870,7 @@ export class ClientCameraSystem extends SystemBase {
         theta: cinematicView.theta,
         phi: cinematicView.phi,
         radius,
+        preparationPairShot: preparationShot,
       };
     }
 
@@ -2519,14 +3888,30 @@ export class ClientCameraSystem extends SystemBase {
       Math.sin(tSolo * 0.15) * soloAmp * 0.5 +
       Math.sin(tSolo * 0.067 + 1.3) * soloAmp * 0.4 +
       Math.sin(tSolo * pp.driftSpeed * 2.5 + 0.2) * soloAmp * 0.35;
-    const baseTheta = this.spherical.theta + thetaDrift;
-    const radius = clamp(
+    let baseTheta = this.spherical.theta + thetaDrift;
+    if (preparationShot) {
+      baseTheta = getStreamingPreparationSoloCameraTheta(
+        _cinematicActorPos,
+        preparationExcludedOpponent ? _cinematicOpponentPos : null,
+        this.streamingPreparationFocus?.activityTargetPosition ?? null,
+        baseTheta,
+      );
+    }
+    const baseRadius = clamp(
       (pp.radiusMin + pp.radiusMax) * 0.5 +
         Math.sin(tSolo * 0.34) * 0.3 +
         Math.sin(tSolo * 0.12 + 0.8) * 0.2,
       pp.radiusMin,
       pp.radiusMax,
     );
+    const aspectFraming = getStreamingAspectFraming(
+      baseRadius,
+      baseTargetFov,
+      this.camera?.aspect,
+      this.settings.maxCinematicDistance,
+    );
+    const radius = aspectFraming.radius;
+    this.cinematicTargetFov = aspectFraming.targetFov;
     const phi = clamp(
       pp.basePhi +
         Math.sin(tSolo * 0.13 + 0.6) * 0.05 +
@@ -2543,6 +3928,7 @@ export class ClientCameraSystem extends SystemBase {
       _cinematicFocusPos,
       _cinematicActorPos,
       null,
+      preparationExcludedOpponent,
     );
 
     return {
@@ -2551,11 +3937,24 @@ export class ClientCameraSystem extends SystemBase {
       theta: cinematicView.theta,
       phi: cinematicView.phi,
       radius,
+      preparationPairShot: false,
     };
   }
 
   update(deltaTime: number): void {
     if (!this.camera) return;
+    if (
+      this.cinematicEnabled &&
+      !this.dashboardFollowMode &&
+      this.latestStreamingState?.cycle?.phase === "IDLE"
+    ) {
+      if (
+        !this.tryRetargetStreamingPreparation() &&
+        !this.tryRetargetFromStreamingState()
+      ) {
+        this.setStreamingArenaTarget();
+      }
+    }
     if (!this.target) {
       this.tryAcquireLocalPlayerTarget();
       this.tryRetargetFromStreamingState();
@@ -2592,6 +3991,8 @@ export class ClientCameraSystem extends SystemBase {
     }
 
     const cinematicFrame = this.buildCinematicFrame(deltaTime);
+    this.streamingPreparationPairShotActive =
+      cinematicFrame?.preparationPairShot === true;
     if (cinematicFrame) {
       this.targetPosition.copy(cinematicFrame.focus);
 
@@ -2607,7 +4008,6 @@ export class ClientCameraSystem extends SystemBase {
         this.spherical.theta = cinematicFrame.theta;
         this.effectiveRadius = cinematicFrame.radius;
         this.lookAtTarget.copy(cinematicFrame.lookAt);
-        this.cinematicLookSlerpReady = false;
         this.cinematicHardCutPending = false;
         this.cinematicFastSnapRemaining = 0;
       } else {
@@ -2619,7 +4019,9 @@ export class ClientCameraSystem extends SystemBase {
         // caps that created mechanical start/stop motion and oscillation.
         //
         // Rate 3.5 → half-life ~0.2s, reaches 95% in ~0.6s.
-        // Rate 5.0 for position → half-life ~0.14s, reaches 95% in ~0.4s.
+        // Presentation position rate 5.0 retains authored weight. FIGHTING uses
+        // a faster midpoint response so authoritative tile steps cannot push
+        // either full silhouette through the HUD-safe crop.
         const snapM = this.cinematicFastSnapRemaining > 0 ? 3.0 : 1.0;
         if (this.cinematicFastSnapRemaining > 0) {
           this.cinematicFastSnapRemaining = Math.max(
@@ -2630,23 +4032,49 @@ export class ClientCameraSystem extends SystemBase {
 
         // Position: exponential damping (unified X/Y/Z — no separate Y rate limit).
         // Y is locked during duel combat so there's no terrain noise to filter.
-        const posDamp = 1 - Math.exp(-5.0 * snapM * frameDt);
+        const posDamp =
+          1 -
+          Math.exp(
+            -getStreamingCinematicPositionDampingRate(this.cinematicPhase) *
+              snapM *
+              frameDt,
+          );
         this.smoothedTarget.lerp(this.targetPosition, posDamp);
         this.lookAtTarget.lerp(cinematicFrame.lookAt, posDamp);
 
         // Angles: single-layer exponential damping directly to cinematicFrame
         // values. No intermediate targetSpherical — that extra layer added
         // latency and created phase conflicts between smoothers.
-        const angleDamp = 1 - Math.exp(-3.5 * snapM * frameDt);
-        const thetaDelta = this.shortestAngleDelta(
+        const angleDamp =
+          1 -
+          Math.exp(
+            -getStreamingCinematicAngleDampingRate(
+              this.cinematicPhase,
+              cinematicFrame.preparationPairShot,
+            ) *
+              snapM *
+              frameDt,
+          );
+        this.targetSpherical.theta = dampStreamingCinematicTheta(
           this.targetSpherical.theta,
           cinematicFrame.theta,
+          getStreamingCinematicAngleDampingRate(
+            this.cinematicPhase,
+            cinematicFrame.preparationPairShot,
+          ) * snapM,
+          frameDt,
+          cinematicFrame.preparationPairShot
+            ? Math.PI / 18
+            : Number.POSITIVE_INFINITY,
         );
-        this.targetSpherical.theta += thetaDelta * angleDamp;
         this.targetSpherical.phi +=
           (cinematicFrame.phi - this.targetSpherical.phi) * angleDamp;
-        this.targetSpherical.radius +=
-          (cinematicFrame.radius - this.targetSpherical.radius) * angleDamp;
+        this.targetSpherical.radius = dampStreamingCinematicRadius(
+          this.targetSpherical.radius,
+          cinematicFrame.radius,
+          frameDt,
+          snapM,
+        );
       }
     } else {
       let hasTargetPosition = this.getTargetWorldPosition(_v3_1);
@@ -2726,7 +4154,9 @@ export class ClientCameraSystem extends SystemBase {
     this.spherical.radius = clamp(
       this.spherical.radius,
       this.settings.minDistance,
-      this.settings.maxDistance,
+      cinematicFrame
+        ? this.settings.maxCinematicDistance
+        : this.settings.maxDistance,
     );
 
     // Collision-aware effective radius — skip in cinematic mode because the
@@ -2740,7 +4170,13 @@ export class ClientCameraSystem extends SystemBase {
       const collidedDistance =
         this.computeCollisionAdjustedDistance(desiredDistance);
       const targetEffective = Math.min(desiredDistance, collidedDistance);
-      if (this.zoomDirty || this.orbitingActive) {
+      // A newly obstructed ray must retract immediately; damping inward can
+      // leave the camera beyond the hit. Preserve the existing smooth release.
+      if (
+        targetEffective < this.effectiveRadius ||
+        this.zoomDirty ||
+        this.orbitingActive
+      ) {
         this.effectiveRadius = targetEffective;
       } else {
         const radiusDamping = this.settings.radiusDampingFactor ?? 0.18;
@@ -2758,12 +4194,11 @@ export class ClientCameraSystem extends SystemBase {
     this.cameraPosition.setFromSpherical(tempSpherical);
     this.cameraPosition.add(this.smoothedTarget);
 
-    // Prevent camera from going underground — skip in cinematic mode where
-    // the LOS scorer handles obstruction avoidance. The hard Y snap fights
-    // with the smooth spherical orbit and causes vertical jitter.
-    if (!cinematicFrame) {
-      this.clampAboveTerrain(this.cameraPosition, 1.5);
-    }
+    // The cinematic candidate search avoids terrain, but angular damping can
+    // briefly interpolate through a ridge between two valid views. Keep a
+    // small emergency clearance in cinematic mode; normal play retains its
+    // larger shoulder-camera clearance.
+    this.clampAboveTerrain(this.cameraPosition, cinematicFrame ? 0.75 : 1.5);
 
     if (!cinematicFrame) {
       // Calculate look-at target - look at player's chest/torso height
@@ -2802,12 +4237,11 @@ export class ClientCameraSystem extends SystemBase {
     this.zoomDirty = false;
 
     if (cinematicFrame) {
-      this.applyCinematicLookSlerp(frameDt);
+      this.applyCinematicLookDirection();
     } else {
       // Camera always looks at the lookAt target
       // This keeps the player centered regardless of avatar rotation
       this.camera.lookAt(this.lookAtTarget);
-      this.cinematicLookSlerpReady = false;
     }
 
     // Dynamic FOV for cinematic mode
@@ -2829,35 +4263,33 @@ export class ClientCameraSystem extends SystemBase {
   private _lastCollisionRaycastTime = 0;
   private _cachedCollisionDistance = 0;
   private _lastCollisionDesired = 0;
+  private readonly _lastCollisionOrigin = new THREE.Vector3();
+  private readonly _lastCollisionDirection = new THREE.Vector3();
   private static readonly COLLISION_RAYCAST_THROTTLE_MS = 80;
 
   private computeCollisionAdjustedDistance(desiredDistance: number): number {
     if (!this.camera || !this.target) return desiredDistance;
 
-    // Throttle raycasts: reuse cached result if camera hasn't moved much
+    // Probe the current requested orbit, not cameraPosition from the previous
+    // update. Its effective radius and terrain clamp are applied afterward.
+    const dir = _v3_3
+      .setFromSphericalCoords(1, this.spherical.phi, this.spherical.theta)
+      .normalize();
+    const origin = _v3_2.copy(this.smoothedTarget);
+
+    // Reuse only the same ray segment. Orbit/target motion must not inherit a
+    // clear result from another direction or location during this interval.
     const now = performance.now();
     if (
       now - this._lastCollisionRaycastTime <
         ClientCameraSystem.COLLISION_RAYCAST_THROTTLE_MS &&
-      Math.abs(desiredDistance - this._lastCollisionDesired) < 0.1
+      desiredDistance === this._lastCollisionDesired &&
+      origin.equals(this._lastCollisionOrigin) &&
+      dir.equals(this._lastCollisionDirection)
     ) {
       return this._cachedCollisionDistance;
     }
 
-    // Direction from orbit center (smoothed target) to ideal camera position
-    const dir = _v3_3
-      .set(
-        this.cameraPosition.x - this.smoothedTarget.x,
-        this.cameraPosition.y - this.smoothedTarget.y,
-        this.cameraPosition.z - this.smoothedTarget.z,
-      )
-      .normalize();
-
-    const origin = _v3_2.set(
-      this.smoothedTarget.x,
-      this.smoothedTarget.y,
-      this.smoothedTarget.z,
-    );
     const hit = this.world.raycast(
       origin,
       dir,
@@ -2880,6 +4312,8 @@ export class ClientCameraSystem extends SystemBase {
 
     this._lastCollisionRaycastTime = now;
     this._lastCollisionDesired = desiredDistance;
+    this._lastCollisionOrigin.copy(origin);
+    this._lastCollisionDirection.copy(dir);
     this._cachedCollisionDistance = result;
     return result;
   }
@@ -2928,6 +4362,8 @@ export class ClientCameraSystem extends SystemBase {
     position: number[] | null;
     isControlling: boolean;
     spherical: { radius: number; phi: number; theta: number };
+    preparationShotActive: boolean;
+    preparationPairShotActive: boolean;
   } {
     // Use pre-allocated arrays to avoid memory allocations
     _cameraInfoOffset[0] = this.cameraOffset.x;
@@ -2956,7 +4392,63 @@ export class ClientCameraSystem extends SystemBase {
         phi: this.spherical.phi,
         theta: this.spherical.theta,
       },
+      preparationShotActive:
+        this.cinematicPhase === "IDLE" &&
+        (this.streamingPreparationActive ||
+          hasAuthoritativeStreamingPreparation(this.latestStreamingState)),
+      preparationPairShotActive: this.streamingPreparationPairShotActive,
     };
+  }
+
+  /**
+   * Probe the real scene collision layers from the current broadcast camera to
+   * a contestant body point. This is diagnostic-only: it cannot steer or
+   * mutate the camera while live acceptance measures an obstructed shot.
+   */
+  public getStreamingCinematicLineOfSight(
+    target: StreamingCameraPosition | null | undefined,
+  ): boolean | null {
+    if (
+      !this.camera ||
+      !target ||
+      !Number.isFinite(target.x) ||
+      !Number.isFinite(target.y) ||
+      !Number.isFinite(target.z)
+    ) {
+      return null;
+    }
+
+    _cinematicProbeTarget.set(target.x, target.y, target.z);
+    return this.hasLineOfSight(
+      this.camera.position,
+      _cinematicProbeTarget,
+      0.65,
+    );
+  }
+
+  /**
+   * Probe environment-only lower-body visibility with a tight target margin.
+   * Excluding player colliders avoids treating the contestant's own capsule as
+   * terrain while head/torso probes still detect contestant depth overlap.
+   */
+  public getStreamingCinematicEnvironmentLineOfSight(
+    target: StreamingCameraPosition | null | undefined,
+  ): boolean | null {
+    if (
+      !this.camera ||
+      !target ||
+      !Number.isFinite(target.x) ||
+      !Number.isFinite(target.y) ||
+      !Number.isFinite(target.z)
+    ) {
+      return null;
+    }
+
+    _cinematicProbeTarget.set(target.x, target.y, target.z);
+    return this.hasEnvironmentLineOfSight(
+      this.camera.position,
+      _cinematicProbeTarget,
+    );
   }
 
   destroy(): void {
@@ -3033,9 +4525,9 @@ export class ClientCameraSystem extends SystemBase {
     this.raycastService = null;
     this.cinematicLosMask = null;
     this.cinematicCollisionMask = null;
-    this.cinematicLookSlerpReady = false;
     this.terrainSystemRef = undefined;
     this.hasLastKnownPosition = false;
+    this.hasStreamingArenaFocus = false;
     this.resetCinematicSamplingState();
   }
 

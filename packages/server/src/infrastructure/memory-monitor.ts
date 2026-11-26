@@ -18,12 +18,100 @@ import fs from "fs";
 import path from "path";
 
 /** Memory sample for trend analysis */
-interface MemorySample {
+export interface MemorySample {
   timestamp: number;
   rss: number;
   heapUsed: number;
   heapTotal: number;
   external: number;
+}
+
+export interface MemoryGrowthTrend {
+  durationMs: number;
+  regressionMBPerMin: number;
+  medianWindowMBPerMin: number;
+  medianWindowGrowthMB: number;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const ordered = values.slice().sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 0
+    ? (ordered[middle - 1] + ordered[middle]) / 2
+    : ordered[middle];
+}
+
+/**
+ * Estimate a memory trend without letting one GC trough or endpoint spike
+ * masquerade as sustained growth.
+ */
+export function calculateMemoryGrowthTrend(
+  samples: MemorySample[],
+  metric: "rss" | "heapUsed",
+): MemoryGrowthTrend {
+  if (samples.length < 2) {
+    return {
+      durationMs: 0,
+      regressionMBPerMin: 0,
+      medianWindowMBPerMin: 0,
+      medianWindowGrowthMB: 0,
+    };
+  }
+
+  const MB = 1024 * 1024;
+  const firstTimestamp = samples[0].timestamp;
+  const lastTimestamp = samples[samples.length - 1].timestamp;
+  const durationMs = Math.max(0, lastTimestamp - firstTimestamp);
+  if (durationMs === 0) {
+    return {
+      durationMs,
+      regressionMBPerMin: 0,
+      medianWindowMBPerMin: 0,
+      medianWindowGrowthMB: 0,
+    };
+  }
+
+  const xValues = samples.map(
+    (sample) => (sample.timestamp - firstTimestamp) / 60_000,
+  );
+  const yValues = samples.map((sample) => sample[metric] / MB);
+  const meanX = xValues.reduce((sum, value) => sum + value, 0) / samples.length;
+  const meanY = yValues.reduce((sum, value) => sum + value, 0) / samples.length;
+  let covariance = 0;
+  let variance = 0;
+  for (let index = 0; index < samples.length; index++) {
+    const centeredX = xValues[index] - meanX;
+    covariance += centeredX * (yValues[index] - meanY);
+    variance += centeredX * centeredX;
+  }
+  const regressionMBPerMin = variance > 0 ? covariance / variance : 0;
+
+  const windowSize = Math.min(
+    samples.length,
+    Math.max(3, Math.ceil(samples.length / 4)),
+  );
+  const earlySamples = samples.slice(0, windowSize);
+  const lateSamples = samples.slice(-windowSize);
+  const earlyMedianMB = median(
+    earlySamples.map((sample) => sample[metric] / MB),
+  );
+  const lateMedianMB = median(lateSamples.map((sample) => sample[metric] / MB));
+  const earlyMedianTime = median(
+    earlySamples.map((sample) => sample.timestamp),
+  );
+  const lateMedianTime = median(lateSamples.map((sample) => sample.timestamp));
+  const medianDurationMin = (lateMedianTime - earlyMedianTime) / 60_000;
+  const medianWindowGrowthMB = lateMedianMB - earlyMedianMB;
+  const medianWindowMBPerMin =
+    medianDurationMin > 0 ? medianWindowGrowthMB / medianDurationMin : 0;
+
+  return {
+    durationMs,
+    regressionMBPerMin,
+    medianWindowMBPerMin,
+    medianWindowGrowthMB,
+  };
 }
 
 type BunJSCHeapStats = {
@@ -70,6 +158,10 @@ interface CollectionMetric {
   size: number;
   previousSize: number;
   growthRate: number;
+  initialSize: number;
+  minSize: number;
+  maxSize: number;
+  samples: number;
 }
 
 /** Memory leak warning */
@@ -379,41 +471,45 @@ export class MemoryMonitor {
       (s) => s.timestamp >= windowStart,
     );
 
-    if (windowSamples.length < 2) return;
+    if (windowSamples.length < 8) return;
 
-    // Calculate growth rates
-    const firstSample = windowSamples[0];
     const lastSample = windowSamples[windowSamples.length - 1];
-    const durationMs = lastSample.timestamp - firstSample.timestamp;
+    const durationMs = lastSample.timestamp - windowSamples[0].timestamp;
     const durationMin = durationMs / 60_000;
 
-    if (durationMin < 1) return; // Need at least 1 minute of data
+    // "Sustained" means the complete configured window. Sampling begins with
+    // an immediate baseline, so accepting a 90% window turns the default
+    // five-minute policy into a four-and-a-half-minute warning and can report
+    // allocator warm-up immediately before its next release.
+    if (durationMs < this.config.sustainedGrowthThresholdMs) return;
 
-    // RSS growth rate
-    const rssGrowthMB = (lastSample.rss - firstSample.rss) / MB;
-    const rssGrowthRate = rssGrowthMB / durationMin;
-
-    // Heap growth rate
-    const heapGrowthMB = (lastSample.heapUsed - firstSample.heapUsed) / MB;
-    const heapGrowthRate = heapGrowthMB / durationMin;
+    const rssTrend = calculateMemoryGrowthTrend(windowSamples, "rss");
+    const heapTrend = calculateMemoryGrowthTrend(windowSamples, "heapUsed");
+    const threshold = this.config.leakWarningThresholdMBPerMin;
 
     // Check for sustained growth
-    if (rssGrowthRate > this.config.leakWarningThresholdMBPerMin) {
+    if (
+      rssTrend.regressionMBPerMin > threshold &&
+      rssTrend.medianWindowMBPerMin > threshold
+    ) {
       this.recordLeakWarning({
         timestamp: now,
         type: "rss",
-        message: `Sustained RSS growth: ${rssGrowthRate.toFixed(2)} MB/min over ${durationMin.toFixed(1)} min`,
-        growthMB: rssGrowthMB,
+        message: `Sustained RSS growth: regression ${rssTrend.regressionMBPerMin.toFixed(2)} MB/min, median windows ${rssTrend.medianWindowMBPerMin.toFixed(2)} MB/min over ${durationMin.toFixed(1)} min`,
+        growthMB: rssTrend.medianWindowGrowthMB,
         durationMs,
       });
     }
 
-    if (heapGrowthRate > this.config.leakWarningThresholdMBPerMin) {
+    if (
+      heapTrend.regressionMBPerMin > threshold &&
+      heapTrend.medianWindowMBPerMin > threshold
+    ) {
       this.recordLeakWarning({
         timestamp: now,
         type: "heap",
-        message: `Sustained heap growth: ${heapGrowthRate.toFixed(2)} MB/min over ${durationMin.toFixed(1)} min`,
-        growthMB: heapGrowthMB,
+        message: `Sustained heap growth: regression ${heapTrend.regressionMBPerMin.toFixed(2)} MB/min, median windows ${heapTrend.medianWindowMBPerMin.toFixed(2)} MB/min over ${durationMin.toFixed(1)} min`,
+        growthMB: heapTrend.medianWindowGrowthMB,
         durationMs,
       });
     }
@@ -465,6 +561,10 @@ export class MemoryMonitor {
           size,
           previousSize,
           growthRate,
+          initialSize: existing?.initialSize ?? size,
+          minSize: Math.min(existing?.minSize ?? size, size),
+          maxSize: Math.max(existing?.maxSize ?? size, size),
+          samples: (existing?.samples ?? 0) + 1,
         });
 
         // Warn on significant collection growth
@@ -723,6 +823,10 @@ export class MemoryMonitor {
       size,
       previousSize,
       growthRate,
+      initialSize: existing?.initialSize ?? size,
+      minSize: Math.min(existing?.minSize ?? size, size),
+      maxSize: Math.max(existing?.maxSize ?? size, size),
+      samples: (existing?.samples ?? 0) + 1,
     });
   }
 
@@ -778,20 +882,15 @@ export class MemoryMonitor {
     let growthRateMBPerMin = 0;
 
     if (this.samples.length >= 2) {
-      const first = this.samples[0];
-      const last = this.samples[this.samples.length - 1];
-      const durationMin = (last.timestamp - first.timestamp) / 60_000;
+      growthRateMBPerMin = calculateMemoryGrowthTrend(
+        this.samples,
+        "heapUsed",
+      ).regressionMBPerMin;
 
-      if (durationMin > 0) {
-        const MB = 1024 * 1024;
-        growthRateMBPerMin =
-          (last.heapUsed - first.heapUsed) / MB / durationMin;
-
-        if (growthRateMBPerMin > 1) {
-          memoryTrend = "growing";
-        } else if (growthRateMBPerMin < -1) {
-          memoryTrend = "shrinking";
-        }
+      if (growthRateMBPerMin > 1) {
+        memoryTrend = "growing";
+      } else if (growthRateMBPerMin < -1) {
+        memoryTrend = "shrinking";
       }
     }
 

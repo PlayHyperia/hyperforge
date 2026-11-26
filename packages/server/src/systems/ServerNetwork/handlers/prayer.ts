@@ -15,11 +15,16 @@
  */
 
 import type { ServerSocket } from "../../../shared/types";
+import { randomUUID } from "node:crypto";
 import {
   EventType,
   World,
   isValidPrayerId,
   isValidPrayerTogglePayload,
+} from "@hyperforge/shared";
+import type {
+  PrayerActionReceipt,
+  PrayerCustodyView,
 } from "@hyperforge/shared";
 import { validateRequestTimestamp } from "../services/InputValidation";
 import { getPrayerRateLimiter } from "../services/SlidingWindowRateLimiter";
@@ -36,6 +41,54 @@ function sendPrayerError(socket: ServerSocket, reason: string): void {
   }
 }
 
+interface PrayerSystemRequestBoundary {
+  executePrayerToggleRequest(
+    playerId: string,
+    prayerId: string,
+    operationId: string,
+  ): Promise<PrayerActionReceipt>;
+  getPrayerCustody(playerId: string): PrayerCustodyView;
+}
+
+function getPrayerSystem(world: World): PrayerSystemRequestBoundary | null {
+  const system = world.getSystem(
+    "prayer",
+  ) as Partial<PrayerSystemRequestBoundary> | null;
+  return system?.executePrayerToggleRequest && system.getPrayerCustody
+    ? (system as PrayerSystemRequestBoundary)
+    : null;
+}
+
+function buildPrayerFailure(
+  playerId: string,
+  operationId: string,
+  reason: PrayerActionReceipt["reason"],
+  message: string,
+  custody?: PrayerCustodyView,
+): PrayerActionReceipt {
+  return {
+    success: false,
+    committed: false,
+    playerId,
+    operationId,
+    replayed: false,
+    pointUnits: custody?.pointUnits ?? 0,
+    points: custody?.points ?? 0,
+    maxPoints: custody?.maxPoints ?? 1,
+    activePrayers: [...(custody?.activePrayers ?? [])],
+    reason,
+    message,
+  };
+}
+
+function sendPrayerReceipt(
+  socket: ServerSocket,
+  requestId: string,
+  receipt: PrayerActionReceipt,
+): void {
+  socket.send?.("prayerActionReceipt", { requestId, ...receipt });
+}
+
 /**
  * Handle prayer toggle request from client
  * Validates input before forwarding to PrayerSystem
@@ -44,28 +97,65 @@ function sendPrayerError(socket: ServerSocket, reason: string): void {
  * @param data - Toggle request payload { prayerId: string }
  * @param world - Game world instance
  */
-export function handlePrayerToggle(
+export async function handlePrayerToggle(
   socket: ServerSocket,
   data: unknown,
   world: World,
-): void {
+): Promise<void> {
   const playerEntity = socket.player;
   if (!playerEntity) {
     return;
   }
 
   const playerId = playerEntity.id;
+  const rawPayload =
+    data && typeof data === "object"
+      ? (data as Record<string, unknown>)
+      : undefined;
+  const requestId =
+    typeof rawPayload?.requestId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      rawPayload.requestId,
+    )
+      ? rawPayload.requestId
+      : randomUUID();
+  const operationId = `network-prayer-toggle:${randomUUID()}`;
+  const prayerSystem = getPrayerSystem(world);
+  const custody = prayerSystem?.getPrayerCustody(playerId);
 
   // Rate limiting using shared infrastructure
   const rateLimiter = getPrayerRateLimiter();
   if (!rateLimiter.check(playerId)) {
-    sendPrayerError(socket, "You are toggling prayers too quickly.");
+    const message = "You are toggling prayers too quickly.";
+    sendPrayerError(socket, message);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "rate_limited",
+        message,
+        custody,
+      ),
+    );
     return;
   }
 
   // Validate request structure using type guard
   if (!isValidPrayerTogglePayload(data)) {
     console.warn(`[Prayer] Invalid toggle request format from ${playerId}`);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "invalid_request",
+        "Invalid prayer request",
+        custody,
+      ),
+    );
     return;
   }
 
@@ -73,12 +163,25 @@ export function handlePrayerToggle(
 
   // Validate timestamp to prevent replay attacks (if provided)
   // Cast through unknown since PrayerTogglePayload may have extra fields from network
-  const rawPayload = data as unknown as Record<string, unknown>;
-  if (rawPayload.timestamp !== undefined) {
-    const timestampValidation = validateRequestTimestamp(rawPayload.timestamp);
+  const validatedPayload = data as unknown as Record<string, unknown>;
+  if (validatedPayload.timestamp !== undefined) {
+    const timestampValidation = validateRequestTimestamp(
+      validatedPayload.timestamp,
+    );
     if (!timestampValidation.valid) {
       console.warn(
         `[Prayer] Replay attack blocked from ${playerId}: ${timestampValidation.reason}`,
+      );
+      sendPrayerReceipt(
+        socket,
+        requestId,
+        buildPrayerFailure(
+          playerId,
+          operationId,
+          "invalid_request",
+          "Prayer request timestamp rejected",
+          custody,
+        ),
       );
       return;
     }
@@ -89,7 +192,19 @@ export function handlePrayerToggle(
     console.warn(
       `[Prayer] Invalid prayer ID format "${prayerId}" from ${playerId}`,
     );
-    sendPrayerError(socket, "Invalid prayer");
+    const message = "Invalid prayer";
+    sendPrayerError(socket, message);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "invalid_request",
+        message,
+        custody,
+      ),
+    );
     return;
   }
 
@@ -105,21 +220,67 @@ export function handlePrayerToggle(
     duelSystemPrayer.canUsePrayer &&
     !duelSystemPrayer.canUsePrayer(playerId)
   ) {
-    sendPrayerError(socket, "Prayer is disabled in this duel.");
+    const message = "Prayer is disabled in this duel.";
+    sendPrayerError(socket, message);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "invalid_request",
+        message,
+        custody,
+      ),
+    );
     return;
   }
 
-  // Forward validated request to PrayerSystem
-  // PrayerSystem handles:
-  // - Prayer existence check via PrayerDataProvider
-  // - Level requirements
-  // - Prayer point check
-  // - Conflict resolution
-  // - State updates and persistence
-  world.emit(EventType.PRAYER_TOGGLE, {
-    playerId,
-    prayerId,
-  });
+  if (!prayerSystem) {
+    const message = "Prayer system is unavailable.";
+    sendPrayerError(socket, message);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "atomic_persistence_unavailable",
+        message,
+      ),
+    );
+    return;
+  }
+
+  try {
+    const receipt = await prayerSystem.executePrayerToggleRequest(
+      playerId,
+      prayerId,
+      operationId,
+    );
+    if (!receipt.success) {
+      sendPrayerError(socket, receipt.message ?? "Cannot toggle prayer");
+    }
+    sendPrayerReceipt(socket, requestId, receipt);
+  } catch (error) {
+    const message = "Prayer request could not be completed.";
+    console.error(
+      `[Prayer] Authoritative toggle failed for ${playerId}`,
+      error,
+    );
+    sendPrayerError(socket, message);
+    sendPrayerReceipt(
+      socket,
+      requestId,
+      buildPrayerFailure(
+        playerId,
+        operationId,
+        "persistence_failed",
+        message,
+        prayerSystem.getPrayerCustody(playerId),
+      ),
+    );
+  }
 }
 
 /**
@@ -163,8 +324,7 @@ export function handleAltarPray(
 
   // Block altar usage during active duels
   const duelSystemAltar = world.getSystem("duel") as
-    | { isPlayerInActiveDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInActiveDuel?: (id: string) => boolean } | undefined;
   if (duelSystemAltar?.isPlayerInActiveDuel?.(playerId)) {
     sendPrayerError(socket, "You can't use an altar during a duel.");
     return;

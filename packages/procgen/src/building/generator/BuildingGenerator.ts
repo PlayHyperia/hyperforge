@@ -125,6 +125,8 @@ import {
   createFloorPlane,
 } from "./geometry";
 import { UV_SCALE_PRESETS } from "./uvUtils";
+import { createGabledRoof } from "./GabledRoof";
+import { createHavenLodgeFinish } from "./HavenArchitecturalFinish";
 import {
   createWindowGeometry,
   getWindowStyleForBuildingType,
@@ -273,6 +275,11 @@ export class BuildingGenerator {
     // This optimization allows BuildingRenderingSystem to reuse layouts
     // already computed by TownSystem, avoiding duplicate computation
     const layout = options.cachedLayout || this.generateLayout(recipe, rng);
+    if (options.roofStyle === "gable" && options.generateLODs) {
+      throw new Error(
+        "Gabled buildings require silhouette-preserving LODs; box LODs are not supported",
+      );
+    }
     const { building, stats, geometryArrays, propPlacements } =
       this.buildBuilding(
         layout,
@@ -283,6 +290,7 @@ export class BuildingGenerator {
         useGreedyMeshing,
         enableInteriorLighting,
         interiorLightIntensity,
+        options,
       );
 
     const result: GeneratedBuilding = {
@@ -807,12 +815,57 @@ export class BuildingGenerator {
     useGreedyMeshing: boolean = true,
     enableInteriorLighting: boolean = true,
     interiorLightIntensity: number = 1.0,
+    geometryOptions: Pick<
+      BuildingGeneratorOptions,
+      "roofStyle" | "includeProps" | "architecturalFinish"
+    > = {},
   ): {
     building: THREE.Mesh | THREE.Group;
     stats: BuildingStats;
     geometryArrays: BuildingGeometryArrays;
     propPlacements: PropPlacements;
   } {
+    const gabled = geometryOptions.roofStyle === "gable";
+    const includeProps = geometryOptions.includeProps !== false;
+    const havenFinish = geometryOptions.architecturalFinish === "haven-v1";
+    if (
+      geometryOptions.architecturalFinish !== undefined &&
+      (!havenFinish ||
+        !gabled ||
+        !includeRoof ||
+        includeProps ||
+        layout.width !== 2 ||
+        layout.depth !== 2 ||
+        layout.foundationSteps !== 2)
+    )
+      throw new Error(
+        "Haven finish requires an unpropped 8×8m gabled lodge with two foundation steps",
+      );
+    if (
+      gabled &&
+      (layout.floors !== 1 ||
+        layout.basementPlans.length !== 0 ||
+        layout.width < 1 ||
+        layout.width > 8 ||
+        layout.depth < 1 ||
+        layout.depth > 8 ||
+        !Number.isInteger(layout.width) ||
+        !Number.isInteger(layout.depth) ||
+        !Number.isInteger(layout.foundationSteps) ||
+        layout.foundationSteps < 0 ||
+        layout.foundationSteps > 8 ||
+        layout.floorPlans.length !== 1 ||
+        layout.floorPlans[0].footprint.length !== layout.depth ||
+        layout.floorPlans[0].footprint.some(
+          (row) =>
+            row.length !== layout.width ||
+            Array.from(row).some((cell) => cell !== true),
+        ))
+    ) {
+      throw new Error(
+        "Gabled buildings require one complete rectangular 4–32m floor without a basement",
+      );
+    }
     // Set wall material ID for this building based on recipe
     const wallMaterial: WallMaterialType = recipe.wallMaterial || "brick";
     this.currentWallMaterialId = WALL_MATERIAL_IDS[wallMaterial];
@@ -855,17 +908,17 @@ export class BuildingGenerator {
     };
 
     const propPlacements: PropPlacements = {};
-    if (typeKey === "inn") {
+    if (includeProps && typeKey === "inn") {
       propPlacements.innBar = this.reserveInnBarPlacement(layout, recipe, rng);
     }
-    if (typeKey === "bank") {
+    if (includeProps && typeKey === "bank") {
       propPlacements.bankCounter = this.reserveBankCounterPlacement(
         layout,
         recipe,
         rng,
       );
     }
-    if (typeKey === "smithy") {
+    if (includeProps && typeKey === "smithy") {
       propPlacements.forge = this.reserveForgePlacement(layout, rng);
     }
 
@@ -1050,28 +1103,44 @@ export class BuildingGenerator {
     this.addStairRamps(floorGeometries, layout); // Invisible walkable ramps
     if (includeRoof) {
       // Actual roof pieces go to roof group
-      this.addRoofPieces(roofGeometries, layout, stats);
+      if (gabled) {
+        const gable = createGabledRoof(
+          layout.width * CELL_SIZE,
+          layout.depth * CELL_SIZE,
+          WALL_HEIGHT + this.currentFoundationHeight,
+          wallMaterial,
+          { architecturalFinish: geometryOptions.architecturalFinish },
+        );
+        roofGeometries.push(...gable.roofs);
+        wallGeometries.push(...gable.walls);
+        stats.roofPieces += gable.roofs.length;
+      } else {
+        this.addRoofPieces(roofGeometries, layout, stats);
+      }
     }
+    if (havenFinish) wallGeometries.push(...createHavenLodgeFinish(layout));
     // Props are non-walkable (counters, forges)
-    this.addBuildingProps(
-      wallGeometries,
-      layout,
-      recipe,
-      typeKey,
-      rng,
-      stats,
-      propPlacements,
-    );
+    if (includeProps) {
+      this.addBuildingProps(
+        wallGeometries,
+        layout,
+        recipe,
+        typeKey,
+        rng,
+        stats,
+        propPlacements,
+      );
 
-    // Interior furniture (tables, chairs, bookshelves, barrels, sconces)
-    this.addInteriorFurniture(
-      wallGeometries,
-      layout,
-      typeKey,
-      rng,
-      stats,
-      propPlacements,
-    );
+      // Interior furniture (tables, chairs, bookshelves, barrels, sconces)
+      this.addInteriorFurniture(
+        wallGeometries,
+        layout,
+        typeKey,
+        rng,
+        stats,
+        propPlacements,
+      );
+    }
 
     stats.rooms = layout.floorPlans.reduce(
       (count, plan) => count + plan.rooms.length,
@@ -1227,6 +1296,24 @@ export class BuildingGenerator {
       }
     }
 
+    if (havenFinish) {
+      const owned = new Set<THREE.BufferGeometry>();
+      let triangles = 0;
+      buildingGroup.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        owned.add(object.geometry);
+        triangles +=
+          (object.geometry.index?.count ??
+            object.geometry.getAttribute("position").count) / 3;
+      });
+      if (triangles > 2400) {
+        for (const geometry of owned) geometry.dispose();
+        throw new Error(
+          "Haven lodge finish exceeded its 2400-triangle recipe budget",
+        );
+      }
+    }
+
     // Build geometry arrays for multi-material rendering support
     const geometryArrays: BuildingGeometryArrays = {
       walls: wallGeometries,
@@ -1322,11 +1409,12 @@ export class BuildingGenerator {
   }
 
   /**
-   * Dispose of resources
+   * Dispose instance material. Whole-world teardown may also clear the shared
+   * primitive cache (legacy default); individual building leases must retain it.
    */
-  dispose(): void {
+  dispose(options: { clearGeometryCache?: boolean } = {}): void {
     this.uberMaterial.dispose();
-    geometryCache.clear();
+    if (options.clearGeometryCache !== false) geometryCache.clear();
   }
 
   /**

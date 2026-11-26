@@ -7,6 +7,32 @@
 // IMPORTANT: DO NOT export createServerWorld or any server systems here
 // This entry point is specifically for browser/client builds
 
+import { DataManager } from "./data/DataManager";
+import type { CompactBankPavilionManifest } from "./types/world/world-types";
+import {
+  getCompactServiceCourtDescriptors,
+  isCompactBankCourt,
+} from "./systems/shared/world/CompactServiceCourt";
+
+/** All admitted access sites, with the explicitly declared primary bank first. */
+export function getAdmittedCompactBankPavilions() {
+  const config = DataManager.getWorldConfig();
+  const primaryId = config?.compactServiceCourts?.primaryBankId;
+  const banks =
+    getCompactServiceCourtDescriptors(config).filter(isCompactBankCourt);
+  if (primaryId)
+    banks.sort(
+      (a, b) =>
+        Number(b.layoutId === primaryId) - Number(a.layoutId === primaryId),
+    );
+  return Object.freeze(banks);
+}
+
+/** Read only the manifest-admitted pavilion, even before its systems exist. */
+export function getAdmittedCompactBankPavilion(): CompactBankPavilionManifest | null {
+  return DataManager.getWorldConfig()?.compactBankPavilion ?? null;
+}
+
 export { createClientWorld } from "./runtime/createClientWorld";
 export { createViewerWorld } from "./runtime/createViewerWorld";
 export {
@@ -16,6 +42,44 @@ export {
 } from "./runtime/createEditorWorld";
 export type { EditorWorldOptions } from "./runtime/createEditorWorld";
 export { World } from "./core/World";
+// Inspection only: these accessors never initialize or load tree render pools.
+export {
+  getGLBTreeRenderOwnership,
+  type GLBTreeRenderOwnership,
+} from "./systems/shared/world/GLBTreeInstancer";
+export { getGLBTreeBatchedRenderOwnership } from "./systems/shared/world/GLBTreeBatchedInstancer";
+export {
+  ProcgenTreeInstancer,
+  type ProcgenTreeRenderOwnership,
+  type ProcgenTreeRenderOwnershipRecord,
+} from "./systems/shared/world/ProcgenTreeInstancer";
+// Explicit construction only. No default profile or render-loop integration;
+// native contact-lighting qualification uses the normal compiled client module.
+export { CompactContactAO } from "./utils/rendering/CompactContactAO";
+export { CompactRockOutcropVisuals } from "./systems/shared/world/CompactRockOutcropVisuals";
+export {
+  PLAYER_ROOT_CLEARANCE,
+  resolvePlayerSupportHeight,
+  resolvePlayerRootHeight,
+  type PlayerTerrainSupport,
+  type PlayerBuildingSupport,
+} from "./utils/movement/PlayerSupport";
+export {
+  STREAMING_RENDER_PROFILES,
+  resolveZoneNavigationMode,
+  type ZoneNavigationMode,
+  resolveExplicitStreamingRenderProfile,
+  resolveStreamingRenderFrameRate,
+  resolveStreamingRenderPreferences,
+  evaluateStreamingRenderProfileApplication,
+  type StreamingRenderPreferences,
+  type StreamingRenderAppliedState,
+  type StreamingGrassProfileReceipt,
+  type GrassSurfaceEligibility,
+  type StreamingRenderProfileApplication,
+  type StreamingRenderProfile,
+  type StreamingRenderProfileId,
+} from "./runtime/clientViewportMode";
 
 // Export editor systems
 export {
@@ -44,6 +108,8 @@ export { PlayerRemote } from "./entities/player/PlayerRemote";
 
 // Export System class from core systems
 export { System } from "./systems/shared";
+
+export type { QuestSnapshot, QuestListPayload } from "./types/game/quest-types";
 
 // Export all types from types/index.ts
 export type {
@@ -124,6 +190,124 @@ export type {
   StreamingGuardrailArenaPositions,
   StreamingGuardrailPhase,
 } from "./utils/rendering/streamingGuardrails";
+export {
+  AVATAR_AUTHORED_MOTION_ACTION_LIMIT,
+  AVATAR_AUTHORED_MOTION_SCHEMA_VERSION,
+  AVATAR_AUTHORED_MOTION_URL_MAX_LENGTH,
+  sanitizeAvatarAuthoredMotionUrl,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
+export type {
+  AvatarAuthoredMotionActionDiagnostics,
+  AvatarAuthoredMotionDiagnostics,
+} from "./extras/three/AvatarAuthoredMotionDiagnostics";
+
+// Export the exact privacy-safe public duel action observation contract.
+export {
+  STREAMING_DUEL_ACTION_OBSERVATION_LIMIT,
+  STREAMING_DUEL_ACTION_OBSERVATION_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_COMBAT_ROLES,
+  STREAMING_DUEL_PUBLIC_PRAYERS,
+  STREAMING_DUEL_PUBLIC_STYLES,
+  STREAMING_DUEL_PUBLIC_TACTICAL_MACROS,
+  parseStreamingDuelActionObservation,
+  parseStreamingDuelDamageObservationContext,
+  parseStreamingDuelExecutorObservationContext,
+  parseStreamingDuelFoodObservationContext,
+  parseStreamingDuelPrayerObservationContext,
+  parseStreamingDuelRoleSwitchObservationContext,
+  parseStreamingDuelStyleObservationContext,
+} from "./types/game/streaming-duel-action-observation";
+export {
+  DUEL_PREPARATION_COMBAT_ROLES,
+  DUEL_PREPARATION_ROLE_POLICY_VERSION,
+  EXTERNAL_DUEL_PREPARATION_MODEL,
+  EXTERNAL_DUEL_PREPARATION_MODEL_PROVIDER,
+  EXTERNAL_DUEL_PREPARATION_STRATEGY_PROTOCOL_VERSION,
+  MAX_EXTERNAL_DUEL_PREPARATION_ARMOR_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_OPPONENT_HISTORY,
+  MAX_EXTERNAL_DUEL_PREPARATION_FOOD_OPTIONS,
+  MAX_EXTERNAL_DUEL_PREPARATION_PLAN_OPTIONS,
+  normalizeExternalDuelPreparationPlanStrategyDecision,
+  normalizeExternalDuelPreparationPublicName,
+  normalizeExternalDuelPreparationOpponentHistorySummary,
+  normalizeExternalDuelPreparationPublicProfile,
+  normalizeExternalDuelPreparationStrategyDecision,
+  normalizeExternalDuelPreparationStrategyRequest,
+  normalizeExternalDuelPreparationStrategyResponse,
+  normalizeExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export type {
+  DuelPreparationBoundedStrategyDecision,
+  DuelPreparationCombatRole,
+  ExternalDuelPreparationArmorOption,
+  ExternalDuelPreparationOpponentHistoryEntry,
+  ExternalDuelPreparationOpponentHistorySummary,
+  ExternalDuelPreparationFoodOption,
+  ExternalDuelPreparationPlanOption,
+  ExternalDuelPreparationPublicProfile,
+  ExternalDuelPreparationStrategyDecision,
+  ExternalDuelPreparationStrategyRequest,
+  ExternalDuelPreparationStrategyResponse,
+  ExternalDuelPreparationTacticalStrategy,
+} from "./types/game/external-duel-preparation-strategy";
+export type {
+  StreamingDuelActionObservation,
+  StreamingDuelDamageObservationContext,
+  StreamingDuelExecutorObservationContext,
+  StreamingDuelFoodObservationContext,
+  StreamingDuelPrayerObservationContext,
+  StreamingDuelRoleSwitchObservationContext,
+  StreamingDuelStyleObservationContext,
+  StreamingDuelPublicCombatRole,
+  StreamingDuelPublicPrayer,
+  StreamingDuelPublicStyle,
+  StreamingDuelPublicTacticalMacro,
+} from "./types/game/streaming-duel-action-observation";
+
+// Export the strict frozen strategy summary disclosed to duel spectators.
+export {
+  STREAMING_DUEL_PUBLIC_STRATEGY_APPROACHES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_ATTACK_STYLES,
+  STREAMING_DUEL_PUBLIC_STRATEGY_SOURCES,
+  STREAMING_DUEL_STRATEGY_SUMMARY_SCHEMA_VERSION,
+  parseStreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+export type {
+  StreamingDuelPublicStrategyApproach,
+  StreamingDuelPublicStrategyAttackStyle,
+  StreamingDuelPublicStrategySource,
+  StreamingDuelStrategySummary,
+} from "./types/game/streaming-duel-strategy-summary";
+
+// Export the strict public status for the selected pre-market contestants.
+export {
+  STREAMING_DUEL_PREPARATION_SUMMARY_SCHEMA_VERSION,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITY_TRAIL_LIMIT,
+  STREAMING_DUEL_PUBLIC_PREPARATION_ACTIVITIES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_MODES,
+  STREAMING_DUEL_PUBLIC_PREPARATION_STATUSES,
+  parseStreamingDuelPreparationSummary,
+} from "./types/game/streaming-duel-preparation-summary";
+export type {
+  StreamingDuelPreparationContestantSummary,
+  StreamingDuelPreparationSummary,
+  StreamingDuelPublicPreparationActivity,
+  StreamingDuelPublicPreparationMode,
+  StreamingDuelPublicPreparationStatus,
+} from "./types/game/streaming-duel-preparation-summary";
+
+// Export the strict, privacy-safe preparation processing presentation contract.
+export {
+  PROCESSING_SKILLS,
+  isProcessingSkill,
+  normalizeProcessingInteractionPresentationState,
+  resolveProcessingInteractionBodyEmote,
+} from "./types/game/processing-interaction-presentation";
+export type {
+  ProcessingInteractionPresentationPhase,
+  ProcessingInteractionPresentationState,
+  ProcessingInteractionTargetPosition,
+} from "./types/game/processing-interaction-presentation";
 
 // Export death/loot types for shadow state and transaction tracking
 export type {
@@ -181,8 +365,17 @@ export { TERRAIN_CONSTANTS } from "./constants/GameConstants";
 // Client input constants (click-to-move distance, drag threshold, raycast range)
 export { INPUT } from "./systems/client/interaction/constants";
 
-// Export avatar options for character creation
-export { AVATAR_OPTIONS } from "./data/avatars";
+// Export avatar options for character creation and duel identity
+export {
+  AVATAR_OPTIONS,
+  CANONICAL_DUEL_AVATAR_ID,
+  CANONICAL_DUEL_AVATAR_URL,
+  DEFAULT_AVATAR_URL,
+  getAvatarByUrl,
+  getDuelAvatarUrlForStyle,
+} from "./data/avatars";
+export { DIAGNOSTIC_AVATAR_OPTIONS } from "./data/avatars";
+export type { AvatarOption, DuelAvatarStyle } from "./data/avatars";
 
 // Export skill data for UI displays
 export {
@@ -233,6 +426,7 @@ export { ClientInterface } from "./systems/client/ClientInterface"; // UI state,
 export { ClientLoader } from "./systems/client/ClientLoader";
 export { Environment } from "./systems/shared";
 export { ClientNetwork } from "./systems/client/ClientNetwork";
+export type { EntryRetryState } from "./types/events";
 export { ClientGraphics } from "./systems/client/ClientGraphics";
 export { ClientRuntime } from "./systems/client/ClientRuntime"; // Client lifecycle and diagnostics
 export { ClientAudio } from "./systems/client/ClientAudio";
@@ -240,19 +434,75 @@ export { ClientLiveKit } from "./systems/client/ClientLiveKit";
 export { ClientInput } from "./systems/client/ClientInput";
 export {
   attachEquipmentVisualToVRM,
+  createDynamicBowStringController,
   extractEquipmentAttachmentData,
+  hasValidDynamicBowString,
+  isSkinnedEquipmentSkeletonCompatible,
   removeEquipmentVisual,
   resolveEquipmentVisualData,
   resolveEquipmentVisualUrls,
+  shouldRenderHeldEquipmentVisual,
+  validateStreamingEquipmentVisualModel,
 } from "./systems/client/EquipmentVisualHelpers";
 export type {
+  DuelEquipmentFitData,
+  DynamicBowStringController,
+  DynamicBowStringData,
+  DynamicBowStringTransition,
   EquipmentAttachmentData,
   EquipmentVisualModelData,
   EquipmentVisualStore,
   EquipmentVisualUrlResolution,
+  HeldEquipmentVisualState,
+  StreamingEquipmentVisualValidation,
+  StreamingEquipmentVisualValidationReason,
 } from "./systems/client/EquipmentVisualHelpers";
+export {
+  EquipmentVisualSystem,
+  STREAMING_DUEL_INTENTIONALLY_INVISIBLE_EQUIPMENT_SLOTS,
+  STREAMING_DUEL_VISIBLE_EQUIPMENT_SLOTS,
+  isStreamingDuelVisibleEquipmentSlot,
+} from "./systems/client/EquipmentVisualSystem";
+export type {
+  StreamingDuelEquipmentVisualContract,
+  StreamingDuelBowPresentationDiagnostics,
+  StreamingDuelBowTransitionEvent,
+  StreamingDuelEquipmentVisualExpectation,
+  StreamingDuelEquipmentVisualLoadStatus,
+  StreamingDuelEquipmentVisualReadiness,
+  StreamingDuelEquipmentVisualRequirement,
+  StreamingDuelVisibleEquipmentSlot,
+  StreamingPreparationVisualDiagnostics,
+  StreamingPreparationVisualPlayerDiagnostics,
+} from "./systems/client/EquipmentVisualSystem";
+export type {
+  StreamingArrowVisualCancellationEvent,
+  StreamingArrowVisualImpactEvent,
+  StreamingArrowVisualSpawnEvent,
+  StreamingProjectileVisualDiagnostics,
+} from "./systems/client/ProjectileRenderer";
+export type {
+  StreamingDamagePresentationDiagnostics,
+  StreamingDamagePresentationEvent,
+} from "./systems/client/DamageSplatSystem";
 export { ClientActions } from "./systems/client/ClientActions";
 export { DevStats } from "./systems/client/DevStats"; // FPS counter and dev performance telemetry
+export {
+  classifyStreamResourceCategory,
+  StreamPerformanceTelemetry,
+  normalizeStreamingPerformanceSnapshot,
+} from "./systems/client/StreamPerformanceTelemetry";
+export type {
+  StreamFramePerformanceSnapshot,
+  StreamLongFrameSample,
+  StreamPerformanceFrameSample,
+  StreamRendererMetricSnapshot,
+  StreamResourceCategory,
+  StreamResourceMetricSnapshot,
+  StreamResourcePerformanceSnapshot,
+  StreamPerformanceResourceSample,
+  StreamingPerformanceSnapshot,
+} from "./systems/client/StreamPerformanceTelemetry";
 export { EventBus } from "./systems/shared";
 export { System as SystemClass } from "./systems/shared";
 export { SystemBase } from "./systems/shared";
@@ -280,6 +530,7 @@ export {
 } from "./physics/PhysXManager";
 
 // Export renderer utilities (WebGPU only - no WebGL fallback)
+export { RendererPreparationTimeoutError } from "./utils/rendering/RendererPreparationQueue";
 export {
   createRenderer,
   configureRenderer,
@@ -333,9 +584,15 @@ export {
   isValidEquipmentSlot,
   getIncompatibleRules,
   areRulesCompatible,
+  getCombatArenaBoundsContainingPositions,
+  getDuelArenaProtectionBounds,
+  isPositionInsideDuelArenaLobby,
+  isPositionInsideDuelArenaZone,
+  isPositionInsideCombatArena,
   type DuelRuleDefinition,
   type EquipmentSlotDefinition,
   type DuelEquipmentSlot,
+  type DuelCombatArenaBounds,
 } from "./data/duel-manifest";
 export { ControlPriorities } from "./systems/client/ControlPriorities";
 export { downloadFile } from "./utils/downloadFile";
@@ -365,6 +622,16 @@ export function getPhysXAssetPath(assetName: string): string {
 
 // Export THREE namespace as a default-only module export
 export { default as THREE } from "./extras/three/three";
+export { BorrowedMaterialEnvironment } from "./extras/three/BorrowedMaterialEnvironment";
+export { fitBoundedDirectionalShadow } from "./extras/three/BoundedDirectionalShadow";
+
+// Explicit temporal consumers must share the live world's deformation registries.
+// Exporting these helpers does not select materials or change renderer defaults.
+export { createGrassMotionMaterial } from "./systems/shared/world/GrassGroundingGpu";
+export {
+  TreeMotionMaterial,
+  treeMotionVelocity,
+} from "./systems/shared/world/TreeWind";
 
 // Export Vector3 compatibility utilities for plugin use
 export {
@@ -530,7 +797,24 @@ export type {
   SystemEvent,
   EventHandler,
 } from "./systems/shared";
-export type { EventMap } from "./types/events";
+export type {
+  EventMap,
+  ProcessingRequestCommitStatus,
+  ProcessingProgressPhase,
+  ProcessingRejectionReason,
+  ProcessingRequestProgressPayload,
+  ProcessingRequestRejectedPayload,
+  ProcessingRequestStatusPayload,
+  ProcessingRequestEnvelope,
+  RecoverableProcessingRequest,
+  RecoverableProcessingRequestStatus,
+  ProcessingSkill,
+} from "./types/events";
+export {
+  getProcessingRequestOperationId,
+  normalizeProcessingRequestEnvelope,
+  normalizeProcessingRequestId,
+} from "./types/events";
 export type {
   AnyEvent,
   EventType as EventTypeEnum,
@@ -661,7 +945,66 @@ export type {
   UserRow,
   EntityRow,
   DatabaseRow,
+  InventoryDebitRequirement,
+  InventoryDebitCommitRequest,
+  InventoryDebitCommitReceipt,
+  GroundItemSourceStatus,
+  GroundItemSourceState,
+  GroundItemSourceRegistrationRequest,
+  GroundItemSourceRegistrationReceipt,
+  GroundItemDropCommitRequest,
+  GroundItemDropCommitReceipt,
+  GroundItemDeathCommitRequest,
+  GroundItemDeathCommitReceipt,
+  GroundItemPickupCommitRequest,
+  GroundItemPickupCommitReceipt,
+  FoodConsumptionOperationStatus,
+  FoodConsumptionCompletionReason,
+  FoodConsumptionCommitRequest,
+  FoodConsumptionCompleteRequest,
+  FoodConsumptionCommitReceipt,
+  DuelDamageCompetitiveAuthority,
+  DuelDamageCompetitiveTerminal,
+  DuelDamageCommitRequest,
+  DuelDamageCommitReceipt,
+  BoneBurialCommitRequest,
+  BoneBurialCommitReceipt,
+  QuestRewardSkill,
+  QuestCompletionRewardItem,
+  QuestStartRewardItem,
+  QuestStartCommitRequest,
+  QuestStartCommitReceipt,
+  QuestCompletionRewardXp,
+  QuestCompletionProgressReceipt,
+  QuestCompletionCommitRequest,
+  QuestCompletionCommitReceipt,
+  EquipmentStackDebitCommitRequest,
+  EquipmentStackDebitCommitReceipt,
+  AmmunitionRecoveryDisposition,
+  AmmunitionShotCommitRequest,
+  AmmunitionShotCommitReceipt,
+  StreamingDuelExecutorCommand,
+  StreamingDuelExecutorCommandOutcome,
+  StreamingDuelExecutorCommandRequest,
+  StreamingDuelExecutorCommandCompletionRequest,
+  StreamingDuelExecutorCommandReceipt,
+  PrayerPersistenceSnapshot,
+  PrayerStateTransitionKind,
+  PrayerStateCommitRequest,
+  PrayerStateCommitReceipt,
 } from "./types/network/database";
+
+export type {
+  PrayerActionFailureReason,
+  PrayerActionReceipt,
+  PrayerCustodyView,
+} from "./systems/shared/character/PrayerSystem";
+export type {
+  BoneBurialFailureReason,
+  BoneBurialReceipt,
+  FoodConsumptionFailureReason,
+  FoodConsumptionReceipt,
+} from "./systems/shared/character/PlayerSystem";
 
 // Export entity types
 export type {

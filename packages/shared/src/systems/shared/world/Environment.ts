@@ -1,11 +1,25 @@
 import THREE, { CSMShadowNode } from "../../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
+import { UniformDirectionalShadowNode } from "../../../extras/three/UniformDirectionalShadow";
+import {
+  resolveSingleMapShadowFlow,
+  resolveGrassLightingModelCandidate,
+} from "../../../runtime/clientViewportMode";
 
 import { Node as NodeClass } from "../../../nodes/Node";
 import { System } from "../infrastructure/System";
 
 // NOTE: Import directly to avoid circular dependency through barrel file
 import { SkySystem } from "./SkySystem";
+import {
+  OutdoorEnvironment,
+  resolveOutdoorCalibration,
+} from "./OutdoorEnvironment";
+import { DataManager } from "../../../data/DataManager";
+import {
+  isCompactSculptProfile,
+  worldTerrainProfileIdentity,
+} from "./WorldTerrainProfile";
 import { setLamppostNightMix } from "./LamppostLightMask";
 import { FOG_NEAR, FOG_FAR } from "./FogConfig";
 import {
@@ -45,7 +59,7 @@ const _sunDirection = new THREE.Vector3(0, -1, 0);
 // - CSMShadowNode handles texel snapping internally - don't add extra snapping
 //
 // Set ENABLE_CSM=true to use cascaded shadow maps (heavy GPU cost).
-// Default: false — uses a single 2048 shadow map centered on the player.
+// Default: false — uses one 4096 map, island-anchored for compact terrain.
 export function isCsmEnabled(): boolean {
   try {
     if (
@@ -142,15 +156,33 @@ export class Environment extends System {
   model: EnvironmentModel | null = null;
   skys: SkyHandle[] = [];
   sky: THREE.Mesh | null = null;
-  skyN: number = 0;
   bgUrl?: string;
   hdrUrl?: string;
   skyInfo!: SkyInfo;
   private skySystem?: SkySystem;
+  private outdoorEnvironment?: OutdoorEnvironment;
+
+  /** Diagnostic receipt only; material inheritance is owned by the scene. */
+  getOutdoorLightingStatus() {
+    return this.outdoorEnvironment?.getStatus() ?? null;
+  }
 
   /** Sky fog texture from SkySystem — used by terrain, water, vegetation for sky-color fog */
   get skyFogTexture(): THREE.Texture | null {
     return this.skySystem?.skyFogTexture ?? null;
+  }
+
+  /** Read-only snapshot of the last render-boundary fog preparation. */
+  getFogSkyReceipt() {
+    return this.skySystem?.getFogSkyReceipt() ?? null;
+  }
+
+  /** Called only after the main camera has been selected for this render. */
+  prepareForRender(
+    renderer: THREE.WebGPURenderer,
+    camera: THREE.PerspectiveCamera,
+  ): void {
+    this.skySystem?.prepareForRender(renderer, camera);
   }
 
   // Main directional light (sun/moon) with CSM shadow support
@@ -159,13 +191,37 @@ export class Environment extends System {
 
   // Shadow stabilization - prevents flickering/swimming
   private targetLightDirection: THREE.Vector3 = new THREE.Vector3(0, -1, 0);
-  private lastLightAnchor: THREE.Vector3 = new THREE.Vector3(); // Camera anchor position
+  // Unit ray used only for placement; never feed normalization into the lerp.
+  // Retain the last valid ray while opposite sun/moon vectors cancel out.
+  private readonly lightPlacementDirection = new THREE.Vector3(0, -1, 0);
+  private lastLightAnchor: THREE.Vector3 = new THREE.Vector3();
+  private readonly compactLightAnchor = new THREE.Vector3();
+  private useCompactLightAnchor = false;
+  private sunLightTerrainProfileIdentity: string | null = null;
+  private sunLightTerrainProfileOwner: THREE.DirectionalLight | null = null;
   private readonly LIGHT_DISTANCE = 400; // Distance from target to light
+
+  /** Admitted compact profile used to construct this exact scene-owned sun.
+   * This is construction provenance, not a claim about current GPU uniforms.
+   */
+  getSunLightTerrainProfileIdentity(): string | null {
+    const owner = this.sunLightTerrainProfileOwner;
+    const scene = this.world.stage?.scene;
+    return owner !== null &&
+      owner === this.sunLight &&
+      owner.parent === scene &&
+      owner.target.parent === scene
+      ? this.sunLightTerrainProfileIdentity
+      : null;
+  }
 
   private currentExposure: number = EXPOSURE.DAY;
 
   // CSMShadowNode for WebGPU cascaded shadows
   private csmShadowNode: InstanceType<typeof CSMShadowNode> | null = null;
+  private readonly singleMapShadowFlow = resolveSingleMapShadowFlow();
+  private readonly grassLightingModel = resolveGrassLightingModelCandidate();
+  private singleMapShadowNode: UniformDirectionalShadowNode | null = null;
 
   // CSM frustum update optimization - only recalculate when needed
   // Set to true on: viewport resize, camera near/far change, CSM config change
@@ -216,7 +272,7 @@ export class Environment extends System {
     // Create ambient lighting for day/night visibility
     this.createAmbientLighting();
 
-    this.updateSky();
+    await this.updateSky();
 
     // Load initial model (non-blocking - don't let model errors break sky)
     try {
@@ -246,9 +302,26 @@ export class Environment extends System {
     // Re-evaluate sky state now that SkySystem exists
     await this.updateSky();
 
-    // No environment map - using planar reflections for water, toon/rough style for everything else
-    if (this.world.stage?.scene) {
-      this.world.stage.scene.environment = null;
+    // Prepare one shared sky IBL before world startup completes. Standard PBR
+    // actors, equipment and terrain inherit it; planar water remains separate.
+    if (this.world.stage?.scene && this.world.graphics) {
+      if (
+        this.grassLightingModel &&
+        (!DataManager.getWorldConfig() ||
+          !isCompactSculptProfile(DataManager.getWorldTerrainProfile()))
+      )
+        throw new Error("Rough leaf lighting requires compact sculpt terrain");
+      this.outdoorEnvironment = new OutdoorEnvironment(
+        this.world.stage.scene,
+        resolveOutdoorCalibration(),
+        this.grassLightingModel !== undefined,
+      );
+      await this.outdoorEnvironment.initialize(
+        this.world.graphics,
+        this.skySystem.createLightingCapture(),
+        this.skySystem.dayPhase,
+      );
+      this.updateAmbientLighting(this.skySystem.dayIntensity);
     }
 
     this.world.settings?.on("change", this.onSettingsChange);
@@ -279,8 +352,7 @@ export class Environment extends System {
     let glb = this.world.loader?.get("model", url);
     if (!glb)
       glb = (await this.world.loader?.load("model", url)) as
-        | LoaderResult
-        | undefined;
+        LoaderResult | undefined;
     if (!glb) return;
 
     if (this.model) this.model.deactivate();
@@ -345,7 +417,7 @@ export class Environment extends System {
 
   getSky() {}
 
-  async updateSky() {
+  async updateSky(): Promise<void> {
     if (!this.isClientWithGraphics) return;
 
     // Check if stage is available
@@ -392,13 +464,8 @@ export class Environment extends System {
     const fogFar = node?._fogFar ?? base.fogFar ?? FOG_FAR;
     const fogColor = node?._fogColor ?? base.fogColor ?? "#d4c8b8";
 
-    const n = ++this.skyN;
-    // Load textures (kept for potential future use, currently SkySystem is active)
-    let _bgTexture;
-    if (bgUrl) _bgTexture = await this.world.loader?.load("texture", bgUrl);
-    let _hdrTexture;
-    if (hdrUrl) _hdrTexture = await this.world.loader?.load("hdr", hdrUrl);
-    if (n !== this.skyN) return;
+    // Legacy URLs remain metadata only. The procedural sky and its captured IBL
+    // own rendering, so unused texture downloads must not gate world startup.
 
     // When using SkySystem, completely remove the legacy sky sphere from scene
     // Just hiding it isn't enough - it can still interfere with planar reflections
@@ -406,9 +473,8 @@ export class Environment extends System {
     if (this.sky.parent) {
       this.sky.parent.remove(this.sky);
     }
-    // Completely remove environment map when using SkySystem
-    // This ensures planar reflections don't pick up the HDR
-    this.world.stage.scene.environment = null;
+    // The procedural sky owns the visible background; IBL is independent and
+    // must survive shadow preference/legacy sky refreshes.
     this.world.stage.scene.background = null;
 
     // Set initial light direction and apply to sun light
@@ -439,6 +505,11 @@ export class Environment extends System {
   }
 
   override destroy(): void {
+    this.sunLightTerrainProfileOwner = null;
+    this.sunLightTerrainProfileIdentity = null;
+    this.useCompactLightAnchor = false;
+    this.outdoorEnvironment?.dispose();
+    this.outdoorEnvironment = undefined;
     if (this.skySystem) {
       this.skySystem.destroy();
       this.skySystem = undefined;
@@ -473,15 +544,8 @@ export class Environment extends System {
       this.sky = null;
     }
 
-    if (
-      this.world.stage?.scene?.environment &&
-      this.world.stage.scene.environment instanceof THREE.Texture
-    ) {
-      this.world.stage.scene.environment.dispose();
-      this.world.stage.scene.environment = null;
-    }
-
     // Dispose sun light and CSM
+    this.disposeSingleMapShadowNode();
     if (this.csmShadowNode) {
       this.csmShadowNode.dispose();
       this.csmShadowNode = null;
@@ -525,6 +589,7 @@ export class Environment extends System {
     // Update sky system first to get current sun position
     if (this.skySystem) {
       this.skySystem.update(_delta);
+      this.outdoorEnvironment?.update(this.skySystem.dayPhase);
 
       // Sync directional light (sun/moon) with sky position
       if (this.sunLight) {
@@ -609,7 +674,7 @@ export class Environment extends System {
         }
 
         // ===================
-        // UPDATE LIGHT POSITION - Follow camera for consistent shadows
+        // UPDATE LIGHT POSITION - Use the active world/shadow anchor
         // ===================
         this.updateSunLightPosition();
       }
@@ -652,35 +717,37 @@ export class Environment extends System {
   }
 
   /**
-   * Update sun light position to follow camera for consistent shadow coverage.
-   *
-   * SHADOW STABILIZATION:
-   * CSMShadowNode handles texel snapping internally per cascade in its updateBefore() method.
-   * We only need to position the main light - CSMShadowNode creates internal lights for each
-   * cascade and snaps them to texel boundaries using the correct per-cascade frustum size.
-   *
-   * Light direction is smoothly interpolated in update() to prevent sudden direction changes.
+   * Compact single-map shadows stay anchored to the island, not the altitude of
+   * an overview camera. Camera cuts therefore cannot translate the shadow volume
+   * above the ground. This is not an all-world depth/texel-quality certificate.
+   * CSM retains its camera anchor and internal per-cascade fitting/snapping.
+   * Normalize only the placement ray: its length must not pull the shadow
+   * camera into the island during sun/moon interpolation. A light-only height
+   * offset would tilt surface lighting away from the sky and water direction.
    */
   private updateSunLightPosition(): void {
     if (!this.sunLight) return;
 
-    // Get camera position (where shadows should be centered)
-    const cameraPos = this.world.camera.position;
-
-    // Use camera position directly - CSMShadowNode handles texel snapping per cascade
-    // Adding our own snapping here would conflict with CSM's internal snapping
-    this.lastLightAnchor.copy(cameraPos);
-
-    // Position light OPPOSITE to light direction (light comes FROM this position)
-    this.sunLight.position.set(
-      this.lastLightAnchor.x - this.lightDirection.x * this.LIGHT_DISTANCE,
-      this.lastLightAnchor.y -
-        this.lightDirection.y * this.LIGHT_DISTANCE +
-        100,
-      this.lastLightAnchor.z - this.lightDirection.z * this.LIGHT_DISTANCE,
+    this.lastLightAnchor.copy(
+      this.useCompactLightAnchor
+        ? this.compactLightAnchor
+        : this.world.camera.position,
     );
 
-    // Target is where shadows should be centered (camera position)
+    const rayLengthSq = this.lightDirection.lengthSq();
+    if (Number.isFinite(rayLengthSq) && rayLengthSq > 1e-12) {
+      this.lightPlacementDirection
+        .copy(this.lightDirection)
+        .multiplyScalar(1 / Math.sqrt(rayLengthSq));
+    }
+
+    // Match water's target-to-light ray except when the input has no reliable
+    // direction; that brief cancellation keeps the last valid placement above.
+    this.sunLight.position
+      .copy(this.lastLightAnchor)
+      .addScaledVector(this.lightPlacementDirection, -this.LIGHT_DISTANCE);
+
+    // Target and light translate together, preserving direction and radiometry.
     this.sunLight.target.position.copy(this.lastLightAnchor);
     this.sunLight.target.updateMatrixWorld();
 
@@ -755,6 +822,14 @@ export class Environment extends System {
    * @param dayIntensity 0-1 (0 = night, 1 = day)
    */
   private updateAmbientLighting(dayIntensity: number): void {
+    // The calibrated environment replaces this fill budget, not adds to it.
+    // Keep analytic lights available during preparation and on server-free
+    // legacy test worlds, but never double-count them in the ready scene.
+    if (this.outdoorEnvironment?.ready) {
+      if (this.hemisphereLight) this.hemisphereLight.intensity = 0;
+      if (this.ambientLight) this.ambientLight.intensity = 0;
+      return;
+    }
     const nightIntensity = 1 - dayIntensity;
 
     if (this.hemisphereLight) {
@@ -809,8 +884,7 @@ export class Environment extends System {
 
     // Apply immediately to renderer
     const graphics = this.world.graphics as
-      | { renderer?: { toneMappingExposure?: number } }
-      | undefined;
+      { renderer?: { toneMappingExposure?: number } } | undefined;
     if (graphics?.renderer) {
       graphics.renderer.toneMappingExposure = this.currentExposure;
     }
@@ -823,8 +897,7 @@ export class Environment extends System {
    */
   private updateAutoExposure(dayIntensity: number): void {
     const graphics = this.world.graphics as
-      | { renderer?: { toneMappingExposure?: number } }
-      | undefined;
+      { renderer?: { toneMappingExposure?: number } } | undefined;
     if (!graphics?.renderer) return;
     // Using smoothstep for natural-feeling transitions
     const t = dayIntensity * dayIntensity * (3 - 2 * dayIntensity); // smoothstep
@@ -916,9 +989,6 @@ export class Environment extends System {
 
   override lateUpdate(_delta: number) {
     if (!this.isClientWithGraphics) return;
-    if (this.skySystem) {
-      this.skySystem.lateUpdate(_delta);
-    }
     if (!this.sky) return;
 
     this.sky.position.x = this.world.rig.position.x;
@@ -954,8 +1024,9 @@ export class Environment extends System {
 
   /**
    * Build directional light (sun/moon) with optional CSMShadowNode.
+   * Shadow quality "none" retains directional illumination without shadow maps.
    * When ENABLE_CSM=true: uses cascaded shadow maps (multiple passes, heavy).
-   * When ENABLE_CSM=false (default): uses a single shadow map centered on the player.
+   * When ENABLE_CSM=false: one map, fixed to admitted compact terrain when present.
    */
   buildSunLight(): void {
     if (!this.isClientWithGraphics) return;
@@ -975,7 +1046,43 @@ export class Environment extends System {
 
     const scene = this.world.stage.scene;
 
+    const terrainProfile =
+      !useCSM && csmConfig.enabled && DataManager.getWorldConfig()
+        ? DataManager.getWorldTerrainProfile()
+        : null;
+    const compactProfile =
+      terrainProfile && isCompactSculptProfile(terrainProfile)
+        ? terrainProfile
+        : null;
+    // Fail before replacing any working light. Selecting no shadows is still a
+    // valid quality change and never enables a map just to satisfy this trial.
+    if (
+      this.singleMapShadowFlow &&
+      csmConfig.enabled &&
+      (!useWebGPU || useCSM || !compactProfile)
+    )
+      throw new Error(
+        "Uniform shadow flow requires WebGPU and compact single-map shadows",
+      );
+    this.sunLightTerrainProfileOwner = null;
+    this.sunLightTerrainProfileIdentity = null;
+    this.useCompactLightAnchor = false;
+
+    // Startup/quality-change only: no per-frame terrain sampling, scene traversal
+    // or allocation. DataManager already admitted and froze this world profile.
+    let terrainProfileIdentity: string | null = null;
+    if (compactProfile) {
+      this.compactLightAnchor.set(
+        compactProfile.island.centerX,
+        compactProfile.height.baseOffset,
+        compactProfile.island.centerZ,
+      );
+      this.useCompactLightAnchor = true;
+      terrainProfileIdentity = worldTerrainProfileIdentity(compactProfile);
+    }
+
     // Dispose existing light and CSM
+    this.disposeSingleMapShadowNode();
     if (this.csmShadowNode) {
       this.csmShadowNode.dispose();
       this.csmShadowNode = null;
@@ -992,15 +1099,14 @@ export class Environment extends System {
       this.sunLight = null;
     }
 
-    if (!csmConfig.enabled) {
-      return;
-    }
-
     // Create directional light
     this.sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
-    this.sunLight.castShadow = true;
+    this.sunLight.castShadow = csmConfig.enabled;
 
-    if (useCSM) {
+    if (!csmConfig.enabled) {
+      // Shadow quality controls occlusion, not sun/moon illumination.
+      this.sunLight.name = "SunLight_NoShadows";
+    } else if (useCSM) {
       // ---- CSM PATH ----
       this.sunLight.name = useWebGPU ? "SunLight_CSM" : "SunLight_WebGL";
       this.sunLight.shadow.mapSize.width = csmConfig.shadowMapSize;
@@ -1017,9 +1123,6 @@ export class Environment extends System {
       shadowCam.top = baseFrustumSize;
       shadowCam.bottom = -baseFrustumSize;
       shadowCam.updateProjectionMatrix();
-
-      this.sunLight.position.set(100, 200, 100);
-      this.sunLight.target.position.set(0, 0, 0);
 
       const customSplitCallback = (
         cascades: number,
@@ -1059,7 +1162,9 @@ export class Environment extends System {
       this.sunLight.name = "SunLight_Single";
       this.sunLight.shadow.mapSize.width = SINGLE_SHADOW_MAP_SIZE;
       this.sunLight.shadow.mapSize.height = SINGLE_SHADOW_MAP_SIZE;
-      this.sunLight.shadow.bias = 0.0002;
+      // The admitted compact single-map path keeps the normal offset without
+      // advancing receiver depth into its own shadow. Other paths are unchanged.
+      this.sunLight.shadow.bias = this.useCompactLightAnchor ? 0 : 0.0002;
       this.sunLight.shadow.normalBias = 0.01;
 
       const shadowCam = this.sunLight.shadow.camera;
@@ -1071,9 +1176,13 @@ export class Environment extends System {
       shadowCam.bottom = -SINGLE_SHADOW_FRUSTUM;
       shadowCam.updateProjectionMatrix();
 
-      this.sunLight.position.set(100, 200, 100);
-      this.sunLight.target.position.set(0, 0, 0);
       this.csmShadowNode = null;
+      if (this.singleMapShadowFlow === "uniform-v1") {
+        this.singleMapShadowNode = new UniformDirectionalShadowNode(
+          this.sunLight,
+        );
+        this.sunLight.shadow.shadowNode = this.singleMapShadowNode;
+      }
 
       console.log(
         `[Environment] Single shadow map (${SINGLE_SHADOW_MAP_SIZE}px, ${SINGLE_SHADOW_FRUSTUM}m frustum)`,
@@ -1082,6 +1191,24 @@ export class Environment extends System {
 
     scene.add(this.sunLight);
     scene.add(this.sunLight.target);
+    this.updateSunLightPosition();
+    if (terrainProfileIdentity !== null) {
+      this.sunLightTerrainProfileIdentity = terrainProfileIdentity;
+      this.sunLightTerrainProfileOwner = this.sunLight;
+    }
+  }
+
+  private disposeSingleMapShadowNode(): void {
+    const node = this.singleMapShadowNode;
+    if (!node) return;
+    this.singleMapShadowNode = null;
+    const allocatedMap = node.shadowMap;
+    node.dispose();
+    // ShadowNode owns the allocated target. Detach only that same target so
+    // retiring the light cannot dispose it a second time; foreign maps survive.
+    if (allocatedMap && node.shadow.map === allocatedMap)
+      node.shadow.map = null;
+    if (node.shadow.shadowNode === node) delete node.shadow.shadowNode;
   }
 
   /**

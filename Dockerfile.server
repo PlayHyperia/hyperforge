@@ -4,16 +4,16 @@
 #   docker build --platform linux/amd64 -f Dockerfile.server -t ghcr.io/alternatefutures/hyperia:v12 .
 #
 # Issues this Dockerfile works around:
-#   1. better-sqlite3 — node-gyp fails under QEMU (stripped before install)
+#   1. Native dependency lifecycle scripts are skipped during the portable build
 #   2. Bun workspace links — Docker COPY flattens symlinks; recreated manually
 #   3. Bun per-package node_modules — not hoisted to root; copied explicitly
-#   4. procgen tsc — type errors cause partial emit; build continues with || true
+#   4. Every workspace build is fail-closed; partial TypeScript emit is rejected
 
 # ─── Builder ────────────────────────────────────────────────────────────────
 
-FROM node:22-bookworm-slim AS node-build-tools
+FROM node:22.23.2-bookworm-slim AS node-build-tools
 
-FROM oven/bun:1.1.38-debian AS builder
+FROM oven/bun:1.3.14-debian AS builder
 
 RUN apt-get update && apt-get install -y \
     python3 make g++ pkg-config \
@@ -27,24 +27,36 @@ ENV CI=true \
     SKIP_ASSETS=true \
     HYPERIA_SKIP_BROWSER_INSTALL=true
 
-# Vite 8 requires Node 20.19+ or 22.12+. Bun 1.1.38 reports Node 22.6.0 when
-# running Vite-backed scripts, so copy in a current real Node binary for those
-# build steps while keeping Bun pinned for installs and the rest of the build.
+# Immutable revision from PlayHyperia/assets. Deliberate asset updates must bump
+# this build input so a production image can be reproduced after branch changes.
+ARG HYPERIA_ASSETS_REV=ef024c400b8b6139a917b2cdf589b515f6e18c8f
+
+# Vite 8 requires Node 20.19+ or 22.12+. Keep an explicit current Node binary
+# for Vite-backed scripts while Bun remains pinned for installs and the rest of
+# the build.
 COPY --from=node-build-tools /usr/local/bin/node /usr/local/bin/node
 
 # Root manifests.
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
 # Workspace package manifests (determines dependency graph).
+COPY packages/app/package.json              ./packages/app/
+COPY packages/asset-forge/package.json      ./packages/asset-forge/
+COPY packages/contracts/package.json        ./packages/contracts/
 COPY packages/physx-js-webidl/package.json ./packages/physx-js-webidl/
 COPY packages/decimation/package.json      ./packages/decimation/
+COPY packages/duel-oracle-evm/package.json ./packages/duel-oracle-evm/
+COPY packages/duel-oracle-solana/package.json ./packages/duel-oracle-solana/
 COPY packages/impostors/package.json       ./packages/impostors/
 COPY packages/procgen/package.json         ./packages/procgen/
 COPY packages/shared/package.json          ./packages/shared/
 COPY packages/plugin-hyperia/package.json ./packages/plugin-hyperia/
+COPY packages/sim-engine/package.json      ./packages/sim-engine/
+COPY packages/vast-keeper/package.json     ./packages/vast-keeper/
 COPY packages/web3/package.json            ./packages/web3/
 COPY packages/server/package.json          ./packages/server/
 COPY packages/client/package.json          ./packages/client/
+COPY packages/website/package.json         ./packages/website/
 
 # Install hook scripts + PhysX WASM prebuilts.
 COPY scripts ./scripts
@@ -62,20 +74,10 @@ COPY packages/web3               ./packages/web3
 COPY packages/server             ./packages/server
 COPY packages/client             ./packages/client
 
-# better-sqlite3's node-gyp build segfaults under QEMU cross-compilation.
-# The project uses bun:sqlite / PostgreSQL, so it's safe to remove.
-RUN bun -e " \
-  const fs = require('fs'); \
-  for (const f of ['packages/shared/package.json', 'package.json']) { \
-    const p = JSON.parse(fs.readFileSync(f)); \
-    delete p.dependencies?.['better-sqlite3']; \
-    delete p.devDependencies?.['better-sqlite3']; \
-    fs.writeFileSync(f, JSON.stringify(p, null, 2)); \
-  }"
-
-# Match CI's stable install mode. `--trust` can hang in container builds,
-# while the frozen install path already passes in CI.
-RUN bun install --frozen-lockfile
+# Keep the checked-in manifests and lockfile identical so the frozen install is
+# meaningful. Native install scripts are unnecessary for the PostgreSQL-backed
+# server build and are not portable under QEMU cross-compilation.
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # Bun may hoist workspace deps without materializing per-package node_modules.
 # Create every runtime COPY source explicitly so missing dirs don't break builds.
@@ -88,21 +90,23 @@ RUN mkdir -p \
     packages/web3/node_modules \
     packages/client/node_modules
 
-# Download game asset manifests (bypass CDN reliance on boot).
-RUN rm -rf packages/server/world/assets && bun scripts/ensure-assets.mjs
+# Download game asset manifests (bypass CDN reliance on boot), verify the exact
+# immutable revision, and exclude repository metadata from the runtime image.
+RUN rm -rf packages/server/world/assets && \
+    HYPERIA_ASSETS_REV="${HYPERIA_ASSETS_REV}" bun scripts/ensure-assets.mjs && \
+    test "$(git -C packages/server/world/assets rev-parse HEAD)" = "${HYPERIA_ASSETS_REV}" && \
+    rm -rf packages/server/world/assets/.git
 
 # Build workspace packages in dependency order.
 RUN cd /app/packages/physx-js-webidl && bun run build && \
     cd /app/packages/decimation && bun run build && \
-    cd /app/packages/impostors && node ../../node_modules/typescript/bin/tsc --project tsconfig.build.json && \
-    node ../../node_modules/vite/bin/vite.js build --config vite.lib.config.ts && \
-    cd /app/packages/procgen && (bun run build || true) && \
+    cd /app/packages/impostors && bun run build && \
+    cd /app/packages/procgen && bun run build && \
     cd /app/packages/shared && bun run build && \
     cd /app/packages/plugin-hyperia && bun run build && \
     cd /app/packages/web3 && bun run build && \
     cd /app/packages/server && bun run build && \
-    cd /app/packages/client && NODE_OPTIONS='--max-old-space-size=4096' \
-    node ../../node_modules/vite/bin/vite.js build
+    cd /app/packages/client && bun run build:cf
 
 # ─── Runtime ────────────────────────────────────────────────────────────────
 #
@@ -110,23 +114,29 @@ RUN cd /app/packages/physx-js-webidl && bun run build && \
 # server loads uWebSockets.js native bindings, which depend on Node's N-API
 # and fail under Bun's `node` compatibility shim.
 
-FROM node:22-trixie-slim AS runtime
+FROM node:22.23.2-trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y \
     libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
     libjpeg62-turbo libgif7 librsvg2-2 \
-    ca-certificates curl \
+    ca-certificates curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ffmpeg -version && ffprobe -version
 
 WORKDIR /app
 
 ENV NODE_ENV=production \
     CI=true \
     SKIP_ASSETS=true \
-    HYPERIA_SKIP_BROWSER_INSTALL=true
+    HYPERIA_SKIP_BROWSER_INSTALL=true \
+    HYPERIA_DATA_DIR=/app/data \
+    ELIZA_DATA_DIR_CHARACTERS=/app/data/eliza/characters \
+    DUEL_ARENA_ORACLE_STORE_PATH=/app/data/duel-arena-oracle/records.json
 
-# Package manifests from builder (has better-sqlite3 stripped).
+# Package manifests from the frozen builder dependency graph.
 COPY --from=builder /app/package.json /app/bun.lock ./
+COPY --from=builder /app/scripts/node-runtime-policy.mjs /app/scripts/start-hyperia-server.mjs ./scripts/
 COPY --from=builder /app/packages/physx-js-webidl/package.json ./packages/physx-js-webidl/
 COPY --from=builder /app/packages/decimation/package.json      ./packages/decimation/
 COPY --from=builder /app/packages/impostors/package.json       ./packages/impostors/
@@ -145,7 +155,7 @@ COPY --from=builder /app/packages/client/package.json          ./packages/client
 #   3. Per-package node_modules for every workspace member used at runtime
 COPY --from=builder /app/node_modules ./node_modules
 
-RUN mkdir -p node_modules/@hyperia && \
+RUN mkdir -p node_modules/@hyperforge && \
     ln -s ../../packages/physx-js-webidl    node_modules/@hyperforge/physx-js-webidl && \
     ln -s ../../packages/decimation         node_modules/@hyperforge/decimation && \
     ln -s ../../packages/impostors          node_modules/@hyperforge/impostor && \
@@ -173,16 +183,38 @@ COPY --from=builder /app/packages/shared/build          ./packages/shared/build
 COPY --from=builder /app/packages/plugin-hyperia/dist ./packages/plugin-hyperia/dist
 COPY --from=builder /app/packages/web3/dist             ./packages/web3/dist
 COPY --from=builder /app/packages/server/dist           ./packages/server/dist
-COPY --from=builder /app/packages/server/scripts        ./packages/server/scripts
-COPY --from=builder /app/packages/server/src            ./packages/server/src
+COPY --from=builder /app/packages/server/scripts/register-hooks.mjs \
+    /app/packages/server/scripts/node-esm-hooks.mjs      ./packages/server/scripts/
+COPY --from=builder /app/packages/server/src/database/migrations \
+    ./packages/server/src/database/migrations
 COPY --from=builder /app/packages/server/world          ./packages/server/world
 COPY --from=builder /app/packages/client/dist           ./packages/client/dist
 
-RUN mkdir -p ./packages/server/public/live
+RUN mkdir -p \
+    /app/assets \
+    /app/data/eliza/characters \
+    /app/data/duel-arena-oracle \
+    /app/heap-snapshots \
+    /app/packages/server/public/live && \
+    chmod -R a=rX /app/packages/server/src/database/migrations && \
+    chown -R node:node \
+    /app/assets \
+    /app/data \
+    /app/heap-snapshots \
+    /app/packages/server/public/live \
+    /app/packages/server/world/assets/manifests
+
+USER node
+
+# Source worktrees can contain owner-only migration files. Normalize them to
+# immutable runtime-readable inputs and prove the production UID can read them.
+RUN test -r /app/packages/server/src/database/migrations/0000_numerous_korvac.sql && \
+    test -r /app/packages/server/src/database/migrations/meta/_journal.json && \
+    test ! -w /app/packages/server/src/database/migrations/0000_numerous_korvac.sql
 
 EXPOSE 5555
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=5 \
     CMD curl -fsS http://localhost:${PORT:-5555}/status >/dev/null || exit 1
 
-CMD ["node", "--import", "/app/packages/server/scripts/register-hooks.mjs", "/app/packages/server/dist/index.js"]
+CMD ["node", "--import", "/app/packages/server/scripts/register-hooks.mjs", "/app/scripts/start-hyperia-server.mjs"]

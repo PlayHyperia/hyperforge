@@ -21,6 +21,7 @@
  */
 
 import * as THREE from "three";
+import type { TextureNode } from "three/webgpu";
 import { texture, uniform, Fn, float } from "three/tsl";
 import type { World } from "../../../core/World";
 import type { CollisionMatrix } from "../movement/CollisionMatrix";
@@ -88,7 +89,7 @@ export class GrassExclusionGrid {
 
   // Exclusion texture (R8: 0=grass ok, 1=excluded)
   private exclusionTexture: THREE.DataTexture | null = null;
-  private exclusionTextureNode: ReturnType<typeof texture> | null = null;
+  private exclusionTextureNode: TextureNode<"vec4"> | null = null;
   private textureData: Uint8Array | null = null;
 
   // Uniforms for shader coordinate conversion
@@ -210,7 +211,7 @@ export class GrassExclusionGrid {
   /**
    * Get the exclusion texture node for shader integration.
    */
-  getTextureNode(): ReturnType<typeof texture> | null {
+  getTextureNode(): TextureNode<"vec4"> | null {
     return this.exclusionTextureNode;
   }
 

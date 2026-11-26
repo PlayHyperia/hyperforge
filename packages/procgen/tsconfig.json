@@ -3,14 +3,13 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": [
-      "ES2022",
-      "DOM"
-    ],
+    "lib": ["ES2022", "DOM"],
+    "types": [],
     "jsx": "react-jsx",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "inlineSources": true,
     "outDir": "dist",
     "rootDir": "src",
     "baseUrl": ".",
@@ -44,14 +43,13 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": [
-    "src/**/*"
-  ],
+  "include": ["src/**/*"],
   "exclude": [
     "node_modules",
     "dist",
     "tests",
     "viewer",
+    "src/building/viewer",
     "**/*.test.ts"
   ]
 }

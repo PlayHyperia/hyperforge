@@ -46,6 +46,26 @@ type InventorySystemAccess = {
   getInventory: (
     playerId: string,
   ) => { items: Array<{ itemId: string }> } | null;
+  reloadFromDatabase?: (playerId: string) => Promise<void>;
+};
+
+type DatabaseSystemAccess = {
+  getDeathLockAsync?: (playerId: string) => Promise<{
+    playerId: string;
+    gravestoneId?: string | null;
+    deathOperationId?: string | null;
+  } | null>;
+  commitSafeAreaDeathGravestoneLootAsync?: (request: {
+    operationId: string;
+    playerId: string;
+    deathOperationId: string;
+    gravestoneId: string;
+    items?: Array<{ itemId: string; quantity: number }>;
+  }) => Promise<{
+    replayed: boolean;
+    transferred: Array<{ itemId: string; quantity: number }>;
+    remaining: Array<{ itemId: string; quantity: number }>;
+  }>;
 };
 
 /** Validated loot context returned by shared validation */
@@ -105,7 +125,7 @@ export class GravestoneLootSystem extends SystemBase {
       name: "gravestone-loot",
       dependencies: {
         required: [],
-        optional: ["inventory"],
+        optional: ["inventory", "database"],
       },
       autoCleanup: true,
     });
@@ -205,7 +225,20 @@ export class GravestoneLootSystem extends SystemBase {
     transactionId: string,
   ): LootContext | null {
     const entity = this.getLootableEntity(corpseId);
-    if (!entity) return null;
+    if (!entity) {
+      // A service may validate an entity immediately before it is removed by
+      // another authoritative action. Always close the exact request instead
+      // of making the caller wait for its custody timeout.
+      this.emitLootResult(
+        playerId,
+        transactionId,
+        false,
+        corpseId,
+        "",
+        "INVALID_REQUEST",
+      );
+      return null;
+    }
 
     const ownerId = entity.getOwnerId();
     const zoneType = entity.getZoneType();
@@ -266,6 +299,121 @@ export class GravestoneLootSystem extends SystemBase {
     return entity as unknown as LootableEntity;
   }
 
+  /**
+   * Safe-area gravestones use database-first custody. Returning true means the
+   * request was fully handled (successfully or fail-closed); false selects the
+   * legacy non-safe-area path.
+   */
+  private async processAtomicSafeAreaLoot(
+    ctx: LootContext,
+    data: {
+      corpseId: string;
+      playerId: string;
+      transactionId: string;
+    },
+    requested?: Array<{ itemId: string; quantity: number }>,
+  ): Promise<boolean> {
+    if (ctx.zoneType !== "safe_area") return false;
+
+    const { corpseId, playerId, transactionId } = data;
+    const { entity, ownerId, zoneType } = ctx;
+    const databaseSystem = this.world.getSystem(
+      "database",
+    ) as unknown as DatabaseSystemAccess | null;
+    const inventorySystem = this.getInventorySystem();
+    if (
+      ownerId !== playerId ||
+      !databaseSystem?.getDeathLockAsync ||
+      !databaseSystem.commitSafeAreaDeathGravestoneLootAsync ||
+      !inventorySystem?.reloadFromDatabase
+    ) {
+      this.emitLootResult(
+        playerId,
+        transactionId,
+        false,
+        corpseId,
+        ownerId,
+        "INVALID_REQUEST",
+        undefined,
+        undefined,
+        zoneType,
+      );
+      return true;
+    }
+
+    try {
+      const deathLock = await databaseSystem.getDeathLockAsync(ownerId);
+      if (!deathLock?.deathOperationId || deathLock.gravestoneId !== corpseId) {
+        throw new Error("safe_death_lock_mismatch");
+      }
+      const receipt =
+        await databaseSystem.commitSafeAreaDeathGravestoneLootAsync({
+          operationId: transactionId,
+          playerId,
+          deathOperationId: deathLock.deathOperationId,
+          gravestoneId: corpseId,
+          ...(requested ? { items: requested } : {}),
+        });
+
+      // Mirror the committed inventory before removing the visible custody.
+      // A crash at any boundary can replay the same database receipt.
+      await inventorySystem.reloadFromDatabase(playerId);
+      for (const item of receipt.transferred) {
+        if (!entity.removeItem(item.itemId, item.quantity)) {
+          throw new Error("safe_death_gravestone_memory_mismatch");
+        }
+      }
+
+      const single = requested?.length === 1 ? receipt.transferred[0] : null;
+      this.emitLootResult(
+        playerId,
+        transactionId,
+        true,
+        corpseId,
+        ownerId,
+        undefined,
+        single?.itemId,
+        single?.quantity ?? receipt.transferred.length,
+        zoneType,
+      );
+      this.world.emit(EventType.AUDIT_LOG, {
+        action: requested ? "LOOT_SUCCESS" : "LOOT_ALL_SUCCESS",
+        playerId: ownerId,
+        actorId: playerId,
+        entityId: corpseId,
+        items: receipt.transferred,
+        zoneType,
+        position: entity.getPosition(),
+        success: true,
+        transactionId,
+        replayed: receipt.replayed,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      const inventoryFull =
+        error instanceof Error && error.message === "safe_death_inventory_full";
+      if (inventoryFull) {
+        this.world.emit(EventType.UI_MESSAGE, {
+          playerId,
+          message: "Your inventory is full!",
+          type: "error",
+        });
+      }
+      this.emitLootResult(
+        playerId,
+        transactionId,
+        false,
+        corpseId,
+        ownerId,
+        inventoryFull ? "INVENTORY_FULL" : "INVALID_REQUEST",
+        undefined,
+        undefined,
+        zoneType,
+      );
+    }
+    return true;
+  }
+
   private isRateLimited(playerId: string): boolean {
     const now = Date.now();
 
@@ -292,8 +440,7 @@ export class GravestoneLootSystem extends SystemBase {
 
   private isPlayerInDeathState(playerId: string): boolean {
     const playerEntity = this.world.entities?.get?.(playerId) as
-      | { data?: { deathState?: DeathState } }
-      | undefined;
+      { data?: { deathState?: DeathState } } | undefined;
     if (!playerEntity?.data?.deathState) return false;
     return (
       playerEntity.data.deathState === DeathState.DYING ||
@@ -396,6 +543,12 @@ export class GravestoneLootSystem extends SystemBase {
     const ctx = this.validateLootPermissions(corpseId, playerId, transactionId);
     if (!ctx) return;
     const { entity, ownerId, zoneType } = ctx;
+
+    if (
+      await this.processAtomicSafeAreaLoot(ctx, data, [{ itemId, quantity }])
+    ) {
+      return;
+    }
 
     const lootItems = entity.getLootItems();
     const item = lootItems.find((i) => i.itemId === itemId);
@@ -544,6 +697,8 @@ export class GravestoneLootSystem extends SystemBase {
     const ctx = this.validateLootPermissions(corpseId, playerId, transactionId);
     if (!ctx) return;
     const { entity, ownerId, zoneType } = ctx;
+
+    if (await this.processAtomicSafeAreaLoot(ctx, data)) return;
 
     const lootItems = entity.getLootItems();
     if (lootItems.length === 0) {

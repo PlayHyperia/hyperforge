@@ -16,8 +16,6 @@ import { WorkerPool } from "./WorkerPool";
 import {
   buildGetBaseHeightAtJS,
   buildComputeBiomeWeightsJS,
-  MAX_HEIGHT,
-  WATER_LEVEL_NORMALIZED,
 } from "../../systems/shared/world/TerrainHeightParams";
 import { buildBiomeConstantsJS } from "../../systems/shared/world/TerrainBiomeTypes";
 import {
@@ -25,24 +23,13 @@ import {
   buildHeightHelpersJS,
   buildBiomeInfluencesJS,
   buildCreateBiomeNoiseSetsJS,
+  buildTerrainWorkerProfileGuardJS,
+  assertTerrainWorkerRequest,
+  assertTerrainWorkerResult,
 } from "./TerrainWorkerShared";
+import type { TerrainWorkerConfig } from "./TerrainWorker";
 
-export interface QuadChunkWorkerConfig {
-  MAX_HEIGHT: number;
-  BIOME_GAUSSIAN_COEFF: number;
-  BIOME_BOUNDARY_NOISE_SCALE: number;
-  BIOME_BOUNDARY_NOISE_AMOUNT: number;
-  WATER_THRESHOLD: number;
-  WATER_LEVEL_NORMALIZED: number;
-  SHORELINE_THRESHOLD: number;
-  SHORELINE_STRENGTH: number;
-  SHORELINE_MIN_SLOPE: number;
-  SHORELINE_SLOPE_SAMPLE_DISTANCE: number;
-  SHORELINE_LAND_BAND: number;
-  SHORELINE_LAND_MAX_MULTIPLIER: number;
-  SHORELINE_UNDERWATER_BAND: number;
-  UNDERWATER_DEPTH_MULTIPLIER: number;
-}
+export type QuadChunkWorkerConfig = TerrainWorkerConfig;
 
 export interface QuadChunkWorkerInput {
   type: "generateQuadChunk";
@@ -62,6 +49,7 @@ export interface QuadChunkWorkerInput {
 }
 
 export interface QuadChunkWorkerOutput {
+  terrainProfileIdentity: string;
   type: "quadChunkResult";
   centerX: number;
   centerZ: number;
@@ -76,9 +64,10 @@ export interface QuadChunkWorkerOutput {
   riverProximity: Float32Array;
 }
 
-const QUAD_CHUNK_WORKER_CODE = `
+export const QUAD_CHUNK_WORKER_CODE = `
 ${buildNoiseGeneratorJS()}
 ${buildBiomeConstantsJS()}
+${buildTerrainWorkerProfileGuardJS()}
 
 var BIOME_IDS = {};
 BIOME_IDS[BT_TUNDRA] = 0;
@@ -86,6 +75,7 @@ BIOME_IDS[BT_FOREST] = 1;
 BIOME_IDS[BT_CANYON] = 2;
 
 function generateQuadChunk(input) {
+  assertTerrainWorkerInput(input);
   const { centerX, centerZ, size, resolution, config, seed, biomeCenters, biomes } = input;
   const {
     MAX_HEIGHT,
@@ -221,6 +211,7 @@ function generateQuadChunk(input) {
 
   return {
     type: 'quadChunkResult',
+    terrainProfileIdentity: config.TERRAIN_PROFILE_IDENTITY,
     centerX,
     centerZ,
     size,
@@ -307,11 +298,14 @@ export function getQuadChunkWorkerPool(
 export async function generateQuadChunkAsync(
   input: QuadChunkWorkerInput,
 ): Promise<QuadChunkWorkerOutput | null> {
+  assertTerrainWorkerRequest(input.config, input.seed);
   const pool = getQuadChunkWorkerPool();
   if (!pool) {
     return null;
   }
-  return pool.execute(input);
+  const result = await pool.execute(input);
+  assertTerrainWorkerResult(result, input.config);
+  return result;
 }
 
 export function terminateQuadChunkWorkerPool(): void {

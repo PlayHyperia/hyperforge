@@ -91,6 +91,11 @@ const defaults = {
   gap: 0,
 };
 
+type UIHitTestNode = Node & {
+  box?: { left: number; top: number; width: number; height: number } | null;
+  _display?: string;
+};
+
 export class UI extends Node implements HotReloadable {
   // Add all the missing private property declarations
   private _space: string = defaults.space;
@@ -162,9 +167,7 @@ export class UI extends Node implements HotReloadable {
       );
     }
     this._scaler = (data.scaler ?? defaults.scaler) as
-      | [number, number]
-      | [number, number, number]
-      | null;
+      [number, number] | [number, number, number] | null;
     this._pointerEvents = data.pointerEvents ?? defaults.pointerEvents;
 
     this._transparent = data.transparent ?? defaults.transparent;
@@ -457,7 +460,7 @@ export class UI extends Node implements HotReloadable {
     this.setDirty();
   }
 
-  commit(didMove) {
+  commit(didMove: boolean) {
     if (this.ctx!.network.isServer) {
       return;
     }
@@ -625,8 +628,12 @@ export class UI extends Node implements HotReloadable {
     return null;
   }
 
-  findNodeAt(x, y) {
-    const findHitNode = (node, offsetX = 0, offsetY = 0) => {
+  findNodeAt(x: number, y: number): Node | null {
+    const findHitNode = (
+      node: UIHitTestNode,
+      offsetX = 0,
+      offsetY = 0,
+    ): Node | null => {
       if (!node.box || node._display === "none") return null;
       const left = offsetX + node.box.left;
       const top = offsetY + node.box.top;
@@ -645,7 +652,12 @@ export class UI extends Node implements HotReloadable {
     return findHitNode(this);
   }
 
-  createMaterial(lit, texture, transparent, doubleside) {
+  createMaterial(
+    lit: boolean,
+    texture: THREE.Texture,
+    transparent: boolean,
+    doubleside: boolean,
+  ) {
     // Use Node materials for WebGPU compatibility
     const material = lit
       ? new MeshStandardNodeMaterial({ roughness: 1, metalness: 0 })
@@ -1203,7 +1215,12 @@ export class UI extends Node implements HotReloadable {
   }
 }
 
-function pivotGeometry(pivot, geometry, width, height) {
+function pivotGeometry(
+  pivot: string,
+  geometry: THREE.BufferGeometry,
+  width: number,
+  height: number,
+) {
   const halfWidth = width / 2;
   const halfHeight = height / 2;
   switch (pivot) {
@@ -1237,7 +1254,12 @@ function pivotGeometry(pivot, geometry, width, height) {
   }
 }
 
-function pivotCanvas(pivot, canvas, _width, _height) {
+function pivotCanvas(
+  pivot: string,
+  canvas: HTMLCanvasElement,
+  _width: number,
+  _height: number,
+) {
   // const halfWidth = width / 2
   // const halfHeight = height / 2
   switch (pivot) {
@@ -1272,21 +1294,21 @@ function pivotCanvas(pivot, canvas, _width, _height) {
   }
 }
 
-function isBillboard(value) {
+function isBillboard(value: string) {
   return billboards.includes(value);
 }
 
-function isPivot(value) {
+function isPivot(value: string) {
   return pivots.includes(value);
 }
 
-function isSpace(value) {
+function isSpace(value: string) {
   return spaces.includes(value);
 }
 
 // pivotOffset == ( - pivotX, - pivotY )
 // i.e., the negative of whatever pivotGeometry just did.
-function getPivotOffset(pivot, width, height) {
+function getPivotOffset(pivot: string, width: number, height: number) {
   // The top-left corner is originally (-halfW, +halfH).
   // Then pivotGeometry adds the following translation:
   const halfW = width / 2;
@@ -1339,7 +1361,7 @@ function getPivotOffset(pivot, width, height) {
   return new THREE.Vector2(-halfW + tx, +halfH + ty);
 }
 
-function _isEdge(value) {
+function _isEdge(value: unknown) {
   if (isNumber(value)) {
     return true;
   }
@@ -1349,6 +1371,6 @@ function _isEdge(value) {
   return false;
 }
 
-function isScaler(value) {
+function isScaler(value: unknown) {
   return isArray(value) && isNumber(value[0]) && isNumber(value[1]);
 }

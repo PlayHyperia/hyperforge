@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import {
   formatDashboardAgentReply,
   formatDashboardAgentReplyMetaLine,
@@ -165,7 +166,7 @@ export const AgentViewportChat: React.FC<AgentViewportChatProps> = ({
 
   // ── Unread badge when chat is closed ────────────────────────────────────
   useEffect(() => {
-    if (!chatOpen && messages.at(-1)?.sender === "agent") {
+    if (!chatOpen && messages[messages.length - 1]?.sender === "agent") {
       setUnreadCount((n) => n + 1);
     }
   }, [messages]); // chatOpen intentionally omitted: only trigger on new messages
@@ -240,6 +241,7 @@ export const AgentViewportChat: React.FC<AgentViewportChatProps> = ({
           // Fallback: mapping endpoint
           const mappingResponse = await fetch(
             `${GAME_API_URL}/api/agents/mapping/${requestedAgentId}`,
+            { headers: getApiAuthorizationHeaders() },
           );
           if (!stillThisAgent()) return;
           if (mappingResponse.ok) {
@@ -509,7 +511,10 @@ export const AgentViewportChat: React.FC<AgentViewportChatProps> = ({
   });
 
   const agentDisplayName = agent.characterName || agent.name;
-  const lastAgentMsg = messages.filter((m) => m.sender === "agent").at(-1);
+  const agentMessages = messages.filter(
+    (message) => message.sender === "agent",
+  );
+  const lastAgentMsg = agentMessages[agentMessages.length - 1];
 
   return (
     <div

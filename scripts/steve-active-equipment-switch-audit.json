@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "title": "Steve active equipment switching audit",
+  "avatarId": "steve",
+  "avatar": "avatars/duel-candidates/duel-steve.vrm",
+  "pose": "emotes/emote-idle.glb",
+  "equipment": {
+    "weapon": {
+      "asset": "models/swords/shortswords/shortsword-bronze-aligned.glb",
+      "itemId": "bronze_shortsword",
+      "slot": "weapon"
+    },
+    "hatchet": {
+      "asset": "models/tools/preparation/bronze-hatchet-steve-fitted.glb",
+      "itemId": "bronze_hatchet",
+      "slot": "gatheringtool"
+    },
+    "pickaxe": {
+      "asset": "models/tools/preparation/bronze-pickaxe-steve-fitted.glb",
+      "itemId": "bronze_pickaxe",
+      "slot": "gatheringtool"
+    }
+  },
+  "rapidSwitchIterations": 60
+}

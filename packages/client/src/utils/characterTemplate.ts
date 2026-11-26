@@ -30,7 +30,6 @@ export interface CharacterTemplate {
       // LLM Provider API Keys (optional, depends on selected plugins)
       OPENAI_API_KEY?: string;
       ANTHROPIC_API_KEY?: string;
-      OPENROUTER_API_KEY?: string;
     };
     avatar?: string;
   };
@@ -142,7 +141,6 @@ export function generateCharacterTemplate(
     plugins: [
       "@hyperforge/plugin-hyperia", // Required - Hyperia game integration
       "@elizaos/plugin-sql", // Database operations
-      "@elizaos/plugin-openrouter", // OpenRouter LLM provider
       "@elizaos/plugin-openai", // OpenAI models (GPT-5, etc)
       "@elizaos/plugin-anthropic", // Anthropic models (Claude)
     ],
@@ -157,7 +155,6 @@ export function generateCharacterTemplate(
         // LLM Provider API Keys (users can add these in the Secrets tab)
         OPENAI_API_KEY: "",
         ANTHROPIC_API_KEY: "",
-        OPENROUTER_API_KEY: "",
       },
       avatar,
     },

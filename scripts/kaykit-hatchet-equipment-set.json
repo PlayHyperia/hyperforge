@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit isolated preparation hatchet candidate",
+  "equipments": [
+    {
+      "asset": "fitted-preparation-kit/kaykit-rpg-axe-fitted.glb",
+      "itemId": "kaykit_hatchet_candidate",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "one-hand"
+    }
+  ]
+}

@@ -153,6 +153,11 @@ interface DebuggerSelectors {
 
 type DebuggerStore = DebuggerState & DebuggerActions & DebuggerSelectors;
 
+interface StoreHook<T> {
+  (): T;
+  <U>(selector: (state: T) => U): U;
+}
+
 const defaultFittingParameters: MeshFittingParameters = {
   iterations: 8,
   stepSize: 0.15,
@@ -228,7 +233,7 @@ const initialState: DebuggerState = {
   canRedo: false,
 };
 
-export const useDebuggerStore = create<DebuggerStore>()(
+const debuggerStore = create<DebuggerStore>()(
   subscribeWithSelector(
     devtools(
       persist(
@@ -620,6 +625,8 @@ export const useDebuggerStore = create<DebuggerStore>()(
     ),
   ),
 );
+
+export const useDebuggerStore: StoreHook<DebuggerStore> = debuggerStore;
 
 // Export convenient selectors
 export const useIsReadyToFit = () =>

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve bronze hatchet launch candidate",
+  "equipments": [
+    {
+      "asset": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-preparation-tiers/bronze_hatchet.glb",
+      "itemId": "bronze_hatchet",
+      "avatarId": "steve",
+      "slot": "gatheringtool",
+      "grip": "one-hand"
+    }
+  ]
+}

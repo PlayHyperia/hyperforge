@@ -47,6 +47,7 @@ export interface PooledCombatDamageDealtPayload extends PooledPayload {
 }
 
 export interface PooledCombatProjectileLaunchedPayload extends PooledPayload {
+  projectileId: string;
   attackerId: string;
   targetId: string;
   projectileType: string;
@@ -98,6 +99,7 @@ export interface PooledCombatEndedPayload extends PooledPayload {
 }
 
 export interface PooledCombatProjectileHitPayload extends PooledPayload {
+  projectileId: string;
   attackerId: string;
   targetId: string;
   damage: number;
@@ -158,6 +160,7 @@ const projectileLaunchedPool: EventPayloadPool<PooledCombatProjectileLaunchedPay
   createEventPayloadPool({
     name: "CombatProjectileLaunched",
     factory: () => ({
+      projectileId: "",
       attackerId: "",
       targetId: "",
       projectileType: "",
@@ -173,6 +176,7 @@ const projectileLaunchedPool: EventPayloadPool<PooledCombatProjectileLaunchedPay
       flightTimeMs: 0,
     }),
     reset: (p) => {
+      p.projectileId = "";
       p.attackerId = "";
       p.targetId = "";
       p.projectileType = "";
@@ -323,12 +327,14 @@ const projectileHitPool: EventPayloadPool<PooledCombatProjectileHitPayload> =
   createEventPayloadPool({
     name: "CombatProjectileHit",
     factory: () => ({
+      projectileId: "",
       attackerId: "",
       targetId: "",
       damage: 0,
       projectileType: "",
     }),
     reset: (p) => {
+      p.projectileId = "";
       p.attackerId = "";
       p.targetId = "";
       p.damage = 0;

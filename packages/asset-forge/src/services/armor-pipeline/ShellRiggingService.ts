@@ -3,6 +3,81 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import type { ShellMesh, RiggedArmorResult } from "./types";
 
+export interface DuelFitExportOptions {
+  itemId: string;
+  compatibleAvatarIds: string[];
+}
+
+const COMPETITIVE_ASSET_ID_PATTERN = /^[a-zA-Z0-9_-]+$/u;
+const DEFORMING_ARMOR_SLOTS = new Set([
+  "helmet",
+  "body",
+  "legs",
+  "boots",
+  "gloves",
+  "cape",
+]);
+
+function canonicalRigNumber(value: number): number {
+  const rounded = Number(value.toFixed(9));
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+/** Stable digest of the ordered skeleton hierarchy and inverse bind pose. */
+export async function createSkeletonRigFingerprint(
+  skeleton: THREE.Skeleton,
+): Promise<string> {
+  if (
+    skeleton.bones.length === 0 ||
+    skeleton.boneInverses.length !== skeleton.bones.length
+  ) {
+    throw new Error("Skeleton is missing a complete inverse bind pose");
+  }
+  const boneIndices = new Map(
+    skeleton.bones.map((bone, index) => [bone, index] as const),
+  );
+  const boneNames = skeleton.bones.map((bone) => bone.name);
+  if (
+    boneNames.some((name) => !name.trim()) ||
+    new Set(boneNames).size !== boneNames.length
+  ) {
+    throw new Error("Skeleton bone names must be non-empty and unique");
+  }
+  if (
+    skeleton.bones.some(
+      (bone) =>
+        bone.parent instanceof THREE.Bone && !boneIndices.has(bone.parent),
+    )
+  ) {
+    throw new Error(
+      "Skeleton hierarchy references an unregistered parent bone",
+    );
+  }
+  if (
+    skeleton.boneInverses.some((matrix) =>
+      matrix.elements.some((value) => !Number.isFinite(value)),
+    )
+  ) {
+    throw new Error("Skeleton inverse bind pose contains non-finite values");
+  }
+  const canonical = skeleton.bones.map((bone, index) => ({
+    name: bone.name,
+    parentIndex:
+      bone.parent instanceof THREE.Bone
+        ? (boneIndices.get(bone.parent) ?? -1)
+        : -1,
+    inverseBindMatrix:
+      skeleton.boneInverses[index].elements.map(canonicalRigNumber),
+  }));
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(canonical)),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 /**
  * ShellRiggingService — POC-3 implementation
  *
@@ -330,13 +405,37 @@ export class ShellRiggingService {
    * It does NOT remap bone indices by name — so skinIndex values must reference
    * the same bone positions as the player's VRM skeleton.
    */
-  async exportRiggedGLB(result: RiggedArmorResult): Promise<Blob> {
+  async exportRiggedGLB(
+    result: RiggedArmorResult,
+    options: DuelFitExportOptions,
+  ): Promise<Blob> {
     const { GLTFExporter } =
       await import("three/addons/exporters/GLTFExporter.js");
 
     const exporter = new GLTFExporter();
     const { skinnedMesh, skeleton } = result;
     const geometry = skinnedMesh.geometry;
+    const itemId = options.itemId.trim();
+    if (
+      options.itemId !== itemId ||
+      !COMPETITIVE_ASSET_ID_PATTERN.test(itemId)
+    ) {
+      throw new Error("A canonical competitive item ID is required");
+    }
+    const compatibleAvatarIds = [...options.compatibleAvatarIds];
+    if (
+      compatibleAvatarIds.length === 0 ||
+      compatibleAvatarIds.some(
+        (id) => id !== id.trim() || !COMPETITIVE_ASSET_ID_PATTERN.test(id),
+      ) ||
+      new Set(compatibleAvatarIds).size !== compatibleAvatarIds.length
+    ) {
+      throw new Error("At least one fitted avatar ID is required");
+    }
+    if (!DEFORMING_ARMOR_SLOTS.has(result.slotName)) {
+      throw new Error(`Unsupported deforming armor slot: ${result.slotName}`);
+    }
+    const rigFingerprint = await createSkeletonRigFingerprint(skeleton);
 
     // Update skeleton before export
     skeleton.update();
@@ -430,6 +529,23 @@ export class ShellRiggingService {
       boots: "leftFoot",
       gloves: "leftHand",
     };
+    const duelFit = {
+      schemaVersion: 1 as const,
+      itemId,
+      slot: result.slotName,
+      compatibleAvatarIds,
+      rigFingerprint,
+    };
+    const hyperiaMetadata = {
+      version: 2,
+      vrmBoneName: slotToBone[result.slotName] ?? "spine",
+      originalSlot: result.slotName,
+      exportedFrom: "asset-forge-armor-pipeline",
+      exportedAt: new Date().toISOString(),
+      duelFit,
+    };
+    exportScene.userData.hyperia = hyperiaMetadata;
+    rootNode.userData.hyperia = hyperiaMetadata;
     exportMesh.userData = {
       armorMetadata: {
         slotName: result.slotName,
@@ -440,13 +556,7 @@ export class ShellRiggingService {
         boneNames: newBones.map((b) => b.name),
         exportDate: new Date().toISOString(),
       },
-      hyperia: {
-        version: 2,
-        vrmBoneName: slotToBone[result.slotName] ?? "spine",
-        originalSlot: result.slotName,
-        exportedFrom: "asset-forge-armor-pipeline",
-        exportedAt: new Date().toISOString(),
-      },
+      hyperia: hyperiaMetadata,
     };
 
     return new Promise((resolve, reject) => {

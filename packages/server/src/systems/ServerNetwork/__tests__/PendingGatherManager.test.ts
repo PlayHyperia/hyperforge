@@ -8,11 +8,17 @@
  * - Timeout handling
  * - Error isolation
  * - Disconnect cleanup
+ *
+ * Fishing shore admission, single/multi-actor relocation, and actual movement
+ * receipts are covered with real owners in PlayerSupport.integration.test.ts.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { PendingGatherManager } from "../PendingGatherManager";
-import { EventType, GATHERING_CONSTANTS } from "@hyperforge/shared";
+import type { TileMovementManager } from "../tile-movement";
+import { EventType } from "@hyperforge/shared";
+
+const AUTONOMY_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
 
 // ===== MOCK FACTORIES =====
 
@@ -20,6 +26,7 @@ interface MockPlayer {
   id: string;
   position: { x: number; y: number; z: number };
   skills?: Record<string, { level: number; xp: number }>;
+  data?: { inStreamingDuel?: boolean };
 }
 
 interface MockResource {
@@ -36,11 +43,15 @@ const createMockWorld = () => {
   const players = new Map<string, MockPlayer>();
   const resources = new Map<string, MockResource>();
   const emittedEvents: Array<{ type: string; data: unknown }> = [];
+  const playerHasRequiredToolForResource = vi.fn(() => true);
+  const requestGathering = vi.fn(() => true);
 
   return {
     players,
     resources,
     emittedEvents,
+    playerHasRequiredToolForResource,
+    requestGathering,
 
     getPlayer: vi.fn((id: string) => players.get(id)),
 
@@ -48,6 +59,8 @@ const createMockWorld = () => {
       if (name === "resource") {
         return {
           getResource: (id: string) => resources.get(id),
+          playerHasRequiredToolForResource,
+          requestGathering,
         };
       }
       return null;
@@ -73,16 +86,25 @@ const createMockWorld = () => {
 };
 
 const createMockTileMovementManager = () => ({
-  movePlayerToward: vi.fn(),
+  movePlayerToward: vi.fn<TileMovementManager["movePlayerToward"]>(() => true),
   getIsRunning: vi.fn(() => false),
   setArrivalEmote: vi.fn(),
+  clearArrivalEmote: vi.fn(),
+  isTileAvailableForPlayer: vi.fn(() => true),
   findClosestWalkableTile: vi.fn(
     (
-      _pos: { x: number; y: number; z: number },
+      pos: { x: number; y: number; z: number },
       _radius: number,
+      acceptsTile?: (tile: { x: number; z: number }) => boolean,
     ): { x: number; z: number } | null => {
-      // Return a shore tile near the position
-      return { x: 10, z: 10 };
+      const origin = pos.x >= 20 ? 20 : 10;
+      const candidates = [
+        { x: origin, z: origin },
+        { x: origin + 1, z: origin },
+        { x: origin, z: origin + 1 },
+        { x: origin - 1, z: origin },
+      ];
+      return candidates.find((tile) => acceptsTile?.(tile) ?? true) ?? null;
     },
   ),
 });
@@ -113,6 +135,17 @@ describe("PendingGatherManager", () => {
   // ===== QUEUE PENDING GATHER TESTS =====
 
   describe("queuePendingGather", () => {
+    it("rejects movement while streaming-duel authority is active", () => {
+      mockWorld.addPlayer({
+        id: "player1",
+        position: { x: 5, y: 0, z: 5 },
+        data: { inStreamingDuel: true },
+      });
+
+      expect(manager.queuePendingGather("player1", "tree_1", 100)).toBe(false);
+      expect(mockTileMovement.movePlayerToward).not.toHaveBeenCalled();
+    });
+
     it("should path player to cardinal tile for trees/ores", () => {
       // Setup
       mockWorld.addPlayer({
@@ -130,43 +163,21 @@ describe("PendingGatherManager", () => {
       });
 
       // Act
-      manager.queuePendingGather("player1", "tree_1", 0, false);
+      const accepted = manager.queuePendingGather(
+        "player1",
+        "tree_1",
+        0,
+        false,
+      );
 
       // Assert - should call movePlayerToward
       expect(mockTileMovement.movePlayerToward).toHaveBeenCalledWith(
         "player1",
-        expect.objectContaining({ x: 10, y: 0, z: 10 }),
+        { x: 9.5, y: 0, z: 10.5 },
         false,
-        GATHERING_CONSTANTS.GATHERING_RANGE,
+        0,
       );
-    });
-
-    it("should path player to shore tile for fishing", () => {
-      // Setup
-      mockWorld.addPlayer({
-        id: "player1",
-        position: { x: 5, y: 0, z: 5 },
-        skills: { fishing: { level: 10, xp: 0 } },
-      });
-
-      mockWorld.addResource({
-        id: "fishing_spot_1",
-        position: { x: 15, y: 0, z: 15 }, // In water
-        isAvailable: true,
-        skillRequired: "fishing",
-        levelRequired: 1,
-        type: "fishing_spot",
-      });
-
-      // Act
-      manager.queuePendingGather("player1", "fishing_spot_1", 0, false);
-
-      // Assert - should find shore tile and path there
-      expect(mockTileMovement.findClosestWalkableTile).toHaveBeenCalled();
-      expect(mockTileMovement.setArrivalEmote).toHaveBeenCalledWith(
-        "player1",
-        "fishing",
-      );
+      expect(accepted).toBe(true);
     });
 
     it("should start immediately if already adjacent", () => {
@@ -186,7 +197,12 @@ describe("PendingGatherManager", () => {
       });
 
       // Act
-      manager.queuePendingGather("player1", "tree_1", 0, false);
+      const accepted = manager.queuePendingGather(
+        "player1",
+        "tree_1",
+        0,
+        false,
+      );
 
       // Assert - should emit RESOURCE_GATHER immediately
       expect(mockWorld.emittedEvents).toContainEqual(
@@ -198,6 +214,38 @@ describe("PendingGatherManager", () => {
           }),
         }),
       );
+      expect(accepted).toBe(true);
+    });
+
+    it("threads an autonomous attempt into the authoritative gather start", () => {
+      mockWorld.addPlayer({
+        id: "player1",
+        position: { x: 10, y: 0, z: 9 },
+      });
+      mockWorld.addResource({
+        id: "tree_1",
+        position: { x: 10, y: 0, z: 10 },
+        isAvailable: true,
+        skillRequired: "woodcutting",
+        levelRequired: 1,
+        type: "tree",
+      });
+
+      expect(
+        manager.queuePendingGather(
+          "player1",
+          "tree_1",
+          0,
+          false,
+          AUTONOMY_ATTEMPT_ID,
+        ),
+      ).toBe(true);
+      expect(mockWorld.requestGathering).toHaveBeenCalledWith({
+        playerId: "player1",
+        resourceId: "tree_1",
+        playerPosition: { x: 10, y: 0, z: 9 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+      });
     });
 
     it("should cancel previous pending gather on new request", () => {
@@ -222,7 +270,12 @@ describe("PendingGatherManager", () => {
       });
 
       // Act - queue two gathers
-      manager.queuePendingGather("player1", "tree_1", 0, false);
+      const accepted = manager.queuePendingGather(
+        "player1",
+        "tree_1",
+        0,
+        false,
+      );
       manager.queuePendingGather("player1", "tree_2", 1, false);
 
       // Assert - should only have one pending gather (the second one)
@@ -235,6 +288,7 @@ describe("PendingGatherManager", () => {
 
       expect(pendingGathers.size).toBe(1);
       expect(pendingGathers.get("player1")?.resourceId).toBe("tree_2");
+      expect(accepted).toBe(true);
     });
 
     it("should silently ignore depleted resources", () => {
@@ -252,7 +306,12 @@ describe("PendingGatherManager", () => {
       });
 
       // Act
-      manager.queuePendingGather("player1", "tree_1", 0, false);
+      const accepted = manager.queuePendingGather(
+        "player1",
+        "tree_1",
+        0,
+        false,
+      );
 
       // Assert - should not path or queue
       expect(mockTileMovement.movePlayerToward).not.toHaveBeenCalled();
@@ -263,6 +322,71 @@ describe("PendingGatherManager", () => {
         }
       ).pendingGathers;
       expect(pendingGathers.size).toBe(0);
+      expect(accepted).toBe(false);
+    });
+
+    it("does not cancel a valid pending gather when a new target is rejected", () => {
+      mockWorld.addPlayer({
+        id: "player1",
+        position: { x: 0, y: 0, z: 0 },
+      });
+      mockWorld.addResource({
+        id: "tree_1",
+        position: { x: 10, y: 0, z: 10 },
+        isAvailable: true,
+        type: "tree",
+      });
+
+      expect(manager.queuePendingGather("player1", "tree_1", 0, false)).toBe(
+        true,
+      );
+      expect(
+        manager.queuePendingGather("player1", "missing-tree", 1, false),
+      ).toBe(false);
+
+      const pendingGathers = (
+        manager as unknown as {
+          pendingGathers: Map<string, { resourceId: string }>;
+        }
+      ).pendingGathers;
+      expect(pendingGathers.get("player1")?.resourceId).toBe("tree_1");
+    });
+
+    it("reserves four distinct physical approaches and rejects overflow", () => {
+      mockWorld.addResource({
+        id: "ore_shared",
+        position: { x: 10, y: 0, z: 10 },
+        isAvailable: true,
+        skillRequired: "mining",
+        levelRequired: 1,
+        type: "ore",
+      });
+      for (let index = 0; index < 25; index++) {
+        mockWorld.addPlayer({
+          id: `gatherer-${index}`,
+          position: { x: 0.5, y: 0, z: 0.5 },
+          skills: { mining: { level: 1, xp: 0 } },
+        });
+      }
+
+      const accepted = Array.from({ length: 25 }, (_, index) =>
+        manager.queuePendingGather(`gatherer-${index}`, "ore_shared", 0, false),
+      );
+      expect(accepted.filter(Boolean)).toHaveLength(4);
+      expect(mockTileMovement.movePlayerToward).toHaveBeenCalledTimes(4);
+      expect(
+        new Set(
+          mockTileMovement.movePlayerToward.mock.calls.map(
+            ([, position]) => `${position.x},${position.z}`,
+          ),
+        ).size,
+      ).toBe(4);
+
+      manager.cancelPendingGather("gatherer-0");
+      expect(
+        manager.queuePendingGather("gatherer-4", "ore_shared", 1, false),
+      ).toBe(true);
+      expect(mockTileMovement.movePlayerToward).toHaveBeenCalledTimes(5);
     });
   });
 
@@ -356,7 +480,7 @@ describe("PendingGatherManager", () => {
       expect(pendingGathers.has("player1")).toBe(false);
     });
 
-    it("should timeout after 20 ticks", () => {
+    it("should timeout after 20 ticks without progress", () => {
       // Setup
       mockWorld.addPlayer({
         id: "player1",
@@ -384,6 +508,10 @@ describe("PendingGatherManager", () => {
               createdTick: number;
               isFishing: boolean;
               resourcePosition: { x: number; y: number; z: number };
+              completionAttemptId?: string;
+              skill: string;
+              deadlineTick: number;
+              lastProgressTick: number;
             }
           >;
         }
@@ -399,6 +527,10 @@ describe("PendingGatherManager", () => {
         createdTick: 0,
         isFishing: false,
         resourcePosition: { x: 100, y: 0, z: 100 },
+        completionAttemptId: AUTONOMY_ATTEMPT_ID,
+        skill: "unknown",
+        deadlineTick: 120,
+        lastProgressTick: 0,
       });
 
       // Act - process at tick 21 (timeout is 20)
@@ -410,6 +542,16 @@ describe("PendingGatherManager", () => {
       expect(mockWorld.emittedEvents).not.toContainEqual(
         expect.objectContaining({ type: EventType.RESOURCE_GATHER }),
       );
+      expect(mockWorld.emittedEvents).toContainEqual({
+        type: EventType.RESOURCE_GATHERING_COMPLETED,
+        data: {
+          playerId: "player1",
+          resourceId: "tree_1",
+          successful: false,
+          skill: "unknown",
+          operationId: `gathering-reward:${AUTONOMY_ATTEMPT_ID}`,
+        },
+      });
     });
 
     it("should cancel if resource becomes unavailable", () => {
@@ -552,6 +694,9 @@ describe("PendingGatherManager", () => {
               }
               return mockWorld.resources.get(id);
             },
+            playerHasRequiredToolForResource:
+              mockWorld.playerHasRequiredToolForResource,
+            requestGathering: mockWorld.requestGathering,
           };
         }
         return originalGetSystem(name);
@@ -573,14 +718,25 @@ describe("PendingGatherManager", () => {
 
   describe("onPlayerDisconnect", () => {
     it("should cleanup pending gather on disconnect", () => {
-      const pendingGathers = (
-        manager as unknown as {
-          pendingGathers: Map<string, unknown>;
-        }
-      ).pendingGathers;
+      const internals = manager as unknown as {
+        pendingGathers: Map<string, unknown>;
+        fishingReplans: Map<string, unknown>;
+        approachReservations: Map<
+          string,
+          { playerId: string; resourceId: string }
+        >;
+      };
 
       // Add pending gather
-      pendingGathers.set("player1", {
+      internals.pendingGathers.set("player1", {
+        playerId: "player1",
+        resourceId: "tree_1",
+      });
+      internals.fishingReplans.set("player1", {
+        resourceId: "fishing_spot_1",
+        runMode: true,
+      });
+      internals.approachReservations.set("10,10", {
         playerId: "player1",
         resourceId: "tree_1",
       });
@@ -589,7 +745,13 @@ describe("PendingGatherManager", () => {
       manager.onPlayerDisconnect("player1");
 
       // Assert
-      expect(pendingGathers.has("player1")).toBe(false);
+      expect(internals.pendingGathers.has("player1")).toBe(false);
+      expect(internals.fishingReplans.has("player1")).toBe(false);
+      expect(
+        [...internals.approachReservations.values()].some(
+          ({ playerId }) => playerId === "player1",
+        ),
+      ).toBe(false);
     });
 
     it("should do nothing if player has no pending gather", () => {

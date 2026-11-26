@@ -11,17 +11,13 @@
  */
 
 import type { Item, EquipmentSlot } from "../../../types/game/item-types";
+import {
+  ARROW_DATA,
+  BOW_TIERS,
+  type ArrowData,
+} from "../../../data/ammunition";
 
-/**
- * Arrow data from the ammunition manifest
- */
-export interface ArrowData {
-  id: string;
-  name: string;
-  rangedStrength: number;
-  requiredRangedLevel: number;
-  requiredBowTier: number;
-}
+export type { ArrowData } from "../../../data/ammunition";
 
 /**
  * Result of arrow validation
@@ -42,58 +38,6 @@ export interface ArrowConsumeResult {
   remainingQuantity: number;
   consumedArrowId: string;
 }
-
-/**
- * Bow tier requirements for arrows
- * Maps bow ID to minimum tier level
- */
-const BOW_TIERS: Record<string, number> = {
-  shortbow: 1,
-  oak_shortbow: 5,
-  willow_shortbow: 20,
-  maple_shortbow: 30,
-};
-
-/**
- * Arrow strength bonuses (from ammunition.json manifest)
- */
-const ARROW_DATA: Record<string, ArrowData> = {
-  bronze_arrow: {
-    id: "bronze_arrow",
-    name: "Bronze arrow",
-    rangedStrength: 7,
-    requiredRangedLevel: 1,
-    requiredBowTier: 1,
-  },
-  iron_arrow: {
-    id: "iron_arrow",
-    name: "Iron arrow",
-    rangedStrength: 10,
-    requiredRangedLevel: 1,
-    requiredBowTier: 1,
-  },
-  steel_arrow: {
-    id: "steel_arrow",
-    name: "Steel arrow",
-    rangedStrength: 16,
-    requiredRangedLevel: 5,
-    requiredBowTier: 5,
-  },
-  mithril_arrow: {
-    id: "mithril_arrow",
-    name: "Mithril arrow",
-    rangedStrength: 22,
-    requiredRangedLevel: 20,
-    requiredBowTier: 20,
-  },
-  adamant_arrow: {
-    id: "adamant_arrow",
-    name: "Adamant arrow",
-    rangedStrength: 31,
-    requiredRangedLevel: 30,
-    requiredBowTier: 30,
-  },
-};
 
 /**
  * AmmunitionService class for managing arrow consumption

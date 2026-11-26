@@ -22,6 +22,11 @@ export {
   handleRequestBankState,
 } from "./core";
 
+export {
+  handleExternalAgentBankTransfer,
+  handleExternalAgentBankRecovery,
+} from "./agent";
+
 // Coin handlers
 export { handleBankDepositCoins, handleBankWithdrawCoins } from "./coins";
 

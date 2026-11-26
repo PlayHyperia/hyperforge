@@ -6,12 +6,24 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentInfo } from "../../screens/StreamingMode";
+import { parseStreamingDuelStrategySummary } from "@hyperforge/shared";
+import type {
+  AgentInfo,
+  FrozenStreamingCombatLoadout,
+  StreamingCombatRole,
+} from "../../screens/StreamingMode";
 import { getRuntimeAssetBaseUrl } from "../../lib/api-config";
+import {
+  formatStreamingCombatRole,
+  resolveActiveStreamingCombatRole,
+} from "./streamingCombatRole";
 
 interface AgentStatsDisplayProps {
   agent: AgentInfo;
   side: "left" | "right";
+  showFrozenLoadouts?: boolean;
+  showActiveCombatRole?: boolean;
+  combatFeedbackEnabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +62,7 @@ const INVENTORY_FALLBACK_ICONS = [
 let cachedItemIconMap: Record<string, string> | null = null;
 let itemIconMapPromise: Promise<Record<string, string>> | null = null;
 
-function resolveManifestIconPath(iconPath: string): string {
+export function resolveStreamingItemIconPath(iconPath: string): string {
   const base = getRuntimeAssetBaseUrl().replace(/\/$/, "");
   if (iconPath.startsWith("asset://")) {
     const relativePath = iconPath.replace("asset://", "");
@@ -85,7 +97,7 @@ async function loadItemIconMap(): Promise<Record<string, string>> {
     const iconMap: Record<string, string> = {};
     for (const item of items) {
       if (!item.id || !item.iconPath) continue;
-      iconMap[item.id] = resolveManifestIconPath(item.iconPath);
+      iconMap[item.id] = resolveStreamingItemIconPath(item.iconPath);
     }
 
     cachedItemIconMap = iconMap;
@@ -95,13 +107,93 @@ async function loadItemIconMap(): Promise<Record<string, string>> {
   return itemIconMapPromise;
 }
 
-function getDeterministicFallbackIcon(itemKey: string, slot: number): string {
+export function resolveStreamingItemIconMap(
+  authoritativePaths: Record<string, string> | undefined,
+  legacyManifestMap: Record<string, string>,
+): Record<string, string> {
+  // Presence is authoritative, including an intentionally empty object. A
+  // current server omits missing files so falling back to the raw manifest here
+  // would recreate the same failed request the server explicitly prevented.
+  if (authoritativePaths === undefined) return legacyManifestMap;
+  return Object.fromEntries(
+    Object.entries(authoritativePaths).map(([itemId, iconPath]) => [
+      itemId,
+      resolveStreamingItemIconPath(iconPath),
+    ]),
+  );
+}
+
+export function getStreamingItemFallbackIcon(
+  itemKey: string,
+  slot: number,
+): string {
+  const normalized = itemKey.toLowerCase();
+  if (/arrow|bow/.test(normalized)) return "🏹";
+  if (/sword|dagger|mace|axe|weapon/.test(normalized)) return "🗡️";
+  if (/shield|helm|helmet|body|legs|boots|gloves|cape/.test(normalized)) {
+    return "🛡️";
+  }
+  if (/rune|staff|wand|spell/.test(normalized)) return "🪄";
+  if (/food|fish|bread|meat|potion/.test(normalized)) return "🧪";
+
   const source = `${itemKey}:${slot}`;
   let hash = 0;
   for (let i = 0; i < source.length; i += 1) {
     hash = (hash * 31 + source.charCodeAt(i)) >>> 0;
   }
   return INVENTORY_FALLBACK_ICONS[hash % INVENTORY_FALLBACK_ICONS.length]!;
+}
+
+function StreamItemIcon({
+  itemId,
+  iconUrl,
+  fallbackSlot,
+}: {
+  itemId: string;
+  iconUrl: string | null;
+  fallbackSlot: number;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [iconUrl, itemId]);
+
+  if (!iconUrl || failed) {
+    return (
+      <span
+        role="img"
+        aria-label={itemId.replaceAll("_", " ")}
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 10,
+          lineHeight: 1,
+          filter: "drop-shadow(0 0 2px rgba(0,0,0,0.6))",
+        }}
+      >
+        {getStreamingItemFallbackIcon(itemId, fallbackSlot)}
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={iconUrl}
+      alt={itemId}
+      onError={() => setFailed(true)}
+      style={{
+        width: "110%",
+        height: "110%",
+        objectFit: "cover",
+        display: "block",
+      }}
+      draggable={false}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +216,62 @@ const EQUIPMENT_SLOT_ORDER = [
 
 const EQUIPPED_SLOTS_VISIBLE = 6;
 
+const COMBAT_ROLE_ORDER = ["melee", "ranged", "mage"] as const;
+
+function humanizeStreamingIdentifier(identifier: string): string {
+  return identifier
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function describeFrozenStreamingCombatLoadout(
+  loadout: FrozenStreamingCombatLoadout,
+): string {
+  const armor = loadout.armorIds
+    ? Object.entries(loadout.armorIds)
+        .filter((entry): entry is [string, string] => entry[1] !== null)
+        .map(
+          ([slot, itemId]) =>
+            `${humanizeStreamingIdentifier(slot)}: ${humanizeStreamingIdentifier(itemId)}`,
+        )
+        .join(", ")
+    : "Legacy snapshot";
+  return [
+    `Weapon: ${humanizeStreamingIdentifier(loadout.weaponId)}`,
+    `Ammunition: ${
+      loadout.arrowsId ? humanizeStreamingIdentifier(loadout.arrowsId) : "None"
+    }`,
+    `Shield: ${
+      loadout.shieldId ? humanizeStreamingIdentifier(loadout.shieldId) : "None"
+    }`,
+    `Spell: ${
+      loadout.spellId ? humanizeStreamingIdentifier(loadout.spellId) : "None"
+    }`,
+    `Armor: ${armor || "None"}`,
+  ].join("; ");
+}
+
+function getVisibleLoadoutSummary(
+  role: StreamingCombatRole,
+  loadout: FrozenStreamingCombatLoadout,
+): string {
+  const parts = [humanizeStreamingIdentifier(loadout.weaponId)];
+  if (role === "ranged" && loadout.arrowsId) {
+    parts.push(humanizeStreamingIdentifier(loadout.arrowsId));
+  }
+  if (role === "mage" && loadout.spellId) {
+    parts.push(humanizeStreamingIdentifier(loadout.spellId));
+  }
+  if (loadout.shieldId) {
+    parts.push(humanizeStreamingIdentifier(loadout.shieldId));
+  }
+  const armorCount = loadout.armorIds
+    ? Object.values(loadout.armorIds).filter((itemId) => itemId !== null).length
+    : 0;
+  if (armorCount > 0) parts.push(`${armorCount} armor`);
+  return parts.join(" · ");
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -131,6 +279,9 @@ const EQUIPPED_SLOTS_VISIBLE = 6;
 export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
   agent,
   side,
+  showFrozenLoadouts = false,
+  showActiveCombatRole = false,
+  combatFeedbackEnabled = true,
 }: AgentStatsDisplayProps) {
   const hpPercent = Math.max(0, Math.min(100, (agent.hp / agent.maxHp) * 100));
   const isCritical = hpPercent < 20;
@@ -140,6 +291,7 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
   // Heal flash: tracks when HP increases or healsUsed increments
   const prevHpRef = useRef<number>(agent.hp);
   const prevHealRef = useRef<number>(agent.healsUsed ?? 0);
+  const prevAgentIdRef = useRef(agent.id);
   const [healFlash, setHealFlash] = useState(false);
   const [healDelta, setHealDelta] = useState(0);
   const healTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,25 +302,40 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
     const hpPrev = prevHpRef.current;
     const healsNow = healUsedNow;
     const healsPrev = prevHealRef.current;
+    const sameAgent = prevAgentIdRef.current === agent.id;
 
-    if (healsNow > healsPrev || hpNow > hpPrev) {
+    if (
+      combatFeedbackEnabled &&
+      sameAgent &&
+      (healsNow > healsPrev || hpNow > hpPrev)
+    ) {
       const delta = Math.max(0, hpNow - hpPrev);
       setHealDelta(delta);
       setHealFlash(true);
       if (healTimerRef.current) clearTimeout(healTimerRef.current);
       healTimerRef.current = setTimeout(() => setHealFlash(false), 900);
+    } else if (!combatFeedbackEnabled || !sameAgent) {
+      setHealFlash(false);
+      if (healTimerRef.current) {
+        clearTimeout(healTimerRef.current);
+        healTimerRef.current = null;
+      }
     }
 
     prevHpRef.current = hpNow;
     prevHealRef.current = healsNow;
+    prevAgentIdRef.current = agent.id;
     return () => {
       if (healTimerRef.current) clearTimeout(healTimerRef.current);
     };
-  }, [agent.hp, agent.healsUsed]);
+  }, [agent.hp, agent.healsUsed, agent.id, combatFeedbackEnabled]);
+
+  const showHealFlash = combatFeedbackEnabled && healFlash;
 
   const [itemIconMap, setItemIconMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    if (agent.itemIconPaths !== undefined) return;
     let isMounted = true;
     void loadItemIconMap().then((iconMap) => {
       if (!isMounted) return;
@@ -177,7 +344,12 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [agent.itemIconPaths]);
+
+  const resolvedItemIconMap = useMemo(
+    () => resolveStreamingItemIconMap(agent.itemIconPaths, itemIconMap),
+    [agent.itemIconPaths, itemIconMap],
+  );
 
   // Direction-dependent clip paths for the skewed HP bar (static per side)
   const { hpOuterClipPath, hpFillClipPath, skewDir } = useMemo(
@@ -239,19 +411,50 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
     ];
   }, [agent.equipment]);
 
+  const frozenLoadoutEntries = useMemo(
+    () =>
+      COMBAT_ROLE_ORDER.flatMap((role) => {
+        const loadout = agent.combatLoadouts?.[role];
+        if (
+          !loadout ||
+          loadout.role !== role ||
+          typeof loadout.weaponId !== "string" ||
+          loadout.weaponId.trim().length === 0
+        ) {
+          return [];
+        }
+        return [{ role, loadout }];
+      }),
+    [agent.combatLoadouts],
+  );
+  const strategySummary = useMemo(
+    () => parseStreamingDuelStrategySummary(agent.strategySummary),
+    [agent.strategySummary],
+  );
+  const exactPrayerPoints =
+    typeof agent.prayerPointUnits === "number" &&
+    Number.isSafeInteger(agent.prayerPointUnits) &&
+    agent.prayerPointUnits >= 0
+      ? agent.prayerPointUnits / 1_000_000
+      : null;
+  const prayerPointLabel =
+    exactPrayerPoints === null
+      ? null
+      : exactPrayerPoints.toFixed(2).replace(/\.00$/, "");
+  const activeCombatRole = showActiveCombatRole
+    ? resolveActiveStreamingCombatRole(agent)
+    : null;
+
   return (
     <div
+      className={`streaming-agent-stats streaming-agent-stats--${side}`}
       style={{
-        position: "relative",
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        width: "clamp(280px, 38vw, 480px)",
         alignItems: isRight ? "flex-end" : "flex-start",
       }}
     >
       {/* Name + stats row */}
       <div
+        className="streaming-agent-heading"
         style={{
           display: "flex",
           justifyContent: "space-between",
@@ -272,6 +475,7 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
           }}
         >
           <span
+            className="streaming-agent-rank"
             style={{
               background: "#ff0d3c",
               color: "#fff",
@@ -286,9 +490,10 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
             #{agent.rank > 0 ? agent.rank : "-"}
           </span>
           <span
+            className="streaming-agent-name"
             style={{
               color: "#fff",
-              fontSize: "clamp(1rem, 2vw, 1.4rem)",
+              fontSize: "clamp(0.95rem, 1.6vw, 1.2rem)",
               fontWeight: 900,
               letterSpacing: 1,
               textShadow: "2px 2px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000",
@@ -299,6 +504,7 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
         </div>
 
         <div
+          className="streaming-agent-records"
           style={{
             display: "flex",
             alignItems: "center",
@@ -354,10 +560,116 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
         </div>
       </div>
 
+      {activeCombatRole ? (
+        <div
+          className={`streaming-agent-active-role streaming-agent-active-role--${side}`}
+          aria-label={`${agent.name} active combat style: ${formatStreamingCombatRole(activeCombatRole)}`}
+          data-active-combat-role={activeCombatRole}
+        >
+          <span className="streaming-agent-active-role-label">Active</span>
+          <strong>{formatStreamingCombatRole(activeCombatRole)}</strong>
+        </div>
+      ) : null}
+
+      {showFrozenLoadouts && agent.loadoutFrozen && strategySummary ? (
+        <section
+          className={`streaming-frozen-strategy streaming-frozen-strategy--${side}`}
+          aria-label={`${agent.name} committed strategy. ${humanizeStreamingIdentifier(strategySummary.approach)} approach using ${humanizeStreamingIdentifier(strategySummary.tacticalMacro)} movement and ${humanizeStreamingIdentifier(strategySummary.attackStyle)} attacks. Recover at ${strategySummary.foodThreshold} percent health and defend at ${strategySummary.switchDefensiveAt} percent health.`}
+          data-strategy-schema={strategySummary.schemaVersion}
+          data-strategy-policy={strategySummary.policyVersion}
+        >
+          <div className="streaming-frozen-strategy-header">
+            <span>Committed strategy</span>
+            <span className="streaming-frozen-strategy-source">
+              {strategySummary.source === "model"
+                ? "Agent-planned"
+                : strategySummary.source === "deterministic"
+                  ? "Rules fallback"
+                  : "Local test"}
+            </span>
+          </div>
+          <div className="streaming-frozen-strategy-primary">
+            <strong>
+              {humanizeStreamingIdentifier(strategySummary.approach)}
+            </strong>
+            <span aria-hidden="true">·</span>
+            <strong>
+              {humanizeStreamingIdentifier(strategySummary.tacticalMacro)}
+            </strong>
+          </div>
+          <div className="streaming-frozen-strategy-details">
+            <span>
+              {humanizeStreamingIdentifier(strategySummary.attackStyle)} attacks
+            </span>
+            <span>
+              {strategySummary.preferredCombatRole
+                ? `Prefer ${humanizeStreamingIdentifier(strategySummary.preferredCombatRole)}`
+                : "Adaptive roles"}
+            </span>
+            <span>
+              {strategySummary.prayer
+                ? humanizeStreamingIdentifier(strategySummary.prayer)
+                : "No Prayer plan"}
+            </span>
+          </div>
+          <div className="streaming-frozen-strategy-thresholds">
+            <span>Recover {strategySummary.foodThreshold}%</span>
+            <span>Defend {strategySummary.switchDefensiveAt}%</span>
+          </div>
+        </section>
+      ) : null}
+
+      {showFrozenLoadouts && agent.loadoutFrozen ? (
+        <section
+          className={`streaming-frozen-loadouts streaming-frozen-loadouts--${side}`}
+          aria-label={`${agent.name} frozen combat loadouts`}
+          data-loadout-fingerprint={agent.loadoutFingerprint ?? undefined}
+        >
+          <div className="streaming-frozen-loadouts-header">
+            <span>Frozen loadouts</span>
+            {agent.loadoutFingerprint ? (
+              <span
+                className="streaming-frozen-loadouts-fingerprint"
+                title={`Snapshot ${agent.loadoutFingerprint}`}
+              >
+                {agent.loadoutFingerprint.slice(0, 8).toUpperCase()}
+              </span>
+            ) : null}
+          </div>
+          {frozenLoadoutEntries.length > 0 ? (
+            <div className="streaming-frozen-loadouts-list">
+              {frozenLoadoutEntries.map(({ role, loadout }) => {
+                const description =
+                  describeFrozenStreamingCombatLoadout(loadout);
+                return (
+                  <div
+                    key={role}
+                    className="streaming-frozen-loadout-entry"
+                    title={description}
+                    aria-label={`${humanizeStreamingIdentifier(role)} loadout. ${description}`}
+                  >
+                    <span className="streaming-frozen-loadout-role">
+                      {role}
+                    </span>
+                    <span className="streaming-frozen-loadout-details">
+                      {getVisibleLoadoutSummary(role, loadout)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <span className="streaming-frozen-loadouts-unavailable">
+              Competitive loadout unavailable
+            </span>
+          )}
+        </section>
+      ) : null}
+
       {/* HP bar - skewed fighting-game style frame + inset fill */}
       <div style={{ position: "relative", width: "100%" }}>
         {/* Floating heal delta popup */}
-        {healFlash && (
+        {showHealFlash && (
           <div
             style={{
               position: "absolute",
@@ -384,8 +696,8 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
             height: 28,
             position: "relative",
             clipPath: hpOuterClipPath,
-            background: healFlash ? "#34d399" : "#fff",
-            boxShadow: healFlash
+            background: showHealFlash ? "#34d399" : "#fff",
+            boxShadow: showHealFlash
               ? "0 4px 12px rgba(52,211,153,0.6), 0 0 24px rgba(52,211,153,0.4)"
               : "0 4px 12px rgba(0,0,0,0.5)",
             transition: "background 0.15s, box-shadow 0.15s",
@@ -442,8 +754,32 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
         </div>
       </div>
 
+      {prayerPointLabel !== null ? (
+        <div
+          className="streaming-agent-prayer-resource"
+          aria-label={`${agent.name} prayer points ${prayerPointLabel} of ${agent.prayerMaxPoints ?? 1}`}
+          data-prayer-point-units={agent.prayerPointUnits}
+          title={`Exact resource: ${agent.prayerPointUnits} units`}
+          style={{
+            alignSelf: isRight ? "flex-end" : "flex-start",
+            color: "#8fd8ff",
+            background: "rgba(0, 16, 35, 0.82)",
+            border: "1px solid rgba(143, 216, 255, 0.7)",
+            borderRadius: 3,
+            font: "800 0.7rem/1.2 monospace",
+            letterSpacing: "0.04em",
+            margin: "2px 8px 0",
+            padding: "2px 7px",
+            textShadow: "0 0 6px rgba(80, 180, 255, 0.65)",
+          }}
+        >
+          PRAYER {prayerPointLabel}/{agent.prayerMaxPoints ?? 1}
+        </div>
+      ) : null}
+
       {/* Bottom: DMG + equipment + inventory */}
       <div
+        className="streaming-agent-loadout"
         style={{
           display: "flex",
           width: "100%",
@@ -523,7 +859,7 @@ export const AgentStatsDisplay = React.memo(function AgentStatsDisplay({
             {renderEquipmentAndInventoryGrid(
               equippedCells,
               inventoryBySlot,
-              itemIconMap,
+              resolvedItemIconMap,
               isRight,
             )}
           </div>
@@ -571,34 +907,15 @@ function renderEquipmentAndInventoryGrid(
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          transition: "all 0.2s",
+          transition: "border-color 0.2s",
         }}
       >
-        {itemId && iconUrl ? (
-          <img
-            src={iconUrl}
-            alt={normalizedItemId ?? itemId}
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-            style={{
-              width: "110%",
-              height: "110%",
-              objectFit: "cover",
-              display: "block",
-            }}
-            draggable={false}
+        {itemId ? (
+          <StreamItemIcon
+            itemId={normalizedItemId || itemId}
+            iconUrl={iconUrl}
+            fallbackSlot={idx}
           />
-        ) : itemId ? (
-          <span
-            style={{
-              fontSize: 10,
-              lineHeight: 1,
-              filter: "drop-shadow(0 0 2px rgba(0,0,0,0.6))",
-            }}
-          >
-            {getDeterministicFallbackIcon(normalizedItemId || itemId, idx)}
-          </span>
         ) : null}
       </div>
     );
@@ -625,41 +942,17 @@ function renderEquipmentAndInventoryGrid(
           border: hasItem
             ? "1px solid rgba(242,208,138,0.5)"
             : "1px solid rgba(255,255,255,0.08)",
-          transition: "all 0.2s",
+          transition: "border-color 0.2s",
           overflow: "hidden",
           borderRadius: 2,
         }}
       >
-        {hasItem && iconUrl ? (
-          <img
-            src={iconUrl}
-            alt={normalizedItemId}
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-            style={{
-              width: "110%",
-              height: "110%",
-              objectFit: "cover",
-              display: "block",
-            }}
-            draggable={false}
+        {hasItem ? (
+          <StreamItemIcon
+            itemId={normalizedItemId || "item"}
+            iconUrl={iconUrl}
+            fallbackSlot={i}
           />
-        ) : hasItem ? (
-          <span
-            style={{
-              width: "100%",
-              height: "100%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 10,
-              lineHeight: 1,
-              filter: "drop-shadow(0 0 2px rgba(0,0,0,0.55))",
-            }}
-          >
-            {getDeterministicFallbackIcon(normalizedItemId || "item", i)}
-          </span>
         ) : null}
       </div>
     );

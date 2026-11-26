@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit generic fishing-motion phase audit",
+  "motions": [
+    {
+      "id": "net-throw-windup",
+      "name": "Net throw · windup",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "net-throw-early",
+      "name": "Net throw · early release",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "net-throw-release",
+      "name": "Net throw · release",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "net-throw-recovery",
+      "name": "Net throw · recovery",
+      "asset": "motions/kaykit-net-throw-candidate.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "pot-pickup-approach",
+      "name": "Pot pickup · approach",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-pickup-reach",
+      "name": "Pot pickup · reach",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-pickup-lift",
+      "name": "Pot pickup · lift",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-pickup-recovery",
+      "name": "Pot pickup · recovery",
+      "asset": "motions/kaykit-object-pickup-candidate.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "pot-interact-approach",
+      "name": "Pot interaction · approach",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "pot-interact-reach",
+      "name": "Pot interaction · reach",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "pot-interact-contact",
+      "name": "Pot interaction · contact",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "pot-interact-recovery",
+      "name": "Pot interaction · recovery",
+      "asset": "motions/kaykit-object-interact-candidate.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "harpoon-thrust-windup",
+      "name": "Harpoon thrust · windup",
+      "asset": "motions/kaykit-harpoon-thrust-candidate.glb",
+      "sampleRatio": 0.1
+    },
+    {
+      "id": "harpoon-thrust-drive",
+      "name": "Harpoon thrust · drive",
+      "asset": "motions/kaykit-harpoon-thrust-candidate.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "harpoon-thrust-extension",
+      "name": "Harpoon thrust · extension",
+      "asset": "motions/kaykit-harpoon-thrust-candidate.glb",
+      "sampleRatio": 0.65
+    },
+    {
+      "id": "harpoon-thrust-recovery",
+      "name": "Harpoon thrust · recovery",
+      "asset": "motions/kaykit-harpoon-thrust-candidate.glb",
+      "sampleRatio": 0.9
+    }
+  ]
+}

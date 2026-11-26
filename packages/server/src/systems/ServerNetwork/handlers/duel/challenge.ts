@@ -15,6 +15,7 @@ import {
 import type { ServerSocket } from "../../../../shared/types";
 import { hasActiveInterfaceSession } from "../common";
 import { Logger } from "../../services";
+import { DUEL_ERRORS } from "../../../DuelSystem/error-messages";
 import {
   rateLimiter,
   getDuelSystem,
@@ -90,6 +91,14 @@ export function handleDuelChallenge(
   if (!duelSystem) {
     Logger.debug("DuelChallenge", "Failed: Duel system unavailable");
     sendDuelError(socket, "Duel system unavailable", "SYSTEM_ERROR");
+    return;
+  }
+
+  // Reject before consuming a token, queueing movement or creating an invite.
+  // createChallenge rechecks after movement, and final confirmation reserves
+  // atomically; this early feedback never grants ownership of the ring.
+  if (duelSystem.arenaPool.getAvailableCount() === 0) {
+    sendDuelError(socket, DUEL_ERRORS.NO_ARENA_AVAILABLE, "NO_ARENA_AVAILABLE");
     return;
   }
 
@@ -193,7 +202,15 @@ export function handleDuelChallenge(
       return;
     }
 
-    // Re-validate lobby status (target may have left lobby while challenger walked over)
+    // Either actor may have crossed the lobby edge during queued movement.
+    if (!isInDuelArenaLobby(world, playerId)) {
+      sendDuelError(
+        socket,
+        "Return to the duel lobby before challenging a player.",
+        "NOT_IN_LOBBY",
+      );
+      return;
+    }
     if (!isInDuelArenaLobby(world, targetPlayerId)) {
       sendDuelError(
         socket,

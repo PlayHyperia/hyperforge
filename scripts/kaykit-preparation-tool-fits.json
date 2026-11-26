@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-12T11:05:00.000Z",
+  "avatar": {
+    "id": "kaykit-knight",
+    "legacyAttachmentId": "kaykit-knight",
+    "path": "artifacts/duel-launch-avatar-bakeoff/kaykit-knight.vrm",
+    "sha256": "b288656410986780a0df81d684e4888633be07751b0e57136d9e3c89512e713f",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "kaykit_hatchet_candidate",
+      "slot": "gatheringtool",
+      "grip": "one-hand",
+      "weaponType": "axe",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/preparation-kit/kaykit-rpg-axe.glb",
+      "sourceSha256": "e8b7e9db723e1c2ebacf57ad668834d076460cd2fd5405310a8fc7b31ccb0c52",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-preparation-kit/kaykit-rpg-axe-fitted.glb",
+      "targetLengthMetres": 0.85,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-woodcutting.glb",
+        "sha256": "efae95d922bb70c50fcb44783308525e9799c990702e580f38ea7137ee0b50c6",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "kaykit_pickaxe_candidate",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "pickaxe",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/preparation-kit/kaykit-rpg-pickaxe.glb",
+      "sourceSha256": "0fb3dd9052e590abb6eeaa53de0f2c9e295441454f8efa653fbe07d285744f0a",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-preparation-kit/kaykit-rpg-pickaxe-fitted.glb",
+      "targetLengthMetres": 0.85,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-mining.glb",
+        "sha256": "7b5b79419682c4477b22834b6ceed058dbb0958cdbe3e2f2eeeb13fedd30e360",
+        "sampleRatio": 0.55
+      }
+    }
+  ]
+}

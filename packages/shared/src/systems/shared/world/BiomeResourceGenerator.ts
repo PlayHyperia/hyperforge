@@ -20,7 +20,10 @@ import type {
 import type {
   ResourceNode,
   ResourceSubType,
+  TerrainResourceBatchOwner,
 } from "../../../types/world/terrain";
+import { centeredTerrainTileIndex } from "../../../types/world/terrain";
+import { snapToTileCenter } from "../movement/TileSystem";
 import type { VegetationInstance } from "../../../types/world/world-types";
 import {
   getTreeLevelRequired,
@@ -245,6 +248,156 @@ export interface ResourceGenerationContext {
   getDominantBiome?: (worldX: number, worldZ: number) => string;
   /** Deterministic RNG seeded for this tile */
   createRng: (salt: string) => () => number;
+}
+
+export interface TreeGenerationSource {
+  context: ResourceGenerationContext;
+  config: BiomeTreeConfig;
+}
+
+export type TreeAnchorRejectionReason =
+  "non_finite" | "water" | "road" | "slope" | "excluded";
+
+export interface CenteredTreeGenerationResult {
+  resources: ResourceNode[];
+  sourceCellsGenerated: number;
+  sourceCandidates: number;
+  ownedCandidates: number;
+  rejected: Array<{
+    id: string;
+    position: { x: number; y: number; z: number };
+    reason: TreeAnchorRejectionReason;
+  }>;
+}
+
+/** Reapply the existing land-tree rules at the final one-metre game anchor. */
+export function validateTreeAnchor(
+  source: TreeGenerationSource,
+  x: number,
+  z: number,
+  isExcludedAt?: (x: number, z: number) => boolean,
+): {
+  position: { x: number; y: number; z: number };
+  rejection: TreeAnchorRejectionReason | null;
+} {
+  const { context, config } = source;
+  const position = snapToTileCenter({ x, y: 0, z });
+  let rejection: TreeAnchorRejectionReason | null = null;
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.z)) {
+    return { position, rejection: "non_finite" };
+  }
+  position.y = context.getHeightAt(position.x, position.z);
+  const water = context.getWaterSurfaceAt?.(position.x, position.z);
+  if (
+    !Number.isFinite(position.y) ||
+    (water !== undefined && !Number.isFinite(water))
+  ) {
+    rejection = "non_finite";
+  } else if (
+    position.y < context.waterThreshold ||
+    (water !== undefined && position.y <= water + 1)
+  ) {
+    rejection = "water";
+  } else if (context.isOnRoad?.(position.x, position.z)) {
+    rejection = "road";
+  } else if (isExcludedAt?.(position.x, position.z)) {
+    rejection = "excluded";
+  } else if (config.maxSlope !== undefined && config.maxSlope < Infinity) {
+    const dx =
+      (context.getHeightAt(position.x + 1, position.z) -
+        context.getHeightAt(position.x - 1, position.z)) *
+      0.5;
+    const dz =
+      (context.getHeightAt(position.x, position.z + 1) -
+        context.getHeightAt(position.x, position.z - 1)) *
+      0.5;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) rejection = "non_finite";
+    else if (dx * dx + dz * dz > config.maxSlope * config.maxSlope)
+      rejection = "slope";
+  }
+  return { position, rejection };
+}
+
+/**
+ * Retain the original positive-local seeded lattice, but give every tree one
+ * centred gameplay owner. Moving the lattice itself would move every tree and
+ * change its durable coordinate-based identity. No rejected tree is backfilled.
+ * Four source cells intersect a centred tile; generate each at most once here.
+ */
+export function generateCenteredTrees(
+  owner: TerrainResourceBatchOwner,
+  tileSize: number,
+  createSource: (tileX: number, tileZ: number) => TreeGenerationSource,
+  isExcludedAt?: (x: number, z: number) => boolean,
+): CenteredTreeGenerationResult {
+  if (
+    !Number.isInteger(owner.tileX) ||
+    !Number.isInteger(owner.tileZ) ||
+    !Number.isSafeInteger(tileSize) ||
+    tileSize <= 0
+  ) {
+    throw new Error(
+      "Centred tree ownership requires integer tiles and a positive whole-metre tile size",
+    );
+  }
+  const result: CenteredTreeGenerationResult = {
+    resources: [],
+    sourceCellsGenerated: 0,
+    sourceCandidates: 0,
+    ownedCandidates: 0,
+    rejected: [],
+  };
+  for (let sourceX = owner.tileX - 1; sourceX <= owner.tileX; sourceX++) {
+    for (let sourceZ = owner.tileZ - 1; sourceZ <= owner.tileZ; sourceZ++) {
+      const { context, config } = createSource(sourceX, sourceZ);
+      if (
+        context.tileX !== sourceX ||
+        context.tileZ !== sourceZ ||
+        context.tileSize !== tileSize
+      ) {
+        throw new Error(
+          "Tree source context does not match its seeded lattice cell",
+        );
+      }
+      const candidates = generateTrees(context, config);
+      result.sourceCellsGenerated++;
+      result.sourceCandidates += candidates.length;
+      for (const candidate of candidates) {
+        const position = snapToTileCenter({
+          x: sourceX * tileSize + candidate.position.x,
+          y: candidate.position.y,
+          z: sourceZ * tileSize + candidate.position.z,
+        });
+        if (
+          centeredTerrainTileIndex(position.x, tileSize) !== owner.tileX ||
+          centeredTerrainTileIndex(position.z, tileSize) !== owner.tileZ
+        )
+          continue;
+        result.ownedCandidates++;
+        const admitted = validateTreeAnchor(
+          { context, config },
+          position.x,
+          position.z,
+          isExcludedAt,
+        );
+        position.y = admitted.position.y;
+        const reason = admitted.rejection;
+        if (reason) {
+          result.rejected.push({ id: candidate.id, position, reason });
+          continue;
+        }
+        result.resources.push({
+          ...candidate,
+          position: {
+            x: position.x - owner.tileX * tileSize,
+            y: position.y,
+            z: position.z - owner.tileZ * tileSize,
+          },
+        });
+      }
+    }
+  }
+  return result;
 }
 
 /**

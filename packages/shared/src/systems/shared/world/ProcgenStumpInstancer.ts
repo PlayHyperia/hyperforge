@@ -136,7 +136,7 @@ export class ProcgenStumpInstancer {
     material.metalness = 0.0;
 
     // Per-instance fade attribute for distance culling
-    const instanceFade = attribute("instanceFade", "float");
+    const instanceFade = attribute<"float">("instanceFade", "float");
 
     // Screen-space dithering dissolve based on fade
     const dissolveNode = Fn(() => {

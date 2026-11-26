@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit exact pickaxe tier review",
+  "motions": [
+    {
+      "id": "mining",
+      "name": "Mining contact and silhouette",
+      "asset": "motions/kaykit-mining.glb",
+      "sampleRatio": 0.55
+    }
+  ]
+}

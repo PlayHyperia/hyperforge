@@ -16,6 +16,15 @@ export const formatWinLoss = (wins: number, losses: number): string => {
   return `${safeWins}-${safeLosses}`;
 };
 
+export const formatWinDrawLoss = (
+  wins: number,
+  draws: number,
+  losses: number,
+): string => {
+  const safeDraws = Number.isFinite(draws) ? Math.max(0, Math.floor(draws)) : 0;
+  return `${formatWinLoss(wins, losses).replace("-", `-${safeDraws}-`)}`;
+};
+
 export const normalizeSearchTerm = (value: string): string =>
   value.trim().toLowerCase();
 

@@ -476,6 +476,9 @@ export class ItemEntity extends InteractableEntity {
     buf.stackable = this.config.stackable;
     buf.modelScale = this.config.modelScale;
     buf.groundOffset = this.config.groundOffset;
+    buf.interactable = this.config.interactable;
+    buf.custodyPolicy = this.getProperty("custodyPolicy");
+    buf.custodySourceId = this.getProperty("custodySourceId");
     return buf;
   }
 
@@ -494,6 +497,9 @@ export class ItemEntity extends InteractableEntity {
       stackable: this.config.stackable,
       modelScale: this.config.modelScale,
       groundOffset: this.config.groundOffset,
+      interactable: this.config.interactable,
+      custodyPolicy: this.getProperty("custodyPolicy"),
+      custodySourceId: this.getProperty("custodySourceId"),
     } as EntityData;
   }
 }

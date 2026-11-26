@@ -47,6 +47,7 @@ export enum InteractionType {
   PICKUP = "pickup",
   TALK = "talk",
   GATHER = "gather",
+  HARVEST = "harvest",
   USE = "use",
   LOOT = "loot",
   BANK = "bank",
@@ -166,6 +167,10 @@ export enum DeathState {
 export interface PlayerEntityData extends BaseEntityData {
   playerId: string;
   playerName: string;
+  /** Server-owned AI player, retained through PlayerEntity serialization. */
+  isAgent?: boolean;
+  /** AI player whose runtime is embedded in the authoritative server. */
+  isEmbeddedAgent?: boolean;
   level: number;
   health: number;
   maxHealth: number;
@@ -273,6 +278,8 @@ export interface MobEntityConfig extends EntityConfig<MobEntityProperties> {
 export interface NPCEntityConfig extends EntityConfig<NPCEntityProperties> {
   npcType: NPCType;
   npcId: string;
+  /** Exact stores.json identity for store-capable NPCs. */
+  storeId?: string;
   dialogueLines: string[];
   services: string[];
   questIds?: string[];
@@ -438,6 +445,9 @@ export interface MobEntityProperties extends BaseEntityProperties {
 // Item-specific properties
 export interface ItemEntityProperties extends BaseEntityProperties {
   itemId: string;
+  /** Runtime custody classification; pickup authority accepts only durable ground sources. */
+  custodyPolicy?: "durable_ground" | "display_only" | "diagnostic_only";
+  custodySourceId?: string;
   harvestable: boolean;
   dialogue: string[];
   quantity: number;
@@ -516,6 +526,7 @@ export interface ItemSpawnData {
   quantity?: number;
   stackable?: boolean;
   value?: number;
+  droppedBy?: string;
 }
 
 export interface ItemSpawnerStats {

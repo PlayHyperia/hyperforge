@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-20T00:00:00.000Z",
+  "avatar": {
+    "id": "steve",
+    "legacyAttachmentId": "/api/assets/steve/model",
+    "path": "avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "shortbow",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "bow",
+      "dynamicBowString": true,
+      "stableHeldPose": {
+        "avatarLocalEulerDegrees": [0, -90, 0],
+        "anchorToPrimaryHandMeshCenter": true,
+        "avatarLocalPositionOffset": [0.0555, 0, 0.005]
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "dynamic-aim",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "leftHand",
+            "minimumSourceProjection": -0.16,
+            "maximumSourceProjection": 0.16
+          }
+        ]
+      },
+      "attachmentBone": "leftHand",
+      "sourcePath": "models/bows/bow-wood/bow-wood.glb",
+      "sourceSha256": "ff92b029f9c2b34035c71b365aad3e5e87e024ffe8f021979bf8c124940111b3",
+      "outputPath": "models/bows/bow-wood/candidates/shortbow-stable-hand-anchor-candidate.glb",
+      "targetLengthMetres": 0.9,
+      "desiredWorldEulerDegrees": [0, -90, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "primaryGripAnchor": "hand-mesh-center",
+      "referenceMotion": {
+        "path": "emotes/emote-range.glb",
+        "sha256": "72c27c15fb447e5f2b2e87ea5e01a2a9c632d201e33042a2c1c6ab696a2769cf",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "magic_shortbow",
+      "slot": "weapon",
+      "grip": "two-hand",
+      "weaponType": "bow",
+      "dynamicBowString": true,
+      "stableHeldPose": {
+        "avatarLocalEulerDegrees": [0, -90, 0],
+        "anchorToPrimaryHandMeshCenter": true,
+        "avatarLocalPositionOffset": [0.0555, 0, 0.005]
+      },
+      "gripContact": {
+        "schemaVersion": 1,
+        "contentNodeName": "EquipmentContent",
+        "sourceAxis": [0, 1, 0],
+        "actionEnd": "dynamic-aim",
+        "zones": [
+          {
+            "id": "primary",
+            "boneName": "leftHand",
+            "minimumSourceProjection": -0.16,
+            "maximumSourceProjection": 0.16
+          }
+        ]
+      },
+      "attachmentBone": "leftHand",
+      "sourcePath": "models/bows/bow-wood/bow-wood.glb",
+      "sourceSha256": "ff92b029f9c2b34035c71b365aad3e5e87e024ffe8f021979bf8c124940111b3",
+      "outputPath": "models/bows/bow-wood/candidates/magic-shortbow-stable-hand-anchor-candidate.glb",
+      "targetLengthMetres": 0.9,
+      "desiredWorldEulerDegrees": [0, -90, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "primaryGripAnchor": "hand-mesh-center",
+      "referenceMotion": {
+        "path": "emotes/emote-range.glb",
+        "sha256": "72c27c15fb447e5f2b2e87ea5e01a2a9c632d201e33042a2c1c6ab696a2769cf",
+        "sampleRatio": 0.55
+      }
+    }
+  ]
+}

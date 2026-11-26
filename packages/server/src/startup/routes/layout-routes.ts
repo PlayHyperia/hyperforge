@@ -10,6 +10,7 @@ import type { World } from "@hyperforge/shared";
 import type { DatabaseSystem } from "../../systems/DatabaseSystem/index.js";
 import * as schema from "../../database/schema.js";
 import { eq, and, desc, isNotNull } from "drizzle-orm";
+import { requirePrivyRequestUser } from "../../infrastructure/auth/http-auth.js";
 
 /**
  * Generate a unique share code for a preset
@@ -71,6 +72,7 @@ export function registerLayoutRoutes(
         error: "Missing userId parameter",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     try {
       const db = databaseSystem.getDb();
@@ -135,6 +137,7 @@ export function registerLayoutRoutes(
         error: "Missing userId parameter",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     const slot = parseInt(slotIndex, 10);
     if (isNaN(slot) || slot < 0 || slot > 3) {
@@ -229,6 +232,7 @@ export function registerLayoutRoutes(
         error: "Missing required fields: userId, slotIndex, name, layoutData",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     if (slotIndex < 0 || slotIndex > 3) {
       return reply.status(400).send({
@@ -330,6 +334,7 @@ export function registerLayoutRoutes(
         error: "Missing userId in body",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     const slot = parseInt(slotIndex, 10);
     if (isNaN(slot) || slot < 0 || slot > 3) {
@@ -400,6 +405,7 @@ export function registerLayoutRoutes(
         error: "Missing required fields: userId, presets",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     try {
       const db = databaseSystem.getDb();
@@ -516,6 +522,7 @@ export function registerLayoutRoutes(
         error: "Missing required fields: userId, slotIndex",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     try {
       const db = databaseSystem.getDb();
@@ -953,6 +960,7 @@ export function registerLayoutRoutes(
         error: "Missing required fields: userId, rating",
       });
     }
+    if (!(await requirePrivyRequestUser(request, reply, userId))) return;
 
     if (rating < 1 || rating > 5) {
       return reply.status(400).send({

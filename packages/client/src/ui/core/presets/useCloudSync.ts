@@ -10,6 +10,15 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { usePresetStore } from "../../stores/presetStore";
 import type { WindowState } from "../../types";
+import { privyAuthManager } from "../../../auth/PrivyAuthManager";
+
+function authenticatedHeaders(contentType = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["Content-Type"] = "application/json";
+  const token = privyAuthManager.getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
 
 /** Cloud sync configuration */
 export interface CloudSyncConfig {
@@ -119,6 +128,7 @@ export function useCloudSync(config: CloudSyncConfig): CloudSyncResult {
     try {
       const response = await fetch(
         `${apiBaseUrl}/layouts?userId=${encodeURIComponent(userId)}`,
+        { headers: authenticatedHeaders() },
       );
 
       if (!response.ok) {
@@ -210,7 +220,7 @@ export function useCloudSync(config: CloudSyncConfig): CloudSyncResult {
 
       const response = await fetch(`${apiBaseUrl}/layouts/sync`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authenticatedHeaders(true),
         body: JSON.stringify({ userId, presets: cloudPresets }),
       });
 
@@ -268,7 +278,7 @@ export function useCloudSync(config: CloudSyncConfig): CloudSyncResult {
 
         const response = await fetch(`${apiBaseUrl}/layouts`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authenticatedHeaders(true),
           body: JSON.stringify({
             userId,
             slotIndex,
@@ -325,7 +335,7 @@ export function useCloudSync(config: CloudSyncConfig): CloudSyncResult {
       try {
         const response = await fetch(`${apiBaseUrl}/layouts/${slotIndex}`, {
           method: "DELETE",
-          headers: { "Content-Type": "application/json" },
+          headers: authenticatedHeaders(true),
           body: JSON.stringify({ userId }),
         });
 

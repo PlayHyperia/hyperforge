@@ -96,6 +96,19 @@
 
 // moment removed; use native Date
 import { emoteUrls, Emotes } from "../../data/playerEmotes";
+import type {
+  QuestListPayload,
+  QuestSnapshot,
+} from "../../types/game/quest-types";
+import { DataManager } from "../../data/DataManager";
+import type { TerrainSystem } from "../shared/world/TerrainSystem";
+import {
+  PLAYER_ROOT_CLEARANCE,
+  resolveExteriorStepSupportHeight,
+  resolvePlayerRootHeight,
+} from "../../utils/movement/PlayerSupport";
+import type { TerrainResourceSpawnBatch } from "../../types/world/terrain";
+import { EQUIPMENT_SLOT_NAMES } from "../../constants/EquipmentConstants";
 import THREE from "../../extras/three/three";
 import { readPacket, writePacket } from "../../platform/shared/packets";
 import { storage } from "../../platform/shared/storage";
@@ -107,8 +120,16 @@ import type {
   WorldOptions,
 } from "../../types";
 import type { Entity } from "../../entities/Entity";
-import { EventType } from "../../types/events";
-import type { FletchingInterfaceOpenPayload } from "../../types/events";
+import { ResourceEntity } from "../../entities/world/ResourceEntity";
+import type { ResourceSystem } from "../shared/entities/ResourceSystem";
+import { EventType, type EventMap } from "../../types/events";
+import type {
+  EntryRetryState,
+  FishingInteractionPresentationPayload,
+  FletchingInterfaceOpenPayload,
+  ProcessingInteractionPresentationPayload,
+} from "../../types/events";
+import { normalizeProcessingInteractionPresentationState } from "../../types/game/processing-interaction-presentation";
 import { DeathState } from "../../types/entities";
 // Social system types - use shared types for consistency
 import type {
@@ -116,19 +137,28 @@ import type {
   FriendRequest,
   FriendStatusUpdateData,
 } from "../../types/game/social-types";
+import type { AttackType } from "../../types/game/item-types";
 import { uuid } from "../../utils";
 import { SystemBase } from "../shared/infrastructure/SystemBase";
+import { resolveClientConnectionAuthMode } from "./clientNetworkAuthPolicy";
 import { PendingActionTracker } from "./network/PendingActionTracker";
-import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import { WorldContentAdmission } from "../../runtime/WorldContentAdmission";
+import {
+  isStreamingLikeViewport,
+  shouldAdmitNetworkEntityInViewport,
+} from "../../runtime/clientViewportMode";
 import { PlayerLocal } from "../../entities/player/PlayerLocal";
 import { TileInterpolator } from "./TileInterpolator";
 import { type TileCoord } from "../shared/movement/TileSystem"; // Internal import within shared package
+import { generateGroundItemDropOperationId } from "../../utils/game/GroundItemSourceIdentity";
 
 type ClientNetworkEnv = {
   PUBLIC_DISABLE_NETWORK?: string;
   DISABLE_NETWORK?: string;
   PUBLIC_INTERPOLATION_MAX_PER_FRAME?: string;
   INTERPOLATION_MAX_PER_FRAME?: string;
+  LOAD_TEST_MODE?: string;
+  NODE_ENV?: string;
 };
 
 const isTruthy = (value?: string): boolean =>
@@ -171,6 +201,7 @@ const readPositiveIntegerEnv = (...keys: string[]): number | null => {
 
 const _v3_1 = new THREE.Vector3();
 const _quat_1 = new THREE.Quaternion();
+const _combatFaceAxis = new THREE.Vector3(0, 1, 0);
 
 /**
  * Entity interpolation state for smooth remote entity movement
@@ -226,6 +257,10 @@ export class ClientNetwork extends SystemBase {
   isClient: boolean;
   isServer: boolean;
   connected: boolean;
+  private readonly worldAdmission = new WorldContentAdmission(() =>
+    DataManager.getWorldContentIdentity(),
+  );
+  private flushing = false;
   queue: Array<[string, unknown]>;
   /** Queue read index for O(1) dequeue (avoids shift() which is O(n)) */
   private _queueReadIndex = 0;
@@ -254,7 +289,66 @@ export class ClientNetwork extends SystemBase {
   private reconnectTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private lastWsUrl: string | null = null;
   private lastInitOptions: Record<string, unknown> | null = null;
+  // Undefined is uncaptured, not a request to reread storage on reconnect.
+  private selectedCharacterId: string | null | undefined;
   private intentionalDisconnect: boolean = false;
+  private entryRetryIntent: {
+    transport: WebSocket;
+    characterId: string;
+    admission: number;
+    awaitingResponse: boolean;
+    expired: boolean;
+  } | null = null;
+  private entryRetryValue: EntryRetryState | null = null;
+  private entryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private entryRetryStaleTransport: WebSocket | null = null;
+  private entryRetryAdmission: number | null = null;
+  private resourceAuthorityToken: object | null = null;
+  private resourceAuthorityOwner: ResourceSystem | null = null;
+
+  private beginResourceAuthority(): void {
+    this.closeResourceAuthority();
+    this.resourceAuthorityToken = {};
+    this.getResourceAuthorityOwner();
+  }
+
+  private getResourceAuthorityOwner(): ResourceSystem | null {
+    const token = this.resourceAuthorityToken;
+    if (!token) return null;
+    const owner = this.world.getSystem<ResourceSystem>("resource") ?? null;
+    if (owner !== this.resourceAuthorityOwner) {
+      this.resourceAuthorityOwner?.closeClientResourceAuthority(token);
+      this.resourceAuthorityOwner = owner;
+      owner?.beginClientResourceAuthority(token);
+    }
+    return owner;
+  }
+
+  private closeResourceAuthority(): void {
+    if (this.resourceAuthorityToken)
+      this.resourceAuthorityOwner?.closeClientResourceAuthority(
+        this.resourceAuthorityToken,
+      );
+    this.resourceAuthorityToken = null;
+    this.resourceAuthorityOwner = null;
+    // These are old-transport deltas, not current authoritative tree state.
+    for (const [id, pending] of this.pendingModifications) {
+      if (!id.startsWith("tree_")) continue;
+      this.totalPendingModificationCount -= pending.length;
+      this.pendingModifications.delete(id);
+      this.pendingModificationTimestamps.delete(id);
+      this.pendingModificationLimitReached.delete(id);
+    }
+  }
+
+  private rememberResourceState(id: string, depleted: boolean): boolean {
+    const token = this.resourceAuthorityToken;
+    const owner =
+      token && id.startsWith("tree_") ? this.getResourceAuthorityOwner() : null;
+    if (!token || !owner) return false;
+    owner.applyClientResourceState(token, id, depleted);
+    return true;
+  }
 
   // Application-level keepalive to prevent Cloudflare/proxy WebSocket idle timeout
   // WS protocol-level ping/pong may not be counted as "activity" by reverse proxies
@@ -283,6 +377,16 @@ export class ClientNetwork extends SystemBase {
   // topics, so players near region boundaries receive the same packet multiple times.
   // Map key → timestamp for periodic sweep (no per-key setTimeout).
   private readonly _recentDamageKeys = new Map<string, number>();
+  private readonly _recentProjectileLaunchKeys = new Map<string, number>();
+  private readonly _recentProjectileHitKeys = new Map<string, number>();
+  private readonly _recentProjectileCancellationKeys = new Map<
+    string,
+    number
+  >();
+  private _projectileNetworkSourceId: string | null = null;
+  private _highestProjectileNetworkSequence = 0;
+  private readonly _missingProjectileNetworkSequences = new Set<number>();
+  private readonly _terminalProjectileIds = new Map<string, number>();
   // Single tracker for all optimistic inventory mutations (shared by all callers).
   // Snapshots the cache before mutation; rolls back after 5s if no server confirmation.
   private inventoryTracker = new PendingActionTracker<InventorySnapshot>(5000);
@@ -309,9 +413,7 @@ export class ClientNetwork extends SystemBase {
   private spectatorFollowEntity: string | undefined;
   private spectatorTargetPending = false;
   private spectatorRetryInterval:
-    | ReturnType<typeof setInterval>
-    | number
-    | null = null;
+    ReturnType<typeof setInterval> | number | null = null;
 
   // Entity interpolation for smooth remote entity movement
   private interpolationStates: Map<string, InterpolationState> = new Map();
@@ -322,6 +424,27 @@ export class ClientNetwork extends SystemBase {
   // Tile-based interpolation for classic fantasy MMORPG-style movement
   // Public to allow position sync on respawn/teleport
   public tileInterpolator: TileInterpolator = new TileInterpolator();
+
+  // Authoritative combat target identity is retained separately from movement
+  // packets. Streaming spectators render only remote players, so they cannot
+  // rely on PlayerLocal's per-frame combat-facing path.
+  private combatFaceTargets: Map<string, string> = new Map();
+  // The streaming scheduler owns its frozen contestant pair for the entire
+  // FIGHTING phase. Generic combat subsystems may transiently clear their own
+  // engagement while an agent repositions; those packets must not release the
+  // broadcast client's opponent-facing lock between scheduler ticks.
+  private streamingDuelCombatFaceTargets: Map<string, string> = new Map();
+  private processingFaceTargets: Map<
+    string,
+    { x: number; y: number; z: number }
+  > = new Map();
+  private streamingDuelContestantIds: Set<string> = new Set();
+  // Entity ids intentionally omitted from arena-only snapshots. Tracking them
+  // prevents later modification packets from accumulating in the out-of-order
+  // queue while preserving the full snapshot behavior for playable clients.
+  private streamingFilteredEntityIds: Set<string> = new Set();
+  private streamingDuelFacingLocked = false;
+  private streamingDuelFighting = false;
 
   // Track dead players to prevent position updates from entityModified packets
   // CRITICAL: Prevents race condition where entityModified packets arrive after death
@@ -485,6 +608,31 @@ export class ClientNetwork extends SystemBase {
     return undefined;
   }
 
+  private captureCharacterSelection(options: WorldOptions): void {
+    const previous = this.selectedCharacterId;
+    if (options.selectedCharacterId !== undefined) {
+      this.selectedCharacterId = options.selectedCharacterId;
+    } else if (this.selectedCharacterId === undefined) {
+      try {
+        this.selectedCharacterId =
+          typeof sessionStorage === "undefined"
+            ? null
+            : sessionStorage.getItem("selectedCharacterId");
+      } catch {
+        // Storage can be unavailable or denied. Never infer another character.
+        this.selectedCharacterId = null;
+        this.logger.warn("Character selection storage is unavailable");
+      }
+    }
+    if (previous !== this.selectedCharacterId && this.ws) {
+      this.clearEntryRetry();
+    }
+    this.lastInitOptions = {
+      ...options,
+      selectedCharacterId: this.selectedCharacterId,
+    };
+  }
+
   async init(options: WorldOptions): Promise<void> {
     const wsUrl = (options as { wsUrl?: string }).wsUrl;
 
@@ -514,7 +662,7 @@ export class ClientNetwork extends SystemBase {
 
     // Store connection options for reconnection
     this.lastWsUrl = wsUrl;
-    this.lastInitOptions = options as Record<string, unknown>;
+    this.captureCharacterSelection(options);
 
     // CRITICAL: If we already have a WORKING WebSocket, don't recreate
     // But if it's closed or closing, we need to reconnect
@@ -547,6 +695,17 @@ export class ClientNetwork extends SystemBase {
       this.connected = false;
       this.id = null;
     }
+
+    this.clearEntryRetry(false);
+    this.entryRetryStaleTransport = null;
+    this.entryRetryAdmission = null;
+    this.worldAdmission.beginConnection();
+    this.beginResourceAuthority();
+    this.connected = false;
+    this.intentionalDisconnect = false;
+    // Packets from a previous transport cannot be replayed into this admission.
+    this.queue.length = 0;
+    this._queueReadIndex = 0;
 
     // AUTHENTICATION: Include authToken in URL for reliable authentication
     // The server supports both URL-based auth and first-message auth.
@@ -693,29 +852,39 @@ export class ClientNetwork extends SystemBase {
 
     const isStreamingConnection = /[?&]mode=streaming(?:[&#]|$)/.test(url);
     const isSpectatorConnection = /[?&]mode=spectator(?:[&#]|$)/.test(url);
-    const allowsAnonymousMode =
-      isStreamingConnection ||
-      isSpectatorConnection ||
-      this.isEmbeddedSpectator;
-    // If URL auth is unavailable (no token), fall back to first-message auth.
-    // Spectator/streaming modes are intentionally anonymous and should not
-    // block waiting for onAuthResult.
-    const useFirstMessageAuth =
-      !urlHasAuthToken && !authToken && !allowsAnonymousMode;
+    // Load-test clients are authenticated by the server from their explicit
+    // connection flag and receive a snapshot immediately. Waiting for an
+    // auth-result packet here deadlocks that supported local-only handshake.
+    const connectionAuthMode = resolveClientConnectionAuthMode({
+      url,
+      urlHasAuthToken,
+      authToken,
+      embeddedSpectator: this.isEmbeddedSpectator,
+      allowLoadTestBypass:
+        process.env.LOAD_TEST_MODE === "true" &&
+        process.env.NODE_ENV !== "production",
+    });
+    const useFirstMessageAuth = connectionAuthMode === "first-message";
     const connectionTimeoutMs =
       isStreamingConnection || isSpectatorConnection ? 120_000 : 30_000;
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(url);
-      this.ws.binaryType = "arraybuffer";
+      const transport = new WebSocket(url);
+      this.ws = transport;
+      transport.binaryType = "arraybuffer";
 
       const timeout = setTimeout(() => {
+        if (this.ws !== transport) {
+          reject(new Error("WebSocket connection superseded"));
+          return;
+        }
         this.logger.warn("WebSocket connection timeout");
         reject(new Error("WebSocket connection timeout"));
       }, connectionTimeoutMs);
 
       // Handler for first-message auth response
       const handleAuthResult = (event: MessageEvent) => {
+        if (this.ws !== transport || this.worldAdmission.rejected) return;
         const packet = readPacket(event.data as ArrayBuffer);
         if (!packet || packet.length === 0) return;
 
@@ -724,7 +893,7 @@ export class ClientNetwork extends SystemBase {
           const result = data as { success: boolean; error?: string };
 
           // Remove auth handler - we're done with auth phase
-          this.ws?.removeEventListener("message", handleAuthResult);
+          transport.removeEventListener("message", handleAuthResult);
 
           if (result.success) {
             this.logger.debug("First-message authentication successful");
@@ -739,7 +908,8 @@ export class ClientNetwork extends SystemBase {
         }
       };
 
-      this.ws.addEventListener("open", () => {
+      transport.addEventListener("open", () => {
+        if (this.ws !== transport || this.worldAdmission.rejected) return;
         this.logger.debug("WebSocket connected successfully");
 
         if (useFirstMessageAuth) {
@@ -747,7 +917,7 @@ export class ClientNetwork extends SystemBase {
           this.logger.debug("Sending first-message authentication...");
 
           // Add auth result handler BEFORE sending authenticate packet
-          this.ws?.addEventListener("message", handleAuthResult);
+          transport.addEventListener("message", handleAuthResult);
 
           // Send authentication credentials
           const authPacket = writePacket("authenticate", {
@@ -756,7 +926,7 @@ export class ClientNetwork extends SystemBase {
             name,
             avatar,
           });
-          this.ws?.send(authPacket);
+          transport.send(authPacket);
 
           // Don't resolve yet - wait for authResult
         } else {
@@ -765,14 +935,18 @@ export class ClientNetwork extends SystemBase {
         }
       });
 
-      this.ws.addEventListener("message", this.onPacket);
-      this.ws.addEventListener("close", this.onClose);
+      transport.addEventListener("message", this.onPacket);
+      transport.addEventListener("close", this.onClose);
 
-      this.ws.addEventListener("error", (e) => {
+      transport.addEventListener("error", (e) => {
         clearTimeout(timeout);
+        if (this.ws !== transport) {
+          reject(new Error("WebSocket connection superseded"));
+          return;
+        }
         const isExpectedDisconnect =
-          this.ws?.readyState === WebSocket.CLOSED ||
-          this.ws?.readyState === WebSocket.CLOSING;
+          transport.readyState === WebSocket.CLOSED ||
+          transport.readyState === WebSocket.CLOSING;
         if (!isExpectedDisconnect) {
           // Extract error message - handle both browser ErrorEvent and Node.js Event
           const errorMessage =
@@ -796,36 +970,10 @@ export class ClientNetwork extends SystemBase {
     timeout: ReturnType<typeof setTimeout>,
     resolve: () => void,
   ): void {
-    this.connected = true;
+    // World.init must finish before the packet loop starts: resolve transport
+    // setup here, but do not claim world admission or flush gameplay messages.
     this.initialized = true;
     clearTimeout(timeout);
-
-    // Handle reconnection success
-    if (this.isReconnecting) {
-      this.logger.debug(`Reconnected after ${this.reconnectAttempts} attempts`);
-      this.emitTypedEvent("NETWORK_RECONNECTED", {
-        attempts: this.reconnectAttempts,
-      });
-      this.world.chat.add(
-        {
-          id: uuid(),
-          from: "System",
-          fromId: undefined,
-          body: "Connection restored.",
-          text: "Connection restored.",
-          timestamp: Date.now(),
-          createdAt: new Date().toISOString(),
-        },
-        false,
-      );
-      // Flush outgoing queue after reconnection
-      this.flushOutgoingQueue();
-    }
-
-    // Reset reconnection state
-    this.isReconnecting = false;
-    this.reconnectAttempts = 0;
-    this.intentionalDisconnect = false;
     if (this.reconnectTimeoutId) {
       clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
@@ -886,11 +1034,20 @@ export class ClientNetwork extends SystemBase {
   }
 
   send<T = unknown>(name: string, data?: T) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.worldAdmission.rejected) return;
+    if (
+      this.connected &&
+      this.worldAdmission.admitted &&
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN
+    ) {
       // console.debug(`[ClientNetwork] Sending packet: ${name}`, data)
       const packet = writePacket(name, data);
       this.ws.send(packet);
-    } else if (this.isReconnecting) {
+    } else if (
+      this.isReconnecting ||
+      (this.ws && this.ws.readyState === WebSocket.OPEN)
+    ) {
       // Queue message for later delivery when reconnected
       this.queueOutgoingMessage(name, data);
     } else {
@@ -941,7 +1098,11 @@ export class ClientNetwork extends SystemBase {
    * Flush queued outgoing messages after reconnection
    */
   private flushOutgoingQueue(): void {
-    if (this.outgoingQueue.length === 0) {
+    if (
+      !this.connected ||
+      !this.worldAdmission.admitted ||
+      this.outgoingQueue.length === 0
+    ) {
       return;
     }
 
@@ -976,72 +1137,95 @@ export class ClientNetwork extends SystemBase {
   }
 
   enqueue(method: string, data: unknown) {
+    if (this.worldAdmission.rejected) return;
     this.queue.push([method, data]);
   }
 
   async flush() {
     // Don't process queue if WebSocket is not connected
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (
+      this.flushing ||
+      this.worldAdmission.rejected ||
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN
+    ) {
       return;
     }
 
-    // OPTIMIZATION: Use read index instead of shift() - O(1) vs O(n)
-    // Process from _queueReadIndex to queue.length, with per-frame limit to prevent jank
-    const MAX_PACKETS_PER_FRAME = 50; // Prevent packet storm from blocking main thread
-    let packetsProcessed = 0;
+    this.flushing = true;
+    const transport = this.ws;
+    try {
+      // OPTIMIZATION: Use read index instead of shift() - O(1) vs O(n)
+      // Process from _queueReadIndex to queue.length, with per-frame limit to prevent jank
+      const MAX_PACKETS_PER_FRAME = 50; // Prevent packet storm from blocking main thread
+      let packetsProcessed = 0;
 
-    while (
-      this._queueReadIndex < this.queue.length &&
-      packetsProcessed < MAX_PACKETS_PER_FRAME
-    ) {
-      const packet = this.queue[this._queueReadIndex++];
-      const method = packet[0];
-      const data = packet[1];
-      packetsProcessed++;
+      while (
+        this._queueReadIndex < this.queue.length &&
+        packetsProcessed < MAX_PACKETS_PER_FRAME &&
+        this.ws === transport &&
+        transport.readyState === WebSocket.OPEN &&
+        !this.worldAdmission.rejected
+      ) {
+        const packet = this.queue[this._queueReadIndex++];
+        const method = packet[0];
+        const data = packet[1];
+        packetsProcessed++;
 
-      // OPTIMIZATION: Cache handler lookups to avoid string operations per packet
-      let handler = this._handlerCache.get(method);
-      if (handler === undefined) {
-        // First time seeing this method - look it up and cache
-        handler = (this as Record<string, unknown>)[method] as
-          | Function
-          | undefined;
+        // Broadcasts can arrive before the initial snapshot. Its authoritative
+        // state supersedes these deltas; never apply them before admission.
+        if (!this.worldAdmission.allowsPacket(method)) continue;
+
+        // OPTIMIZATION: Cache handler lookups to avoid string operations per packet
+        let handler = this._handlerCache.get(method);
+        if (handler === undefined) {
+          // First time seeing this method - look it up and cache
+          handler = (this as Record<string, unknown>)[method] as
+            Function | undefined;
+          if (!handler) {
+            // Try onX format (e.g., onSnapshot)
+            const onName = `on${method.charAt(0).toUpperCase()}${method.slice(1)}`;
+            handler = (this as Record<string, unknown>)[onName] as
+              Function | undefined;
+          }
+          // Cache result (even if null, to avoid repeated lookups)
+          this._handlerCache.set(method, handler ?? null);
+        }
+
         if (!handler) {
-          // Try onX format (e.g., onSnapshot)
-          const onName = `on${method.charAt(0).toUpperCase()}${method.slice(1)}`;
-          handler = (this as Record<string, unknown>)[onName] as
-            | Function
-            | undefined;
+          console.error(`[ClientNetwork] No handler for packet '${method}'`);
+          continue; // Skip unknown packets instead of throwing to avoid breaking queue
         }
-        // Cache result (even if null, to avoid repeated lookups)
-        this._handlerCache.set(method, handler ?? null);
-      }
 
-      if (!handler) {
-        console.error(`[ClientNetwork] No handler for packet '${method}'`);
-        continue; // Skip unknown packets instead of throwing to avoid breaking queue
-      }
-
-      try {
-        // Strong type assumption - handler is a function
-        const result = handler.call(this, data);
-        if (result instanceof Promise) {
-          await result;
+        try {
+          // Strong type assumption - handler is a function
+          const result = handler.call(this, data);
+          if (result instanceof Promise) {
+            await result;
+          }
+        } catch (err) {
+          console.error(
+            `[ClientNetwork] Error handling packet '${method}':`,
+            err,
+          );
+          // Continue processing remaining packets even if one fails
         }
-      } catch (err) {
-        console.error(
-          `[ClientNetwork] Error handling packet '${method}':`,
-          err,
-        );
-        // Continue processing remaining packets even if one fails
       }
-    }
 
-    // OPTIMIZATION: Only clear queue when it gets large (avoids array reallocation)
-    // Reset read index and clear queue periodically to prevent unbounded growth
-    if (this._queueReadIndex > 1000) {
-      this.queue.length = 0;
-      this._queueReadIndex = 0;
+      // Compact processed entries periodically without discarding unread packets.
+      // A frame can intentionally leave work behind at MAX_PACKETS_PER_FRAME; clearing
+      // the whole array here used to drop that tail whenever the read index crossed
+      // 1,000 during a packet burst (including adjacent combat terminal packets).
+      if (this._queueReadIndex > 1000) {
+        if (this._queueReadIndex >= this.queue.length) {
+          this.queue.length = 0;
+        } else {
+          this.queue = this.queue.slice(this._queueReadIndex);
+        }
+        this._queueReadIndex = 0;
+      }
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -1049,7 +1233,151 @@ export class ClientNetwork extends SystemBase {
     return (performance.now() + this.serverTimeOffset) / 1000; // seconds
   }
 
+  get entryRetryState(): EntryRetryState | null {
+    return this.entryRetryValue;
+  }
+
+  private publishEntryRetry(state: EntryRetryState | null): void {
+    if (state === this.entryRetryValue) return;
+    this.entryRetryValue = state === null ? null : Object.freeze(state);
+    this.emitTypedEvent(EventType.ENTRY_RETRY_CHANGED, {
+      state: this.entryRetryValue,
+    });
+  }
+
+  private clearEntryRetry(disqualifyTransport = true): void {
+    if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+    this.entryRetryTimer = null;
+    if (disqualifyTransport && this.entryRetryIntent) {
+      this.entryRetryStaleTransport = this.entryRetryIntent.transport;
+    }
+    this.entryRetryIntent = null;
+    // Rejections carry no attempt/character ID. Once intent changes, a late
+    // response must never authorize recovery for another choice on this socket.
+    this.publishEntryRetry(null);
+  }
+
+  private requestInitialEntry(): boolean {
+    const transport = this.ws;
+    const characterId = this.selectedCharacterId;
+    const admission = this.entryRetryAdmission;
+    if (
+      this.entryRetryIntent ||
+      !transport ||
+      transport.readyState !== WebSocket.OPEN ||
+      this.entryRetryStaleTransport === transport ||
+      !characterId ||
+      admission === null ||
+      !this.worldAdmission.isCurrent(admission) ||
+      !this.connected ||
+      this.intentionalDisconnect ||
+      this.isReconnecting ||
+      this.world.entities.player ||
+      this.isEmbeddedSpectator ||
+      this.embeddedCharacterId !== null ||
+      isStreamingLikeViewport()
+    )
+      return false;
+    const intent = {
+      transport,
+      characterId,
+      admission,
+      awaitingResponse: true,
+      expired: false,
+    };
+    this.entryRetryIntent = intent;
+    try {
+      transport.send(writePacket("enterWorld", { characterId }));
+      return true;
+    } catch {
+      this.expireEntryRetry(intent);
+      return false;
+    }
+  }
+
+  private isCurrentEntryRetry(
+    intent: NonNullable<ClientNetwork["entryRetryIntent"]>,
+  ): boolean {
+    return (
+      this.entryRetryIntent === intent &&
+      this.ws === intent.transport &&
+      intent.transport.readyState === WebSocket.OPEN &&
+      this.connected &&
+      !this.intentionalDisconnect &&
+      !this.isReconnecting &&
+      this.worldAdmission.isCurrent(intent.admission) &&
+      this.selectedCharacterId === intent.characterId &&
+      !this.world.entities.player &&
+      !this.isEmbeddedSpectator &&
+      this.embeddedCharacterId === null &&
+      !isStreamingLikeViewport()
+    );
+  }
+
+  private expireEntryRetry(
+    intent: NonNullable<ClientNetwork["entryRetryIntent"]>,
+  ): void {
+    if (this.entryRetryIntent !== intent) return;
+    if (!this.isCurrentEntryRetry(intent)) {
+      this.clearEntryRetry();
+      return;
+    }
+    if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+    this.entryRetryTimer = null;
+    intent.expired = true;
+    this.publishEntryRetry({
+      characterId: intent.characterId,
+      status: "expired",
+      message:
+        "The entry request has not completed. Wait for the server or reload; another request will not be sent.",
+    });
+  }
+
+  /** Explicit action only. Never queues entry across transports or takes over. */
+  retryEnterWorld(): boolean {
+    const intent = this.entryRetryIntent;
+    if (!intent || !this.isCurrentEntryRetry(intent)) {
+      this.clearEntryRetry();
+      return false;
+    }
+    if (
+      intent.awaitingResponse ||
+      intent.expired ||
+      this.entryRetryValue?.status !== "available"
+    )
+      return false;
+    intent.awaitingResponse = true;
+    this.publishEntryRetry({
+      characterId: intent.characterId,
+      status: "pending",
+      message: "Waiting for the server to admit this character…",
+    });
+    if (!this.isCurrentEntryRetry(intent)) {
+      if (this.entryRetryIntent === intent) this.clearEntryRetry();
+      return false;
+    }
+    this.entryRetryTimer = setTimeout(
+      () => this.expireEntryRetry(intent),
+      15_000,
+    );
+    try {
+      intent.transport.send(
+        writePacket("enterWorld", { characterId: intent.characterId }),
+      );
+      return true;
+    } catch {
+      // A send exception cannot prove the request was not accepted remotely.
+      this.expireEntryRetry(intent);
+      return false;
+    }
+  }
+
   onPacket = (e: MessageEvent) => {
+    if (
+      this.worldAdmission.rejected ||
+      (e.currentTarget && e.currentTarget !== this.ws)
+    )
+      return;
     const result = readPacket(e.data);
     if (result && result[0]) {
       const [method, data] = result;
@@ -1070,6 +1398,15 @@ export class ClientNetwork extends SystemBase {
   }
 
   async onSnapshot(data: SnapshotData) {
+    // This must precede every snapshot side effect, including enterWorld.
+    const admission = this.worldAdmission.admitSnapshot(
+      data?.worldContentIdentity,
+    );
+    if (admission === null) {
+      this.rejectWorldAdmission();
+      return;
+    }
+    this.entryRetryAdmission = admission;
     this.id = data.id; // Store our network ID
     this.connected = true; // Mark as connected when we get the snapshot
 
@@ -1117,14 +1454,10 @@ export class ClientNetwork extends SystemBase {
 
       // Handle character selection and world entry (non-spectators only)
       if (isCharacterSelectMode) {
-        // Get characterId from embedded config (read at init) OR sessionStorage
-        // NOTE: sessionStorage is per-tab, preventing cross-tab character conflicts
-        // (localStorage was causing Tab B to overwrite Tab A's character selection)
+        // The entry choice was captured before socket setup, not reread from
+        // mutable tab storage after asynchronous authentication/loading.
         const characterId =
-          this.embeddedCharacterId ||
-          (typeof sessionStorage !== "undefined"
-            ? sessionStorage.getItem("selectedCharacterId")
-            : null);
+          this.embeddedCharacterId || this.selectedCharacterId;
 
         console.log("[PlayerLoading] Character select mode detected", {
           characterId,
@@ -1141,7 +1474,18 @@ export class ClientNetwork extends SystemBase {
           console.log(
             `[PlayerLoading] Sending enterWorld with characterId: ${characterId}`,
           );
-          this.send("enterWorld", { characterId });
+          if (
+            this.isEmbeddedSpectator ||
+            this.embeddedCharacterId !== null ||
+            isStreamingLikeViewport() ||
+            this.isReconnecting
+          ) {
+            // Reconnect may still own a local entity. Preserve its established
+            // queued reattachment at snapshot completion, without retry intent.
+            this.send("enterWorld", { characterId });
+          } else {
+            this.requestInitialEntry();
+          }
         } else {
           if (process.env.PLAYWRIGHT_TEST === "true") {
             console.log(
@@ -1159,14 +1503,14 @@ export class ClientNetwork extends SystemBase {
     // Ensure Physics is fully initialized before processing entities
     // This is needed because PlayerLocal uses physics extensions during construction
     const physicsSystem = this.world.physics as
-      | { physics?: unknown }
-      | undefined;
+      { physics?: unknown } | undefined;
     const needsLocalPhysics = !isSpectatorMode;
     if (physicsSystem && !physicsSystem.physics && needsLocalPhysics) {
       // Wait a bit for Physics to initialize
       let attempts = 0;
       while (!physicsSystem.physics && attempts < 50) {
         await new Promise((resolve) => setTimeout(resolve, 10));
+        if (!this.worldAdmission.isCurrent(admission)) return;
         attempts++;
       }
       if (!physicsSystem.physics) {
@@ -1257,8 +1601,15 @@ export class ClientNetwork extends SystemBase {
     }
     // Deserialize entities if method exists
     if (data.entities) {
+      const snapshotEntities = this.filterNetworkEntities(data.entities);
       try {
-        await this.world.entities.deserialize(data.entities);
+        await this.world.entities.deserialize(snapshotEntities);
+        if (!this.worldAdmission.isCurrent(admission)) return;
+        if (this.world.entities.player) this.clearEntryRetry();
+        for (const entityData of snapshotEntities) {
+          const entity = this.world.entities.get(entityData.id);
+          if (entity) this.admitAuthoritativeResourceEntity(entity, entityData);
+        }
       } catch (err) {
         this.logger.error(
           "Failed to deserialize entity snapshot:",
@@ -1285,7 +1636,7 @@ export class ClientNetwork extends SystemBase {
         }
         if (!playerAvatarPreloaded) {
           // Try from the raw data if entity iteration didn't work
-          for (const item of data.entities) {
+          for (const item of snapshotEntities) {
             const entity = item as {
               type?: string;
               owner?: string;
@@ -1307,7 +1658,7 @@ export class ClientNetwork extends SystemBase {
       }
 
       // Set initial serverPosition for local player immediately to avoid Y=0 flash
-      for (const entityData of data.entities) {
+      for (const entityData of snapshotEntities) {
         if (
           entityData &&
           entityData.type === "player" &&
@@ -1329,7 +1680,7 @@ export class ClientNetwork extends SystemBase {
         }
       }
       // Apply pending modifications to all newly added entities
-      for (const entityData of data.entities) {
+      for (const entityData of snapshotEntities) {
         if (entityData && entityData.id) {
           this.applyPendingModifications(entityData.id);
         }
@@ -1360,14 +1711,11 @@ export class ClientNetwork extends SystemBase {
       const setCameraTarget = (entity: unknown) => {
         const camera =
           (this.world.getSystem("client-camera-system") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined) ??
+            { setTarget?: (target: unknown) => void } | undefined) ??
           (this.world.getSystem("client-camera") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined) ??
+            { setTarget?: (target: unknown) => void } | undefined) ??
           (this.world.getSystem("camera") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined);
+            { setTarget?: (target: unknown) => void } | undefined);
         if (camera?.setTarget) {
           this.logger.info(
             `👁️ Setting camera target to entity ${spectatorFollowId}`,
@@ -1382,6 +1730,7 @@ export class ClientNetwork extends SystemBase {
 
       // Helper to attempt following the entity
       const attemptFollow = (): boolean => {
+        if (!this.worldAdmission.isCurrent(admission)) return false;
         const targetEntity =
           this.resolveSpectatorTargetEntity(spectatorFollowId);
 
@@ -1405,6 +1754,7 @@ export class ClientNetwork extends SystemBase {
 
       // Try immediately after a short delay for entity initialization
       setTimeout(() => {
+        if (!this.worldAdmission.isCurrent(admission)) return;
         if (!attemptFollow()) {
           this.logger.info(
             `👁️ Spectator target entity ${spectatorFollowId} not found - starting retry loop`,
@@ -1412,6 +1762,15 @@ export class ClientNetwork extends SystemBase {
 
           // Start retry interval - check every 1 second for up to 15 seconds
           this.spectatorRetryInterval = setInterval(() => {
+            if (!this.worldAdmission.isCurrent(admission)) {
+              if (this.spectatorRetryInterval !== null) {
+                clearInterval(
+                  this.spectatorRetryInterval as ReturnType<typeof setInterval>,
+                );
+                this.spectatorRetryInterval = null;
+              }
+              return;
+            }
             retryCount++;
 
             if (attemptFollow()) {
@@ -1455,6 +1814,66 @@ export class ClientNetwork extends SystemBase {
     }
 
     storage?.set("authToken", data.authToken);
+
+    // Transport reconnection is not success until its world snapshot validates.
+    if (this.isReconnecting) {
+      this.emitTypedEvent("NETWORK_RECONNECTED", {
+        attempts: this.reconnectAttempts,
+      });
+      this.world.chat.add(
+        {
+          id: uuid(),
+          from: "System",
+          fromId: undefined,
+          body: "Connection restored.",
+          text: "Connection restored.",
+          timestamp: Date.now(),
+          createdAt: new Date().toISOString(),
+        },
+        false,
+      );
+    }
+    this.isReconnecting = false;
+    this.reconnectAttempts = 0;
+    this.flushOutgoingQueue();
+  }
+
+  /** Persistent diagnostic; cleared only by a fresh matching admission. */
+  get worldAdmissionError(): string | null {
+    return this.worldAdmission.failure;
+  }
+
+  /** Exact remote digest validated for this transport, never a pending/stale hash. */
+  get admittedWorldContentIdentity(): string | null {
+    return this.worldAdmission.admittedIdentity;
+  }
+
+  private rejectWorldAdmission(): void {
+    this.clearEntryRetry();
+    const reason =
+      this.worldAdmission.failure ??
+      "World snapshot arrived outside an active connection.";
+    this.worldAdmission.reject(reason);
+    this.closeResourceAuthority();
+    this.connected = false;
+    this.intentionalDisconnect = true;
+    this.cancelReconnect();
+    this.queue.length = 0;
+    this._queueReadIndex = 0;
+    this.outgoingQueue = [];
+    this.outgoingQueueSequence = 0;
+    if (this.keepaliveIntervalId) {
+      clearInterval(this.keepaliveIntervalId);
+      this.keepaliveIntervalId = null;
+    }
+    this.logger.error(reason);
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      this.ws.close(4005, "World content mismatch; update assets and reload");
+    }
   }
 
   onSettingsModified = (data: { key: string; value: unknown }) => {
@@ -1491,21 +1910,33 @@ export class ClientNetwork extends SystemBase {
   /**
    * Handler for enterWorldApproved packet.
    * The actual game state transition is handled by CharacterSelectScreen,
-   * this handler just prevents the "no handler" warning.
+   * Matching approval also retires the pre-entry recovery intent.
    */
-  onEnterWorldApproved = (_data: { playerId: string; characterId: string }) => {
-    // Handled by CharacterSelectScreen socket listener
+  onEnterWorldApproved = (data: { playerId: string; characterId: string }) => {
+    if (data.characterId === this.selectedCharacterId) {
+      this.entryRetryStaleTransport = this.ws;
+    }
+    if (data.characterId === this.entryRetryIntent?.characterId) {
+      this.clearEntryRetry();
+    }
   };
 
   onEntityAdded = (data: EntityData) => {
+    if (this.filterNetworkEntities([data]).length === 0) return;
+
     // Add entity if method exists
     const newEntity = this.world.entities.add(data);
     if (newEntity) {
+      this.admitAuthoritativeResourceEntity(newEntity, data);
       this.applyPendingModifications(newEntity.id);
       // If this is the local player added after character select, force-set initial position
       const isLocalPlayer =
         (data as { type?: string; owner?: string }).type === "player" &&
         (data as { owner?: string }).owner === this.id;
+      if (isLocalPlayer) {
+        this.entryRetryStaleTransport = this.ws;
+        this.clearEntryRetry();
+      }
       if (
         isLocalPlayer &&
         Array.isArray((data as { position?: number[] }).position)
@@ -1562,14 +1993,11 @@ export class ClientNetwork extends SystemBase {
         // Set camera to follow this entity
         const camera =
           (this.world.getSystem("client-camera-system") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined) ??
+            { setTarget?: (target: unknown) => void } | undefined) ??
           (this.world.getSystem("client-camera") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined) ??
+            { setTarget?: (target: unknown) => void } | undefined) ??
           (this.world.getSystem("camera") as
-            | { setTarget?: (target: unknown) => void }
-            | undefined);
+            { setTarget?: (target: unknown) => void } | undefined);
         if (camera?.setTarget) {
           this.logger.info(
             `👁️ Setting camera target to newly spawned entity ${spectatorFollowId}`,
@@ -1582,13 +2010,46 @@ export class ClientNetwork extends SystemBase {
 
   onEntitiesBatchAdded = (batch: EntityData[]) => {
     if (!Array.isArray(batch)) return;
-    for (const data of batch) {
+    for (const data of this.filterNetworkEntities(batch)) {
       const newEntity = this.world.entities.add(data);
       if (newEntity) {
+        this.admitAuthoritativeResourceEntity(newEntity, data);
         this.applyPendingModifications(newEntity.id);
       }
     }
   };
+
+  private admitAuthoritativeResourceEntity(
+    entity: Entity,
+    data: EntityData,
+  ): void {
+    if (!(entity instanceof ResourceEntity)) return;
+    if (
+      typeof data.resourceId === "string" &&
+      data.resourceId !== entity.config.resourceId
+    ) {
+      throw new Error(
+        `[ClientNetwork] Conflicting authoritative resource variant: ${entity.id}`,
+      );
+    }
+    // Entities.add deliberately reuses duplicate IDs. Reconcile settled resource
+    // state even when an eager local terrain registration created it first.
+    this.onEntityModified({
+      id: entity.id,
+      changes: {
+        position: data.position,
+        quaternion: data.quaternion,
+      },
+    });
+    if (typeof data.depleted === "boolean") {
+      this.rememberResourceState(entity.id, data.depleted);
+      entity.updateFromNetwork({ depleted: data.depleted });
+      entity.data.depleted = data.depleted;
+    }
+    this.world
+      .getSystem<ResourceSystem>("resource")
+      ?.claimNetworkResourceOwnership(entity);
+  }
 
   onEntityModified = (
     data: { id: string; changes?: Record<string, unknown> } & Record<
@@ -1597,8 +2058,27 @@ export class ClientNetwork extends SystemBase {
     >,
   ) => {
     const { id } = data;
+    if (this.streamingFilteredEntityIds.has(id)) return;
+    const changes =
+      data.changes ??
+      Object.fromEntries(
+        Object.entries(data).filter(([k]) => k !== "id" && k !== "changes"),
+      );
+    // Retain actual resource state even before a distant local actor exists.
+    // Generic pending modifications expire; resource authority must not.
+    const retainedResourceState =
+      typeof changes.depleted === "boolean" &&
+      this.rememberResourceState(id, changes.depleted);
+
     const entity = this.world.entities.get(id);
     if (!entity) {
+      if (retainedResourceState) {
+        // Do not replay an older boolean after a newer dedicated respawn/deplete
+        // packet. Other modifications retain their existing queue semantics.
+        const { depleted: _depleted, ...remaining } = changes;
+        if (Object.keys(remaining).length === 0) return;
+        data = { id, changes: remaining };
+      }
       // Limit queued modifications per entity to avoid unbounded growth
       const list = this.pendingModifications.get(id) || [];
       const now = performance.now();
@@ -1663,11 +2143,65 @@ export class ClientNetwork extends SystemBase {
       return;
     }
     // Accept both normalized { changes: {...} } and flat payloads { id, ...changes }
-    const changes =
-      data.changes ??
-      Object.fromEntries(
-        Object.entries(data).filter(([k]) => k !== "id" && k !== "changes"),
-      );
+    // Resources relocate atomically; they are not characters walking a path.
+    // In particular, a fishing spot's authoritative Y is its water surface.
+    // A routine p/q update must not create combat-facing state whose next
+    // TileInterpolator update would replace that Y with the pond bed height.
+    if (entity.type === "resource") {
+      const resource = entity as ResourceEntity;
+      this.deleteInterpolationState(id);
+      this.tileInterpolator.removeEntity(id);
+      // Keep normal data updates, but do not merge unvalidated transform aliases
+      // into canonical data.position/data.quaternion before applying them.
+      const {
+        p,
+        q,
+        position: namedPosition,
+        quaternion,
+        ...restChanges
+      } = changes;
+      entity.modify(restChanges);
+      const position = p ?? namedPosition;
+      if (
+        Array.isArray(position) &&
+        position.length === 3 &&
+        position.every(Number.isFinite)
+      ) {
+        this.applyResourcePosition(resource, {
+          x: position[0],
+          y: position[1],
+          z: position[2],
+        });
+      }
+      const rotation = q ?? quaternion;
+      if (
+        Array.isArray(rotation) &&
+        rotation.length === 4 &&
+        rotation.every(Number.isFinite)
+      ) {
+        entity.node.quaternion.set(
+          rotation[0],
+          rotation[1],
+          rotation[2],
+          rotation[3],
+        );
+        resource.config.rotation = {
+          x: rotation[0],
+          y: rotation[1],
+          z: rotation[2],
+          w: rotation[3],
+        };
+        entity.data.quaternion = [
+          rotation[0],
+          rotation[1],
+          rotation[2],
+          rotation[3],
+        ];
+      }
+      if (typeof changes.e === "string") entity.data.emote = changes.e;
+      this.world.emit(EventType.ENTITY_MODIFIED, { id, changes });
+      return;
+    }
 
     // Check if this is the local player
     const isLocal = (() => {
@@ -2286,6 +2820,12 @@ export class ClientNetwork extends SystemBase {
       respawnAt?: number;
     }>;
   }) => {
+    const token = this.resourceAuthorityToken;
+    if (token)
+      this.getResourceAuthorityOwner()?.applyClientResourceSnapshot(
+        token,
+        data.resources,
+      );
     for (const r of data.resources) {
       this.world.emit(EventType.RESOURCE_SPAWNED, {
         id: r.id,
@@ -2299,13 +2839,7 @@ export class ClientNetwork extends SystemBase {
         });
     }
   };
-  onResourceSpawnPoints = (data: {
-    spawnPoints: Array<{
-      id: string;
-      type: string;
-      position: { x: number; y: number; z: number };
-    }>;
-  }) => {
+  onResourceSpawnPoints = (data: TerrainResourceSpawnBatch) => {
     this.world.emit(EventType.RESOURCE_SPAWN_POINTS_REGISTERED, data);
   };
   onResourceSpawned = (data: {
@@ -2320,6 +2854,7 @@ export class ClientNetwork extends SystemBase {
     position?: { x: number; y: number; z: number };
     depleted?: boolean;
   }) => {
+    this.rememberResourceState(data.resourceId, true);
     // Update the ResourceEntity visual
     interface EntityWithNetworkUpdate {
       updateFromNetwork?: (data: Record<string, unknown>) => void;
@@ -2340,6 +2875,7 @@ export class ClientNetwork extends SystemBase {
     position?: { x: number; y: number; z: number };
     depleted?: boolean;
   }) => {
+    this.rememberResourceState(data.resourceId, false);
     // Update the ResourceEntity visual
     const entity = this.world.entities.get(data.resourceId);
     interface EntityWithNetworkUpdate {
@@ -2365,6 +2901,10 @@ export class ClientNetwork extends SystemBase {
     fireId: string;
     playerId: string;
     position: { x: number; y: number; z: number };
+    createdAt: number;
+    expiresAt: number;
+    serverObservedAt: number;
+    requestId?: string;
   }) => {
     // Debug log removed — fires per fire spell during combat
     this.world.emit(EventType.FIRE_CREATED, data);
@@ -2390,6 +2930,19 @@ export class ClientNetwork extends SystemBase {
     this.world.emit(EventType.FIRE_LIGHTING_CANCELLED, data);
   };
 
+  private applyResourcePosition(
+    entity: ResourceEntity,
+    position: { x: number; y: number; z: number },
+  ): void {
+    if (![position.x, position.y, position.z].every(Number.isFinite)) return;
+    this.deleteInterpolationState(entity.id);
+    this.tileInterpolator.removeEntity(entity.id);
+    // Do not mark the replicated entity network-dirty or retain packet objects.
+    entity.position.set(position.x, position.y, position.z);
+    entity.config.position = { ...position };
+    entity.data.position = [position.x, position.y, position.z];
+  }
+
   onFishingSpotMoved = (data: {
     resourceId: string;
     oldPosition: { x: number; y: number; z: number };
@@ -2397,20 +2950,8 @@ export class ClientNetwork extends SystemBase {
   }) => {
     // Update the fishing spot entity position
     const entity = this.world.entities.get(data.resourceId);
-    if (entity) {
-      // Update entity position
-      if (entity.position) {
-        entity.position.x = data.newPosition.x;
-        entity.position.y = data.newPosition.y;
-        entity.position.z = data.newPosition.z;
-      }
-      if (entity.node?.position) {
-        entity.node.position.set(
-          data.newPosition.x,
-          data.newPosition.y,
-          data.newPosition.z,
-        );
-      }
+    if (entity?.type === "resource") {
+      this.applyResourcePosition(entity as ResourceEntity, data.newPosition);
     }
 
     // Emit event for other systems that might need to react
@@ -2440,6 +2981,12 @@ export class ClientNetwork extends SystemBase {
     this.lastInventoryByPlayerId[data.playerId] = snapshot;
     // Re-emit with typed event so UI updates without waiting for local add
     this.world.emit(EventType.INVENTORY_UPDATED, snapshot);
+  };
+
+  onGroundItemDropResult = (
+    data: EventMap[EventType.ITEM_DROP_RESULT],
+  ): void => {
+    this.world.emit(EventType.ITEM_DROP_RESULT, data);
   };
 
   onCoinsUpdated = (data: { playerId: string; coins: number }) => {
@@ -2530,9 +3077,9 @@ export class ClientNetwork extends SystemBase {
     // so EquipmentVisualSystem can attach/remove 3D models to the avatar
     if (data.equipment) {
       const equipment = data.equipment;
-      const slots = ["weapon", "shield", "helmet", "body", "legs", "arrows"];
-
-      for (const slot of slots) {
+      // Use the server's canonical slots, including boots/gloves and accessories.
+      // Omitting a slot prevents its real replicated equip AND clear events.
+      for (const slot of EQUIPMENT_SLOT_NAMES) {
         const slotData = equipment[slot];
         // Emit for ALL slots, including null (to remove items on death)
         interface SlotDataWithItem {
@@ -2606,6 +3153,26 @@ export class ClientNetwork extends SystemBase {
     }
     // Re-emit with typed event so UI updates
     this.world.emit(EventType.PRAYER_TOGGLED, data);
+  };
+
+  /**
+   * Consume the correlated server receipt. Browser clients rely on the normal
+   * Prayer events for UI, while agent transports use this packet to gate local
+   * decisions. Keeping a handler here prevents append-only protocol warnings.
+   */
+  onPrayerActionReceipt = (data: {
+    playerId: string;
+    pointUnits: number;
+    points: number;
+    maxPoints: number;
+    activePrayers: string[];
+  }) => {
+    if (!data?.playerId || !Array.isArray(data.activePrayers)) return;
+    this.lastPrayerStateByPlayerId[data.playerId] = {
+      points: data.points,
+      maxPoints: data.maxPoints,
+      active: [...data.activePrayers],
+    };
   };
 
   onPrayerPointsChanged = (data: {
@@ -2733,6 +3300,7 @@ export class ClientNetwork extends SystemBase {
     resultItemId: string;
     wasBurnt: boolean;
     xpGained: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.COOKING_COMPLETE, {
       playerId: this.world?.entities?.player?.id || "",
@@ -2766,6 +3334,7 @@ export class ClientNetwork extends SystemBase {
     totalSmelted: number;
     totalFailed: number;
     totalXp: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.SMELTING_COMPLETE, {
       playerId: this.world?.entities?.player?.id || "",
@@ -2801,6 +3370,7 @@ export class ClientNetwork extends SystemBase {
     outputItemId: string;
     totalSmithed: number;
     totalXp: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.SMITHING_COMPLETE, {
       playerId: this.world?.entities?.player?.id || "",
@@ -2845,6 +3415,7 @@ export class ClientNetwork extends SystemBase {
     outputItemId: string;
     totalCrafted: number;
     totalXp: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.CRAFTING_COMPLETE, {
       playerId: this.world?.entities?.player?.id || "",
@@ -2867,6 +3438,7 @@ export class ClientNetwork extends SystemBase {
     outputItemId: string;
     totalCrafted: number;
     totalXp: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.FLETCHING_COMPLETE, {
       playerId: this.world?.entities?.player?.id || "",
@@ -2913,8 +3485,91 @@ export class ClientNetwork extends SystemBase {
     outputItemId: string;
     totalTanned: number;
     totalCost: number;
+    requestId?: string;
   }) => {
     this.world.emit(EventType.TANNING_COMPLETE, {
+      playerId: this.world?.entities?.player?.id || "",
+      ...data,
+    });
+  };
+
+  onRunecraftingComplete = (data: {
+    runeType: string;
+    runeItemId: string;
+    essenceConsumed: number;
+    runesProduced: number;
+    multiplier: number;
+    xpAwarded: number;
+    requestId?: string;
+  }) => {
+    this.world.emit(EventType.RUNECRAFTING_COMPLETE, {
+      playerId: this.world?.entities?.player?.id || "",
+      ...data,
+    });
+  };
+
+  onProcessingRejected = (data: {
+    requestId: string;
+    skill:
+      | "firemaking"
+      | "cooking"
+      | "smelting"
+      | "smithing"
+      | "crafting"
+      | "fletching"
+      | "runecrafting"
+      | "tanning";
+    reason:
+      | "busy"
+      | "invalid_request"
+      | "not_authorized"
+      | "requirements_not_met"
+      | "resources_unavailable"
+      | "capacity_unavailable"
+      | "interrupted"
+      | "persistence_rejected";
+    retryable: boolean;
+  }) => {
+    this.world.emit(EventType.PROCESSING_REQUEST_REJECTED, {
+      playerId: this.world?.entities?.player?.id || "",
+      ...data,
+    });
+  };
+
+  onProcessingProgress = (data: {
+    requestId: string;
+    skill:
+      | "firemaking"
+      | "cooking"
+      | "smelting"
+      | "smithing"
+      | "crafting"
+      | "fletching"
+      | "runecrafting"
+      | "tanning";
+    phase: "accepted" | "working" | "reconciling" | "committed";
+  }) => {
+    this.world.emit(EventType.PROCESSING_REQUEST_PROGRESS, {
+      playerId: this.world?.entities?.player?.id || "",
+      ...data,
+    });
+  };
+
+  onProcessingRequestStatus = (data: {
+    requestId: string;
+    queryId: string;
+    skill:
+      | "firemaking"
+      | "cooking"
+      | "smelting"
+      | "smithing"
+      | "crafting"
+      | "fletching"
+      | "runecrafting"
+      | "tanning";
+    status: "committed" | "not_found" | "unavailable";
+  }) => {
+    this.world.emit(EventType.PROCESSING_REQUEST_STATUS, {
       playerId: this.world?.entities?.player?.id || "",
       ...data,
     });
@@ -2993,12 +3648,9 @@ export class ClientNetwork extends SystemBase {
     // Cache and re-emit so UI can show the modal
     this.lastCharacterList = data.characters || [];
     this.world.emit(EventType.CHARACTER_LIST, data);
-    // Auto-select previously chosen character if available
-    // NOTE: Use sessionStorage (per-tab) to prevent cross-tab character conflicts
-    const storedId =
-      typeof sessionStorage !== "undefined"
-        ? sessionStorage.getItem("selectedCharacterId")
-        : null;
+    // Only the retained entry intent may auto-select; a late tab-storage write
+    // must not change the character chosen before socket setup.
+    const storedId = this.selectedCharacterId;
     if (
       storedId &&
       Array.isArray(data.characters) &&
@@ -3016,37 +3668,12 @@ export class ClientNetwork extends SystemBase {
   };
 
   // --- Quest system handlers ---
-  onQuestList = (data: {
-    quests: Array<{
-      id: string;
-      name: string;
-      status: string;
-      difficulty: string;
-      questPoints: number;
-    }>;
-    questPoints: number;
-  }) => {
+  onQuestList = (data: QuestListPayload) => {
     // Emit for QuestJournal to update
     this.emit("questList", data);
   };
 
-  onQuestDetail = (data: {
-    id: string;
-    name: string;
-    description: string;
-    status: string;
-    difficulty: string;
-    questPoints: number;
-    currentStage: string;
-    stageProgress: Record<string, number>;
-    stages: Array<{
-      id: string;
-      description: string;
-      type: string;
-      target?: string;
-      count?: number;
-    }>;
-  }) => {
+  onQuestDetail = (data: QuestSnapshot) => {
     // Emit for QuestJournal to update
     this.emit("questDetail", data);
   };
@@ -3863,15 +4490,27 @@ export class ClientNetwork extends SystemBase {
     this.send("characterCreate", { name });
   }
   requestCharacterSelect(characterId: string) {
+    if (characterId !== this.selectedCharacterId) this.clearEntryRetry();
+    this.selectedCharacterId = characterId;
+    if (this.lastInitOptions) {
+      this.lastInitOptions = {
+        ...this.lastInitOptions,
+        selectedCharacterId: characterId,
+      };
+    }
     this.send("characterSelected", { characterId });
   }
-  requestEnterWorld() {
-    this.send("enterWorld", {});
+  requestEnterWorld(): boolean {
+    return this.entryRetryIntent
+      ? this.retryEnterWorld()
+      : this.requestInitialEntry();
   }
 
   // Inventory actions
-  dropItem(itemId: string, slot?: number, quantity?: number) {
-    this.send("dropItem", { itemId, slot, quantity });
+  dropItem(itemId: string, slot?: number, quantity?: number): string {
+    const operationId = generateGroundItemDropOperationId();
+    this.send("dropItem", { itemId, slot, quantity, operationId });
+    return operationId;
   }
 
   // Prayer actions
@@ -3893,18 +4532,33 @@ export class ClientNetwork extends SystemBase {
   }
 
   onEntityRemoved = (id: string) => {
+    this.streamingFilteredEntityIds.delete(id);
+    this.processingFaceTargets.delete(id);
+    // An entity can disappear before the explicit combat-clear packet during a
+    // death/disconnect. Drop both its own target and any references to it so a
+    // stale facing mode cannot survive entity removal.
+    this.combatFaceTargets.delete(id);
+    this.streamingDuelCombatFaceTargets.delete(id);
+    this.streamingDuelContestantIds.delete(id);
+    for (const [playerId, targetId] of this.streamingDuelCombatFaceTargets) {
+      if (targetId !== id) continue;
+      this.streamingDuelCombatFaceTargets.delete(playerId);
+      this.streamingDuelContestantIds.delete(playerId);
+      this.combatFaceTargets.delete(playerId);
+      this.tileInterpolator.clearCombatRotation(playerId);
+    }
+    for (const [playerId, targetId] of this.combatFaceTargets) {
+      if (targetId !== id) continue;
+      this.combatFaceTargets.delete(playerId);
+      this.streamingDuelCombatFaceTargets.delete(playerId);
+      this.tileInterpolator.clearCombatRotation(playerId);
+    }
     // Remove from interpolation tracking
     this.deleteInterpolationState(id);
     // Remove from tile interpolation tracking (classic fantasy MMORPG-style movement)
     this.tileInterpolator.removeEntity(id);
     // Clean up pending modifications tracking - decrement count first
-    const list = this.pendingModifications.get(id);
-    if (list) {
-      this.totalPendingModificationCount -= list.length;
-    }
-    this.pendingModifications.delete(id);
-    this.pendingModificationTimestamps.delete(id);
-    this.pendingModificationLimitReached.delete(id);
+    this.clearPendingModifications(id);
     // Clean up dead players tracking
     this.deadPlayers.delete(id);
     // Remove from entities system
@@ -3917,10 +4571,14 @@ export class ClientNetwork extends SystemBase {
   lateUpdate(delta: number): void {
     this.updateInterpolation(delta);
 
+    // Recompute against current remote positions every frame. This keeps a
+    // strafing/kiting fighter visually locked to a moving opponent instead of
+    // preserving the direction from the first attack packet.
+    this.refreshCombatFaceRotations();
+    this.refreshProcessingFaceRotations();
+
     // Get terrain system for height lookups
-    const terrain = this.world.getSystem("terrain") as {
-      getHeightAt?: (x: number, z: number) => number | null;
-    } | null;
+    const terrain = this.world.getSystem<TerrainSystem>("terrain");
 
     // Get building collision service for building proximity and step height checks
     const townSystem = this.world.getSystem("towns") as {
@@ -3950,11 +4608,14 @@ export class ClientNetwork extends SystemBase {
           modify: (data: Record<string, unknown>) => entity.modify(data),
         };
       },
-      // Pass terrain height function for smooth Y updates.
-      // getHeightAt() is bridge-aware (returns deck height on bridge tiles),
-      // so no per-caller bridge check is needed.
+      // Player roots use the same solid-surface/clearance contract as the server.
+      // Building floor Y remains authoritative through the proximity callback.
+      // Do not apply character clearance to resource or other entity transforms.
       terrain?.getHeightAt
-        ? (x: number, z: number) => terrain.getHeightAt!(x, z)
+        ? (x: number, z: number, entityId: string) =>
+            this.world.entities.get(entityId)?.type === "player"
+              ? resolvePlayerRootHeight(x, z, terrain)
+              : terrain.getHeightAt!(x, z)
         : undefined,
       // Callback when entity finishes moving - emit ENTITY_MODIFIED for InteractionSystem
       // This enables event-based pending interactions (NPC trade, bank open, etc.)
@@ -3975,7 +4636,16 @@ export class ClientNetwork extends SystemBase {
         : undefined,
       // Pass step height function for smooth entrance stair walking
       collisionService
-        ? (x: number, z: number) => collisionService.getStepHeightAtWorld(x, z)
+        ? (x: number, z: number, entityId: string) => {
+            const isPlayer =
+              this.world.entities.get(entityId)?.type === "player";
+            const rawStepY = collisionService.getStepHeightAtWorld(x, z);
+            const stepY = isPlayer
+              ? resolveExteriorStepSupportHeight(x, z, rawStepY, terrain)
+              : rawStepY;
+            if (stepY === null || !Number.isFinite(stepY)) return null;
+            return isPlayer ? stepY + PLAYER_ROOT_CLEARANCE : stepY;
+          }
         : undefined,
       this.world.frameBudget
         ? (minimumMs: number = 1) =>
@@ -3998,25 +4668,63 @@ export class ClientNetwork extends SystemBase {
     });
   };
 
-  // classic MMORPG-STYLE: Show gathering tool in hand during gathering (e.g., fishing rod)
+  // Show the authoritative gathering tool visual.
   onGatheringToolShow = (data: {
     playerId: string;
     itemId: string;
     slot: string;
+    revision?: number;
   }) => {
     // Forward to local event system for EquipmentVisualSystem
     this.world.emit(EventType.GATHERING_TOOL_SHOW, {
       playerId: data.playerId,
       itemId: data.itemId,
       slot: data.slot,
+      revision: data.revision,
     });
   };
 
-  onGatheringToolHide = (data: { playerId: string; slot: string }) => {
+  onGatheringToolHide = (data: {
+    playerId: string;
+    slot: string;
+    revision?: number;
+  }) => {
     // Forward to local event system for EquipmentVisualSystem
     this.world.emit(EventType.GATHERING_TOOL_HIDE, {
       playerId: data.playerId,
       slot: data.slot,
+      revision: data.revision,
+    });
+  };
+
+  onFishingInteractionPresentation = (
+    data: FishingInteractionPresentationPayload,
+  ) => {
+    this.world.emit(EventType.FISHING_INTERACTION_PRESENTATION, data);
+  };
+
+  onProcessingInteractionPresentation = (
+    data: ProcessingInteractionPresentationPayload,
+  ) => {
+    if (typeof data?.playerId !== "string") return;
+    const playerId = data.playerId.trim();
+    if (!playerId || playerId.length > 256) return;
+    const { playerId: _playerId, ...rawState } = data;
+    const state = normalizeProcessingInteractionPresentationState(rawState);
+    if (!state) return;
+
+    if (state.phase === "working" && state.targetPosition) {
+      this.processingFaceTargets.set(playerId, state.targetPosition);
+      this.applyProcessingFaceRotation(playerId, state.targetPosition);
+    } else {
+      this.processingFaceTargets.delete(playerId);
+      if (!this.combatFaceTargets.has(playerId)) {
+        this.tileInterpolator.clearCombatRotation(playerId);
+      }
+    }
+    this.world.emit(EventType.PROCESSING_INTERACTION_PRESENTATION, {
+      playerId,
+      ...state,
     });
   };
 
@@ -4437,10 +5145,13 @@ export class ClientNetwork extends SystemBase {
   };
 
   onCombatDamageDealt = (data: {
+    projectileId?: string;
     attackerId: string;
     targetId: string;
     damage: number;
+    attackType?: AttackType;
     targetType: "player" | "mob";
+    isCritical?: boolean;
     position: { x: number; y: number; z: number };
     tick?: number;
   }) => {
@@ -4451,7 +5162,9 @@ export class ClientNetwork extends SystemBase {
     // If tick is missing (rolling deploy), fall back to ms timestamp rounded to
     // 125ms (one server tick at 8Hz) so distinct hits aren't collapsed to tick 0.
     const tick = data.tick ?? Math.floor(performance.now() / 125);
-    const dedupKey = `${data.attackerId}|${data.targetId}|${data.damage}|${tick}`;
+    const dedupKey = data.projectileId
+      ? `projectile|${data.projectileId}`
+      : `${data.attackerId}|${data.targetId}|${data.damage}|${tick}`;
     if (this._recentDamageKeys.has(dedupKey)) {
       return; // Already processed this damage event
     }
@@ -4485,6 +5198,7 @@ export class ClientNetwork extends SystemBase {
   };
 
   onProjectileLaunched = (data: {
+    projectileId?: string;
     attackerId: string;
     targetId: string;
     projectileType: string;
@@ -4492,22 +5206,498 @@ export class ClientNetwork extends SystemBase {
     targetPosition: { x: number; y: number; z: number };
     spellId?: string;
     delayMs?: number;
+    arrowId?: string;
+    travelDurationMs?: number;
+    tick?: number;
+    networkEventId?: string;
   }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    if (
+      data.projectileId &&
+      this._terminalProjectileIds.has(data.projectileId)
+    ) {
+      return;
+    }
+    const eventIdentity = this.getProjectileNetworkEventIdentity(
+      data.networkEventId,
+      data.tick,
+    );
+    const source = data.sourcePosition;
+    const target = data.targetPosition;
+    const dedupKey = eventIdentity.startsWith("event:")
+      ? `launch|${eventIdentity}`
+      : [
+          "launch",
+          eventIdentity,
+          data.attackerId,
+          data.targetId,
+          data.projectileType,
+          data.spellId ?? "",
+          data.arrowId ?? "",
+          data.delayMs ?? "",
+          data.travelDurationMs ?? "",
+          source.x,
+          source.y,
+          source.z,
+          target.x,
+          target.y,
+          target.z,
+        ].join("|");
+    if (
+      !this.shouldProcessSpatialCombatPacket(
+        this._recentProjectileLaunchKeys,
+        dedupKey,
+      )
+    ) {
+      return;
+    }
+
     // Forward to local event system so ProjectileRenderer can show visual effects
     this.world.emit(EventType.COMBAT_PROJECTILE_LAUNCHED, data);
   };
 
+  onProjectileHit = (data: {
+    projectileId?: string;
+    attackerId: string;
+    targetId: string;
+    damage: number;
+    projectileType: string;
+    position?: { x: number; y: number; z: number } | null;
+    tick?: number;
+    networkEventId?: string;
+  }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    if (data.projectileId) {
+      this.rememberTerminalProjectile(data.projectileId);
+    }
+    const eventIdentity = this.getProjectileNetworkEventIdentity(
+      data.networkEventId,
+      data.tick,
+    );
+    const position = data.position;
+    const dedupKey = eventIdentity.startsWith("event:")
+      ? `hit|${eventIdentity}`
+      : [
+          "hit",
+          eventIdentity,
+          data.attackerId,
+          data.targetId,
+          data.damage,
+          data.projectileType,
+          position?.x ?? "",
+          position?.y ?? "",
+          position?.z ?? "",
+        ].join("|");
+    if (
+      !this.shouldProcessSpatialCombatPacket(
+        this._recentProjectileHitKeys,
+        dedupKey,
+      )
+    ) {
+      return;
+    }
+
+    this.world.emit(EventType.COMBAT_PROJECTILE_HIT, data);
+  };
+
+  onProjectileCancelled = (data: {
+    projectileId: string;
+    attackerId: string;
+    targetId: string;
+    projectileType: "arrow" | "spell";
+    reason:
+      | "combat_ended"
+      | "entity_died"
+      | "player_respawned"
+      | "player_disconnected"
+      | "combat_state_missing"
+      | "projectile_expired";
+    tick?: number;
+    networkEventId?: string;
+  }) => {
+    this.observeProjectileNetworkEvent(data.networkEventId);
+    this.rememberTerminalProjectile(data.projectileId);
+    const eventIdentity = this.getProjectileNetworkEventIdentity(
+      data.networkEventId,
+      data.tick,
+    );
+    const dedupKey = eventIdentity.startsWith("event:")
+      ? `cancel|${eventIdentity}`
+      : [
+          "cancel",
+          eventIdentity,
+          data.projectileId,
+          data.attackerId,
+          data.targetId,
+          data.reason,
+        ].join("|");
+    if (
+      !this.shouldProcessSpatialCombatPacket(
+        this._recentProjectileCancellationKeys,
+        dedupKey,
+      )
+    ) {
+      return;
+    }
+
+    this.world.emit(EventType.COMBAT_PROJECTILE_CANCELLED, data);
+  };
+
+  onProjectileEventReplay = (data: {
+    sourceId?: unknown;
+    requestedFromSequence?: unknown;
+    requestedToSequence?: unknown;
+    complete?: unknown;
+    events?: unknown;
+  }) => {
+    if (
+      typeof data?.sourceId !== "string" ||
+      !Number.isSafeInteger(data.requestedFromSequence) ||
+      !Number.isSafeInteger(data.requestedToSequence) ||
+      !Array.isArray(data.events)
+    ) {
+      return;
+    }
+
+    if (
+      this._projectileNetworkSourceId &&
+      data.sourceId !== this._projectileNetworkSourceId
+    ) {
+      this._projectileNetworkSourceId = data.sourceId;
+      this._highestProjectileNetworkSequence = 0;
+      this._missingProjectileNetworkSequences.clear();
+      return;
+    }
+
+    const events = data.events
+      .filter(
+        (
+          event,
+        ): event is {
+          sequence: number;
+          name:
+            | "projectileLaunched"
+            | "projectileHit"
+            | "projectileCancelled"
+            | "combatDamageDealt";
+          data: unknown;
+        } =>
+          !!event &&
+          typeof event === "object" &&
+          Number.isSafeInteger((event as { sequence?: unknown }).sequence) &&
+          [
+            "projectileLaunched",
+            "projectileHit",
+            "projectileCancelled",
+            "combatDamageDealt",
+          ].includes(String((event as { name?: unknown }).name)),
+      )
+      .sort((left, right) => left.sequence - right.sequence);
+
+    for (const event of events) {
+      switch (event.name) {
+        case "projectileLaunched":
+          this.onProjectileLaunched(event.data as never);
+          break;
+        case "projectileHit":
+          this.onProjectileHit(event.data as never);
+          break;
+        case "projectileCancelled":
+          this.onProjectileCancelled(event.data as never);
+          break;
+        case "combatDamageDealt":
+          this.onCombatDamageDealt(event.data as never);
+          break;
+      }
+    }
+
+    const fromSequence = data.requestedFromSequence as number;
+    const toSequence = data.requestedToSequence as number;
+    for (let sequence = fromSequence; sequence <= toSequence; sequence += 1) {
+      this._missingProjectileNetworkSequences.delete(sequence);
+    }
+  };
+
+  private observeProjectileNetworkEvent(networkEventId?: string): void {
+    if (typeof networkEventId !== "string") return;
+    const separator = networkEventId.lastIndexOf(":");
+    if (separator <= 0 || separator === networkEventId.length - 1) return;
+
+    const sourceId = networkEventId.slice(0, separator);
+    const sequence = Number(networkEventId.slice(separator + 1));
+    if (
+      sourceId.length === 0 ||
+      sourceId.length > 64 ||
+      !Number.isSafeInteger(sequence) ||
+      sequence <= 0
+    ) {
+      return;
+    }
+
+    if (sourceId !== this._projectileNetworkSourceId) {
+      this._projectileNetworkSourceId = sourceId;
+      this._highestProjectileNetworkSequence = sequence;
+      this._missingProjectileNetworkSequences.clear();
+      return;
+    }
+
+    if (sequence > this._highestProjectileNetworkSequence + 1) {
+      const fromSequence = Math.max(
+        this._highestProjectileNetworkSequence + 1,
+        sequence - 64,
+      );
+      const toSequence = sequence - 1;
+      for (let missing = fromSequence; missing <= toSequence; missing += 1) {
+        this._missingProjectileNetworkSequences.add(missing);
+      }
+      this.send("requestProjectileEventReplay", {
+        sourceId,
+        fromSequence,
+        toSequence,
+      });
+    }
+
+    this._highestProjectileNetworkSequence = Math.max(
+      this._highestProjectileNetworkSequence,
+      sequence,
+    );
+    this._missingProjectileNetworkSequences.delete(sequence);
+  }
+
+  private rememberTerminalProjectile(projectileId: string): void {
+    this._terminalProjectileIds.set(projectileId, performance.now());
+    while (this._terminalProjectileIds.size > 512) {
+      const oldest = this._terminalProjectileIds.keys().next().value as
+        string | undefined;
+      if (!oldest) break;
+      this._terminalProjectileIds.delete(oldest);
+    }
+  }
+
+  private getProjectileNetworkEventIdentity(
+    networkEventId: string | undefined,
+    tick: number | undefined,
+  ): string {
+    if (
+      typeof networkEventId === "string" &&
+      networkEventId.length > 0 &&
+      networkEventId.length <= 160
+    ) {
+      return `event:${networkEventId}`;
+    }
+    if (Number.isSafeInteger(tick) && (tick as number) >= 0) {
+      return `tick:${tick}`;
+    }
+    // Rolling-deploy compatibility for packets from an older server. Multiple
+    // nearby-topic copies arrive together, while a genuine later projectile is
+    // assigned to a different 125 ms server-tick-sized bucket.
+    return `legacy:${Math.floor(performance.now() / 125)}`;
+  }
+
+  private shouldProcessSpatialCombatPacket(
+    recentKeys: Map<string, number>,
+    dedupKey: string,
+  ): boolean {
+    if (recentKeys.has(dedupKey)) return false;
+
+    const now = performance.now();
+    if (recentKeys.size > 150) {
+      for (const [key, timestamp] of recentKeys) {
+        if (now - timestamp > 5_000) recentKeys.delete(key);
+      }
+      if (recentKeys.size > 200) {
+        const excess = recentKeys.size - 100;
+        let dropped = 0;
+        for (const key of recentKeys.keys()) {
+          recentKeys.delete(key);
+          if (++dropped >= excess) break;
+        }
+      }
+    }
+
+    recentKeys.set(dedupKey, now);
+    return true;
+  }
+
+  private applyCombatFaceRotation(playerId: string, targetId: string): boolean {
+    const player = this.world.entities.get(playerId);
+    const target = this.world.entities.get(targetId);
+    if (!player?.position || !target?.position) return false;
+
+    const dx = target.position.x - player.position.x;
+    const dz = target.position.z - player.position.z;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) return false;
+    if (dx * dx + dz * dz < 1e-8) return false;
+
+    // Registered player avatars face local -Z, so the target-space yaw needs
+    // a half-turn compensation before TileInterpolator owns the rendered base.
+    const angle = Math.atan2(dx, dz) + Math.PI;
+    _quat_1.setFromAxisAngle(_combatFaceAxis, angle);
+    const lockTarget =
+      this.streamingDuelFacingLocked &&
+      this.streamingDuelCombatFaceTargets.get(playerId) === targetId;
+    return this.tileInterpolator.setCombatRotation(
+      playerId,
+      _quat_1,
+      player.position,
+      lockTarget,
+    );
+  }
+
+  private refreshCombatFaceRotations(): void {
+    for (const [playerId, targetId] of this.combatFaceTargets) {
+      this.applyCombatFaceRotation(playerId, targetId);
+    }
+  }
+
+  private applyProcessingFaceRotation(
+    playerId: string,
+    targetPosition: { x: number; y: number; z: number },
+  ): boolean {
+    if (this.combatFaceTargets.has(playerId)) return false;
+    const player = this.world.entities.get(playerId);
+    if (!player?.position) return false;
+    const dx = targetPosition.x - player.position.x;
+    const dz = targetPosition.z - player.position.z;
+    if (!Number.isFinite(dx) || !Number.isFinite(dz)) return false;
+    if (dx * dx + dz * dz < 1e-8) return false;
+    const angle = Math.atan2(dx, dz) + Math.PI;
+    _quat_1.setFromAxisAngle(_combatFaceAxis, angle);
+    return this.tileInterpolator.setCombatRotation(
+      playerId,
+      _quat_1,
+      player.position,
+      false,
+    );
+  }
+
+  private refreshProcessingFaceRotations(): void {
+    for (const [playerId, targetPosition] of this.processingFaceTargets) {
+      this.applyProcessingFaceRotation(playerId, targetPosition);
+    }
+  }
+
+  private clearPlayerHitReaction(playerId: string): void {
+    const player = this.world.entities.get(playerId) as
+      { avatar?: { clearHitReaction?: () => void } } | null | undefined;
+    player?.avatar?.clearHitReaction?.();
+  }
+
+  private clearCombatFaceRotation(playerId: string, force = false): void {
+    const streamingTarget = this.streamingDuelCombatFaceTargets.get(playerId);
+    if (!force && this.streamingDuelFacingLocked && streamingTarget) {
+      this.combatFaceTargets.set(playerId, streamingTarget);
+      this.applyCombatFaceRotation(playerId, streamingTarget);
+      return;
+    }
+    this.combatFaceTargets.delete(playerId);
+    this.tileInterpolator.clearCombatRotation(playerId);
+  }
+
+  private syncStreamingDuelCombatFaceTargets(cycle: {
+    phase: string;
+    agent1: unknown | null;
+    agent2: unknown | null;
+  }): void {
+    const readId = (agent: unknown): string | null => {
+      if (!agent || typeof agent !== "object") return null;
+      const id = (agent as { id?: unknown }).id;
+      return typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+    };
+    const wasFighting = this.streamingDuelFighting;
+    const previousContestantIds = [...this.streamingDuelContestantIds];
+    const agent1Id = readId(cycle.agent1);
+    const agent2Id = readId(cycle.agent2);
+    const contestantIds = [agent1Id, agent2Id].filter(
+      (id): id is string => id !== null,
+    );
+    this.streamingDuelContestantIds = new Set(contestantIds);
+    const fighting =
+      cycle.phase === "FIGHTING" &&
+      agent1Id !== null &&
+      agent2Id !== null &&
+      agent1Id !== agent2Id;
+    const facingLocked =
+      (cycle.phase === "ANNOUNCEMENT" ||
+        cycle.phase === "COUNTDOWN" ||
+        fighting) &&
+      agent1Id !== null &&
+      agent2Id !== null &&
+      agent1Id !== agent2Id;
+    const nextTargets = facingLocked
+      ? new Map([
+          [agent1Id, agent2Id],
+          [agent2Id, agent1Id],
+        ])
+      : new Map<string, string>();
+
+    // A draw, cancellation, or ordinary resolution can arrive while a recent
+    // recoil is still active. Clear the additive pose at the authoritative
+    // FIGHTING boundary instead of letting it bleed into terminal presentation.
+    if (wasFighting && !fighting) {
+      for (const playerId of new Set([
+        ...previousContestantIds,
+        ...contestantIds,
+      ])) {
+        this.clearPlayerHitReaction(playerId);
+      }
+    }
+
+    for (const [playerId, previousTarget] of this
+      .streamingDuelCombatFaceTargets) {
+      if (nextTargets.get(playerId) === previousTarget) continue;
+      this.streamingDuelCombatFaceTargets.delete(playerId);
+      if (this.combatFaceTargets.get(playerId) === previousTarget) {
+        this.clearCombatFaceRotation(playerId, true);
+      }
+    }
+    this.streamingDuelFacingLocked = facingLocked;
+    this.streamingDuelFighting = fighting;
+    for (const [playerId, targetId] of nextTargets) {
+      this.streamingDuelCombatFaceTargets.set(playerId, targetId);
+      this.combatFaceTargets.set(playerId, targetId);
+      this.applyCombatFaceRotation(playerId, targetId);
+    }
+  }
+
   onCombatFaceTarget = (data: { playerId: string; targetId: string }) => {
-    // Forward to local event system so PlayerLocal rotates toward combat target
+    const streamingTarget = this.streamingDuelCombatFaceTargets.get(
+      data.playerId,
+    );
+    if (this.streamingDuelFacingLocked && streamingTarget) {
+      this.combatFaceTargets.set(data.playerId, streamingTarget);
+      this.applyCombatFaceRotation(data.playerId, streamingTarget);
+      this.world.emit(EventType.COMBAT_FACE_TARGET, {
+        playerId: data.playerId,
+        targetId: streamingTarget,
+      });
+      return;
+    }
+    if (
+      !this.streamingDuelFacingLocked &&
+      this.streamingDuelContestantIds.has(data.playerId)
+    ) {
+      return;
+    }
+    this.combatFaceTargets.set(data.playerId, data.targetId);
+    // Apply immediately when both entities already exist; the retained mapping
+    // retries in lateUpdate when packet ordering delivers an entity later.
+    this.applyCombatFaceRotation(data.playerId, data.targetId);
+    // Preserve the local event for PlayerLocal and existing presentation hooks.
     this.world.emit(EventType.COMBAT_FACE_TARGET, data);
   };
 
   onCombatEnded = (data: { attackerId: string; targetId: string }) => {
+    // Explicit face-clear packets remain the normal path. Combat-ended is a
+    // defensive terminal cleanup for disconnect/death ordering.
+    this.clearCombatFaceRotation(data.attackerId);
+    this.clearCombatFaceRotation(data.targetId);
     this.world.emit(EventType.COMBAT_ENDED, data);
   };
 
   onCombatClearFaceTarget = (data: { playerId: string }) => {
-    // Forward to local event system so PlayerLocal stops rotating toward target
+    this.clearCombatFaceRotation(data.playerId);
+    // Forward to local event system so PlayerLocal stops rotating toward target.
     this.world.emit(EventType.COMBAT_CLEAR_FACE_TARGET, data);
   };
 
@@ -4569,6 +5759,33 @@ export class ClientNetwork extends SystemBase {
     // Forward to local event system so UI can open loot window
     this.world.emit(EventType.CORPSE_CLICK, data);
   };
+
+  private clearPendingModifications(entityId: string): void {
+    const pending = this.pendingModifications.get(entityId);
+    if (pending) {
+      this.totalPendingModificationCount = Math.max(
+        0,
+        this.totalPendingModificationCount - pending.length,
+      );
+    }
+    this.pendingModifications.delete(entityId);
+    this.pendingModificationTimestamps.delete(entityId);
+    this.pendingModificationLimitReached.delete(entityId);
+  }
+
+  private filterNetworkEntities(entities: EntityData[]): EntityData[] {
+    const admitted: EntityData[] = [];
+    for (const entity of entities) {
+      if (!shouldAdmitNetworkEntityInViewport(entity.type)) {
+        this.streamingFilteredEntityIds.add(entity.id);
+        this.clearPendingModifications(entity.id);
+        continue;
+      }
+      this.streamingFilteredEntityIds.delete(entity.id);
+      admitted.push(entity);
+    }
+    return admitted;
+  }
 
   applyPendingModifications = (entityId: string) => {
     const pending = this.pendingModifications.get(entityId);
@@ -4779,6 +5996,22 @@ export class ClientNetwork extends SystemBase {
     maxLateness: number;
     lastResetTick: number;
     lastTickDuration: number;
+    tickDurations?: {
+      samples: number;
+      average: number;
+      p50: number;
+      p95: number;
+      p99: number;
+      max: number;
+    };
+    tickLateness?: {
+      samples: number;
+      average: number;
+      p50: number;
+      p95: number;
+      p99: number;
+      max: number;
+    };
     isHealthy: boolean;
     phaseTimings?: { mobAI: number; mobMove: number; combat: number };
     eventLoopLag?: number;
@@ -4794,6 +6027,12 @@ export class ClientNetwork extends SystemBase {
    * Handle server acknowledgment of a successful session reconnection.
    */
   onReconnected = (data: { characterId: string }) => {
+    if (data.characterId === this.selectedCharacterId) {
+      this.entryRetryStaleTransport = this.ws;
+    }
+    if (data.characterId === this.entryRetryIntent?.characterId) {
+      this.clearEntryRetry();
+    }
     this.logger.info(
       `[ClientNetwork] Server confirmed reconnection for character ${data.characterId}`,
     );
@@ -4803,8 +6042,9 @@ export class ClientNetwork extends SystemBase {
   };
 
   onKick = (code: string) => {
+    this.clearEntryRetry();
     // Emit a typed UI event for kicks
-    this.emitTypedEvent("UI_KICK", {
+    this.emitTypedEvent(EventType.UI_KICK, {
       playerId: this.id || "unknown",
       reason: code || "unknown",
     });
@@ -4820,11 +6060,42 @@ export class ClientNetwork extends SystemBase {
       data.reason,
       data.message,
     );
-    // Emit as a kick event with the duplicate_user code
-    // This will show the proper overlay and let the user know
-    this.emitTypedEvent("UI_KICK", {
+    const intent = this.entryRetryIntent;
+    if (
+      data.reason === "already_logged_in" &&
+      intent &&
+      this.isCurrentEntryRetry(intent)
+    ) {
+      if (intent.expired || !intent.awaitingResponse) return;
+      if (this.entryRetryTimer !== null) clearTimeout(this.entryRetryTimer);
+      this.entryRetryTimer = null;
+      intent.awaitingResponse = false;
+      this.publishEntryRetry({
+        characterId: intent.characterId,
+        status: "available",
+        message: "Close the other session, then try entering again.",
+      });
+      return;
+    }
+    if (
+      data.reason === "already_logged_in" &&
+      ((this.entryRetryStaleTransport !== null &&
+        this.entryRetryStaleTransport === this.ws) ||
+        intent)
+    ) {
+      // This response has no character/attempt ID. A canceled or successfully
+      // admitted intent must not become a denial of the next selection/player.
+      this.clearEntryRetry();
+      return;
+    }
+    this.clearEntryRetry();
+    // Authentication and unknown failures are not duplicate-session failures.
+    this.emitTypedEvent(EventType.UI_KICK, {
       playerId: this.id || "unknown",
-      reason: "duplicate_user",
+      reason:
+        data.reason === "already_logged_in"
+          ? "duplicate_user"
+          : data.reason || "unknown",
     });
   };
 
@@ -4969,9 +6240,24 @@ export class ClientNetwork extends SystemBase {
     tilesPerTick?: number; // Mob-specific speed (optional, defaults to walk/run speed)
     isContinuation?: boolean; // Append to existing path instead of resetting interpolator
   }) => {
+    if (this.processingFaceTargets.delete(data.id)) {
+      if (!this.combatFaceTargets.has(data.id)) {
+        this.tileInterpolator.clearCombatRotation(data.id);
+      }
+    }
     // Get entity's current position for smooth start (fallback if startTile not provided)
     const entity = this.world.entities.get(data.id);
     const currentPosition = entity?.position as THREE.Vector3 | undefined;
+
+    // A movement state can be absent after lifecycle cleanup even though the
+    // canonical stream pairing is still frozen. Re-establish the locked duel
+    // rotation before the path is interpreted so a newly-created interpolator
+    // state never initializes from the travel heading for one rendered frame.
+    const streamingTarget = this.streamingDuelCombatFaceTargets.get(data.id);
+    if (this.streamingDuelFacingLocked && streamingTarget) {
+      this.combatFaceTargets.set(data.id, streamingTarget);
+      this.applyCombatFaceRotation(data.id, streamingTarget);
+    }
 
     // Pass server's authoritative path to interpolator
     // startTile: where server knows entity IS (authoritative)
@@ -5150,6 +6436,10 @@ export class ClientNetwork extends SystemBase {
   };
 
   onClose = (code: CloseEvent) => {
+    if (code.currentTarget && code.currentTarget !== this.ws) return;
+    this.clearEntryRetry();
+    this.worldAdmission.close();
+    this.closeResourceAuthority();
     console.error("[ClientNetwork] 🔌 WebSocket CLOSED:", {
       code: code.code,
       reason: code.reason,
@@ -5195,6 +6485,7 @@ export class ClientNetwork extends SystemBase {
       4002, // Invalid token
       4003, // Banned
       4004, // Server full
+      4005, // World content identity mismatch (requires an asset/client update)
       1000, // Normal closure (server initiated clean disconnect)
     ];
     if (noReconnectCodes.includes(code.code)) {
@@ -5333,6 +6624,9 @@ export class ClientNetwork extends SystemBase {
   }
 
   destroy = () => {
+    this.clearEntryRetry();
+    this.worldAdmission.close();
+    this.closeResourceAuthority();
     // Mark as intentional disconnect to prevent reconnection
     this.intentionalDisconnect = true;
     this.cancelReconnect();
@@ -5356,6 +6650,7 @@ export class ClientNetwork extends SystemBase {
     }
     // Clear any pending queue items
     this.queue.length = 0;
+    this._queueReadIndex = 0;
     // Clear outgoing queue
     this.outgoingQueue = [];
     this.outgoingQueueSequence = 0;
@@ -5364,11 +6659,26 @@ export class ClientNetwork extends SystemBase {
     this.interpolationStates.clear();
     // Clear tile interpolation states
     this.tileInterpolator.clear();
+    this.combatFaceTargets.clear();
+    this.streamingDuelCombatFaceTargets.clear();
+    this.processingFaceTargets.clear();
+    this.streamingDuelContestantIds.clear();
+    this.streamingFilteredEntityIds.clear();
+    this.streamingDuelFacingLocked = false;
+    this.streamingDuelFighting = false;
     // Clear pending modifications tracking
     this.pendingModifications.clear();
     this.pendingModificationTimestamps.clear();
     this.pendingModificationLimitReached.clear();
     this.totalPendingModificationCount = 0;
+    this._recentDamageKeys.clear();
+    this._recentProjectileLaunchKeys.clear();
+    this._recentProjectileHitKeys.clear();
+    this._recentProjectileCancellationKeys.clear();
+    this._projectileNetworkSourceId = null;
+    this._highestProjectileNetworkSequence = 0;
+    this._missingProjectileNetworkSequences.clear();
+    this._terminalProjectileIds.clear();
     // Clear dead players tracking
     this.deadPlayers.clear();
   };
@@ -5437,11 +6747,13 @@ export class ClientNetwork extends SystemBase {
       } | null;
       winnerId: string | null;
       winnerName: string | null;
+      outcome: "win" | "draw" | null;
       winReason: string | null;
     };
     leaderboard: unknown[];
     cameraTarget: string | null;
   }) => {
+    this.syncStreamingDuelCombatFaceTargets(data.cycle);
     // Re-emit on world for streaming UI components to consume
     this.world.emit("streaming:state:update", data);
 
@@ -5503,14 +6815,11 @@ export class ClientNetwork extends SystemBase {
 
     const camera =
       (this.world.getSystem("client-camera-system") as
-        | { setTarget?: (target: unknown) => void }
-        | undefined) ??
+        { setTarget?: (target: unknown) => void } | undefined) ??
       (this.world.getSystem("client-camera") as
-        | { setTarget?: (target: unknown) => void }
-        | undefined) ??
+        { setTarget?: (target: unknown) => void } | undefined) ??
       (this.world.getSystem("camera") as
-        | { setTarget?: (target: unknown) => void }
-        | undefined);
+        { setTarget?: (target: unknown) => void } | undefined);
 
     const findTargetEntity = () =>
       this.resolveSpectatorTargetEntity(nextTargetId);
@@ -5553,6 +6862,7 @@ export class ClientNetwork extends SystemBase {
 
   // Plugin-specific disconnect method
   async disconnect(): Promise<void> {
+    this.clearEntryRetry();
     // console.debug('[ClientNetwork] Disconnect called')
     // Mark as intentional disconnect to prevent reconnection
     this.intentionalDisconnect = true;

@@ -1567,8 +1567,9 @@ describe("ProcgenPlantInstancer geometry merge", () => {
     let maxMeshVerts = 0;
     let meshCount = 0;
     result.group.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        const posAttr = obj.geometry.getAttribute("position");
+      if ((obj as THREE.Mesh).isMesh === true) {
+        const mesh = obj as THREE.Mesh;
+        const posAttr = mesh.geometry.getAttribute("position");
         maxMeshVerts = Math.max(maxMeshVerts, posAttr.count);
         meshCount += 1;
       }

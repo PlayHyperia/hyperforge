@@ -315,7 +315,7 @@ describe("FiremakingCalculator", () => {
     });
 
     it("fire duration: 60-119 seconds (100-198 ticks at 600ms/tick)", () => {
-      // Per Mod Ash: fires last 60-119 seconds
+      // Fires last 60-119 seconds.
       // At 600ms per tick: 60s = 100 ticks, 119s ≈ 198 ticks
       const { minDurationTicks, maxDurationTicks } = PROCESSING_CONSTANTS.FIRE;
       const minSeconds = (minDurationTicks * 600) / 1000;

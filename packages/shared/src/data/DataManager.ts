@@ -30,6 +30,31 @@ import {
   getNPCsInArea,
 } from "./world-areas";
 import { BIOMES } from "./world-structure";
+import { getDuelArenaProtectionBounds } from "./duel-manifest";
+import { validateAuthoredResourceIdentities } from "./ResourceInstanceIdentity";
+import { validateCompactResourceGroves } from "../systems/shared/world/CompactResourceGroves";
+import { validateCompactPreparationLodge } from "../systems/shared/world/CompactPreparationLodge";
+import {
+  validateCompactBankPavilion,
+  validateCompactServiceCourt,
+  validateCompactServiceCourts,
+  validateCompactServiceCourtBindings,
+  validateCompactServicePlanting,
+  COMPACT_SERVICE_COURT,
+} from "../systems/shared/world/CompactServiceCourt";
+import { validateCompactLandscapeRocks } from "../systems/shared/world/CompactLandscapeRocks";
+import {
+  validateCompactPondDockBindings,
+  validateCompactPondDocks,
+} from "../systems/shared/world/DockDefinition";
+import {
+  canonicalWorldJson,
+  WorldManifestIdentityBuilder,
+} from "./WorldContentIdentity";
+import {
+  resolveWorldTerrainProfile,
+  type WorldTerrainProfile,
+} from "../systems/shared/world/WorldTerrainProfile";
 import { loadSkillUnlocks, type SkillUnlocksManifest } from "./skill-unlocks";
 import {
   TierDataProvider,
@@ -54,6 +79,12 @@ import {
   type ModelBoundsManifest,
 } from "./StationDataProvider";
 import { prayerDataProvider, type PrayersManifest } from "./PrayerDataProvider";
+import { DEFAULT_AVATAR_URL, getDuelAvatarUrlForStyle } from "./avatars";
+import {
+  isExternalValueEnabled,
+  validateExternalValueWorldAreaSafety,
+  validatePreparationDeathCustodyAreas,
+} from "../systems/shared/death/PreparationDeathCustodyPolicy";
 
 // Define constants from JSON data
 const STARTING_ITEMS: Array<{ id: string }> = []; // Stub - data removed
@@ -87,6 +118,15 @@ function warnOptionalData(message: string): void {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Used only after descriptor-validated JSON copying, never on caller objects. */
+function freezeWorldConfig<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeWorldConfig(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function isBuildingsManifest(value: unknown): value is BuildingsManifest {
@@ -155,10 +195,11 @@ async function fetchRequiredJson<T>(url: string, label: string): Promise<T> {
 async function fetchOptionalJson<T>(
   url: string,
   label: string,
-): Promise<T | null> {
+): Promise<{ found: false } | { found: true; value: T }> {
   const response = await fetch(url);
+  if (response.status === 404) return { found: false };
   if (!response.ok) {
-    return null;
+    throw new Error(`${label} failed with HTTP ${response.status}`);
   }
 
   const contentType = response.headers.get("content-type") || "";
@@ -168,16 +209,15 @@ async function fetchOptionalJson<T>(
     );
   }
 
-  return (await response.json()) as T;
+  return { found: true, value: (await response.json()) as T };
 }
 
 const NPC_MODEL_ARCHETYPES: Record<NPCModelArchetype, string> = {
   // Use GLB version (323KB) instead of VRM (8.7MB) to avoid base64 buffer parsing issues
   goblin: "asset://models/goblin/goblin_rigged.glb",
-  // TEMP: Use non-optimized VRM to test humanoid.update issue
-  human: "asset://avatars/avatar-male-01.vrm",
-  thug: "asset://avatars/avatar-male-01.vrm",
-  troll: "asset://avatars/avatar-male-01.vrm",
+  human: DEFAULT_AVATAR_URL,
+  thug: getDuelAvatarUrlForStyle("melee", 1),
+  troll: getDuelAvatarUrlForStyle("melee", 0),
   imp: "asset://models/goblin/goblin_rigged.glb",
 };
 
@@ -319,10 +359,14 @@ export interface FishingManifest {
 export class DataManager {
   private static instance: DataManager;
   private isInitialized = false;
+  private initialization: Promise<DataValidationResult> | null = null;
   private validationResult: DataValidationResult | null = null;
   private worldAssetsDir: string | null = null;
   private static worldConfig: WorldConfigManifest | null = null;
   private static buildingsManifest: BuildingsManifest | null = null;
+  private worldIdentityBuilder = new WorldManifestIdentityBuilder();
+  private static worldContentIdentity: string | null = null;
+  private static worldTerrainProfile: WorldTerrainProfile | null = null;
 
   private constructor() {
     // Private constructor for singleton pattern
@@ -337,10 +381,143 @@ export class DataManager {
   }
 
   /**
-   * Set the world configuration (for testing or runtime updates)
+   * Admit startup configuration. An identified running world cannot hot-swap it.
    */
   public static setWorldConfig(config: WorldConfigManifest): void {
-    DataManager.worldConfig = config;
+    // Copy descriptor-validated JSON before reading fields: callers cannot use
+    // accessors or mutate the stored terrain after identity admission.
+    const copy = JSON.parse(canonicalWorldJson(config)) as WorldConfigManifest;
+    if (
+      !isObjectRecord(copy) ||
+      !isObjectRecord(copy.terrain) ||
+      !isObjectRecord(copy.towns) ||
+      !isObjectRecord(copy.roads)
+    )
+      throw new Error(
+        "World configuration requires terrain, towns and roads objects",
+      );
+    if (
+      !Number.isSafeInteger(copy.version) ||
+      copy.version < 1 ||
+      !Number.isSafeInteger(copy.terrain.worldSize) ||
+      copy.terrain.worldSize < 1
+    )
+      throw new Error(
+        "World configuration requires a positive integer version and world size",
+      );
+    if (
+      !Number.isSafeInteger(copy.terrain.tileResolution) ||
+      copy.terrain.tileResolution < 2 ||
+      copy.terrain.tileResolution > 256
+    )
+      throw new Error(
+        "World configuration tileResolution must be an integer in 2..256",
+      );
+    const profile = resolveWorldTerrainProfile(copy.terrainProfile);
+    const compactResourceGroves = validateCompactResourceGroves(
+      copy.compactResourceGroves,
+      profile,
+      copy.version,
+    );
+    const compactPreparationLodge = validateCompactPreparationLodge(
+      copy.compactPreparationLodge,
+      profile,
+    );
+    const compactServiceCourt = validateCompactServiceCourt(
+      copy.compactServiceCourt,
+      profile,
+    );
+    const compactBankPavilion = validateCompactBankPavilion(
+      copy.compactBankPavilion,
+      profile,
+    );
+    const compactServiceCourts = validateCompactServiceCourts(
+      copy.compactServiceCourts,
+      profile,
+    );
+    if (
+      compactServiceCourts &&
+      (compactServiceCourt || compactBankPavilion || compactPreparationLodge)
+    )
+      throw new Error(
+        "Plural service courts replace all singular service architecture",
+      );
+    if (compactBankPavilion && compactPreparationLodge)
+      throw new Error(
+        "Bank pavilion replaces the preparation lodge; both cannot own the bank",
+      );
+    const compactServicePlanting = validateCompactServicePlanting(
+      copy.compactServicePlanting,
+      profile,
+      compactServiceCourt ??
+        (compactServiceCourts?.courts.some(
+          (court) =>
+            court.recipeId === COMPACT_SERVICE_COURT.recipeId &&
+            court.position.x === COMPACT_SERVICE_COURT.position.x &&
+            court.position.z === COMPACT_SERVICE_COURT.position.z &&
+            court.rotation === 0,
+        )
+          ? COMPACT_SERVICE_COURT
+          : undefined),
+    );
+    const compactLandscapeRocks = validateCompactLandscapeRocks(
+      copy.compactLandscapeRocks,
+      profile,
+    );
+    const compactPondDocks = validateCompactPondDocks(
+      copy.compactPondDocks,
+      profile,
+    );
+    config = copy;
+    if (
+      config.seed !== profile.seed ||
+      config.terrain.tileSize !== profile.terrainTileSize ||
+      config.terrain.maxHeight !== profile.height.maxHeightParameter ||
+      config.terrain.waterThreshold !== profile.water.threshold ||
+      config.terrain.worldSize * profile.terrainTileSize !==
+        profile.bounds.maxX - profile.bounds.minX ||
+      config.terrain.worldSize * profile.terrainTileSize !==
+        profile.bounds.maxZ - profile.bounds.minZ
+    ) {
+      throw new Error("World configuration conflicts with its terrain profile");
+    }
+    const normalized = freezeWorldConfig({
+      ...config,
+      terrainProfile: profile,
+      ...(compactResourceGroves ? { compactResourceGroves } : {}),
+      ...(compactPreparationLodge ? { compactPreparationLodge } : {}),
+      ...(compactServiceCourt ? { compactServiceCourt } : {}),
+      ...(compactBankPavilion ? { compactBankPavilion } : {}),
+      ...(compactServiceCourts ? { compactServiceCourts } : {}),
+      ...(compactServicePlanting ? { compactServicePlanting } : {}),
+      ...(compactLandscapeRocks ? { compactLandscapeRocks } : {}),
+      ...(compactPondDocks ? { compactPondDocks } : {}),
+    });
+    if (DataManager.worldContentIdentity !== null) {
+      if (
+        canonicalWorldJson(DataManager.worldConfig) !==
+        canonicalWorldJson(normalized)
+      )
+        throw new Error(
+          "An identified world cannot change configuration without a fresh startup",
+        );
+      return;
+    }
+    DataManager.worldConfig = normalized;
+    DataManager.worldTerrainProfile = profile;
+    DataManager.worldContentIdentity = null;
+  }
+
+  public static getWorldTerrainProfile(): WorldTerrainProfile {
+    if (!DataManager.worldTerrainProfile)
+      throw new Error("World terrain profile is not initialized");
+    return DataManager.worldTerrainProfile;
+  }
+
+  public static getWorldContentIdentity(): string {
+    if (!DataManager.worldContentIdentity)
+      throw new Error("World content identity is not initialized");
+    return DataManager.worldContentIdentity;
   }
 
   /**
@@ -352,10 +529,23 @@ export class DataManager {
   }
 
   /**
-   * Set the buildings manifest (for testing or runtime updates)
+   * Admit buildings before readiness; identified worlds cannot hot-swap content.
    */
   public static setBuildingsManifest(manifest: BuildingsManifest): void {
-    DataManager.buildingsManifest = manifest;
+    const copy = JSON.parse(canonicalWorldJson(manifest)) as unknown;
+    if (!isBuildingsManifest(copy))
+      throw new Error("Invalid buildings manifest shape");
+    if (DataManager.worldContentIdentity !== null) {
+      if (
+        canonicalWorldJson(DataManager.buildingsManifest) !==
+        canonicalWorldJson(copy)
+      )
+        throw new Error(
+          "An identified world cannot change buildings without a fresh startup",
+        );
+      return;
+    }
+    DataManager.buildingsManifest = freezeWorldConfig(copy);
   }
 
   /**
@@ -505,6 +695,7 @@ export class DataManager {
             const normalized = this.normalizeNPC(npc);
             (ALL_NPCS as Map<string, NPCData>).set(normalized.id, normalized);
           }
+          this.worldIdentityBuilder.record("npcs.json", npcList);
         })(),
 
         // World areas
@@ -516,6 +707,13 @@ export class DataManager {
             level3Areas: Record<string, WorldArea>;
             specialAreas?: Record<string, WorldArea>;
           }>(`${baseUrl}/world-areas.json`, "world-areas.json");
+          validateAuthoredResourceIdentities([
+            worldAreasData.starterTowns,
+            worldAreasData.level1Areas,
+            worldAreasData.level2Areas,
+            worldAreasData.level3Areas,
+            worldAreasData.specialAreas,
+          ]);
           Object.assign(
             ALL_WORLD_AREAS,
             worldAreasData.starterTowns,
@@ -525,6 +723,7 @@ export class DataManager {
             worldAreasData.specialAreas || {},
           );
           Object.assign(STARTER_TOWNS, worldAreasData.starterTowns);
+          this.worldIdentityBuilder.record("world-areas.json", worldAreasData);
         })(),
 
         // Biomes
@@ -536,24 +735,24 @@ export class DataManager {
           for (const biome of biomeList) {
             BIOMES[biome.id] = biome;
           }
+          this.worldIdentityBuilder.record("biomes.json", biomeList);
         })(),
 
-        // World config
+        // World profile and arena layout are mandatory identity inputs. The
+        // final identity build rejects failures even though optional loaders
+        // in this phase use allSettled.
         (async () => {
-          try {
-            const worldConfigData =
-              await fetchOptionalJson<WorldConfigManifest>(
-                `${baseUrl}/world-config.json`,
-                "world-config.json",
-              );
-            if (worldConfigData) {
-              DataManager.worldConfig = worldConfigData;
-            }
-          } catch {
-            warnOptionalData(
-              "[DataManager] world-config.json not found, using default world generation parameters",
-            );
-          }
+          const config = await fetchRequiredJson<WorldConfigManifest>(
+            `${baseUrl}/world-config.json`,
+            "world-config.json",
+          );
+          DataManager.setWorldConfig(config);
+          this.worldIdentityBuilder.record("world-config.json", config);
+          const arenas = await fetchRequiredJson<unknown>(
+            `${baseUrl}/duel-arenas.json`,
+            "duel-arenas.json",
+          );
+          this.worldIdentityBuilder.record("duel-arenas.json", arenas);
         })(),
 
         // Buildings
@@ -564,18 +763,22 @@ export class DataManager {
               `${baseUrl}/buildings.json`,
               "buildings.json",
             );
-            if (buildingsData) {
-              if (!isBuildingsManifest(buildingsData)) {
+            if (buildingsData.found) {
+              if (!isBuildingsManifest(buildingsData.value)) {
                 throw new Error("Invalid buildings manifest shape");
               }
-              DataManager.buildingsManifest = buildingsData;
+              DataManager.setBuildingsManifest(buildingsData.value);
               console.log(
-                `[DataManager] Loaded buildings manifest: ${buildingsData.towns?.length ?? 0} pre-defined towns`,
+                `[DataManager] Loaded buildings manifest: ${buildingsData.value.towns.length} pre-defined towns`,
               );
             }
+            this.worldIdentityBuilder.record(
+              "buildings.json",
+              DataManager.buildingsManifest,
+            );
           } catch (error) {
             warnOptionalData(
-              `[DataManager] buildings.json missing or invalid, skipping pre-defined towns (${error instanceof Error ? error.message : "unknown error"})`,
+              `[DataManager] buildings.json failed; world identity will reject initialization (${error instanceof Error ? error.message : "unknown error"})`,
             );
           }
         })(),
@@ -675,8 +878,9 @@ export class DataManager {
       }
     };
 
-    if (process.env.ASSETS_DIR) {
-      pushCandidate(path.join(process.env.ASSETS_DIR, "manifests"));
+    const explicitAssetsDir = process.env.ASSETS_DIR;
+    if (explicitAssetsDir) {
+      pushCandidate(path.join(explicitAssetsDir, "manifests"));
     }
 
     // Resolve robustly via __dirname to support hoisting in monorepos/CI
@@ -705,7 +909,9 @@ export class DataManager {
       path.resolve(cwd, "packages", "server", "world", "assets", "manifests");
 
     let foundManifestsDir = false;
-    for (const candidate of candidateManifestsDirs) {
+    for (const candidate of explicitAssetsDir
+      ? candidateManifestsDirs.slice(0, 1)
+      : candidateManifestsDirs) {
       try {
         await fs.access(candidate);
         manifestsDir = candidate;
@@ -789,6 +995,7 @@ export class DataManager {
         const normalized = this.normalizeNPC(npc);
         (ALL_NPCS as Map<string, NPCData>).set(normalized.id, normalized);
       }
+      this.worldIdentityBuilder.record("npcs.json", npcList);
 
       // Load gathering resources from separate per-skill manifests
       // This matches the recipes/ pattern for organizational consistency
@@ -805,6 +1012,13 @@ export class DataManager {
         specialAreas?: Record<string, WorldArea>;
       };
       // Merge all areas into ALL_WORLD_AREAS (including specialAreas like duel_arena)
+      validateAuthoredResourceIdentities([
+        worldAreas.starterTowns,
+        worldAreas.level1Areas,
+        worldAreas.level2Areas,
+        worldAreas.level3Areas,
+        worldAreas.specialAreas,
+      ]);
       Object.assign(
         ALL_WORLD_AREAS,
         worldAreas.starterTowns,
@@ -814,6 +1028,7 @@ export class DataManager {
         worldAreas.specialAreas || {},
       );
       Object.assign(STARTER_TOWNS, worldAreas.starterTowns);
+      this.worldIdentityBuilder.record("world-areas.json", worldAreas);
 
       // Load biomes
       const biomesPath = path.join(manifestsDir, "biomes.json");
@@ -822,20 +1037,28 @@ export class DataManager {
       for (const biome of biomeList) {
         BIOMES[biome.id] = biome;
       }
+      this.worldIdentityBuilder.record("biomes.json", biomeList);
 
       // Load world config manifest for terrain/town/road generation
       const worldConfigPath = path.join(manifestsDir, "world-config.json");
-      try {
-        const worldConfigData = await fs.readFile(worldConfigPath, "utf-8");
-        const worldConfigManifest = JSON.parse(
-          worldConfigData,
-        ) as WorldConfigManifest;
-        DataManager.worldConfig = worldConfigManifest;
-      } catch {
-        warnOptionalData(
-          "[DataManager] world-config.json not found, using default world generation parameters",
-        );
-      }
+      const worldConfigData = await fs.readFile(worldConfigPath, "utf-8");
+      const worldConfigManifest = JSON.parse(
+        worldConfigData,
+      ) as WorldConfigManifest;
+      DataManager.setWorldConfig(worldConfigManifest);
+      this.worldIdentityBuilder.record(
+        "world-config.json",
+        worldConfigManifest,
+      );
+      this.worldIdentityBuilder.record(
+        "duel-arenas.json",
+        JSON.parse(
+          await fs.readFile(
+            path.join(manifestsDir, "duel-arenas.json"),
+            "utf-8",
+          ),
+        ),
+      );
 
       // Load buildings manifest for pre-defined towns
       const buildingsPath = path.join(manifestsDir, "buildings.json");
@@ -846,13 +1069,22 @@ export class DataManager {
         if (!isBuildingsManifest(buildingsManifest)) {
           throw new Error("Invalid buildings manifest shape");
         }
-        DataManager.buildingsManifest = buildingsManifest;
+        DataManager.setBuildingsManifest(buildingsManifest);
+        this.worldIdentityBuilder.record(
+          "buildings.json",
+          DataManager.buildingsManifest,
+        );
         console.log(
           `[DataManager] Loaded buildings manifest: ${buildingsManifest.towns?.length ?? 0} pre-defined towns`,
         );
       } catch (error) {
+        if (isObjectRecord(error) && error.code === "ENOENT") {
+          this.worldIdentityBuilder.record("buildings.json", null);
+        } else {
+          throw error;
+        }
         warnOptionalData(
-          `[DataManager] buildings.json missing or invalid, skipping pre-defined towns (${error instanceof Error ? error.message : "unknown error"})`,
+          "[DataManager] buildings.json absent; recorded explicit absence in world identity",
         );
       }
 
@@ -993,9 +1225,23 @@ export class DataManager {
 
   private normalizeItem(item: Item): Item {
     // Ensure required fields have sane defaults and enums
-    const safeWeaponType = item.weaponType ?? WeaponType.NONE;
+    const normalizedWeaponType = String(item.weaponType ?? "")
+      .trim()
+      .toLowerCase();
+    const safeWeaponType = Object.values(WeaponType).includes(
+      normalizedWeaponType as WeaponType,
+    )
+      ? (normalizedWeaponType as WeaponType)
+      : WeaponType.NONE;
     const equipSlot = item.equipSlot ?? null;
-    const attackType = item.attackType ?? null;
+    const normalizedAttackType = String(item.attackType ?? "")
+      .trim()
+      .toLowerCase();
+    const attackType = Object.values(AttackType).includes(
+      normalizedAttackType as AttackType,
+    )
+      ? (normalizedAttackType as AttackType)
+      : null;
 
     // Validate: weapons with equipSlot "weapon" should have equippedModelPath
     const equippedModelPath = item.equippedModelPath;
@@ -1004,6 +1250,101 @@ export class DataManager {
         `[DataManager] Weapon "${item.id}" missing equippedModelPath - will use convention fallback`,
       );
     }
+
+    const equippedModelPathsByAvatar = item.equippedModelPathsByAvatar
+      ? Object.fromEntries(
+          Object.entries(item.equippedModelPathsByAvatar).map(
+            ([avatarId, modelPath]) => {
+              if (
+                !/^[a-z0-9][a-z0-9-]*$/u.test(avatarId) ||
+                typeof modelPath !== "string" ||
+                !modelPath.startsWith("asset://") ||
+                modelPath.includes("\\") ||
+                modelPath.split("/").includes("..")
+              ) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has an invalid avatar-specific equipped model entry for "${avatarId}"`,
+                );
+              }
+              return [avatarId, modelPath];
+            },
+          ),
+        )
+      : undefined;
+
+    const gatheringModelPathsByAvatar = item.gatheringModelPathsByAvatar
+      ? Object.fromEntries(
+          Object.entries(item.gatheringModelPathsByAvatar).map(
+            ([avatarId, modelPath]) => {
+              if (
+                !/^[a-z0-9][a-z0-9-]*$/u.test(avatarId) ||
+                typeof modelPath !== "string" ||
+                !modelPath.startsWith("asset://") ||
+                modelPath.includes("\\") ||
+                modelPath.split("/").includes("..")
+              ) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has an invalid avatar-specific gathering model entry for "${avatarId}"`,
+                );
+              }
+              return [avatarId, modelPath];
+            },
+          ),
+        )
+      : undefined;
+
+    const normalizeContentHash = (
+      value: string | undefined,
+      label: string,
+    ): string | undefined => {
+      if (value === undefined) return undefined;
+      if (!/^[a-f0-9]{64}$/u.test(value)) {
+        throw new Error(
+          `[DataManager] Item "${item.id}" has an invalid ${label} SHA-256`,
+        );
+      }
+      return value;
+    };
+    const normalizeAvatarContentHashes = (
+      hashes: Record<string, string> | undefined,
+      paths: Record<string, string> | undefined,
+      label: string,
+    ): Record<string, string> | undefined =>
+      hashes
+        ? Object.fromEntries(
+            Object.entries(hashes).map(([avatarId, hash]) => {
+              if (!paths?.[avatarId]) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" has a ${label} SHA-256 without a matching model for "${avatarId}"`,
+                );
+              }
+              const normalizedHash = normalizeContentHash(
+                hash,
+                `${label} "${avatarId}"`,
+              );
+              if (!normalizedHash) {
+                throw new Error(
+                  `[DataManager] Item "${item.id}" is missing a ${label} SHA-256 for "${avatarId}"`,
+                );
+              }
+              return [avatarId, normalizedHash];
+            }),
+          )
+        : undefined;
+    const equippedModelSha256 = normalizeContentHash(
+      item.equippedModelSha256,
+      "equipped model",
+    );
+    const equippedModelSha256ByAvatar = normalizeAvatarContentHashes(
+      item.equippedModelSha256ByAvatar,
+      equippedModelPathsByAvatar,
+      "avatar-specific equipped model",
+    );
+    const gatheringModelSha256ByAvatar = normalizeAvatarContentHashes(
+      item.gatheringModelSha256ByAvatar,
+      gatheringModelPathsByAvatar,
+      "avatar-specific gathering model",
+    );
 
     // Derive requirements from tier if not explicitly set
     // This implements the tier-based requirements system
@@ -1063,7 +1404,7 @@ export class DataManager {
       type: item.type,
       weaponType: safeWeaponType,
       equipSlot: equipSlot as EquipmentSlotName | null,
-      attackType: attackType as AttackType | null,
+      attackType,
       // Inventory properties with defaults
       quantity: item.quantity ?? 1,
       stackable: item.stackable ?? false,
@@ -1085,6 +1426,11 @@ export class DataManager {
           ? COMBAT_CONSTANTS.DEFAULTS.ITEM.ATTACK_RANGE
           : undefined),
       equippedModelPath: item.equippedModelPath,
+      equippedModelSha256,
+      equippedModelPathsByAvatar,
+      equippedModelSha256ByAvatar,
+      gatheringModelPathsByAvatar,
+      gatheringModelSha256ByAvatar,
       bonuses: item.bonuses,
       requirements: requirements,
     };
@@ -1303,10 +1649,12 @@ export class DataManager {
       // Model bounds → stations (sequential dependency: bounds must load before stations)
       (async () => {
         try {
-          const boundsRes = await fetch(`${baseUrl}/model-bounds.json`);
-          const boundsManifest =
-            (await boundsRes.json()) as ModelBoundsManifest;
+          const boundsManifest = await fetchRequiredJson<ModelBoundsManifest>(
+            `${baseUrl}/model-bounds.json`,
+            "model-bounds.json",
+          );
           stationDataProvider.loadModelBounds(boundsManifest);
+          this.worldIdentityBuilder.record("model-bounds.json", boundsManifest);
         } catch {
           console.warn(
             "[DataManager] model-bounds.json not found, using default footprints",
@@ -1315,10 +1663,12 @@ export class DataManager {
 
         // Stations depends on model-bounds being loaded first
         try {
-          const stationsRes = await fetch(`${baseUrl}/stations.json`);
-          const stationsManifest =
-            (await stationsRes.json()) as StationsManifest;
+          const stationsManifest = await fetchRequiredJson<StationsManifest>(
+            `${baseUrl}/stations.json`,
+            "stations.json",
+          );
           stationDataProvider.loadStations(stationsManifest);
+          this.worldIdentityBuilder.record("stations.json", stationsManifest);
         } catch {
           console.warn(
             "[DataManager] stations.json not found, using default station data",
@@ -1466,6 +1816,7 @@ export class DataManager {
       const boundsData = await fs.readFile(boundsPath, "utf-8");
       const boundsManifest = JSON.parse(boundsData) as ModelBoundsManifest;
       stationDataProvider.loadModelBounds(boundsManifest);
+      this.worldIdentityBuilder.record("model-bounds.json", boundsManifest);
     } catch {
       console.warn(
         "[DataManager] model-bounds.json not found, using default footprints",
@@ -1478,6 +1829,7 @@ export class DataManager {
       const stationsData = await fs.readFile(stationsPath, "utf-8");
       const stationsManifest = JSON.parse(stationsData) as StationsManifest;
       stationDataProvider.loadStations(stationsManifest);
+      this.worldIdentityBuilder.record("stations.json", stationsManifest);
     } catch {
       console.warn(
         "[DataManager] stations.json not found, using default station data",
@@ -1517,14 +1869,18 @@ export class DataManager {
       // Woodcutting (trees)
       (async () => {
         try {
-          const woodcuttingRes = await fetch(
-            `${baseUrl}/gathering/woodcutting.json`,
-          );
           const woodcuttingManifest =
-            (await woodcuttingRes.json()) as WoodcuttingManifest;
+            await fetchRequiredJson<WoodcuttingManifest>(
+              `${baseUrl}/gathering/woodcutting.json`,
+              "gathering/woodcutting.json",
+            );
           for (const tree of woodcuttingManifest.trees) {
             resourcesMap.set(tree.id, tree);
           }
+          this.worldIdentityBuilder.record(
+            "gathering/woodcutting.json",
+            woodcuttingManifest,
+          );
         } catch {
           console.warn(
             "[DataManager] gathering/woodcutting.json not found, trying legacy resources.json",
@@ -1535,11 +1891,17 @@ export class DataManager {
       // Mining (rocks/ores)
       (async () => {
         try {
-          const miningRes = await fetch(`${baseUrl}/gathering/mining.json`);
-          const miningManifest = (await miningRes.json()) as MiningManifest;
+          const miningManifest = await fetchRequiredJson<MiningManifest>(
+            `${baseUrl}/gathering/mining.json`,
+            "gathering/mining.json",
+          );
           for (const rock of miningManifest.rocks) {
             resourcesMap.set(rock.id, rock);
           }
+          this.worldIdentityBuilder.record(
+            "gathering/mining.json",
+            miningManifest,
+          );
         } catch {
           console.warn(
             "[DataManager] gathering/mining.json not found, trying legacy resources.json",
@@ -1550,11 +1912,17 @@ export class DataManager {
       // Fishing (spots)
       (async () => {
         try {
-          const fishingRes = await fetch(`${baseUrl}/gathering/fishing.json`);
-          const fishingManifest = (await fishingRes.json()) as FishingManifest;
+          const fishingManifest = await fetchRequiredJson<FishingManifest>(
+            `${baseUrl}/gathering/fishing.json`,
+            "gathering/fishing.json",
+          );
           for (const spot of fishingManifest.spots) {
             resourcesMap.set(spot.id, spot);
           }
+          this.worldIdentityBuilder.record(
+            "gathering/fishing.json",
+            fishingManifest,
+          );
         } catch {
           console.warn(
             "[DataManager] gathering/fishing.json not found, trying legacy resources.json",
@@ -1650,6 +2018,10 @@ export class DataManager {
       for (const tree of woodcuttingManifest.trees) {
         resourcesMap.set(tree.id, tree);
       }
+      this.worldIdentityBuilder.record(
+        "gathering/woodcutting.json",
+        woodcuttingManifest,
+      );
       console.log(
         `[DataManager] ✅ Loaded woodcutting manifest (${woodcuttingManifest.trees.length} trees) from: ${source}`,
       );
@@ -1667,6 +2039,7 @@ export class DataManager {
       for (const rock of miningManifest.rocks) {
         resourcesMap.set(rock.id, rock);
       }
+      this.worldIdentityBuilder.record("gathering/mining.json", miningManifest);
     } catch {
       console.warn(
         "[DataManager] gathering/mining.json not found, trying legacy resources.json",
@@ -1681,6 +2054,10 @@ export class DataManager {
       for (const spot of fishingManifest.spots) {
         resourcesMap.set(spot.id, spot);
       }
+      this.worldIdentityBuilder.record(
+        "gathering/fishing.json",
+        fishingManifest,
+      );
     } catch {
       console.warn(
         "[DataManager] gathering/fishing.json not found, trying legacy resources.json",
@@ -1823,29 +2200,104 @@ export class DataManager {
   /**
    * Initialize the data manager and validate all data
    */
-  public async initialize(): Promise<DataValidationResult> {
+  public initialize(): Promise<DataValidationResult> {
     if (this.isInitialized) {
-      return this.validationResult!;
+      return Promise.resolve(this.validationResult!);
     }
+    if (this.initialization) return this.initialization;
+    this.initialization = this.initializeOnce().finally(() => {
+      this.initialization = null;
+    });
+    return this.initialization;
+  }
 
-    // Load externally generated assets (Forge) before validation
-    await this.loadExternalAssetsFromWorld();
+  /** Only called before readiness or after a failed attempt, never for hot reload. */
+  private clearInitializationContent(): void {
+    this.isInitialized = false;
+    this.validationResult = null;
+    this.worldAssetsDir = null;
+    this.worldIdentityBuilder = new WorldManifestIdentityBuilder();
+    DataManager.worldContentIdentity = null;
+    DataManager.worldTerrainProfile = null;
+    DataManager.worldConfig = null;
+    DataManager.buildingsManifest = null;
+    (ITEMS as Map<string, Item>).clear();
+    (ALL_NPCS as Map<string, NPCData>).clear();
+    for (const entries of [
+      ALL_WORLD_AREAS,
+      STARTER_TOWNS,
+      BIOMES,
+      GENERAL_STORES,
+    ])
+      for (const key of Object.keys(entries)) delete entries[key];
+    const external = globalThis as {
+      EXTERNAL_RESOURCES?: Map<string, ExternalResourceData>;
+      EXTERNAL_TOOLS?: Map<string, GatheringToolData>;
+    };
+    external.EXTERNAL_RESOURCES?.clear();
+    external.EXTERNAL_TOOLS?.clear();
+    TierDataProvider.reset();
+    stationDataProvider.loadStations({ stations: [] });
+    stationDataProvider.loadModelBounds({
+      generatedAt: "",
+      tileSize: 100,
+      models: [],
+    });
+  }
 
-    this.validationResult = await this.validateAllData();
-    this.isInitialized = true;
+  private async initializeOnce(): Promise<DataValidationResult> {
+    this.clearInitializationContent();
+    try {
+      // Load externally generated assets (Forge) before validation
+      await this.loadExternalAssetsFromWorld();
 
-    const skipValidation =
-      typeof process !== "undefined" &&
-      typeof process.env !== "undefined" &&
-      process.env.SKIP_VALIDATION === "true";
-
-    if (!this.validationResult.isValid && !skipValidation) {
-      throw new Error(
-        `[DataManager] ❌ Data validation failed: ${this.validationResult.errors.join(", ")}`,
+      // A declared service may never lose its physical identity through the
+      // optional validation escape hatch. Bind placements before any readiness.
+      validateCompactServiceCourtBindings(
+        DataManager.worldConfig?.compactServiceCourts,
+        ALL_WORLD_AREAS,
       );
-    }
+      validateCompactPondDockBindings(
+        DataManager.worldConfig?.compactPondDocks,
+        ALL_WORLD_AREAS,
+      );
+      // Economic protection cannot silently fall back to a broad rectangle or
+      // disappear through SKIP_VALIDATION. Admit it before content readiness.
+      for (const [id, area] of Object.entries(ALL_WORLD_AREAS))
+        if (
+          ("duelProtection" in area && id !== "duel_arena") ||
+          (ALL_WORLD_AREAS.duel_arena?.duelProtection !== undefined &&
+            area.id === "duel_arena" &&
+            id !== "duel_arena")
+        )
+          throw new Error("Duel protection metadata belongs to duel_arena");
+      getDuelArenaProtectionBounds();
 
-    return this.validationResult;
+      this.validationResult = await this.validateAllData();
+
+      const skipValidation =
+        typeof process !== "undefined" &&
+        typeof process.env !== "undefined" &&
+        process.env.SKIP_VALIDATION === "true";
+
+      if (!this.validationResult.isValid && !skipValidation) {
+        throw new Error(
+          `[DataManager] ❌ Data validation failed: ${this.validationResult.errors.join(", ")}`,
+        );
+      }
+
+      // This mandatory identity gate cannot be bypassed by SKIP_VALIDATION or
+      // optional-manifest fallbacks. Complete it before any readiness is exposed.
+      DataManager.worldContentIdentity = await this.worldIdentityBuilder.build(
+        DataManager.getWorldTerrainProfile(),
+      );
+      this.isInitialized = true;
+
+      return this.validationResult;
+    } catch (error) {
+      this.clearInitializationContent();
+      throw error;
+    }
   }
 
   /**
@@ -1886,6 +2338,24 @@ export class DataManager {
         errors.push("No world areas found in ALL_WORLD_AREAS");
       }
     }
+
+    const externalValueEnabled = isExternalValueEnabled();
+    const requireApprovedDeathCustody =
+      typeof process !== "undefined" &&
+      typeof process.env !== "undefined" &&
+      (externalValueEnabled ||
+        process.env.HYPERIA_REQUIRE_APPROVED_PREPARATION_DEATH_CUSTODY ===
+          "true");
+    errors.push(
+      ...validatePreparationDeathCustodyAreas(ALL_WORLD_AREAS, {
+        requireApproval: requireApprovedDeathCustody,
+      }),
+    );
+    errors.push(
+      ...validateExternalValueWorldAreaSafety(ALL_WORLD_AREAS, {
+        externalValueEnabled,
+      }),
+    );
 
     // Validate treasure locations
     const treasureCount = Object.keys(TREASURE_LOCATIONS).length;

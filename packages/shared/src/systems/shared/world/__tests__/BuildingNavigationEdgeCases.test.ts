@@ -422,6 +422,7 @@ function toLayoutInput(layout: BuildingLayout) {
       internalOpenings: fp.internalOpenings,
       externalOpenings: fp.externalOpenings,
     })),
+    exteriorFootprint: layout.exteriorFootprint,
     stairs: layout.stairs ?? null,
   };
 }

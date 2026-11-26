@@ -15,23 +15,38 @@ import { getRTMPBridge, peekRTMPBridge } from "./rtmp-bridge.js";
 
 const RTMP_BRIDGE_PORT = parseInt(process.env.RTMP_BRIDGE_PORT || "8765", 10);
 
+interface StreamCaptureBridgeAuthority {
+  start(port: number): void;
+  waitForServerReady(timeoutMs?: number): Promise<void>;
+}
+
+interface StreamCaptureInitializationOptions {
+  bridge?: StreamCaptureBridgeAuthority;
+  port?: number;
+  readyTimeoutMs?: number;
+}
+
 /**
  * Initialize the stream capture pipeline.
  *
  * Starts the RTMPBridge WebSocket server so that the browser's capture
  * script (injected in StreamingMode) can connect and send video frames.
  */
-export function initStreamCapture(): boolean {
+export async function initStreamCapture(
+  options: StreamCaptureInitializationOptions = {},
+): Promise<boolean> {
   const enabled = process.env.STREAMING_CAPTURE_ENABLED !== "false";
   if (!enabled) {
     console.log("[StreamCapture] Disabled via STREAMING_CAPTURE_ENABLED=false");
     return false;
   }
 
-  const bridge = getRTMPBridge();
-  bridge.start(RTMP_BRIDGE_PORT);
+  const bridge = options.bridge ?? getRTMPBridge();
+  const port = options.port ?? RTMP_BRIDGE_PORT;
+  bridge.start(port);
+  await bridge.waitForServerReady(options.readyTimeoutMs);
   console.log(
-    `[StreamCapture] RTMPBridge WebSocket server started on port ${RTMP_BRIDGE_PORT}`,
+    `[StreamCapture] RTMPBridge WebSocket server started on port ${port}`,
   );
   console.log(
     `[StreamCapture] Waiting for browser capture client to connect...`,

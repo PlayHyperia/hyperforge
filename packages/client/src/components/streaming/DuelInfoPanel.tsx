@@ -104,8 +104,6 @@ function getProviderIcon(provider: string): string {
       return "A";
     case "groq":
       return "G";
-    case "xai":
-      return "X";
     default:
       return "?";
   }

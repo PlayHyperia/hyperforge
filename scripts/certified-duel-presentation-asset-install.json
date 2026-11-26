@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "activationId": "steve-harpoon-v1",
+  "avatarId": "steve",
+  "itemId": "harpoon",
+  "slot": "gatheringtool",
+  "bodyEmoteKey": "harpoon",
+  "equipment": {
+    "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/fitted-steve/harpoon-fitted.glb",
+    "sourceSha256": "0e70fbb8bd4ee8b21b9be8cad8ad525b18722443c7f19899e8113f4cda721b20",
+    "destinationPath": "models/tools/harpoon/harpoon-steve-fitted.glb",
+    "assetUrl": "asset://models/tools/harpoon/harpoon-steve-fitted.glb",
+    "fitReportPath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/steve-harpoon-fit-report.json",
+    "fitReportSha256": "b365baf0f1b08e25a287f7610e7161dd87e8fc37a05b70bc69a7c8f916de88d9"
+  },
+  "motion": {
+    "sourcePath": "artifacts/duel-launch-avatar-bakeoff/motions/harpoon-water-strike-candidates/steve-harpoon-water-strike.glb",
+    "sourceSha256": "f414eecf3289dd510bc325ceaf3d809776195585de3ca20753c61918a7673812",
+    "destinationPath": "emotes/emote-harpoon-water-strike.glb",
+    "assetUrl": "asset://emotes/emote-harpoon-water-strike.glb",
+    "durationSeconds": 1.2,
+    "strikeSeconds": 0.6,
+    "recoverySeconds": 0.6,
+    "candidateReportPath": "artifacts/duel-launch-avatar-bakeoff/harpoon-water-strike-candidate-report.json",
+    "candidateReportSha256": "976d59f821f6456c58bcff6d44bd35e9beb496f0a50d737aa4141da73328e876",
+    "browserReportPath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/steve-harpoon-motion-report.json",
+    "browserReportSha256": "b5cf99a0dffd42ee66f993eb838f1e471822629017ba836ed74afb432d09cc03",
+    "contactSheetPath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/steve-harpoon-motion-contact-sheet.png",
+    "contactSheetSha256": "e9c4915592631492b07a9703bd9821b71a0f39d3bbf4c8c22ed7dc5850594f13"
+  },
+  "rollback": {
+    "equippedModelPath": null,
+    "equippedModelPathsByAvatar": {},
+    "bodyEmotePath": null,
+    "removeInstalledAssets": true
+  }
+}

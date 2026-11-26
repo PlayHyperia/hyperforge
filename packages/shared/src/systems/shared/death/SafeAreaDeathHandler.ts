@@ -36,6 +36,7 @@ interface GravestoneData {
   position: { x: number; y: number; z: number };
   items: InventoryItem[];
   expirationTick: number;
+  durableCustody: boolean;
 }
 
 export class SafeAreaDeathHandler {
@@ -136,6 +137,7 @@ export class SafeAreaDeathHandler {
       position: { ...position },
       items: items.map((item) => ({ ...item })),
       expirationTick,
+      durableCustody: false,
     });
 
     console.log(
@@ -151,6 +153,8 @@ export class SafeAreaDeathHandler {
     position: { x: number; y: number; z: number },
     items: InventoryItem[],
     killedBy: string,
+    durableCustody = false,
+    exactGravestoneId?: string,
   ): Promise<string> {
     const entityManager = this.world.getSystem(
       "entity-manager",
@@ -166,8 +170,7 @@ export class SafeAreaDeathHandler {
       name?: string;
     } | null;
     const playerEntity = this.world.entities?.get?.(playerId) as
-      | { playerName?: string; name?: string }
-      | undefined;
+      { playerName?: string; name?: string } | undefined;
     const playerName =
       playerFromWorld?.playerName ||
       playerFromWorld?.name ||
@@ -175,10 +178,12 @@ export class SafeAreaDeathHandler {
       playerEntity?.name ||
       playerId;
 
-    const gravestoneId = `${GRAVESTONE_ID_PREFIX}${playerId}_${Date.now()}`;
+    const gravestoneId =
+      exactGravestoneId ?? `${GRAVESTONE_ID_PREFIX}${playerId}_${Date.now()}`;
     // Calculate despawnTime in ms for entity config (backwards compatible)
-    const despawnTime =
-      Date.now() + ticksToMs(COMBAT_CONSTANTS.GRAVESTONE_TICKS);
+    const despawnTime = durableCustody
+      ? Number.MAX_SAFE_INTEGER
+      : Date.now() + ticksToMs(COMBAT_CONSTANTS.GRAVESTONE_TICKS);
 
     // Create gravestone entity
     const gravestoneConfig: HeadstoneEntityConfig = {
@@ -278,6 +283,31 @@ export class SafeAreaDeathHandler {
   ): Promise<void> {
     const { gravestoneId, playerId, position, items } = gravestoneData;
 
+    // Database-native custody must remain owner-only and recoverable. Renew the
+    // visible grave instead of converting it into ephemeral public ground loot.
+    if (gravestoneData.durableCustody) {
+      const deathLock = await this.deathStateManager.getDeathLock(playerId);
+      if (
+        deathLock?.deathOperationId &&
+        deathLock.gravestoneId === gravestoneId
+      ) {
+        this.gravestones.set(gravestoneId, {
+          ...gravestoneData,
+          expirationTick: Number.MAX_SAFE_INTEGER,
+        });
+        Logger.system(
+          "SafeAreaDeathHandler",
+          `Renewed durable gravestone ${gravestoneId} for owner recovery`,
+        );
+      } else {
+        const entityManager = this.world.getSystem(
+          "entity-manager",
+        ) as EntityManager | null;
+        entityManager?.destroyEntity(gravestoneId);
+      }
+      return;
+    }
+
     // Note: gravestone was already removed from this.gravestones in processTick
     // to prevent double-processing on next tick.
 
@@ -322,6 +352,10 @@ export class SafeAreaDeathHandler {
     position: { x: number; y: number; z: number },
     items: InventoryItem[],
     killedBy: string,
+    recovery: {
+      deathOperationId?: string | null;
+      exactGravestoneId?: string | null;
+    } = {},
   ): Promise<string> {
     if (!this.world.isServer) {
       console.error(
@@ -348,12 +382,71 @@ export class SafeAreaDeathHandler {
       return "";
     }
 
-    const gravestoneId = await this.spawnGravestone(
-      playerId,
-      position,
-      items,
-      killedBy,
-    );
+    const deathLock = await this.deathStateManager.getDeathLock(playerId);
+    if (
+      recovery.deathOperationId !== undefined &&
+      (deathLock?.deathOperationId ?? null) !== recovery.deathOperationId
+    ) {
+      throw new Error("death_recovery_operation_mismatch");
+    }
+    const exactGravestoneId = recovery.exactGravestoneId?.trim() || undefined;
+    if (exactGravestoneId) {
+      const requiredPrefix = `${GRAVESTONE_ID_PREFIX}${playerId}_`;
+      if (
+        exactGravestoneId.length > 256 ||
+        !exactGravestoneId.startsWith(requiredPrefix) ||
+        /[\u0000-\u001f\u007f]/u.test(exactGravestoneId) ||
+        deathLock?.gravestoneId !== exactGravestoneId
+      ) {
+        throw new Error("death_recovery_gravestone_identity_invalid");
+      }
+    }
+    const durableCustody = Boolean(deathLock?.deathOperationId);
+    let gravestoneId = exactGravestoneId;
+    if (gravestoneId) {
+      const existing = this.world.entities?.get?.(gravestoneId) as
+        | {
+            getOwnerId?: () => string;
+            getLootItems?: () => InventoryItem[];
+          }
+        | undefined;
+      if (existing) {
+        const summarize = (values: InventoryItem[]): string =>
+          JSON.stringify(
+            [...values]
+              .map(({ itemId, quantity }) => ({ itemId, quantity }))
+              .sort((left, right) =>
+                left.itemId === right.itemId
+                  ? left.quantity - right.quantity
+                  : left.itemId.localeCompare(right.itemId),
+              ),
+          );
+        if (
+          existing.getOwnerId?.() !== playerId ||
+          typeof existing.getLootItems !== "function" ||
+          summarize(existing.getLootItems()) !== summarize(items)
+        ) {
+          throw new Error("death_recovery_gravestone_collision");
+        }
+      } else {
+        gravestoneId = await this.spawnGravestone(
+          playerId,
+          position,
+          items,
+          killedBy,
+          durableCustody,
+          exactGravestoneId,
+        );
+      }
+    } else {
+      gravestoneId = await this.spawnGravestone(
+        playerId,
+        position,
+        items,
+        killedBy,
+        durableCustody,
+      );
+    }
 
     if (!gravestoneId) {
       console.error(
@@ -365,7 +458,9 @@ export class SafeAreaDeathHandler {
     // Track for tick-based expiration
     const currentTick: number = this.world.currentTick ?? 0;
     const gravestoneTicks: number = COMBAT_CONSTANTS.GRAVESTONE_TICKS;
-    const expirationTick: number = currentTick + gravestoneTicks;
+    const expirationTick: number = durableCustody
+      ? Number.MAX_SAFE_INTEGER
+      : currentTick + gravestoneTicks;
 
     this.gravestones.set(gravestoneId, {
       gravestoneId,
@@ -373,10 +468,13 @@ export class SafeAreaDeathHandler {
       position: { ...position },
       items: items.map((item) => ({ ...item })),
       expirationTick,
+      durableCustody,
     });
 
     console.log(
-      `[SafeAreaDeathHandler] Gravestone ${gravestoneId} tracked for expiration at tick ${expirationTick} (${COMBAT_CONSTANTS.GRAVESTONE_TICKS} ticks = ${(ticksToMs(COMBAT_CONSTANTS.GRAVESTONE_TICKS) / 1000).toFixed(1)}s)`,
+      durableCustody
+        ? `[SafeAreaDeathHandler] Gravestone ${gravestoneId} retained for durable owner recovery`
+        : `[SafeAreaDeathHandler] Gravestone ${gravestoneId} tracked for expiration at tick ${expirationTick} (${COMBAT_CONSTANTS.GRAVESTONE_TICKS} ticks = ${(ticksToMs(COMBAT_CONSTANTS.GRAVESTONE_TICKS) / 1000).toFixed(1)}s)`,
     );
 
     return gravestoneId;

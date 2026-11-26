@@ -462,6 +462,7 @@ export class DialogueSystem extends SystemBase {
         this.emitTypedEvent(EventType.TANNING_INTERACT, {
           playerId,
           npcId,
+          npcEntityId,
         });
         break;
 

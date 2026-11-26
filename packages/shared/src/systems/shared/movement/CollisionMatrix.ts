@@ -57,10 +57,125 @@ export const ZONE_SIZE = 8;
 /** Number of tiles per zone */
 const TILES_PER_ZONE = ZONE_SIZE * ZONE_SIZE; // 64
 
+/** Releasing this lease cannot clear terrain, network or another object's flags. */
+export type StaticCollisionLease = Readonly<{
+  tileCount: number;
+  release(): boolean;
+}>;
+
+type DeckCollisionZone = {
+  decks: Uint16Array;
+  wallCounts: Uint16Array;
+  wallFlags: Uint8Array;
+  references: number;
+};
+type DeckCollisionRow = { x: number; z: number; flags: number };
+type CollisionChangeListener = (
+  tileX: number | null,
+  tileZ: number | null,
+  changedFlags: number,
+) => void;
+
+/** Validate/copy without invoking authored accessors or retaining input rows. */
+function readDeckCollisionRows(
+  value: unknown,
+  walls: boolean,
+): DeckCollisionRow[] {
+  const label = walls ? "walls" : "tiles";
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length > 4096 ||
+    (!walls && value.length === 0)
+  )
+    throw new Error(`Walkable deck ${label} requires a dense bounded array`);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).length !== value.length + 1)
+    throw new Error(`Walkable deck ${label} has extra properties`);
+  const rows: DeckCollisionRow[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const entry = descriptors[String(i)];
+    if (!entry || !entry.enumerable || !("value" in entry))
+      throw new Error(`Walkable deck ${label} requires own data rows`);
+    const row: unknown = entry.value;
+    if (
+      !row ||
+      typeof row !== "object" ||
+      (Object.getPrototypeOf(row) !== Object.prototype &&
+        Object.getPrototypeOf(row) !== null)
+    )
+      throw new Error(`Walkable deck ${label} requires plain rows`);
+    const fields = Object.getOwnPropertyDescriptors(row);
+    const keys = walls ? ["x", "z", "flags"] : ["x", "z"];
+    if (
+      Reflect.ownKeys(fields).length !== keys.length ||
+      keys.some((key) => !fields[key]?.enumerable || !("value" in fields[key]))
+    )
+      throw new Error(`Walkable deck ${label} requires exact own data fields`);
+    const x: unknown = fields.x.value,
+      z: unknown = fields.z.value;
+    if (
+      typeof x !== "number" ||
+      typeof z !== "number" ||
+      !Number.isInteger(x) ||
+      !Number.isInteger(z) ||
+      x < -2147483648 ||
+      x > 2147483647 ||
+      z < -2147483648 ||
+      z > 2147483647
+    )
+      throw new Error("Walkable deck requires signed 32-bit integer tiles");
+    const flags: unknown = walls ? fields.flags.value : 0;
+    if (
+      typeof flags !== "number" ||
+      !Number.isInteger(flags) ||
+      (walls &&
+        (flags <= 0 ||
+          flags > CollisionMask.WALLS ||
+          (flags & ~CollisionMask.WALLS) !== 0))
+    )
+      throw new Error(
+        "Walkable deck walls require nonzero directional WALLS flags only",
+      );
+    rows.push({ x, z, flags });
+  }
+  return rows;
+}
+
+function combinedCollisionFlags(
+  base: number,
+  index: number,
+  footprint: Uint16Array | undefined,
+  deck: DeckCollisionZone | undefined,
+): number {
+  if (deck) {
+    if (deck.decks[index])
+      base =
+        (base & ~(CollisionFlag.WATER | CollisionFlag.STEEP_SLOPE)) |
+        CollisionFlag.DOCK;
+    base |= deck.wallFlags[index];
+  }
+  return base | (footprint?.[index] ? CollisionFlag.BLOCKED : 0);
+}
+
 /**
  * Interface for collision matrix operations
  */
 export interface ICollisionMatrix {
+  /** Effective before XOR after flags; (null, null, 0) denotes a full reset. */
+  onChange(listener: CollisionChangeListener): () => void;
+
+  /** Own a reference-counted static obstacle without overwriting other flags. */
+  acquireStaticFootprint(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+  ): StaticCollisionLease;
+
+  /** Own deck passability/rails without modifying underlying terrain flags. */
+  acquireWalkableDeck(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+    walls: readonly Readonly<{ x: number; z: number; flags: number }>[],
+  ): StaticCollisionLease;
+
   /** Get flags for a tile */
   getFlags(tileX: number, tileZ: number): number;
 
@@ -72,6 +187,22 @@ export interface ICollisionMatrix {
 
   /** Remove flags from a tile (bitwise AND NOT) */
   removeFlags(tileX: number, tileZ: number, flags: number): void;
+
+  /**
+   * Replace a masked subset of flags across a rectangular tile region.
+   *
+   * `flags` is X-major (`localX * height + localZ`). Flags outside `mask`
+   * are preserved, allowing terrain to refresh WATER/STEEP_SLOPE without
+   * disturbing buildings, entities, walls, bridges, or docks.
+   */
+  replaceFlagsInRegion(
+    originX: number,
+    originZ: number,
+    width: number,
+    height: number,
+    mask: number,
+    flags: ArrayLike<number>,
+  ): void;
 
   /** Check if tile has specific flags (any of them) */
   hasFlags(tileX: number, tileZ: number, flags: number): boolean;
@@ -104,6 +235,17 @@ export interface ICollisionMatrix {
 export class CollisionMatrix implements ICollisionMatrix {
   /** Zone storage: Map<bigint, Int32Array[64]> - uses packed coordinate key */
   private zones: Map<bigint, Int32Array>;
+  private readonly changeListeners = new Set<CollisionChangeListener>();
+
+  // Separate from base flags: depletion, terrain refresh and network replacement
+  // cannot erase scenery ownership. Reads reuse the existing zone-key cache.
+  private staticFootprints = new Map<bigint, Uint16Array>();
+  private staticLeases = new Set<symbol>();
+  private staticPlaceholderZones = new Set<bigint>();
+  private cachedStaticFootprint: Uint16Array | undefined;
+  private walkableDecks = new Map<bigint, DeckCollisionZone>();
+  private deckLeases = new Set<symbol>();
+  private cachedWalkableDeck: DeckCollisionZone | undefined;
 
   // Pre-allocated for getFlags/setFlags hot path
   private _cachedZoneKey: bigint = 0n;
@@ -112,6 +254,60 @@ export class CollisionMatrix implements ICollisionMatrix {
 
   constructor() {
     this.zones = new Map();
+  }
+
+  /** Subscribers observe committed collision state and must not mutate it. */
+  onChange(listener: CollisionChangeListener): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  private notifyChange(
+    tileX: number | null,
+    tileZ: number | null,
+    changedFlags: number,
+  ): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(tileX, tileZ, changedFlags);
+      } catch (error) {
+        // An observer cannot interrupt collision installation or strand a lease.
+        console.error("[CollisionMatrix] Change listener failed:", error);
+      }
+    }
+  }
+
+  private notifyZoneTile(
+    key: bigint,
+    index: number,
+    changedFlags: number,
+  ): void {
+    this.notifyChange(
+      Number(key >> 32n) * ZONE_SIZE + (index % ZONE_SIZE),
+      Number(BigInt.asIntN(32, key)) * ZONE_SIZE +
+        Math.floor(index / ZONE_SIZE),
+      changedFlags,
+    );
+  }
+
+  private writeBaseFlags(
+    zone: Int32Array,
+    index: number,
+    flags: number,
+    tileX: number,
+    tileZ: number,
+    footprint: Uint16Array | undefined,
+    deck: DeckCollisionZone | undefined,
+  ): void {
+    const previous = zone[index];
+    zone[index] = flags;
+    if (!this.changeListeners.size) return;
+    const changedFlags =
+      combinedCollisionFlags(previous, index, footprint, deck) ^
+      combinedCollisionFlags(zone[index], index, footprint, deck);
+    if (changedFlags) this.notifyChange(tileX, tileZ, changedFlags);
   }
 
   /**
@@ -136,6 +332,10 @@ export class CollisionMatrix implements ICollisionMatrix {
     this._cachedZoneX = zoneX;
     this._cachedZoneZ = zoneZ;
     this._cachedZoneKey = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
+    this.cachedStaticFootprint = this.staticFootprints.get(this._cachedZoneKey);
+    this.cachedWalkableDeck = this.walkableDecks.size
+      ? this.walkableDecks.get(this._cachedZoneKey)
+      : undefined;
     return this._cachedZoneKey;
   }
 
@@ -184,7 +384,260 @@ export class CollisionMatrix implements ICollisionMatrix {
     const zone = this.getZone(tileX, tileZ);
     if (!zone) return 0;
     const index = this.getTileIndex(tileX, tileZ);
-    return zone[index];
+    return combinedCollisionFlags(
+      zone[index],
+      index,
+      this.cachedStaticFootprint,
+      this.cachedWalkableDeck,
+    );
+  }
+
+  /**
+   * Acquire a bounded, immutable ground-level footprint. Tiles are integer
+   * movement cells, not world-space box coordinates. Full validation precedes
+   * installation, overlaps are reference-counted and stale releases are inert.
+   * The lease does not imply a floor, deck, indoor zone or visual/PhysX owner.
+   */
+  acquireStaticFootprint(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+  ): StaticCollisionLease {
+    if (
+      !Array.isArray(tiles) ||
+      tiles.length < 1 ||
+      tiles.length > 4096 ||
+      this.staticLeases.size >= 1024
+    )
+      throw new Error(
+        "Static footprint requires 1..4096 tiles and an available owner slot",
+      );
+    const groups = new Map<bigint, Set<number>>();
+    for (const tile of tiles) {
+      if (
+        !tile ||
+        !Number.isInteger(tile.x) ||
+        !Number.isInteger(tile.z) ||
+        tile.x < -2147483648 ||
+        tile.x > 2147483647 ||
+        tile.z < -2147483648 ||
+        tile.z > 2147483647
+      )
+        throw new Error(
+          "Static footprint requires signed 32-bit integer tiles",
+        );
+      const key =
+        (BigInt(Math.floor(tile.x / ZONE_SIZE)) << 32n) |
+        BigInt(Math.floor(tile.z / ZONE_SIZE) >>> 0);
+      let indices = groups.get(key);
+      if (!indices) groups.set(key, (indices = new Set()));
+      const index = this.getTileIndex(tile.x, tile.z);
+      if (indices.has(index))
+        throw new Error("Static footprint contains a duplicate tile");
+      indices.add(index);
+    }
+    const token = Symbol("static-footprint");
+    const changed: Array<[bigint, number, number]> | null = this.changeListeners
+      .size
+      ? []
+      : null;
+    for (const [key, indices] of groups) {
+      let counts = this.staticFootprints.get(key);
+      if (!counts)
+        this.staticFootprints.set(
+          key,
+          (counts = new Uint16Array(TILES_PER_ZONE)),
+        );
+      if (!this.zones.has(key)) {
+        this.zones.set(key, new Int32Array(TILES_PER_ZONE));
+        this.staticPlaceholderZones.add(key);
+      }
+      const base = this.zones.get(key)!;
+      const deck = this.walkableDecks.get(key);
+      for (const index of indices) {
+        const previous = changed
+          ? combinedCollisionFlags(base[index], index, counts, deck)
+          : 0;
+        counts[index]++;
+        const difference = changed
+          ? previous ^ combinedCollisionFlags(base[index], index, counts, deck)
+          : 0;
+        if (difference) changed!.push([key, index, difference]);
+      }
+    }
+    this.staticLeases.add(token);
+    this._cachedZoneX = NaN;
+    this._cachedZoneZ = NaN;
+    this.cachedStaticFootprint = undefined;
+    this.cachedWalkableDeck = undefined;
+    for (const [key, index, flags] of changed ?? [])
+      this.notifyZoneTile(key, index, flags);
+    return Object.freeze({
+      tileCount: tiles.length,
+      release: () => {
+        if (!this.staticLeases.delete(token)) return false;
+        const changed: Array<[bigint, number, number]> | null = this
+          .changeListeners.size
+          ? []
+          : null;
+        for (const [key, indices] of groups) {
+          const counts = this.staticFootprints.get(key)!;
+          const base = this.zones.get(key)!;
+          const deck = this.walkableDecks.get(key);
+          for (const index of indices) {
+            const previous = changed
+              ? combinedCollisionFlags(base[index], index, counts, deck)
+              : 0;
+            counts[index]--;
+            const difference = changed
+              ? previous ^
+                combinedCollisionFlags(base[index], index, counts, deck)
+              : 0;
+            if (difference) changed!.push([key, index, difference]);
+          }
+          if (!counts.some((count) => count !== 0)) {
+            this.staticFootprints.delete(key);
+            this.discardUnusedPlaceholderZone(key);
+          }
+        }
+        this._cachedZoneX = NaN;
+        this._cachedZoneZ = NaN;
+        this.cachedStaticFootprint = undefined;
+        this.cachedWalkableDeck = undefined;
+        for (const [key, index, flags] of changed ?? [])
+          this.notifyZoneTile(key, index, flags);
+        return true;
+      },
+    });
+  }
+
+  /** Placeholder zones belong to all overlays, not whichever allocated first. */
+  private discardUnusedPlaceholderZone(key: bigint): void {
+    if (
+      this.staticFootprints.has(key) ||
+      this.walkableDecks.has(key) ||
+      !this.staticPlaceholderZones.delete(key)
+    )
+      return;
+    if (!this.zones.get(key)!.some((flags) => flags !== 0))
+      this.zones.delete(key);
+  }
+
+  acquireWalkableDeck(
+    tiles: readonly Readonly<{ x: number; z: number }>[],
+    walls: readonly Readonly<{ x: number; z: number; flags: number }>[],
+  ): StaticCollisionLease {
+    if (this.deckLeases.size >= 1024)
+      throw new Error("Walkable deck owner limit exceeded");
+    const deckRows = readDeckCollisionRows(tiles, false);
+    const wallRows = readDeckCollisionRows(walls, true);
+    const groups = new Map<
+      bigint,
+      Map<number, { deck: boolean; walls: number }>
+    >();
+    const insert = (row: DeckCollisionRow, deck: boolean) => {
+      const key =
+        (BigInt(Math.floor(row.x / ZONE_SIZE)) << 32n) |
+        BigInt(Math.floor(row.z / ZONE_SIZE) >>> 0);
+      let indices = groups.get(key);
+      if (!indices) groups.set(key, (indices = new Map()));
+      const index = this.getTileIndex(row.x, row.z);
+      let entry = indices.get(index);
+      if (!entry) indices.set(index, (entry = { deck: false, walls: 0 }));
+      if (deck && entry.deck)
+        throw new Error("Walkable deck contains a duplicate tile");
+      entry.deck ||= deck;
+      entry.walls |= row.flags;
+    };
+    for (const row of deckRows) insert(row, true);
+    for (const row of wallRows) insert(row, false);
+    // Preallocate every new buffer before publishing any part of the lease.
+    const prepared = [...groups].map(([key, indices]) => ({
+      key,
+      indices,
+      base: this.zones.get(key) ?? new Int32Array(TILES_PER_ZONE),
+      overlay: this.walkableDecks.get(key) ?? {
+        decks: new Uint16Array(TILES_PER_ZONE),
+        wallCounts: new Uint16Array(TILES_PER_ZONE * 8),
+        wallFlags: new Uint8Array(TILES_PER_ZONE),
+        references: 0,
+      },
+    }));
+    const token = Symbol("walkable-deck");
+    const changed: Array<[bigint, number, number]> | null = this.changeListeners
+      .size
+      ? []
+      : null;
+    for (const { key, indices, base, overlay } of prepared) {
+      if (!this.zones.has(key)) {
+        this.zones.set(key, base);
+        this.staticPlaceholderZones.add(key);
+      }
+      this.walkableDecks.set(key, overlay);
+      const footprint = this.staticFootprints.get(key);
+      for (const [index, entry] of indices) {
+        const previous = changed
+          ? combinedCollisionFlags(base[index], index, footprint, overlay)
+          : 0;
+        if (entry.deck) overlay.decks[index]++;
+        for (let bit = 0; bit < 8; bit++)
+          if (entry.walls & (1 << bit)) overlay.wallCounts[index * 8 + bit]++;
+        overlay.wallFlags[index] |= entry.walls;
+        const difference = changed
+          ? previous ^
+            combinedCollisionFlags(base[index], index, footprint, overlay)
+          : 0;
+        if (difference) changed!.push([key, index, difference]);
+      }
+      overlay.references += indices.size;
+    }
+    this.deckLeases.add(token);
+    this._cachedZoneX = NaN;
+    this._cachedZoneZ = NaN;
+    this.cachedStaticFootprint = undefined;
+    this.cachedWalkableDeck = undefined;
+    for (const [key, index, flags] of changed ?? [])
+      this.notifyZoneTile(key, index, flags);
+    return Object.freeze({
+      tileCount: deckRows.length,
+      release: () => {
+        if (!this.deckLeases.delete(token)) return false;
+        const changed: Array<[bigint, number, number]> | null = this
+          .changeListeners.size
+          ? []
+          : null;
+        for (const { key, indices, overlay } of prepared) {
+          const base = this.zones.get(key)!;
+          const footprint = this.staticFootprints.get(key);
+          for (const [index, entry] of indices) {
+            const previous = changed
+              ? combinedCollisionFlags(base[index], index, footprint, overlay)
+              : 0;
+            if (entry.deck) overlay.decks[index]--;
+            for (let bit = 0; bit < 8; bit++)
+              if (entry.walls & (1 << bit)) {
+                if (--overlay.wallCounts[index * 8 + bit] === 0)
+                  overlay.wallFlags[index] &= ~(1 << bit);
+              }
+            const difference = changed
+              ? previous ^
+                combinedCollisionFlags(base[index], index, footprint, overlay)
+              : 0;
+            if (difference) changed!.push([key, index, difference]);
+          }
+          overlay.references -= indices.size;
+          if (overlay.references === 0) {
+            this.walkableDecks.delete(key);
+            this.discardUnusedPlaceholderZone(key);
+          }
+        }
+        this._cachedZoneX = NaN;
+        this._cachedZoneZ = NaN;
+        this.cachedStaticFootprint = undefined;
+        this.cachedWalkableDeck = undefined;
+        for (const [key, index, flags] of changed ?? [])
+          this.notifyZoneTile(key, index, flags);
+        return true;
+      },
+    });
   }
 
   /**
@@ -202,7 +655,15 @@ export class CollisionMatrix implements ICollisionMatrix {
     }
     const zone = this.getOrCreateZone(tileX, tileZ);
     const index = this.getTileIndex(tileX, tileZ);
-    zone[index] = flags;
+    this.writeBaseFlags(
+      zone,
+      index,
+      flags,
+      tileX,
+      tileZ,
+      this.cachedStaticFootprint,
+      this.cachedWalkableDeck,
+    );
   }
 
   /**
@@ -220,7 +681,15 @@ export class CollisionMatrix implements ICollisionMatrix {
     }
     const zone = this.getOrCreateZone(tileX, tileZ);
     const index = this.getTileIndex(tileX, tileZ);
-    zone[index] |= flags;
+    this.writeBaseFlags(
+      zone,
+      index,
+      zone[index] | flags,
+      tileX,
+      tileZ,
+      this.cachedStaticFootprint,
+      this.cachedWalkableDeck,
+    );
   }
 
   /**
@@ -239,7 +708,116 @@ export class CollisionMatrix implements ICollisionMatrix {
     const zone = this.getZone(tileX, tileZ);
     if (!zone) return; // Nothing to remove from unallocated zone
     const index = this.getTileIndex(tileX, tileZ);
-    zone[index] &= ~flags;
+    this.writeBaseFlags(
+      zone,
+      index,
+      zone[index] & ~flags,
+      tileX,
+      tileZ,
+      this.cachedStaticFootprint,
+      this.cachedWalkableDeck,
+    );
+  }
+
+  /**
+   * Replace a masked subset of collision flags across a rectangular region.
+   *
+   * Terrain baking updates 10,000 movement tiles at a time. Calling
+   * addFlags/removeFlags for each tile repeats validation, BigInt key packing,
+   * and Map lookup work thousands of times. This zone-oriented path performs
+   * one lookup per intersected 8x8 zone while preserving every non-masked bit.
+   */
+  replaceFlagsInRegion(
+    originX: number,
+    originZ: number,
+    width: number,
+    height: number,
+    mask: number,
+    flags: ArrayLike<number>,
+  ): void {
+    if (
+      !Number.isInteger(originX) ||
+      !Number.isInteger(originZ) ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      width < 0 ||
+      height < 0 ||
+      !Number.isFinite(mask)
+    ) {
+      throw new Error(
+        `[CollisionMatrix] replaceFlagsInRegion: invalid region (${originX}, ${originZ}, ${width}, ${height}) or mask ${mask}`,
+      );
+    }
+
+    const requiredLength = width * height;
+    if (flags.length < requiredLength) {
+      throw new Error(
+        `[CollisionMatrix] replaceFlagsInRegion: flags length ${flags.length} is smaller than ${requiredLength}`,
+      );
+    }
+    if (requiredLength === 0 || mask === 0) return;
+
+    const endX = originX + width;
+    const endZ = originZ + height;
+    const firstZoneX = Math.floor(originX / ZONE_SIZE);
+    const lastZoneX = Math.floor((endX - 1) / ZONE_SIZE);
+    const firstZoneZ = Math.floor(originZ / ZONE_SIZE);
+    const lastZoneZ = Math.floor((endZ - 1) / ZONE_SIZE);
+    const inverseMask = ~mask;
+
+    for (let zoneX = firstZoneX; zoneX <= lastZoneX; zoneX++) {
+      const zoneOriginX = zoneX * ZONE_SIZE;
+      const worldStartX = Math.max(originX, zoneOriginX);
+      const worldEndX = Math.min(endX, zoneOriginX + ZONE_SIZE);
+
+      for (let zoneZ = firstZoneZ; zoneZ <= lastZoneZ; zoneZ++) {
+        const zoneOriginZ = zoneZ * ZONE_SIZE;
+        const worldStartZ = Math.max(originZ, zoneOriginZ);
+        const worldEndZ = Math.min(endZ, zoneOriginZ + ZONE_SIZE);
+        const zoneKey = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
+        let zone = this.zones.get(zoneKey);
+
+        // Clearing terrain flags in an unallocated zone is a no-op unless at
+        // least one replacement value actually sets a masked bit.
+        if (!zone) {
+          let needsZone = false;
+          for (let worldX = worldStartX; worldX < worldEndX; worldX++) {
+            const sourceX = (worldX - originX) * height;
+            for (let worldZ = worldStartZ; worldZ < worldEndZ; worldZ++) {
+              if ((flags[sourceX + worldZ - originZ] & mask) !== 0) {
+                needsZone = true;
+                break;
+              }
+            }
+            if (needsZone) break;
+          }
+          if (!needsZone) continue;
+          zone = new Int32Array(TILES_PER_ZONE);
+          this.zones.set(zoneKey, zone);
+        }
+
+        const footprint = this.staticFootprints.get(zoneKey);
+        const deck = this.walkableDecks.get(zoneKey);
+        for (let worldX = worldStartX; worldX < worldEndX; worldX++) {
+          const localX = worldX - zoneOriginX;
+          const sourceX = (worldX - originX) * height;
+          for (let worldZ = worldStartZ; worldZ < worldEndZ; worldZ++) {
+            const localZ = worldZ - zoneOriginZ;
+            const tileIndex = localX + localZ * ZONE_SIZE;
+            const replacement = flags[sourceX + worldZ - originZ] & mask;
+            this.writeBaseFlags(
+              zone,
+              tileIndex,
+              (zone[tileIndex] & inverseMask) | replacement,
+              worldX,
+              worldZ,
+              footprint,
+              deck,
+            );
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -255,7 +833,16 @@ export class CollisionMatrix implements ICollisionMatrix {
     const zone = this.getZone(tileX, tileZ);
     if (!zone) return false;
     const index = this.getTileIndex(tileX, tileZ);
-    return (zone[index] & flags) !== 0;
+    return (
+      (combinedCollisionFlags(
+        zone[index],
+        index,
+        this.cachedStaticFootprint,
+        this.cachedWalkableDeck,
+      ) &
+        flags) !==
+      0
+    );
   }
 
   /**
@@ -373,9 +960,20 @@ export class CollisionMatrix implements ICollisionMatrix {
    * Clear all collision data
    */
   clear(): void {
+    const hadState = this.zones.size > 0;
     this.zones.clear();
+    this.staticFootprints.clear();
+    this.staticLeases.clear();
+    this.staticPlaceholderZones.clear();
+    this.cachedStaticFootprint = undefined;
+    this.walkableDecks.clear();
+    this.deckLeases.clear();
+    this.cachedWalkableDeck = undefined;
     this._cachedZoneX = NaN;
     this._cachedZoneZ = NaN;
+    // Clearing allocated ownership is an explicit reset, without scanning the
+    // entire world to enumerate old nonzero cells. Repeated empty resets are inert.
+    if (hadState) this.notifyChange(null, null, 0);
   }
 
   /**
@@ -385,7 +983,19 @@ export class CollisionMatrix implements ICollisionMatrix {
   getZoneData(zoneX: number, zoneZ: number): Int32Array | null {
     // Direct BigInt key computation (no caching needed for zone-coord API)
     const key = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
-    return this.zones.get(key) ?? null;
+    const data = this.zones.get(key);
+    if (!data) return null;
+    const counts = this.staticFootprints.get(key);
+    const deck = this.walkableDecks.size
+      ? this.walkableDecks.get(key)
+      : undefined;
+    if (!counts && !deck) return data;
+    // Export the combined authoritative state without exposing the base array
+    // to edits through a synthesized ownership view.
+    const combined = new Int32Array(data);
+    for (let i = 0; i < TILES_PER_ZONE; i++)
+      combined[i] = combinedCollisionFlags(data[i], i, counts, deck);
+    return combined;
   }
 
   /**
@@ -400,7 +1010,23 @@ export class CollisionMatrix implements ICollisionMatrix {
       return;
     }
     const key = (BigInt(zoneX) << 32n) | BigInt(zoneZ >>> 0);
-    this.zones.set(key, new Int32Array(data));
+    const previous = this.zones.get(key);
+    const next = new Int32Array(data);
+    this.zones.set(key, next);
+    if (this.changeListeners.size) {
+      const footprint = this.staticFootprints.get(key);
+      const deck = this.walkableDecks.get(key);
+      for (let index = 0; index < TILES_PER_ZONE; index++) {
+        const difference =
+          combinedCollisionFlags(
+            previous?.[index] ?? 0,
+            index,
+            footprint,
+            deck,
+          ) ^ combinedCollisionFlags(next[index], index, footprint, deck);
+        if (difference) this.notifyZoneTile(key, index, difference);
+      }
+    }
   }
 
   /**

@@ -161,6 +161,17 @@ const configSchema = z.object({
     .optional()
     .default("false")
     .describe("Disable chat processing for silent bots"),
+  HYPERIA_OPERATOR_CHAT_ENTITY_ID: z
+    .string()
+    .optional()
+    .describe(
+      "Exact server-authenticated entity ID allowed to issue in-world operator commands; unset denies all",
+    ),
+  HYPERIA_LLM_PUBLIC_CHAT_ENABLED: z
+    .string()
+    .optional()
+    .default("false")
+    .describe("Development/test-only opt-in for model-generated public chat"),
   HYPERIA_FLEE_HEALTH_PERCENT: z
     .string()
     .optional()
@@ -231,6 +242,13 @@ export const hyperiaPlugin: HyperiaPlugin = {
     HYPERIA_SCRIPTED_ROLE: normalizeEnvValue(process.env.HYPERIA_SCRIPTED_ROLE),
     HYPERIA_SILENT_CHAT: normalizeEnvValue(
       process.env.HYPERIA_SILENT_CHAT,
+      "false",
+    ),
+    HYPERIA_OPERATOR_CHAT_ENTITY_ID: normalizeEnvValue(
+      process.env.HYPERIA_OPERATOR_CHAT_ENTITY_ID,
+    ),
+    HYPERIA_LLM_PUBLIC_CHAT_ENABLED: normalizeEnvValue(
+      process.env.HYPERIA_LLM_PUBLIC_CHAT_ENABLED,
       "false",
     ),
     HYPERIA_FLEE_HEALTH_PERCENT: normalizeEnvValue(

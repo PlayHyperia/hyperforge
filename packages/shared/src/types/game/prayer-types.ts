@@ -66,6 +66,8 @@ export interface PrayerState {
 
 export interface PrayerTogglePayload {
   readonly prayerId: string;
+  /** Optional client correlation ID; never used as the persistence operation ID. */
+  readonly requestId?: string;
 }
 
 export interface PrayerToggledEvent {
@@ -106,7 +108,14 @@ export function isValidPrayerTogglePayload(
 ): data is PrayerTogglePayload {
   if (!data || typeof data !== "object") return false;
   const payload = data as Record<string, unknown>;
-  return isValidPrayerId(payload.prayerId);
+  return (
+    isValidPrayerId(payload.prayerId) &&
+    (payload.requestId === undefined ||
+      (typeof payload.requestId === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          payload.requestId,
+        )))
+  );
 }
 
 /**

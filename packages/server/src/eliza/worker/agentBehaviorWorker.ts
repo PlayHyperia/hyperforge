@@ -30,7 +30,7 @@ function send(msg: WorkerToMainMessage): void {
 port.on("message", (msg: MainToWorkerMessage) => {
   switch (msg.type) {
     case "init": {
-      initializeItems(msg.itemsData);
+      initializeItems(msg.itemsData, msg.processingRecipes);
       send({ type: "ready" });
       break;
     }
@@ -46,7 +46,9 @@ port.on("message", (msg: MainToWorkerMessage) => {
           agent.resourceSystemAvailable = shared.resourceSystemAvailable;
           agent.spawnAnchors = shared.spawnAnchors;
           agent.worldResources = shared.worldResources;
+          agent.worldMobs = shared.worldMobs;
           agent.stationPositions = shared.stationPositions;
+          agent.storePositions = shared.storePositions;
         }
         const results = processAgentTicks(msg.agents);
         send({ type: "tickResults", results });

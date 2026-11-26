@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "title": "Certified staff primary-grip close review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-grip-front",
+      "name": "Staff idle grip · front",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-left",
+      "name": "Staff idle grip · left",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-rear",
+      "name": "Staff idle grip · rear",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-right",
+      "name": "Staff idle grip · right",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "cast-grip-front",
+      "name": "Staff cast grip · front",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.55,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "cast-grip-left",
+      "name": "Staff cast grip · left",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.55,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "cast-grip-rear",
+      "name": "Staff cast grip · rear",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.55,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "cast-grip-right",
+      "name": "Staff cast grip · right",
+      "asset": "emotes/emote-spell-cast.glb",
+      "sampleRatio": 0.55,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    }
+  ]
+}

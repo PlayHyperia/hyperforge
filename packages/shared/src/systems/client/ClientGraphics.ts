@@ -70,6 +70,8 @@
 
 import * as THREE from "../../extras/three/three";
 import type { World } from "../../core/World";
+import type { CompactLandscapeRocksVisualsSystem } from "./CompactLandscapeRocksVisualsSystem";
+import type { TerrainSystem } from "../shared/world/TerrainSystem";
 import type { WorldOptions } from "../../types";
 import { EventType } from "../../types/events";
 import { System } from "../shared/infrastructure/System";
@@ -94,6 +96,15 @@ import {
   cleanupGPUCompute,
   type GPUComputeManager,
 } from "../../utils/compute";
+import { RendererPreparationQueue } from "../../utils/rendering/RendererPreparationQueue";
+import {
+  OpaqueLoadingRenderGate,
+  type OpaqueLoadingCoverLease,
+  type OpaqueLoadingCoverStatus,
+} from "../../utils/rendering/OpaqueLoadingRenderGate";
+import type { Environment } from "../shared/world/Environment";
+import type { VegetationSystem } from "../shared/world/VegetationSystem";
+import { prepareGLBTreeBatchedInstancerForRender } from "../shared/world/GLBTreeBatchedInstancer";
 
 let renderer: WebGPURenderer | undefined;
 
@@ -136,9 +147,17 @@ export class ClientGraphics extends System {
   isWebGPU: boolean = true;
   hasRendered: boolean = false;
   gpuCompute: GPUComputeManager | null = null;
+  private readonly rendererPreparationQueue = new RendererPreparationQueue();
+  private readonly opaqueLoadingRenderGate: OpaqueLoadingRenderGate;
+  private pendingPrimaryCommitFrame: number | null = null;
+  private static readonly PRECOMPILE_TIMEOUT_MS = 15_000;
+  private static readonly RENDERER_READY_TIMEOUT_MS = 15_000;
 
   constructor(world: World) {
     super(world);
+    this.opaqueLoadingRenderGate = new OpaqueLoadingRenderGate(
+      () => this.world.frame,
+    );
   }
 
   override async init(
@@ -196,7 +215,7 @@ export class ClientGraphics extends System {
     // Configure shadows
     configureShadowMaps(this.renderer, {
       enabled: true,
-      type: THREE.PCFSoftShadowMap,
+      type: THREE.PCFShadowMap,
     });
 
     // Get max anisotropy
@@ -332,6 +351,7 @@ export class ClientGraphics extends System {
     this.width = width;
     this.height = height;
     this.aspect = this.width / this.height;
+    this.opaqueLoadingRenderGate.invalidate();
 
     // Update camera aspect ratio
     // THREE.PerspectiveCamera has aspect and updateProjectionMatrix properties
@@ -356,17 +376,173 @@ export class ClientGraphics extends System {
     this.render();
   }
 
+  /** The caller must own a mounted, fully opaque cover. New ownership replaces
+   * old ownership; ordinary clients never acquire and keep normal rendering. */
+  acquireOpaqueLoadingCover(): OpaqueLoadingCoverLease {
+    return this.opaqueLoadingRenderGate.acquire();
+  }
+
+  getOpaqueLoadingCoverStatus(): OpaqueLoadingCoverStatus {
+    return this.opaqueLoadingRenderGate.getStatus();
+  }
+
   render() {
-    if (!this.usePostprocessing || !this.composer) {
-      this.renderer.render(this.world.stage.scene, this.world.camera);
-    } else {
-      this.composer.render();
+    // Consume commit credit before preparation/render callbacks can re-enter.
+    // Direct/resize renders and a second render in one wrapper have no credit.
+    const primaryWorldFrame = this.pendingPrimaryCommitFrame;
+    this.pendingPrimaryCommitFrame = null;
+    this.world
+      .getSystem<TerrainSystem>("terrain")
+      ?.prepareGrassForRender(this.world.camera);
+    this.world
+      .getSystem<CompactLandscapeRocksVisualsSystem>(
+        "compact-landscape-rocks-visuals",
+      )
+      ?.prepareForRender(this.world.camera, this.renderer.domElement.height);
+    // Camera owners (including diagnostic leases) select their pose before this
+    // method. Screen-space fog must use that same pose, not the earlier update.
+    this.world
+      .getSystem<Environment>("environment")
+      ?.prepareForRender(this.renderer, this.world.camera);
+    this.world
+      .getSystem<VegetationSystem>("vegetation")
+      ?.prepareForRender(
+        this.world.camera,
+        this.renderer.domElement.width,
+        this.renderer.domElement.height,
+      );
+    // Use the finalized primary pose; secondary passes reuse tree membership.
+    prepareGLBTreeBatchedInstancerForRender(this.world.camera);
+    // Keep primary-view scheduling, offscreen fog and all preparation above
+    // active. Only the final scene/composer submission is covered by this gate.
+    if (!this.isPrecompileIdle()) this.opaqueLoadingRenderGate.invalidate();
+    const submission = this.opaqueLoadingRenderGate.beginSubmission();
+    if (submission === null) return;
+    try {
+      if (!this.usePostprocessing || !this.composer) {
+        this.renderer.render(this.world.stage.scene, this.world.camera);
+      } else {
+        this.composer.render();
+      }
+    } finally {
+      // Three does not guarantee onAfterRender after a failed object draw.
+      this.world.getSystem<TerrainSystem>("terrain")?.finishGrassForRender();
     }
     this.hasRendered = true;
+    this.opaqueLoadingRenderGate.completeSubmission(
+      submission,
+      primaryWorldFrame,
+    );
+  }
+
+  /**
+   * Compile a newly loaded object's WebGPU pipelines before it becomes visible.
+   * Calls are serialized because Three's compiler temporarily swaps renderer
+   * traversal state. Visibility and frustum flags are restored synchronously
+   * before the compiler waits on backend pipeline promises.
+   */
+  precompileObject(object: THREE.Object3D): Promise<void> {
+    this.opaqueLoadingRenderGate.invalidate();
+    return this.rendererPreparationQueue.run(
+      (startCallerDeadline) =>
+        this.precompileObjectNow(object, startCallerDeadline),
+      ClientGraphics.PRECOMPILE_TIMEOUT_MS,
+      `WebGPU object precompile timed out after ${ClientGraphics.PRECOMPILE_TIMEOUT_MS}ms`,
+    );
+  }
+
+  /**
+   * Awaited startup preparation shares the object compiler's serialization.
+   * Timeout rejects this caller after 15s of execution, but DOES NOT cancel the
+   * operation: the queue stays busy until it settles. The operation owner must
+   * guard late publication/disposal after timeout or world teardown. Do not
+   * await another prepareRenderer/precompileObject call inside this callback.
+   */
+  prepareRenderer<T>(operation: () => T | Promise<T>): Promise<T> {
+    this.opaqueLoadingRenderGate.invalidate();
+    return this.rendererPreparationQueue.run(
+      (startCallerDeadline) => {
+        startCallerDeadline();
+        return operation();
+      },
+      ClientGraphics.PRECOMPILE_TIMEOUT_MS,
+      `WebGPU renderer preparation timed out after ${ClientGraphics.PRECOMPILE_TIMEOUT_MS}ms`,
+    );
+  }
+
+  isPrecompileIdle(): boolean {
+    return this.rendererPreparationQueue.pendingCount === 0;
+  }
+
+  private async precompileObjectNow(
+    object: THREE.Object3D,
+    startCallerDeadline: () => void,
+  ): Promise<void> {
+    // Streaming equipment contracts can arrive while ClientGraphics.init() is
+    // still awaiting WebGPU adapter creation. Queue the compile until that
+    // exact renderer is ready instead of turning a healthy startup race into a
+    // failed asset pre-warm and a redundant reload.
+    const rendererReadyDeadline =
+      Date.now() + ClientGraphics.RENDERER_READY_TIMEOUT_MS;
+    while (!this.renderer) {
+      if (Date.now() >= rendererReadyDeadline) {
+        throw new Error(
+          `WebGPU renderer was not ready after ${ClientGraphics.RENDERER_READY_TIMEOUT_MS}ms`,
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 16));
+    }
+
+    const previousVisible = object.visible;
+    const frustumStates: Array<{
+      object: THREE.Object3D & { frustumCulled: boolean };
+      value: boolean;
+    }> = [];
+    object.traverse((child) => {
+      if (
+        "frustumCulled" in child &&
+        typeof child.frustumCulled === "boolean"
+      ) {
+        frustumStates.push({
+          object: child as THREE.Object3D & { frustumCulled: boolean },
+          value: child.frustumCulled,
+        });
+        child.frustumCulled = false;
+      }
+    });
+
+    let compilation: Promise<void>;
+    try {
+      object.visible = true;
+      object.updateMatrixWorld(true);
+      compilation = this.renderer.compileAsync(
+        object,
+        this.world.camera,
+        this.world.stage.scene,
+      );
+    } finally {
+      object.visible = previousVisible;
+      for (const state of frustumStates) {
+        state.object.frustumCulled = state.value;
+      }
+      // compileAsync traverses object render callbacks before it returns.
+      this.world.getSystem<TerrainSystem>("terrain")?.finishGrassForRender();
+    }
+
+    startCallerDeadline();
+    await compilation;
   }
 
   override commit() {
-    this.render();
+    // World.frame advances once per world tick. Direct/resize renders do not
+    // acknowledge warmup. Preserve public dispatch for existing profilers.
+    const previous = this.pendingPrimaryCommitFrame;
+    this.pendingPrimaryCommitFrame = this.world.frame;
+    try {
+      this.render();
+    } finally {
+      this.pendingPrimaryCommitFrame = previous;
+    }
   }
 
   override preTick() {
@@ -390,7 +566,23 @@ export class ClientGraphics extends System {
     depthBlur?: { value: boolean };
     depthBlurIntensity?: { value: number };
     depthBlurDistance?: { value: number };
+    shadows?: { value: string };
+    waterReflections?: { value: boolean };
   }) => {
+    if (
+      changes.dpr ||
+      changes.postprocessing ||
+      changes.bloom ||
+      changes.colorGrading ||
+      changes.colorGradingIntensity ||
+      changes.depthBlur ||
+      changes.depthBlurIntensity ||
+      changes.depthBlurDistance ||
+      changes.shadows ||
+      changes.waterReflections
+    ) {
+      this.opaqueLoadingRenderGate.invalidate();
+    }
     // dpr
     if (changes.dpr) {
       this.renderer.setPixelRatio(changes.dpr.value);
@@ -434,6 +626,7 @@ export class ClientGraphics extends System {
   };
 
   override destroy() {
+    this.opaqueLoadingRenderGate.destroy();
     // Guard against destruction before initialization
     if (this.resizer) {
       this.resizer.disconnect();

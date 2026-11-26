@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "routeId": "compact-path-pond-approach",
+  "protectedStartMeters": 3,
+  "protectedEndMeters": 4,
+  "protectedDockMeters": 1.5,
+  "transitionMeters": 3,
+  "knots": [
+    { "fraction": 0, "width": 0.6, "blendWidth": 0.75 },
+    { "fraction": 0.17, "width": 1.4, "blendWidth": 0.9 },
+    { "fraction": 0.36, "width": 0.45, "blendWidth": 0.6 },
+    { "fraction": 0.61, "width": 1.5, "blendWidth": 0.9 },
+    { "fraction": 0.82, "width": 0.55, "blendWidth": 0.65 },
+    { "fraction": 1, "width": 0.6, "blendWidth": 0.75 }
+  ]
+}

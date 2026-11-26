@@ -37,7 +37,6 @@ interface AgentSettingsData {
 }
 
 interface SecretsData {
-  OPENROUTER_API_KEY?: string;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
   [key: string]: string | undefined;
@@ -82,12 +81,6 @@ export const AgentSettings: React.FC<AgentSettingsProps> = ({
 
   // Common API key configurations
   const apiKeyConfigs = [
-    {
-      key: "OPENROUTER_API_KEY",
-      label: "OpenRouter API Key",
-      placeholder: "sk-or-v1-...",
-      description: "Required for LLM access via OpenRouter",
-    },
     {
       key: "OPENAI_API_KEY",
       label: "OpenAI API Key",

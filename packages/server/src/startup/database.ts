@@ -28,6 +28,10 @@ import {
 import type { ServerConfig } from "./config.js";
 import type * as schema from "../database/schema.js";
 
+export type ServerDrizzleDatabase = NodePgDatabase<typeof schema> & {
+  $client: pg.Pool;
+};
+
 /**
  * Database context returned by initialization
  * Contains all database-related instances needed by the server
@@ -37,7 +41,7 @@ export interface DatabaseContext {
   pgPool: pg.Pool;
 
   /** Drizzle database client (typed with schema) */
-  drizzleDb: NodePgDatabase<typeof schema>;
+  drizzleDb: ServerDrizzleDatabase;
 
   /** Legacy database adapter for old systems */
   db: unknown; // DrizzleAdapter type from drizzle-adapter.ts
@@ -46,96 +50,53 @@ export interface DatabaseContext {
   dockerManager?: DockerManager;
 }
 
+export interface DatabaseConnectionTarget {
+  connectionString: string;
+  dockerManager?: DockerManager;
+}
+
+export type DockerManagerFactory = () => DockerManager;
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
 
-function buildPostgresConnectionString(opts: {
-  user: string;
-  password?: string;
-  host: string;
-  port: number;
-  database: string;
-}): string {
-  const encodedUser = encodeURIComponent(opts.user);
-  const encodedPassword =
-    opts.password && opts.password.length > 0
-      ? `:${encodeURIComponent(opts.password)}`
-      : "";
-  return `postgresql://${encodedUser}${encodedPassword}@${opts.host}:${opts.port}/${opts.database}`;
-}
-
 /**
- * Development fallback when Docker isn't available:
- * connect to a local PostgreSQL service (e.g. Homebrew), create DB if needed,
- * then return a usable connection string for normal Drizzle initialization.
+ * Resolve and prepare exactly one configured database target.
+ *
+ * Managed-local startup is intentionally fail closed: an unavailable or
+ * mismatched Docker target is never replaced with another service listening on
+ * a familiar port.
  */
-async function tryLocalPostgresFallback(
-  config: ServerConfig,
-): Promise<string | null> {
-  // Only allow automatic local fallback outside production.
-  if (config.nodeEnv === "production") return null;
-
-  const host = process.env.LOCAL_POSTGRES_HOST || "localhost";
-  const port = parseInt(process.env.LOCAL_POSTGRES_PORT || "5432", 10);
-  const user =
-    process.env.LOCAL_POSTGRES_USER || process.env.USER || "postgres";
-  const password = process.env.LOCAL_POSTGRES_PASSWORD || "";
-  const adminDatabase = process.env.LOCAL_POSTGRES_ADMIN_DB || "postgres";
-  const targetDatabase = process.env.POSTGRES_DB || "hyperia";
-
-  const adminConnectionString = buildPostgresConnectionString({
-    user,
-    password,
-    host,
-    port,
-    database: adminDatabase,
-  });
-  const targetConnectionString = buildPostgresConnectionString({
-    user,
-    password,
-    host,
-    port,
-    database: targetDatabase,
-  });
-
-  let pool: pg.Pool | undefined;
-  try {
-    const { default: pgModule } = await import("pg");
-    pool = new pgModule.Pool({
-      connectionString: adminConnectionString,
-      max: 1,
-      connectionTimeoutMillis: 5000,
-    });
-
-    const client = await pool.connect();
+export async function prepareDatabaseConnectionTarget(
+  config: Pick<ServerConfig, "useLocalPostgres" | "databaseUrl">,
+  createDockerManager: DockerManagerFactory = createDefaultDockerManager,
+): Promise<DatabaseConnectionTarget> {
+  if (config.useLocalPostgres && !config.databaseUrl) {
     try {
-      await client.query("SELECT 1");
-
-      if (targetDatabase !== adminDatabase) {
-        const exists = await client.query(
-          "SELECT 1 FROM pg_database WHERE datname = $1 LIMIT 1",
-          [targetDatabase],
-        );
-        if (exists.rowCount === 0) {
-          const safeDbName = `"${targetDatabase.replace(/"/g, '""')}"`;
-          await client.query(`CREATE DATABASE ${safeDbName}`);
-        }
-      }
-    } finally {
-      client.release();
+      const dockerManager = createDockerManager();
+      await dockerManager.checkDockerRunning();
+      await dockerManager.startPostgres();
+      return {
+        connectionString: await dockerManager.getConnectionString(),
+        dockerManager,
+      };
+    } catch (dockerError) {
+      throw new Error(
+        `[Database] Managed local PostgreSQL failed closed: ${getErrorMessage(dockerError)} ` +
+          `Fix the configured Docker container/port or set DATABASE_URL with USE_LOCAL_POSTGRES=false. No unrelated local PostgreSQL service will be used automatically.`,
+      );
     }
-    return targetConnectionString;
-  } catch (error) {
-    console.warn(
-      "[Database] Local PostgreSQL fallback failed:",
-      getErrorMessage(error),
-    );
-    return null;
-  } finally {
-    if (pool) await pool.end().catch(() => {});
   }
+
+  if (config.databaseUrl) {
+    return { connectionString: config.databaseUrl };
+  }
+
+  throw new Error(
+    "[Database] No database configuration: set DATABASE_URL or USE_LOCAL_POSTGRES=true",
+  );
 }
 
 /**
@@ -156,47 +117,8 @@ async function tryLocalPostgresFallback(
 export async function initializeDatabase(
   config: ServerConfig,
 ): Promise<DatabaseContext> {
-  let dockerManager: DockerManager | undefined;
-  let connectionString: string;
-
-  // Initialize Docker and PostgreSQL (optional based on config)
-  if (config.useLocalPostgres && !config.databaseUrl) {
-    try {
-      dockerManager = createDefaultDockerManager();
-      await dockerManager.checkDockerRunning();
-
-      const isPostgresRunning = await dockerManager.checkPostgresRunning();
-      if (!isPostgresRunning) {
-        await dockerManager.startPostgres();
-      }
-
-      connectionString = await dockerManager.getConnectionString();
-    } catch (dockerError) {
-      console.warn(
-        "[Database] Docker PostgreSQL unavailable:",
-        getErrorMessage(dockerError),
-      );
-
-      const fallbackConnectionString = await tryLocalPostgresFallback(config);
-      if (!fallbackConnectionString) {
-        throw new Error(
-          `[Database] Failed to initialize database: Docker/local PostgreSQL initialization failed. ` +
-            `Start Docker Desktop, start local PostgreSQL for fallback, or set DATABASE_URL to a reachable PostgreSQL instance. ` +
-            `If you use a pre-existing Docker container with non-default credentials, set POSTGRES_PASSWORD to match.`,
-        );
-      }
-
-      // Docker is not being used in fallback mode.
-      dockerManager = undefined;
-      connectionString = fallbackConnectionString;
-    }
-  } else if (config.databaseUrl) {
-    connectionString = config.databaseUrl;
-  } else {
-    throw new Error(
-      "[Database] No database configuration: set DATABASE_URL or USE_LOCAL_POSTGRES=true",
-    );
-  }
+  const { connectionString, dockerManager } =
+    await prepareDatabaseConnectionTarget(config);
 
   // Initialize Drizzle database
   const { initializeDatabase: initDrizzle } =
@@ -209,7 +131,7 @@ export async function initializeDatabase(
 
   return {
     pgPool,
-    drizzleDb: drizzleDb as NodePgDatabase<typeof schema>,
+    drizzleDb: drizzleDb as ServerDrizzleDatabase,
     db,
     dockerManager,
   };

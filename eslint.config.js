@@ -90,6 +90,12 @@ export default [
         requestAnimationFrame: "readonly",
         cancelAnimationFrame: "readonly",
         performance: "readonly",
+        PerformanceObserver: "readonly",
+        PerformanceObserverCallback: "readonly",
+        PerformanceObserverEntryList: "readonly",
+        PerformanceObserverInit: "readonly",
+        PerformanceEntryList: "readonly",
+        PerformanceResourceTiming: "readonly",
         // IndexedDB
         indexedDB: "readonly",
         IDBFactory: "readonly",
@@ -109,6 +115,7 @@ export default [
         btoa: "readonly",
         atob: "readonly",
         crypto: "readonly",
+        structuredClone: "readonly",
         screen: "readonly",
         TextEncoder: "readonly",
         TextDecoder: "readonly",
@@ -148,6 +155,9 @@ export default [
         FileReader: "readonly",
         TexImageSource: "readonly",
         AudioBuffer: "readonly",
+        AudioContextState: "readonly",
+        DistanceModelType: "readonly",
+        PanningModelType: "readonly",
         CSSStyleDeclaration: "readonly",
 
         // Cloudflare Workers / Web Platform API globals

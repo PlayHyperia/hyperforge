@@ -120,6 +120,7 @@ import { LootSystem } from "..";
 import { GravestoneLootSystem } from "..";
 import { GroundItemSystem } from "../economy/GroundItemSystem";
 import { generateKillToken } from "../../../utils/game/KillTokenUtils";
+import { generateGroundItemMobLootOperationId } from "../../../utils/game/GroundItemSourceIdentity";
 // Movement now handled by physics in PlayerLocal
 // CameraSystem is ClientCameraSystem
 // UI components are React-based in the client package
@@ -151,6 +152,10 @@ import { TanningSystem } from "..";
 import { HealthRegenSystem } from "..";
 import { PrayerSystem } from "..";
 import { QuestSystem } from "..";
+import {
+  getSystemRuntimePolicy,
+  type SystemRuntimeKind,
+} from "./systemRuntime";
 
 /** Minimal contract for the client-side movement system (physics-based in PlayerLocal) */
 interface MovementSystemLike {
@@ -190,11 +195,23 @@ export interface Systems {
   healthRegen?: HealthRegenSystem;
 }
 
+export interface SystemRegistrationOptions {
+  /** Render gathering nodes that belong to the interactive exploration map. */
+  enableExplorationResourceNodes?: boolean;
+  /** Render NPCs, stations, and item spawners from the exploration map. */
+  enableExplorationWorldEntities?: boolean;
+}
+
 /**
  * Register all systems with a Hyperia world
  * This is the main entry point called by the bootstrap
  */
-export async function registerSystems(world: World): Promise<void> {
+export async function registerSystems(
+  world: World,
+  runtimeKind: SystemRuntimeKind,
+  options: SystemRegistrationOptions = {},
+): Promise<void> {
+  const runtime = getSystemRuntimePolicy(runtimeKind);
   // Use a centralized logger
   const _logger = (world as { logger?: { system: (msg: string) => void } })
     .logger;
@@ -285,15 +302,14 @@ export async function registerSystems(world: World): Promise<void> {
   systems.player = getSystem(world, "player") as PlayerSystem;
   systems.entityManager = getSystem(world, "entity-manager") as EntityManager;
 
-  if (world.isClient) {
+  if (runtime.client) {
     // InteractionRouter is now registered in createClientWorld.ts (before ClientCameraSystem)
     // so that ClientCameraSystem can access its RaycastService during initialization
     systems.interaction = getSystem(world, "interaction") as InteractionRouter;
     // Camera system API is accessed through world events, not direct system reference
     systems.cameraSystem = undefined;
     systems.movementSystem = getSystem(world, "client-movement-system") as
-      | MovementSystemLike
-      | undefined;
+      MovementSystemLike | undefined;
   }
 
   // ParticleSystem is registered synchronously in createClientWorld() alongside
@@ -305,7 +321,9 @@ export async function registerSystems(world: World): Promise<void> {
   }
 
   // 6. Mob NPC system - Core mob NPC management (mobs, bosses, quest enemies)
-  world.register("mob-npc", MobNPCSystem);
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    world.register("mob-npc", MobNPCSystem);
+  }
 
   // === INTERACTION SYSTEMS ===
   // These systems handle player-world interactions
@@ -332,15 +350,7 @@ export async function registerSystems(world: World): Promise<void> {
 
   // 12a. Health regeneration system - Passive health regen (depends on combat system)
   // Server-only: handles classic fantasy MMORPG-style out-of-combat health regeneration
-  // Note: world.isServer isn't reliable here because ServerNetwork registers later
-  // Use Node.js/Bun environment check instead
-  const isServerEnvironment =
-    typeof process !== "undefined" &&
-    process.versions &&
-    (typeof process.versions.node === "string" ||
-      typeof (process.versions as { bun?: string }).bun === "string");
-
-  if (isServerEnvironment) {
+  if (runtime.server) {
     world.register("health-regen", HealthRegenSystem);
     console.log("[SystemLoader] ✅ HealthRegenSystem registered (server-only)");
   }
@@ -354,8 +364,12 @@ export async function registerSystems(world: World): Promise<void> {
   // 14. Store system - Item trading (depends on inventory system)
   world.register("store", StoreSystem);
 
-  // 15. Resource system - Gathering mechanics (depends on inventory system)
-  world.register("resource", ResourceSystem);
+  // 15. Resource system - Gathering mechanics (depends on inventory system).
+  // The server always owns gathering state. The arena-only broadcast client
+  // omits exploration nodes that cannot affect or explain an active duel.
+  if (runtime.server || options.enableExplorationResourceNodes !== false) {
+    world.register("resource", ResourceSystem);
+  }
 
   // 18. Processing system - Crafting and item processing (depends on inventory system)
   world.register("processing", ProcessingSystem);
@@ -396,7 +410,7 @@ export async function registerSystems(world: World): Promise<void> {
   // Duel Arena visual system - procedural arena geometry and physics collision
   const duelArenaVisualsEnabled =
     process.env.DUEL_ARENA_VISUALS_ENABLED !== "false";
-  if (duelArenaVisualsEnabled) {
+  if (runtime.client && duelArenaVisualsEnabled) {
     try {
       world.register("duel-arena-visuals", DuelArenaVisualsSystem);
     } catch (err) {
@@ -405,14 +419,14 @@ export async function registerSystems(world: World): Promise<void> {
         err,
       );
     }
-  } else if (isServerEnvironment) {
+  } else if (runtime.client) {
     console.log(
       "[SystemLoader] DuelArenaVisualsSystem skipped (DUEL_ARENA_VISUALS_ENABLED=false)",
     );
   }
 
   // Client-only visual combat feedback systems
-  if (world.isClient) {
+  if (runtime.client) {
     world.register("damage-splat", DamageSplatSystem);
     world.register("duel-countdown-splat", DuelCountdownSplatSystem);
     world.register("projectile-renderer", ProjectileRenderer);
@@ -431,7 +445,7 @@ export async function registerSystems(world: World): Promise<void> {
   world.register("loot", LootSystem);
 
   // World Content Systems (server only for world management)
-  if (world.isServer) {
+  if (runtime.server) {
     world.register("npc", NPCSystem);
   }
 
@@ -439,20 +453,22 @@ export async function registerSystems(world: World): Promise<void> {
   world.register("dialogue", DialogueSystem);
 
   // Quest system - handles quest progression (server only)
-  // Note: world.isServer isn't reliable here because ServerNetwork registers later
-  // Use Node.js environment check instead (isServerEnvironment defined above)
-  if (isServerEnvironment) {
+  if (runtime.server) {
     world.register("quest", QuestSystem);
     console.log("[SystemLoader] ✅ QuestSystem registered (server-only)");
   }
 
-  // DYNAMIC WORLD CONTENT SYSTEMS - FULL THREE.JS ACCESS, NO SANDBOX
-  world.register("mob-npc-spawner", MobNPCSpawnerSystem);
-  world.register("station-spawner", StationSpawnerSystem);
-  world.register("item-spawner", ItemSpawnerSystem);
+  // DYNAMIC WORLD CONTENT SYSTEMS - FULL THREE.JS ACCESS, NO SANDBOX.
+  // The fixed arena broadcast receives contestants through PlayerSystem and
+  // does not admit exploration NPCs, stations, or loose item populations.
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    world.register("mob-npc-spawner", MobNPCSpawnerSystem);
+    world.register("station-spawner", StationSpawnerSystem);
+    world.register("item-spawner", ItemSpawnerSystem);
+  }
 
   // Zone Detection System - registered on server only (client registers in createClientWorld.ts)
-  if (world.isServer) {
+  if (runtime.server) {
     world.register("zone-detection", ZoneDetectionSystem);
   }
 
@@ -467,10 +483,16 @@ export async function registerSystems(world: World): Promise<void> {
   systems.combat = getSystem(world, "combat") as CombatSystem;
   systems.inventory = getSystem(world, "inventory") as InventorySystem;
   systems.skills = getSystem(world, "skills") as SkillsSystem;
-  systems.mobNpc = getSystem(world, "mob-npc") as MobNPCSystem;
+  systems.mobNpc =
+    runtime.server || options.enableExplorationWorldEntities !== false
+      ? (getSystem(world, "mob-npc") as MobNPCSystem)
+      : undefined;
   systems.banking = getSystem(world, "banking") as BankingSystem;
   systems.store = getSystem(world, "store") as StoreSystem;
-  systems.resource = getSystem(world, "resource") as ResourceSystem;
+  systems.resource =
+    runtime.server || options.enableExplorationResourceNodes !== false
+      ? (getSystem(world, "resource") as ResourceSystem)
+      : undefined;
 
   systems.aggro = getSystem(world, "aggro") as AggroSystem;
   systems.equipment = getSystem(world, "equipment") as EquipmentSystem;
@@ -480,7 +502,7 @@ export async function registerSystems(world: World): Promise<void> {
   systems.mobDeath = getSystem(world, "mob-death") as MobDeathSystem;
 
   // Client-only systems
-  if (world.isClient) {
+  if (runtime.client) {
     systems.inventoryInteraction = getSystem(
       world,
       "inventory-interaction",
@@ -494,20 +516,22 @@ export async function registerSystems(world: World): Promise<void> {
   systems.loot = getSystem(world, "loot") as LootSystem;
 
   // World Content Systems
-  if (world.isServer) {
+  if (runtime.server) {
     systems.npc = getSystem(world, "npc") as NPCSystem;
   }
 
   // DYNAMIC WORLD CONTENT SYSTEMS
-  systems.mobNpcSpawner = getSystem(
-    world,
-    "mob-npc-spawner",
-  ) as MobNPCSpawnerSystem;
-  systems.stationSpawner = getSystem(
-    world,
-    "station-spawner",
-  ) as StationSpawnerSystem;
-  systems.itemSpawner = getSystem(world, "item-spawner") as ItemSpawnerSystem;
+  if (runtime.server || options.enableExplorationWorldEntities !== false) {
+    systems.mobNpcSpawner = getSystem(
+      world,
+      "mob-npc-spawner",
+    ) as MobNPCSpawnerSystem;
+    systems.stationSpawner = getSystem(
+      world,
+      "station-spawner",
+    ) as StationSpawnerSystem;
+    systems.itemSpawner = getSystem(world, "item-spawner") as ItemSpawnerSystem;
+  }
 
   // Set up API for apps to access functionality
   setupAPI(world, systems);
@@ -892,8 +916,7 @@ function setupAPI(world: World, systems: Systems): void {
     // Camera API (Core ClientCameraSystem)
     getCameraInfo: () => {
       const cameraSystem = world.getSystem("client-camera-system") as
-        | { getCameraInfo?: () => unknown }
-        | undefined;
+        { getCameraInfo?: () => unknown } | undefined;
       return cameraSystem?.getCameraInfo?.();
     },
     setCameraTarget: (_target: THREE.Object3D | null) => {}, // setTarget is private
@@ -1356,16 +1379,36 @@ function setupAPI(world: World, systems: Systems): void {
 
       killMob: (mobId: string, killerId: string) => {
         const timestamp = Date.now();
-        const killToken = generateKillToken(mobId, killerId, timestamp);
-        world.emit(EventType.NPC_DIED, {
+        const lootOperationId = generateGroundItemMobLootOperationId();
+        const attackStyle = "aggressive";
+        const damageDealt = 1;
+        void generateKillToken(
           mobId,
-          mobType: "unknown",
-          level: 1,
-          killedBy: killerId,
-          position: { x: 0, y: 0, z: 0 },
+          killerId,
           timestamp,
-          killToken,
-        });
+          lootOperationId,
+          attackStyle,
+          damageDealt,
+        )
+          .then((killToken) => {
+            world.emit(EventType.NPC_DIED, {
+              mobId,
+              mobType: "unknown",
+              level: 1,
+              killedBy: killerId,
+              position: { x: 0, y: 0, z: 0 },
+              timestamp,
+              lootOperationId,
+              killToken,
+              attackStyle,
+              damageDealt,
+            });
+          })
+          .catch((error) => {
+            console.error(
+              `[SystemLoader] Refused unsigned death event for ${mobId}: ${String(error)}`,
+            );
+          });
       },
 
       // App management actions

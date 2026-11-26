@@ -98,7 +98,7 @@ export class StreamLeakDiagnostics {
         delay?: number,
         ...args: unknown[]
       ) {
-        const id = origSI.call(global, fn, delay, ...args);
+        const id = origSI(fn, delay, ...args);
         const record: AllocRecord = {
           id,
           stack: captureStack(),

@@ -41,13 +41,75 @@ import {
   vec2,
   vec3,
   vec4,
-  type ShaderNode,
 } from "../../../extras/three/three";
+import type { Node, UniformNode } from "three/webgpu";
 import type { World, WorldOptions } from "../../../types";
+import {
+  isStreamingLikeViewport,
+  resolveSkyAtmosphereMode,
+  type SkyAtmosphereMode,
+} from "../../../runtime/clientViewportMode";
 import { applyCloudFog, fogRenderTarget } from "./FogConfig";
 import { DAY_CYCLE, SUN_LIGHT } from "./LightingConfig";
+import { ScatteringSky } from "./ScatteringSky";
 
 const SKY_DOME_RADIUS = 5000;
+
+type PerspectiveView = NonNullable<THREE.PerspectiveCamera["view"]>;
+
+function copyFogProjection(
+  target: THREE.PerspectiveCamera,
+  source: THREE.PerspectiveCamera,
+  view: PerspectiveView,
+): void {
+  // Deliberately not Object3D/Camera.copy(): those serialize userData and copy
+  // unrelated animations/children. Only projection state belongs to this pass.
+  target.fov = source.fov;
+  target.aspect = source.aspect;
+  target.near = source.near;
+  target.far = source.far;
+  target.zoom = source.zoom;
+  target.focus = source.focus;
+  target.filmGauge = source.filmGauge;
+  target.filmOffset = source.filmOffset;
+  target.coordinateSystem = source.coordinateSystem;
+  target.projectionMatrix.copy(source.projectionMatrix);
+  target.projectionMatrixInverse.copy(source.projectionMatrixInverse);
+  if (source.view) {
+    view.enabled = source.view.enabled;
+    view.fullWidth = source.view.fullWidth;
+    view.fullHeight = source.view.fullHeight;
+    view.offsetX = source.view.offsetX;
+    view.offsetY = source.view.offsetY;
+    view.width = source.view.width;
+    view.height = source.view.height;
+    target.view = view;
+  } else {
+    target.view = null;
+  }
+}
+
+function createFogView(): PerspectiveView {
+  return {
+    enabled: false,
+    fullWidth: 1,
+    fullHeight: 1,
+    offsetX: 0,
+    offsetY: 0,
+    width: 1,
+    height: 1,
+  };
+}
+
+/**
+ * Decorative sky billboards are intentionally omitted from broadcast views.
+ * Their large transparent TSL planes are expensive and can render as opaque
+ * rectangles on WebGPU capture paths. The procedural sky dome and celestial
+ * lighting stay enabled, so this does not affect illumination or time-of-day.
+ */
+export function shouldRenderDecorativeSkyBillboards(win?: Window): boolean {
+  return !isStreamingLikeViewport(win);
+}
 
 const SKY_RENDER_ORDER = {
   SKY_DOME: -1000,
@@ -391,6 +453,28 @@ export type SkyUniforms = {
 type TSLUniformFloat = { value: number };
 type TSLUniformVec3 = { value: THREE.Vector3 };
 
+type PaletteColorUniform = UniformNode<"color", THREE.Color>;
+
+/** Linear colors shared by this world's visible sky and starless fog graphs. */
+export type SkyPaletteUniforms = {
+  readonly dayZenith: PaletteColorUniform;
+  readonly dayHorizon: PaletteColorUniform;
+  readonly nightZenith: PaletteColorUniform;
+  readonly nightHorizon: PaletteColorUniform;
+  readonly sunrise: PaletteColorUniform;
+  readonly sunsetPink: PaletteColorUniform;
+  readonly moonGlow: PaletteColorUniform;
+  readonly haze: PaletteColorUniform;
+};
+
+/** Linear colors shared by all decorative clouds in this world. */
+export type CloudPaletteUniforms = {
+  readonly nightBright: PaletteColorUniform;
+  readonly dayBright: PaletteColorUniform;
+  readonly nightDark: PaletteColorUniform;
+  readonly dayDark: PaletteColorUniform;
+};
+
 // Material uniform storage types
 type SkyMaterialUniforms = {
   uTime: TSLUniformFloat;
@@ -413,12 +497,176 @@ type MoonMaterialUniforms = {
   uOpacity: TSLUniformFloat;
 };
 
+function skyCycleSmoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Existing cycle math, without reading or changing any clock. Writes the caller's
+ * direction, with no allocation. Deliberately retains the existing intensity
+ * jumps at DAWN_END (.28: 1 -> .934) and DUSK_START (.72: .934 -> 1).
+ */
+export function sampleSkyCycle(
+  phase: number,
+  direction: THREE.Vector3,
+): number {
+  let dayIntensity: number;
+  if (phase < DAY_CYCLE.DAWN_START || phase >= DAY_CYCLE.DUSK_END) {
+    dayIntensity = 0;
+  } else if (phase < DAY_CYCLE.DAWN_END) {
+    dayIntensity = skyCycleSmoothstep(
+      DAY_CYCLE.DAWN_START,
+      DAY_CYCLE.DAWN_END,
+      phase,
+    );
+  } else if (phase < DAY_CYCLE.DUSK_START) {
+    const noonFactor = 1 - Math.abs(phase - 0.5) * 2;
+    dayIntensity =
+      DAY_CYCLE.NOON_MIN_INTENSITY +
+      noonFactor * (1 - DAY_CYCLE.NOON_MIN_INTENSITY);
+  } else {
+    dayIntensity =
+      1 - skyCycleSmoothstep(DAY_CYCLE.DUSK_START, DAY_CYCLE.DUSK_END, phase);
+  }
+
+  const sunArcAngle = (phase - 0.25) * Math.PI * 2;
+  const sunElevation = Math.sin(sunArcAngle);
+  const sunAzimuth = Math.cos(sunArcAngle);
+  direction
+    .set(
+      sunAzimuth * Math.max(0.1, 1 - Math.abs(sunElevation)),
+      sunElevation,
+      SUN_LIGHT.TILT * sunAzimuth,
+    )
+    .normalize();
+  return dayIntensity;
+}
+
+/** Literal shared starless atmosphere; no sun disc, stars, clouds or exposure. */
+function createStarlessSkyColorNode(
+  direction: Node<"vec3">,
+  uDayCycleProgress: Node<"float">,
+  uDayIntensity: Node<"float">,
+  uSunPosition: Node<"vec3">,
+  palette: SkyPaletteUniforms,
+  atmosphere: ScatteringSky | null = null,
+): Node<"vec4"> {
+  return Fn(() => {
+    const localPos = normalize(direction);
+    const elevation = abs(localPos.y);
+
+    const dayIntensity = uDayIntensity;
+    const nightIntensity = sub(float(1.0), dayIntensity);
+
+    const dayZenith = palette.dayZenith.rgb;
+    const dayHorizon = palette.dayHorizon.rgb;
+    const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
+    const daySkyColor = atmosphere
+      ? atmosphere.colorNode(localPos)
+      : mix(dayZenith, dayHorizon, dayGradient);
+
+    const nightZenith = palette.nightZenith.rgb;
+    const nightHorizon = palette.nightHorizon.rgb;
+    const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
+    const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
+
+    let skyColor: Node<"vec3"> = mix(nightSkyColor, daySkyColor, dayIntensity);
+
+    const sunY = uSunPosition.y;
+    const dawnDuskFactor = smoothstep(float(-0.2), float(0.0), sunY);
+    const dawnDuskFade = smoothstep(float(0.4), float(0.15), sunY);
+    const sunriseSunsetIntensity = mul(dawnDuskFactor, dawnDuskFade);
+
+    const sunDir = normalize(uSunPosition);
+    const angleToSun = dot(localPos, sunDir);
+
+    const sunriseColor = palette.sunrise.rgb;
+    const sunsetPinkColor = palette.sunsetPink.rgb;
+    const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
+    const sunGlowAngle = pow(sunGlowRaw, float(4.0));
+    const horizonGlow = pow(
+      clamp(
+        sub(float(1.0), mul(elevation, float(2.0))),
+        float(0.0),
+        float(1.0),
+      ),
+      float(2.0),
+    );
+    const glowIntensity = mul(
+      mul(sunGlowAngle, horizonGlow),
+      mul(sunriseSunsetIntensity, float(0.6)),
+    );
+    const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
+    const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
+    if (!atmosphere) skyColor = add(skyColor, mul(glowColor, glowIntensity));
+
+    const moonPos = mul(sunDir, float(-1.0));
+    const angleToMoon = dot(localPos, moonPos);
+    const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
+    const moonGlowAngle = pow(moonGlowRaw, float(6.0));
+    const moonGlowColor = palette.moonGlow.rgb;
+    const moonGlowIntensity = mul(
+      mul(moonGlowAngle, nightIntensity),
+      float(0.4),
+    );
+    skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
+
+    const hazeColor = palette.haze.rgb;
+    const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
+    const hazeAmount = mul(
+      hazeStrength,
+      mul(float(0.3), mul(dayIntensity, float(0.9))),
+    );
+    if (!atmosphere) skyColor = mix(skyColor, hazeColor, hazeAmount);
+
+    return vec4(skyColor, float(1.0));
+  })();
+}
+
+export interface SkyLightingCapture {
+  readonly scene: THREE.Scene;
+  /** Unscaled starless atmosphere using this capture's palette snapshot. */
+  sampleRadiance(
+    phase: number,
+    direction: THREE.Vector3,
+    target: THREE.Color,
+  ): void;
+  setPhase(
+    phase: number,
+    skyRadianceScale: number,
+    groundRadiance: readonly [number, number, number],
+    skyRadianceColor?: readonly [number, number, number],
+  ): void;
+  dispose(): void;
+}
+
 // -----------------------------
 // SkySystem
 // -----------------------------
 export class SkySystem extends System {
   // PERFORMANCE: Static shared TextureLoader (avoids creating new loader per texture)
   private static _textureLoader = new THREE.TextureLoader();
+
+  // Records/nodes stay stable; callers may reversibly edit each uniform's Color value.
+  // Per-instance allocation keeps palette ownership separate between worlds.
+  public readonly skyPaletteUniforms: SkyPaletteUniforms = Object.freeze({
+    dayZenith: uniform(new THREE.Color(0.25, 0.55, 0.95)),
+    dayHorizon: uniform(new THREE.Color(0.7, 0.85, 1.0)),
+    nightZenith: uniform(new THREE.Color(0.005, 0.008, 0.025)),
+    nightHorizon: uniform(new THREE.Color(0.02, 0.03, 0.06)),
+    sunrise: uniform(new THREE.Color(1.0, 0.5, 0.2)),
+    sunsetPink: uniform(new THREE.Color(1.0, 0.4, 0.5)),
+    moonGlow: uniform(new THREE.Color(0.5, 0.6, 0.8)),
+    haze: uniform(new THREE.Color(0.83, 0.78, 0.72)),
+  });
+
+  public readonly cloudPaletteUniforms: CloudPaletteUniforms = Object.freeze({
+    nightBright: uniform(new THREE.Color(0.141, 0.607, 0.94)),
+    dayBright: uniform(new THREE.Color(1.0, 1.0, 1.0)),
+    nightDark: uniform(new THREE.Color(0.024, 0.32, 0.59)),
+    dayDark: uniform(new THREE.Color(0.22, 0.5, 0.85)),
+  });
 
   private scene: THREE.Scene | null = null;
   private group: THREE.Group | null = null;
@@ -444,6 +692,20 @@ export class SkySystem extends System {
   private fogCamera: THREE.PerspectiveCamera | null = null;
   private fogSkyMesh: THREE.Mesh | null = null;
   private fogSkyUniforms: SkyMaterialUniforms | null = null;
+  private fogPreparationCount = 0;
+  private fogPreparationSucceeded = false;
+  private fogPreparationFailed = false;
+  private fogSelectedCameraUuid: string | null = null;
+  private readonly fogSelectedCamera = new THREE.PerspectiveCamera();
+  private fogSelectedReversedDepth = false;
+  private readonly fogWorldPosition = new THREE.Vector3();
+  private readonly fogWorldQuaternion = new THREE.Quaternion();
+  private readonly fogView = createFogView();
+  private readonly fogSelectedView = createFogView();
+  private fogRendererFrameBefore = 0;
+  private fogRendererFrameAfter = 0;
+  private fogRendererCallsBefore = 0;
+  private fogRendererCallsAfter = 0;
 
   // Legacy uniforms (for compatibility)
   private skyUniforms: SkyUniforms;
@@ -463,9 +725,18 @@ export class SkySystem extends System {
   private _sunDir = new THREE.Vector3();
   private _dayPhase = 0;
   private _dayIntensity = 1;
+  private renderDecorativeSkyBillboards = true;
+  private readonly scatteringSky: ScatteringSky | null;
 
-  constructor(world: World) {
+  constructor(
+    world: World,
+    readonly atmosphereMode: SkyAtmosphereMode = resolveSkyAtmosphereMode(),
+  ) {
     super(world);
+    if (atmosphereMode !== "gradient-v1" && atmosphereMode !== "scattering-v1")
+      throw new Error("Invalid sky atmosphere mode");
+    this.scatteringSky =
+      atmosphereMode === "scattering-v1" ? new ScatteringSky() : null;
     this.skyUniforms = {
       time: { value: 0 },
       sunPosition: { value: new THREE.Vector3(0, 1, 0) },
@@ -520,6 +791,8 @@ export class SkySystem extends System {
 
     this.noiseA = createNoiseTexture(128);
     this.noiseB = createNoiseTexture(128);
+    this.renderDecorativeSkyBillboards =
+      shouldRenderDecorativeSkyBillboards(window);
 
     // PERFORMANCE: Reuse a single TextureLoader instance
     const cachedLoader = SkySystem._textureLoader;
@@ -545,13 +818,25 @@ export class SkySystem extends System {
       });
     };
 
+    const omittedCloudTexture = (): Promise<THREE.Texture | null> =>
+      Promise.resolve(null);
     const results = await Promise.allSettled([
-      loadTex("/textures/cloud1.png"),
-      loadTex("/textures/cloud2.png"),
-      loadTex("/textures/cloud3.png"),
-      loadTex("/textures/cloud4.png"),
+      this.renderDecorativeSkyBillboards
+        ? loadTex("/textures/cloud1.png")
+        : omittedCloudTexture(),
+      this.renderDecorativeSkyBillboards
+        ? loadTex("/textures/cloud2.png")
+        : omittedCloudTexture(),
+      this.renderDecorativeSkyBillboards
+        ? loadTex("/textures/cloud3.png")
+        : omittedCloudTexture(),
+      this.renderDecorativeSkyBillboards
+        ? loadTex("/textures/cloud4.png")
+        : omittedCloudTexture(),
       loadTex("/textures/galaxy.png"),
-      loadTex("/textures/moon2.png"),
+      this.renderDecorativeSkyBillboards
+        ? loadTex("/textures/moon2.png")
+        : omittedCloudTexture(),
       loadTex("/textures/star3.png"),
       loadTex("/textures/noise.png"),
       loadTex("/textures/noise2.png"),
@@ -560,7 +845,7 @@ export class SkySystem extends System {
     // Extract successful loads
     const getResult = (index: number): THREE.Texture | null => {
       const result = results[index];
-      return result.status === "fulfilled" ? result.value : null;
+      return result?.status === "fulfilled" ? result.value : null;
     };
 
     this.cloud1 = getResult(0);
@@ -597,14 +882,14 @@ export class SkySystem extends System {
     // Create fog sky render target (sky dome without stars for fog color sampling)
     this.createFogSky();
 
-    // Create sun with TSL Node Material
-    this.createSun();
-
-    // Create moon with TSL Node Material
-    this.createMoon();
-
-    // Clouds (instanced billboards)
-    this.createClouds();
+    // Large transparent sky billboards are excluded from stream/spectator
+    // capture. The sky dome already supplies sun/moon atmospheric color while
+    // the lighting systems continue to use the same celestial directions.
+    if (this.renderDecorativeSkyBillboards) {
+      this.createSun();
+      this.createMoon();
+      this.createClouds();
+    }
   }
 
   /**
@@ -859,19 +1144,25 @@ export class SkySystem extends System {
       // SKY COLORS - Darker night sky
       // =====================
       // Day sky gradient: deep blue at zenith, lighter at horizon
-      const dayZenith = vec3(0.25, 0.55, 0.95); // Rich blue
-      const dayHorizon = vec3(0.7, 0.85, 1.0); // Light blue/white
+      const dayZenith = this.skyPaletteUniforms.dayZenith.rgb; // Rich blue
+      const dayHorizon = this.skyPaletteUniforms.dayHorizon.rgb; // Light blue/white
       const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
-      const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
+      const daySkyColor = this.scatteringSky
+        ? this.scatteringSky.colorNode(localPos)
+        : mix(dayZenith, dayHorizon, dayGradient);
 
       // Night sky gradient: MUCH darker for proper night feel
-      const nightZenith = vec3(0.005, 0.008, 0.025); // Almost black with blue tint
-      const nightHorizon = vec3(0.02, 0.03, 0.06); // Very dark blue-gray
+      const nightZenith = this.skyPaletteUniforms.nightZenith.rgb; // Almost black with blue tint
+      const nightHorizon = this.skyPaletteUniforms.nightHorizon.rgb; // Very dark blue-gray
       const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
       const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
 
       // Blend day/night sky
-      let skyColor: ShaderNode = mix(nightSkyColor, daySkyColor, dayIntensity);
+      let skyColor: Node<"vec3"> = mix(
+        nightSkyColor,
+        daySkyColor,
+        dayIntensity,
+      );
 
       // =====================
       // SUNRISE/SUNSET GLOW
@@ -888,8 +1179,8 @@ export class SkySystem extends System {
       const angleToSun = dot(localPos, sunDir);
 
       // Sunrise/sunset colors near sun
-      const sunriseColor = vec3(1.0, 0.5, 0.2); // Orange
-      const sunsetPinkColor = vec3(1.0, 0.4, 0.5); // Pink/red
+      const sunriseColor = this.skyPaletteUniforms.sunrise.rgb; // Orange
+      const sunsetPinkColor = this.skyPaletteUniforms.sunsetPink.rgb; // Pink/red
 
       // Glow strongest near sun, with gradual falloff across radius
       // Use power function for smooth natural falloff instead of smoothstep
@@ -913,7 +1204,8 @@ export class SkySystem extends System {
       // Blend sunrise color with slight pink variation based on time
       const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
       const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
-      skyColor = add(skyColor, mul(glowColor, glowIntensity));
+      if (!this.scatteringSky)
+        skyColor = add(skyColor, mul(glowColor, glowIntensity));
 
       // =====================
       // STARS (Night only) - Procedural starfield with stable noise
@@ -1015,7 +1307,7 @@ export class SkySystem extends System {
       // Use power function for gradual falloff instead of smoothstep
       const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
       const moonGlowAngle = pow(moonGlowRaw, float(6.0)); // Softer glow
-      const moonGlowColor = vec3(0.5, 0.6, 0.8); // Cool blue glow
+      const moonGlowColor = this.skyPaletteUniforms.moonGlow.rgb; // Cool blue glow
       const moonGlowIntensity = mul(
         mul(moonGlowAngle, nightIntensity),
         float(0.4), // Stronger moon glow
@@ -1025,7 +1317,7 @@ export class SkySystem extends System {
       // =====================
       // HORIZON HAZE (subtle atmosphere)
       // =====================
-      const hazeColor = vec3(0.83, 0.78, 0.72); // Warm beige
+      const hazeColor = this.skyPaletteUniforms.haze.rgb; // Warm beige
       // Haze strongest near horizon (low elevation), fades as you go higher
       // Use elevation (which is now abs(localPos.y)) for symmetric reflections
       const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
@@ -1034,7 +1326,7 @@ export class SkySystem extends System {
         hazeStrength,
         mul(float(0.3), mul(dayIntensity, float(0.9))), // Much less haze at night
       );
-      skyColor = mix(skyColor, hazeColor, hazeAmount);
+      if (!this.scatteringSky) skyColor = mix(skyColor, hazeColor, hazeAmount);
 
       return vec4(skyColor, float(1.0));
     })();
@@ -1075,7 +1367,7 @@ export class SkySystem extends System {
     if (!this.skyTSLUniforms) return;
 
     this.fogScene = new THREE.Scene();
-    this.fogCamera = this.world.camera.clone() as THREE.PerspectiveCamera;
+    this.fogCamera = new THREE.PerspectiveCamera();
 
     const fogSkyGeom = new THREE.SphereGeometry(SKY_DOME_RADIUS, 64, 32);
 
@@ -1090,78 +1382,14 @@ export class SkySystem extends System {
       uDayIntensity: uDayIntensity,
     } as SkyMaterialUniforms;
 
-    // Same as main sky dome but WITHOUT stars and galaxy (they'd bleed bright spots into fog)
-    const fogSkyColorNode = Fn(() => {
-      const localPos = normalize(positionLocal);
-      const elevation = abs(localPos.y);
-
-      const dayIntensity = uDayIntensity;
-      const nightIntensity = sub(float(1.0), dayIntensity);
-
-      const dayZenith = vec3(0.25, 0.55, 0.95);
-      const dayHorizon = vec3(0.7, 0.85, 1.0);
-      const dayGradient = pow(sub(float(1.0), elevation), float(1.5));
-      const daySkyColor = mix(dayZenith, dayHorizon, dayGradient);
-
-      const nightZenith = vec3(0.005, 0.008, 0.025);
-      const nightHorizon = vec3(0.02, 0.03, 0.06);
-      const nightGradient = pow(sub(float(1.0), elevation), float(2.0));
-      const nightSkyColor = mix(nightZenith, nightHorizon, nightGradient);
-
-      let skyColor: ShaderNode = mix(nightSkyColor, daySkyColor, dayIntensity);
-
-      // Sunrise/sunset glow
-      const sunY = uSunPosition.y;
-      const dawnDuskFactor = smoothstep(float(-0.2), float(0.0), sunY);
-      const dawnDuskFade = smoothstep(float(0.4), float(0.15), sunY);
-      const sunriseSunsetIntensity = mul(dawnDuskFactor, dawnDuskFade);
-
-      const sunDir = normalize(uSunPosition);
-      const angleToSun = dot(localPos, sunDir);
-
-      const sunriseColor = vec3(1.0, 0.5, 0.2);
-      const sunsetPinkColor = vec3(1.0, 0.4, 0.5);
-      const sunGlowRaw = clamp(angleToSun, float(0.0), float(1.0));
-      const sunGlowAngle = pow(sunGlowRaw, float(4.0));
-      const horizonGlow = pow(
-        clamp(
-          sub(float(1.0), mul(elevation, float(2.0))),
-          float(0.0),
-          float(1.0),
-        ),
-        float(2.0),
-      );
-      const glowIntensity = mul(
-        mul(sunGlowAngle, horizonGlow),
-        mul(sunriseSunsetIntensity, float(0.6)),
-      );
-      const dawnOrDusk = smoothstep(float(0.2), float(0.3), uDayCycleProgress);
-      const glowColor = mix(sunriseColor, sunsetPinkColor, dawnOrDusk);
-      skyColor = add(skyColor, mul(glowColor, glowIntensity));
-
-      // Moon glow
-      const moonPos = mul(sunDir, float(-1.0));
-      const angleToMoon = dot(localPos, moonPos);
-      const moonGlowRaw = clamp(angleToMoon, float(0.0), float(1.0));
-      const moonGlowAngle = pow(moonGlowRaw, float(6.0));
-      const moonGlowColor = vec3(0.5, 0.6, 0.8);
-      const moonGlowIntensity = mul(
-        mul(moonGlowAngle, nightIntensity),
-        float(0.4),
-      );
-      skyColor = add(skyColor, mul(moonGlowColor, moonGlowIntensity));
-
-      // Horizon haze
-      const hazeColor = vec3(0.83, 0.78, 0.72);
-      const hazeStrength = smoothstep(float(0.15), float(0.0), elevation);
-      const hazeAmount = mul(
-        hazeStrength,
-        mul(float(0.3), mul(dayIntensity, float(0.9))),
-      );
-      skyColor = mix(skyColor, hazeColor, hazeAmount);
-
-      return vec4(skyColor, float(1.0));
-    })();
+    const fogSkyColorNode = createStarlessSkyColorNode(
+      positionLocal,
+      uDayCycleProgress,
+      uDayIntensity,
+      uSunPosition,
+      this.skyPaletteUniforms,
+      this.scatteringSky,
+    );
 
     const fogSkyMat = new MeshBasicNodeMaterial();
     fogSkyMat.colorNode = fogSkyColorNode;
@@ -1172,11 +1400,215 @@ export class SkySystem extends System {
 
     this.fogSkyMesh = new THREE.Mesh(fogSkyGeom, fogSkyMat);
     this.fogSkyMesh.frustumCulled = false;
+    this.fogSkyMesh.matrixAutoUpdate = false;
     this.fogScene.add(this.fogSkyMesh);
 
     console.log(
       `[SkySystem] Fog sky scene created, rendering to shared fogRenderTarget (${fogRenderTarget.width}x${fogRenderTarget.height})`,
     );
+  }
+
+  /**
+   * Isolated, CPU-only scene boundary for the caller's PMREM preparation.
+   * Captures a palette snapshot and never borrows live mesh/phase ownership.
+   * Ground is explicit linear radiance, not a claim of measured terrain bounce.
+   * The caller owns filtering/render targets and must dispose this capture.
+   */
+  createLightingCapture(): SkyLightingCapture {
+    const copy = (source: PaletteColorUniform): PaletteColorUniform => {
+      if (!source.value.toArray().every((c) => Number.isFinite(c) && c >= 0)) {
+        throw new Error(
+          "Lighting capture requires finite nonnegative sky colors",
+        );
+      }
+      return uniform(source.value.clone());
+    };
+    const palette: SkyPaletteUniforms = {
+      dayZenith: copy(this.skyPaletteUniforms.dayZenith),
+      dayHorizon: copy(this.skyPaletteUniforms.dayHorizon),
+      nightZenith: copy(this.skyPaletteUniforms.nightZenith),
+      nightHorizon: copy(this.skyPaletteUniforms.nightHorizon),
+      sunrise: copy(this.skyPaletteUniforms.sunrise),
+      sunsetPink: copy(this.skyPaletteUniforms.sunsetPink),
+      moonGlow: copy(this.skyPaletteUniforms.moonGlow),
+      haze: copy(this.skyPaletteUniforms.haze),
+    };
+    const phase = uniform(0);
+    const sunDirection = uniform(new THREE.Vector3());
+    const dayIntensity = uniform(sampleSkyCycle(0, sunDirection.value));
+    const scattering = this.scatteringSky
+      ? new ScatteringSky(this.scatteringSky.parameters)
+      : null;
+    scattering?.setSun(sunDirection.value);
+    const skyScale = uniform(1);
+    const skyRadianceColor = uniform(new THREE.Color(1, 1, 1));
+    const groundColor = uniform(new THREE.Color(0, 0, 0));
+    // Startup integration reuses these private values; sampling never changes
+    // the scene's phase, sun, intensity, scale or explicit ground radiance.
+    const sampleSun = new THREE.Vector3();
+    const sampleDay = new THREE.Color();
+    const sampleGlow = new THREE.Color();
+    const scene = new THREE.Scene();
+    scene.name = "SkyLightingCapture";
+    scene.background = new THREE.Color(0, 0, 0);
+    const skyMaterial = new MeshBasicNodeMaterial({
+      side: THREE.BackSide,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    });
+    const skyColor = createStarlessSkyColorNode(
+      positionLocal,
+      phase,
+      dayIntensity,
+      sunDirection,
+      palette,
+      scattering,
+    );
+    skyMaterial.colorNode = vec4(
+      skyColor.rgb.mul(skyScale).mul(skyRadianceColor),
+      float(1),
+    );
+    const skyGeometry = new THREE.SphereGeometry(10, 64, 32);
+    const skyMesh = new THREE.Mesh(skyGeometry, skyMaterial);
+    skyMesh.name = "LightingCaptureSky";
+    skyMesh.frustumCulled = false;
+    skyMesh.renderOrder = -1;
+    scene.add(skyMesh);
+
+    // Cover the starless shader's mirrored lower hemisphere, without capturing
+    // actors, water/viewport nodes or any other part of the live world scene.
+    const groundGeometry = new THREE.SphereGeometry(
+      9,
+      32,
+      16,
+      0,
+      Math.PI * 2,
+      Math.PI / 2,
+      Math.PI / 2,
+    );
+    const groundMaterial = new MeshBasicNodeMaterial({
+      side: THREE.BackSide,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    });
+    groundMaterial.colorNode = groundColor.rgb;
+    const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+    groundMesh.name = "LightingCaptureGround";
+    groundMesh.frustumCulled = false;
+    groundMesh.renderOrder = 1;
+    scene.add(groundMesh);
+
+    let disposed = false;
+    return {
+      scene,
+      sampleRadiance(samplePhase, direction, target) {
+        if (disposed) throw new Error("Lighting capture is disposed");
+        const length = direction.length();
+        if (
+          !Number.isFinite(samplePhase) ||
+          samplePhase < 0 ||
+          samplePhase > 1 ||
+          !Number.isFinite(length) ||
+          length <= 0
+        ) {
+          throw new Error(
+            "Invalid lighting capture sampling phase or direction",
+          );
+        }
+        const intensity = sampleSkyCycle(samplePhase, sampleSun);
+        const x = direction.x / length,
+          y = direction.y / length,
+          z = direction.z / length;
+        const elevation = Math.abs(y);
+        const dayGradient = Math.pow(1 - elevation, 1.5);
+        const nightGradient = Math.pow(1 - elevation, 2);
+        if (scattering)
+          scattering.sampleRadiance(direction, sampleSun, sampleDay);
+        else
+          sampleDay
+            .copy(palette.dayZenith.value)
+            .lerp(palette.dayHorizon.value, dayGradient);
+        target
+          .copy(palette.nightZenith.value)
+          .lerp(palette.nightHorizon.value, nightGradient)
+          .lerp(sampleDay, intensity);
+        const sunriseSunsetIntensity =
+          skyCycleSmoothstep(-0.2, 0, sampleSun.y) *
+          skyCycleSmoothstep(0.4, 0.15, sampleSun.y);
+        const angleToSun = x * sampleSun.x + y * sampleSun.y + z * sampleSun.z;
+        const sunGlowAngle = Math.pow(Math.max(0, Math.min(1, angleToSun)), 4);
+        const horizonGlow = Math.pow(
+          Math.max(0, Math.min(1, 1 - elevation * 2)),
+          2,
+        );
+        const glowIntensity =
+          sunGlowAngle * horizonGlow * (sunriseSunsetIntensity * 0.6);
+        sampleGlow
+          .copy(palette.sunrise.value)
+          .lerp(
+            palette.sunsetPink.value,
+            skyCycleSmoothstep(0.2, 0.3, samplePhase),
+          )
+          .multiplyScalar(glowIntensity);
+        if (!scattering) target.add(sampleGlow);
+        const moonGlowAngle = Math.pow(
+          Math.max(0, Math.min(1, -angleToSun)),
+          6,
+        );
+        const moonGlowIntensity = moonGlowAngle * (1 - intensity) * 0.4;
+        target.r += palette.moonGlow.value.r * moonGlowIntensity;
+        target.g += palette.moonGlow.value.g * moonGlowIntensity;
+        target.b += palette.moonGlow.value.b * moonGlowIntensity;
+        const hazeAmount =
+          skyCycleSmoothstep(0.15, 0, elevation) * (0.3 * (intensity * 0.9));
+        if (!scattering) target.lerp(palette.haze.value, hazeAmount);
+      },
+      setPhase(nextPhase, skyRadianceScale, groundRadiance, color = [1, 1, 1]) {
+        if (disposed) throw new Error("Lighting capture is disposed");
+        if (
+          !Number.isFinite(nextPhase) ||
+          nextPhase < 0 ||
+          nextPhase > 1 ||
+          !Number.isFinite(skyRadianceScale) ||
+          skyRadianceScale < 0 ||
+          !Array.isArray(groundRadiance) ||
+          groundRadiance.length !== 3 ||
+          ![groundRadiance[0], groundRadiance[1], groundRadiance[2]].every(
+            (c) => Number.isFinite(c) && c >= 0,
+          ) ||
+          !Array.isArray(color) ||
+          color.length !== 3 ||
+          ![color[0], color[1], color[2]].every(
+            (c) => Number.isFinite(c) && c >= 0,
+          )
+        ) {
+          throw new Error("Invalid lighting capture phase or linear radiance");
+        }
+        dayIntensity.value = sampleSkyCycle(nextPhase, sunDirection.value);
+        scattering?.setSun(sunDirection.value);
+        phase.value = nextPhase;
+        skyScale.value = skyRadianceScale;
+        skyRadianceColor.value.setRGB(color[0], color[1], color[2]);
+        groundColor.value.setRGB(
+          groundRadiance[0],
+          groundRadiance[1],
+          groundRadiance[2],
+        );
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        scene.remove(skyMesh, groundMesh);
+        skyMaterial.dispose();
+        groundMaterial.dispose();
+        skyGeometry.dispose();
+        groundGeometry.dispose();
+      },
+    };
   }
 
   // Store cloud group for rotation animation
@@ -1295,13 +1727,13 @@ export class SkySystem extends System {
           div(uSunPos.y, uCloudRadius),
         );
         const brightColor = mix(
-          vec3(0.141, 0.607, 0.94),
-          vec3(1.0, 1.0, 1.0),
+          this.cloudPaletteUniforms.nightBright.rgb,
+          this.cloudPaletteUniforms.dayBright.rgb,
           sunNightStep,
         );
         const darkColor = mix(
-          vec3(0.024, 0.32, 0.59),
-          vec3(0.22, 0.5, 0.85),
+          this.cloudPaletteUniforms.nightDark.rgb,
+          this.cloudPaletteUniforms.dayDark.rgb,
           sunNightStep,
         );
 
@@ -1361,8 +1793,7 @@ export class SkySystem extends System {
     // On client: use network.getSyncedWorldTime() if available, otherwise local time
     // On server: use local world time (server is authoritative)
     const network = this.world.network as
-      | { getSyncedWorldTime?: () => number }
-      | undefined;
+      { getSyncedWorldTime?: () => number } | undefined;
     const worldTime = network?.getSyncedWorldTime
       ? network.getSyncedWorldTime()
       : this.world.getTime();
@@ -1374,57 +1805,9 @@ export class SkySystem extends System {
     // Sun is above horizon from dayPhase 0.25 (sunrise) to 0.75 (sunset)
     const isDay = this.isDay;
 
-    // Calculate day intensity with SHARP transitions at sunrise/sunset
-    // Night stays truly dark until sunrise, then rapid transition
-    // This creates the feeling of "darkest before dawn" then sudden light
-    const smoothstep = (edge0: number, edge1: number, x: number) => {
-      const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-      return t * t * (3 - 2 * t);
-    };
-
-    let dayIntensity: number;
-    if (dayPhase < DAY_CYCLE.DAWN_START || dayPhase >= DAY_CYCLE.DUSK_END) {
-      dayIntensity = 0;
-    } else if (dayPhase < DAY_CYCLE.DAWN_END) {
-      dayIntensity = smoothstep(
-        DAY_CYCLE.DAWN_START,
-        DAY_CYCLE.DAWN_END,
-        dayPhase,
-      );
-    } else if (dayPhase < DAY_CYCLE.DUSK_START) {
-      const noonFactor = 1 - Math.abs(dayPhase - 0.5) * 2;
-      dayIntensity =
-        DAY_CYCLE.NOON_MIN_INTENSITY +
-        noonFactor * (1 - DAY_CYCLE.NOON_MIN_INTENSITY);
-    } else {
-      dayIntensity =
-        1 - smoothstep(DAY_CYCLE.DUSK_START, DAY_CYCLE.DUSK_END, dayPhase);
-    }
-
+    const dayIntensity = sampleSkyCycle(dayPhase, this._sunDir);
     this._dayIntensity = dayIntensity;
-
-    // Sun direction - traces arc across sky from east to west
-    // dayPhase: 0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 1 = midnight
-    //
-    // The sun arc angle: -π/2 at midnight, 0 at sunrise, π/2 at noon, π at sunset
-    const sunArcAngle = (dayPhase - 0.25) * Math.PI * 2;
-
-    // Sun position in sky:
-    // - X: East-West position (positive = east, negative = west)
-    // - Y: Height above horizon (positive = above, negative = below)
-    // - Z: North-South offset (slight tilt for more natural path)
-    const sunElevation = Math.sin(sunArcAngle); // -1 to 1, peaks at noon
-    const sunAzimuth = Math.cos(sunArcAngle); // 1 at sunrise, -1 at sunset
-
-    const sunTilt = SUN_LIGHT.TILT;
-
-    this._sunDir
-      .set(
-        sunAzimuth * Math.max(0.1, 1 - Math.abs(sunElevation)), // X: E-W, compressed when high
-        sunElevation, // Y: height
-        sunTilt * sunAzimuth, // Z: slight tilt
-      )
-      .normalize();
+    this.scatteringSky?.setSun(this._sunDir);
 
     // Update uniforms
     this.skyUniforms.time.value = this.elapsed;
@@ -1520,46 +1903,60 @@ export class SkySystem extends System {
     // noise UV distortion and alpha oscillation.
   }
 
-  override lateUpdate(_delta: number): void {
-    if (!this.group) return;
+  /**
+   * Render-dependent work belongs here, after the final camera selection and
+   * immediately before the main render. Day/time/weather remain in update().
+   */
+  prepareForRender(
+    renderer: THREE.WebGPURenderer,
+    camera: THREE.PerspectiveCamera,
+  ): void {
+    if (!this.group || !this.fogScene || !this.fogCamera) return;
+    if (this.fogPreparationFailed) {
+      throw new Error("Sky fog preparation failed; renderer session must stop");
+    }
+    this.fogPreparationSucceeded = false;
+    this.fogPreparationCount++;
 
-    // Keep sky centered on camera for infinite effect - follow all 3 axes
-    // This ensures sky never clips against draw distance regardless of camera position
-    // Use camera position directly (most reliable) with rig fallback
-    if (this.world.camera) {
-      this.group.position.copy(this.world.camera.position);
-    } else if (this.world.rig) {
-      this.group.position.copy(this.world.rig.position);
+    // Resolve the actual world pose, including a transformed camera parent.
+    camera.updateWorldMatrix(true, false);
+    camera.getWorldPosition(this.fogWorldPosition);
+    camera.getWorldQuaternion(this.fogWorldQuaternion);
+    this.group.position.copy(this.fogWorldPosition);
+    if (this.group.parent) this.group.parent.worldToLocal(this.group.position);
+    this.group.updateMatrixWorld(true);
+
+    // Preserve the existing visible sky's rotation/scale, even under a
+    // transformed parent. Only its camera-centered translation is removed.
+    if (this.fogSkyMesh) {
+      this.fogSkyMesh.matrix.copy(this.group.matrixWorld).setPosition(0, 0, 0);
+      this.fogSkyMesh.updateMatrixWorld(true);
     }
 
-    // Render fog sky to offscreen render target
-    this.renderFogSky();
-  }
+    // Retain view/film offsets and FOV/zoom so a native first projection update
+    // stays coherent. Three owns reversed-depth activation for both cameras.
+    copyFogProjection(this.fogCamera, camera, this.fogView);
+    this.fogCamera.position.set(0, 0, 0);
+    this.fogCamera.quaternion.copy(this.fogWorldQuaternion);
+    this.fogCamera.scale.set(1, 1, 1);
+    this.fogCamera.matrixAutoUpdate = true;
+    this.fogCamera.matrixWorldAutoUpdate = true;
+    this.fogCamera.updateMatrixWorld(true);
 
-  /** Render the fog sky dome (no stars) to the shared offscreen render target. */
-  private renderFogSky(): void {
-    if (!this.fogScene || !this.fogCamera) return;
-    const renderer = (
-      this.world.graphics as { renderer?: THREE.WebGPURenderer } | undefined
-    )?.renderer;
-    if (!renderer) return;
+    // A detached snapshot keeps diagnostic reads from observing a later director
+    // update. Diagnostic matrix arrays are allocated only by the read-only getter.
+    copyFogProjection(this.fogSelectedCamera, camera, this.fogSelectedView);
+    this.fogSelectedCamera.matrixWorld.copy(camera.matrixWorld);
+    this.fogSelectedCamera.matrixWorldInverse.copy(camera.matrixWorldInverse);
+    this.fogSelectedCameraUuid = camera.uuid;
+    this.fogSelectedReversedDepth = camera.reversedDepth;
 
-    // Sync fog camera orientation with main camera (direction only)
-    const cam = this.world.camera;
-    if (cam) {
-      this.fogCamera.position.set(0, 0, 0);
-      this.fogCamera.quaternion.copy(cam.quaternion);
-      this.fogCamera.projectionMatrix.copy(cam.projectionMatrix);
-      this.fogCamera.projectionMatrixInverse.copy(cam.projectionMatrixInverse);
-
-      // Resize fog render target when aspect ratio changes
-      const desiredW = Math.max(
-        1,
-        Math.round(cam.aspect * fogRenderTarget.height),
-      );
-      if (fogRenderTarget.width !== desiredW) {
-        fogRenderTarget.setSize(desiredW, fogRenderTarget.height);
-      }
+    const desiredW = Math.max(
+      1,
+      Math.round(camera.aspect * fogRenderTarget.height),
+    );
+    if (fogRenderTarget.width !== desiredW) {
+      fogRenderTarget.setSize(desiredW, fogRenderTarget.height);
     }
 
     // Sync fog sky uniforms with main sky values
@@ -1578,14 +1975,104 @@ export class SkySystem extends System {
     // Disable tone mapping so the fog texture stores linear values.
     // Object shaders apply tone mapping once on final output — prevents double mapping.
     const savedToneMapping = renderer.toneMapping;
-    renderer.toneMapping = THREE.NoToneMapping;
-
     const currentTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(fogRenderTarget);
-    renderer.render(this.fogScene, this.fogCamera);
-    renderer.setRenderTarget(currentTarget);
+    const cubeFace = renderer.getActiveCubeFace();
+    const mipLevel = renderer.getActiveMipmapLevel();
+    this.fogRendererFrameBefore = renderer.info.frame;
+    this.fogRendererCallsBefore = renderer.info.calls;
+    try {
+      let renderFailed = false;
+      let renderError: unknown;
+      let restoreFailed = false;
+      let restoreError: unknown;
+      try {
+        renderer.toneMapping = THREE.NoToneMapping;
+        renderer.setRenderTarget(fogRenderTarget);
+        renderer.render(this.fogScene, this.fogCamera);
+      } catch (error) {
+        renderFailed = true;
+        renderError = error;
+      } finally {
+        try {
+          renderer.setRenderTarget(currentTarget, cubeFace, mipLevel);
+        } catch (error) {
+          restoreFailed = true;
+          restoreError = error;
+        } finally {
+          renderer.toneMapping = savedToneMapping;
+        }
+      }
+      if (restoreFailed) {
+        if (renderFailed) {
+          throw new AggregateError(
+            [renderError, restoreError],
+            "Sky fog render and target restoration failed",
+          );
+        }
+        throw restoreError;
+      }
+      if (renderFailed) throw renderError;
+      this.fogRendererFrameAfter = renderer.info.frame;
+      this.fogRendererCallsAfter = renderer.info.calls;
+      this.fogPreparationSucceeded = true;
+    } catch (error) {
+      // Restoring public state does not make private native renderer state safe
+      // after an exception. Do not draw the main scene or retry this session.
+      this.fogPreparationFailed = true;
+      throw error;
+    }
+  }
 
-    renderer.toneMapping = savedToneMapping;
+  /** Bounded read-only CPU receipt, not GPU completion or pixel-match proof. */
+  getFogSkyReceipt() {
+    const cameraReceipt = (camera: THREE.PerspectiveCamera) => ({
+      uuid: camera.uuid,
+      matrixWorld: camera.matrixWorld.toArray(),
+      matrixWorldInverse: camera.matrixWorldInverse.toArray(),
+      projectionMatrix: camera.projectionMatrix.toArray(),
+      projectionMatrixInverse: camera.projectionMatrixInverse.toArray(),
+      coordinateSystem: camera.coordinateSystem,
+      reversedDepth: camera.reversedDepth,
+      near: camera.near,
+      far: camera.far,
+      aspect: camera.aspect,
+      fov: camera.fov,
+      zoom: camera.zoom,
+    });
+    return {
+      schemaVersion: 1,
+      scope: "last-main-render-fog-preparation",
+      preparationCount: this.fogPreparationCount,
+      ready: this.fogPreparationSucceeded,
+      failed: this.fogPreparationFailed,
+      initialized: this.fogScene !== null && this.fogCamera !== null,
+      renderer: {
+        frameBefore: this.fogRendererFrameBefore,
+        frameAfter: this.fogRendererFrameAfter,
+        callsBefore: this.fogRendererCallsBefore,
+        callsAfter: this.fogRendererCallsAfter,
+      },
+      selectedCamera: this.fogSelectedCameraUuid
+        ? {
+            ...cameraReceipt(this.fogSelectedCamera),
+            uuid: this.fogSelectedCameraUuid,
+            reversedDepth: this.fogSelectedReversedDepth,
+          }
+        : null,
+      fogCamera: this.fogCamera ? cameraReceipt(this.fogCamera) : null,
+      skyCenter: this.fogSelectedCameraUuid
+        ? this.fogWorldPosition.toArray()
+        : null,
+      renderTarget: {
+        width: fogRenderTarget.width,
+        height: fogRenderTarget.height,
+        textureUuid: fogRenderTarget.texture.uuid,
+        textureVersion: fogRenderTarget.texture.version,
+        type: fogRenderTarget.texture.type,
+        colorSpace: fogRenderTarget.texture.colorSpace,
+        samples: fogRenderTarget.samples,
+      },
+    };
   }
 
   override destroy(): void {
@@ -1614,8 +2101,7 @@ export class SkySystem extends System {
     }
     // Clean up inner sun glow
     const groupWithGlow = this.group as
-      | (THREE.Group & { sunInnerGlow?: THREE.Mesh })
-      | null;
+      (THREE.Group & { sunInnerGlow?: THREE.Mesh }) | null;
     if (groupWithGlow?.sunInnerGlow) {
       groupWithGlow.sunInnerGlow.geometry.dispose();
       (groupWithGlow.sunInnerGlow.material as THREE.Material).dispose();
@@ -1646,6 +2132,8 @@ export class SkySystem extends System {
     this.fogScene = null;
     this.fogCamera = null;
     this.fogSkyUniforms = null;
+    this.fogPreparationSucceeded = false;
+    this.fogSelectedCameraUuid = null;
   }
 }
 

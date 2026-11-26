@@ -5,16 +5,18 @@
  * - Autonomous behavior tick loop (8s interval)
  * - Quest management (auto-accept, track progress, complete)
  * - Shopping (buy tools/weapons)
- * - Inventory management (drop junk, bury bones)
+ * - Conserved inventory management through typed banking actions
  * - Equipment management (equip best gear)
  * - Eating (health recovery)
  * - Action selection (quest-driven or default combat/explore)
  * - Combat chat reactions
  */
 
-import { getItem, EventType } from "@hyperforge/shared";
+import { getItem, EventType, ProcessingDataProvider } from "@hyperforge/shared";
 import type { AgentRuntime } from "@elizaos/core";
 import type { World } from "@hyperforge/shared";
+import type { DuelPreparationOpponentHistoryEntry } from "../../systems/StreamingDuelScheduler/types.js";
+import type { CompetitiveTacticalStrategy } from "../../systems/StreamingDuelScheduler/competitive-tactical-strategy.js";
 import {
   ejectAgentFromCombatArena,
   recoverAgentFromDeathLoop,
@@ -27,10 +29,41 @@ import {
   findWorldMapMoveTarget,
 } from "../dashboardInterop.js";
 import { errMsg } from "../../shared/errMsg.js";
+import { isStartableAgentQuest } from "../types.js";
 import {
   isLlmBehaviorEnabled,
   pickBehaviorActionWithLlm,
+  recordAuthoritativeBehaviorOutcome,
 } from "../llmBehaviorDecision.js";
+import type { LlmBehaviorResult } from "../llmBehaviorDecision.js";
+import {
+  captureAgentAutonomyCheckpointContext,
+  type AgentAutonomyActionResult,
+  type AgentAutonomyCheckpointContext,
+} from "../agentAutonomyCheckpoint.js";
+import type {
+  AgentAutonomyDecisionSource,
+  AgentAutonomyProgressionAttempt,
+} from "../agentAutonomyProgression.js";
+import {
+  executeOrdinaryBankDepositSurplus,
+  executeOrdinaryBankStageMaterials,
+  recordOrdinaryBankStageOutcome,
+} from "../ordinaryAgentBanking.js";
+import { executeOrdinaryBoneBurial } from "../ordinaryAgentPrayerTraining.js";
+import {
+  executeOrdinaryStoreBuy,
+  recordOrdinaryStoreBuyOutcome,
+} from "../ordinaryAgentStore.js";
+import {
+  isOrdinaryProcessingActionSuppressed,
+  recordOrdinaryProcessingActionOutcome,
+  type OrdinaryProcessingRetryState,
+} from "../ordinaryProcessingRetry.js";
+import {
+  findOrdinaryQuestEntrySkillTarget,
+  getOrdinaryAgentQuestPriority,
+} from "../ordinaryAgentQuestProgression.js";
 import type {
   EmbeddedAgentConfig,
   AgentState,
@@ -47,6 +80,14 @@ import type { EmbeddedHyperiaService } from "../EmbeddedHyperiaService.js";
 const yieldToEventLoop = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
+function actionResult(
+  attemptedActionType: EmbeddedBehaviorAction["type"],
+  outcome: AgentAutonomyActionResult["outcome"],
+  appliedActionType: EmbeddedBehaviorAction["type"] | null = null,
+): AgentAutonomyActionResult {
+  return { attemptedActionType, appliedActionType, outcome };
+}
+
 /**
  * Active goal for an embedded agent (visible on dashboard)
  */
@@ -59,9 +100,12 @@ export interface AgentGoal {
     | "cooking"
     | "smelting"
     | "smithing"
+    | "provisioning"
     | "exploring"
     | "idle";
   description: string;
+  /** Server-private staging intent; never contains bank item identities/counts. */
+  bankPurpose?: "survival_food" | "combat_supply";
   questId?: string;
   questName?: string;
   questStageType?: string;
@@ -103,6 +147,8 @@ export interface AgentInstance {
     source: string;
   } | null;
   chatRuntimeInitPromise: Promise<AgentRuntime | null> | null;
+  /** Fences a runtime initialization or model result across provider changes. */
+  chatRuntimeGeneration: number;
   state: AgentState;
   startedAt: number;
   lastActivity: number;
@@ -114,6 +160,34 @@ export interface AgentInstance {
   currentTargetId: string | null;
   lastAteAt: number;
   dropCooldownUntil: number;
+  /** Backoff after a rejected secure store transaction. */
+  storeRetryAfter: number;
+  /** Main-process-only identity for one insufficient-coin purchase recovery. */
+  coinRecovery: {
+    storeId: string;
+    itemId: string;
+    quantity: number;
+    expiresAt: number;
+  } | null;
+  /** Backoff after no eligible ordinary bank material batch is available. */
+  bankStageRetryAfter: number;
+  /**
+   * Main-process control fence authorizing public-source acquisition only
+   * after the private bank had no stageable path for the exact quest lock.
+   */
+  questEntryAcquisition: {
+    questId: string;
+    expiresAt: number;
+  } | null;
+  /**
+   * Main-process authorization for one manifest-derived ordinary processing
+   * baseline after an exact private-bank miss. No bank item or count crosses.
+   */
+  ordinaryProcessingAcquisition?: { expiresAt: number } | null;
+  /** Public-source food recovery after an exact empty private-bank result. */
+  survivalFoodAcquisition: { expiresAt: number } | null;
+  /** Process-local, exact-recipe anti-storm state; never replayed after restart. */
+  ordinaryProcessingRetries: OrdinaryProcessingRetryState[];
   lastGatherTargetId: string | null;
   lastGatherQueuedAt: number;
   lastGatherAttemptPosition: [number, number, number] | null;
@@ -128,8 +202,15 @@ export interface AgentInstance {
   lastCombatChatAt: number;
   /** Timestamp of last re-engage attack during an active fight */
   lastCombatReEngageAt: number;
+  /** Process-local fence after a dispatched attack while health/combat settle. */
+  attackObservationRetryAfter: number;
   /** Whether offensive prayer has been activated for the current combat encounter */
   combatPrayerActive: boolean;
+  /**
+   * Monotonic fence for autonomous decisions. Incrementing this invalidates
+   * worker and model results captured before a custody-sensitive transition.
+   */
+  behaviorEpoch: number;
   /** Timestamp of last dashboard operator command — ticker defers to it for a grace period */
   operatorCommandAt: number;
   /** Persistent navigation target — agent re-issues move toward this each tick until arrival */
@@ -161,10 +242,13 @@ export interface AgentInstance {
   tickCounter?: number;
   /** Persistent learnings the agent discovers through play (survives across ticks) */
   memories?: string[];
+  /** Last durable autonomy-checkpoint revision observed by this process. */
+  autonomyCheckpointRevision?: number;
+  /** Recovered context must be reassessed before a model continues its plan. */
+  autonomyRecoveryPending?: boolean;
   /** Pre-fetched LLM decision from the previous tick (non-blocking pipeline) */
   pendingLlmResult?:
-    | import("../llmBehaviorDecision.js").LlmBehaviorResult
-    | null;
+    import("../llmBehaviorDecision.js").LlmBehaviorResult | null;
   /** Whether an LLM call is currently in-flight for this agent */
   llmCallInFlight?: boolean;
   /** LLM token cost tracker */
@@ -178,6 +262,57 @@ export interface AgentInstance {
   llmOutcomeBuffer?: Array<"ok" | "fail">;
   /** Timestamp when LLM circuit breaker tripped — scripted-only until cooldown expires */
   llmCircuitOpenUntil?: number;
+  /** Private pre-market state; bank contents never enter public scheduler events. */
+  duelPreparation?: {
+    preparationId: string;
+    opponentId: string;
+    opponentName: string;
+    selectedAt: number;
+    expiresAt: number;
+    opponentHistory: DuelPreparationOpponentHistoryEntry[];
+    status: "opening_bank" | "planning" | "failed" | "ready";
+    bankOpenedAt: number | null;
+    bankItems: Array<{
+      itemId: string;
+      quantity: number;
+      slot: number;
+      tabIndex: number;
+    }>;
+    failureReason: string | null;
+    strategy: {
+      primaryStyle: "melee" | "ranged" | "mage";
+      availableStyles: Array<"melee" | "ranged" | "mage">;
+      weaponId: string;
+      ammunitionId: string | null;
+      spellId: string | null;
+      foodItemId: string | null;
+      foodQuantity: number;
+      opponentHistorySampleSize: number;
+      defensiveFocus: "melee" | "ranged" | "mage" | null;
+      tacticalStrategy: CompetitiveTacticalStrategy;
+      loadouts: Partial<
+        Record<
+          "melee" | "ranged" | "mage",
+          {
+            weaponId: string;
+            ammunitionId: string | null;
+            spellId: string | null;
+            armorIds: Record<
+              | "helmet"
+              | "body"
+              | "legs"
+              | "boots"
+              | "gloves"
+              | "cape"
+              | "amulet"
+              | "ring",
+              string | null
+            >;
+          }
+        >
+      >;
+    } | null;
+  };
 }
 
 export type EmbeddedBehaviorAction =
@@ -197,15 +332,25 @@ export type EmbeddedBehaviorAction =
   | { type: "craft"; recipeId: string; quantity?: number }
   | { type: "fletch"; recipeId: string; quantity?: number }
   | { type: "tan"; inputItemId: string; quantity?: number }
+  | { type: "storeBuy"; storeId: string; itemId: string; quantity: number }
   | { type: "use"; itemId: string }
+  | { type: "bury"; itemId: string }
   | { type: "equip"; itemId: string }
-  | { type: "bankDepositAll" }
+  | { type: "setAutocast"; spellId: string }
+  | { type: "bankDepositAll"; bankId: string }
+  | { type: "bankWithdraw"; bankId: string }
   | { type: "homeTeleport" }
   | { type: "stop" }
   | { type: "idle" };
 
 /** Autonomous behavior tick interval for embedded agents */
 export const EMBEDDED_BEHAVIOR_TICK_INTERVAL = 8000;
+/**
+ * Let server combat and health observations settle before another autonomous
+ * target can be initiated. Three behavior intervals cover the stale snapshot
+ * window observed when a kill and its final damage resolve asynchronously.
+ */
+export const ATTACK_OBSERVATION_SETTLE_MS = EMBEDDED_BEHAVIOR_TICK_INTERVAL * 3;
 
 /**
  * Stagger offset between agents to prevent all agents from ticking on the same
@@ -264,6 +409,17 @@ export class AgentBehaviorTicker {
       characterId: string,
     ) => AgentInstance | undefined,
     private readonly getAllAgentIds: () => string[],
+    private readonly persistAutonomyCheckpoint?: (
+      instance: AgentInstance,
+      actionResult: AgentAutonomyActionResult,
+      attempt?: AgentAutonomyProgressionAttempt,
+      checkpointContext?: AgentAutonomyCheckpointContext,
+    ) => Promise<void>,
+    private readonly beginAutonomyProgressionAttempt?: (
+      instance: AgentInstance,
+      actionType: Exclude<EmbeddedBehaviorAction["type"], "idle">,
+      decisionSource: AgentAutonomyDecisionSource,
+    ) => Promise<AgentAutonomyProgressionAttempt | null>,
   ) {}
 
   // ─── BEHAVIOR LOOP ───────────────────────────────────────────────────
@@ -386,6 +542,13 @@ export class AgentBehaviorTicker {
       return;
     }
 
+    if (instance.duelPreparation) {
+      // Private preparation has exclusive control over loadout/inventory.
+      // Only the scheduler's frozen/expired/cancelled terminal event may clear
+      // the fence; a local clock must never reopen ordinary autonomy.
+      return;
+    }
+
     // Hard gate: if the service has disabled autonomous behavior (e.g. while
     // a DuelCombatAI is running), skip the entire tick so the agent doesn't
     // try to wander, quest, or fight something other than its assigned opponent.
@@ -397,6 +560,15 @@ export class AgentBehaviorTicker {
     if (!gameState || !gameState.position) {
       return;
     }
+
+    const gatherThrottleBeforeDecision = {
+      targetId: instance.lastGatherTargetId,
+      queuedAt: instance.lastGatherQueuedAt,
+    };
+    const restoreUncommittedGatherThrottle = () => {
+      instance.lastGatherTargetId = gatherThrottleBeforeDecision.targetId;
+      instance.lastGatherQueuedAt = gatherThrottleBeforeDecision.queuedAt;
+    };
 
     ensureEmbeddedAgentCharacterVision(characterId, gameState.skills);
 
@@ -423,40 +595,26 @@ export class AgentBehaviorTicker {
     // can fire instead of being starved by back-to-back agent CPU work.
     await yieldToEventLoop();
 
-    // === INVENTORY MANAGEMENT ===
-    this.manageInventory(instance);
-
-    // === SHOPPING: buy missing tools/weapons ===
-    this.manageShopping(instance);
-
-    // === EQUIPMENT MANAGEMENT ===
-    this.manageEquipment(instance, gameState);
+    // Maintenance is a normal typed action, never a hidden pre-action
+    // mutation. This keeps direct diagnostic ticks on the same durable truth
+    // boundary as the production worker path.
+    const maintenanceAction =
+      this.pickFoodAction(instance, gameState) ??
+      this.pickEquipmentAction(instance) ??
+      this.pickShoppingAction(instance);
 
     await yieldToEventLoop();
-
-    // === SURVIVAL: EAT FOOD IF NEEDED ===
-    if (this.assessAndEat(instance, gameState)) {
-      syncEmbeddedAgentDashboardForTick(
-        instance.config.characterId,
-        instance.goal,
-        instance.service.getQuestState(),
-        instance.service.getAvailableQuests(),
-        instance.startedAt,
-        "idle",
-        "Ate food to recover health.",
-      );
-      return; // Ate food this tick — skip action to let health update
-    }
 
     // === OPERATOR COMMAND GRACE ===
     // When the dashboard user just sent a command, don't override it with
     // autonomous action selection for OPERATOR_COMMAND_GRACE_MS.  Survival
-    // tasks (eating, equipment, quests) above still run, but we skip the
+    // typed survival/equipment/provisioning action above still runs, but we skip the
     // autonomous "what should I do?" decision so the agent follows through
     // on the operator's instruction.
     if (
       instance.operatorCommandAt > 0 &&
-      Date.now() - instance.operatorCommandAt < OPERATOR_COMMAND_GRACE_MS
+      Date.now() - instance.operatorCommandAt < OPERATOR_COMMAND_GRACE_MS &&
+      maintenanceAction === null
     ) {
       syncEmbeddedAgentDashboardForTick(
         instance.config.characterId,
@@ -474,17 +632,27 @@ export class AgentBehaviorTicker {
     let action: EmbeddedBehaviorAction;
     let decisionPath: "llm" | "scripted" = "scripted";
     let llmReasoning: string | null = null;
+    let consumedLlmResult: LlmBehaviorResult | null = null;
 
-    if (isLlmBehaviorEnabled(instance)) {
+    if (maintenanceAction) {
+      action = maintenanceAction;
+    } else if (isLlmBehaviorEnabled(instance)) {
       const llmResult = await pickBehaviorActionWithLlm(instance, gameState);
-      if (llmResult) {
+      if (
+        llmResult &&
+        !isOrdinaryProcessingActionSuppressed(
+          instance.ordinaryProcessingRetries,
+          llmResult.action,
+        )
+      ) {
         action = llmResult.action;
+        consumedLlmResult = llmResult;
         decisionPath = "llm";
         llmReasoning = llmResult.reasoning;
         if (llmResult.goal) {
           instance.goal = llmResult.goal;
         }
-        // Record chain-of-thought as a separate thought for dashboard visibility
+        // Publish only the model's bounded, public-safe decision summary.
         if (llmResult.thinking) {
           recordAgentThought(instance.config.characterId, {
             type: "thinking",
@@ -518,209 +686,561 @@ export class AgentBehaviorTicker {
       instance.questCompleteFailures.clear();
     }
 
-    switch (action.type) {
-      case "attack":
-        await instance.service.executeAttack(action.targetId);
-        instance.lastActivity = Date.now();
-        // Activate offensive prayer proactively on the same tick as the attack.
-        if (!instance.combatPrayerActive) {
-          const prayer = this.getOffensivePrayerForAgent(instance);
-          if (prayer) {
-            void instance.service.executePrayer(prayer).catch(() => {});
-            instance.combatPrayerActive = true;
-          }
-        }
-        break;
-
-      case "gather":
-        await instance.service.executeGather(action.targetId);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "pickup":
-        await instance.service.executePickup(action.targetId);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "lootGravestone":
-        this.world.emit(EventType.CORPSE_LOOT_ALL_REQUEST, {
-          corpseId: action.gravestoneId,
-          playerId: instance.service.getPlayerId(),
-        });
-        instance.lastActivity = Date.now();
-        break;
-
-      case "move":
-        await instance.service.executeMove(action.target, action.runMode);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "firemake":
-        await instance.service.executeFiremake(action.logsItemId);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "questAccept": {
-        const accepted = await instance.service.executeQuestAccept(
-          action.questId,
+    let actionExecution = actionResult(
+      action.type,
+      action.type === "idle" ? "idle" : "rejected",
+    );
+    const actionEpoch = instance.behaviorEpoch;
+    const resultIsStale = (): boolean =>
+      instance.state !== "running" ||
+      instance.duelPreparation !== undefined ||
+      instance.behaviorEpoch !== actionEpoch;
+    let progressionAttempt: AgentAutonomyProgressionAttempt | null = null;
+    let preActionCheckpointContext: AgentAutonomyCheckpointContext | null =
+      null;
+    if (action.type !== "idle" && this.beginAutonomyProgressionAttempt) {
+      const safePreActionContext =
+        captureAgentAutonomyCheckpointContext(instance);
+      try {
+        progressionAttempt = await this.beginAutonomyProgressionAttempt(
+          instance,
+          action.type,
+          decisionPath,
         );
-        if (accepted) {
-          // Verify quest actually started by checking quest state after a moment
-          // (QUEST_START_ACCEPTED is handled synchronously by QuestSystem)
-          const postAcceptState = instance.service.getQuestState();
-          const questStarted = postAcceptState.some(
-            (q) => q.questId === action.questId,
-          );
-          if (questStarted) {
-            instance.questsAccepted.add(action.questId);
-          } else {
+        if (progressionAttempt) {
+          preActionCheckpointContext = safePreActionContext;
+        }
+      } catch (error) {
+        actionExecution = actionResult(action.type, "failed");
+        restoreUncommittedGatherThrottle();
+        if (!resultIsStale()) {
+          recordAuthoritativeBehaviorOutcome(instance, {
+            action,
+            execution: actionExecution,
+            source: decisionPath,
+            llmResult: consumedLlmResult,
+          });
+        }
+        console.warn(
+          `[AgentManager] Refusing untracked action ${action.type} for ${characterId}: ${errMsg(error)}`,
+        );
+        return;
+      }
+      if (resultIsStale()) {
+        restoreUncommittedGatherThrottle();
+        if (
+          progressionAttempt &&
+          preActionCheckpointContext &&
+          this.persistAutonomyCheckpoint
+        ) {
+          try {
+            await this.persistAutonomyCheckpoint(
+              instance,
+              actionExecution,
+              progressionAttempt,
+              preActionCheckpointContext,
+            );
+          } catch (error) {
             console.warn(
-              `[AgentManager] ${instance.config.name} quest accept sent but not started yet: ${action.questId} (will retry)`,
+              `[AgentManager] Failed to close fenced autonomy attempt for ${characterId}: ${errMsg(error)}`,
             );
           }
         }
-        instance.lastActivity = Date.now();
-        break;
+        return;
       }
-
-      case "questComplete": {
-        if (!instance.questCompleteFailures) {
-          instance.questCompleteFailures = new Map();
-        }
-        const qcFailCount =
-          instance.questCompleteFailures.get(action.questId) || 0;
-        if (qcFailCount >= 3) {
-          // Too many failures — skip and let agent try something else
-          instance.goal = null;
+    }
+    try {
+      switch (action.type) {
+        case "attack": {
+          const dispatched = await instance.service.executeAttack(
+            action.targetId,
+          );
+          if (!dispatched) break;
+          actionExecution = actionResult("attack", "dispatched", "attack");
           instance.lastActivity = Date.now();
+          instance.attackObservationRetryAfter =
+            Date.now() + ATTACK_OBSERVATION_SETTLE_MS;
+          // Activate offensive prayer proactively on the same tick as the attack.
+          if (!instance.combatPrayerActive) {
+            const prayer = this.getOffensivePrayerForAgent(instance);
+            if (prayer) {
+              void instance.service.executePrayer(prayer).catch(() => {});
+              instance.combatPrayerActive = true;
+            }
+          }
           break;
         }
-        const qcCompleted = await instance.service.executeQuestComplete(
-          action.questId,
-        );
-        if (qcCompleted) {
-          instance.goal = null;
-          instance.questCompleteFailures.delete(action.questId);
+
+        case "gather":
+          if (!progressionAttempt) break;
+          if (
+            await instance.service.executeGather(
+              action.targetId,
+              progressionAttempt.attemptId,
+            )
+          ) {
+            actionExecution = actionResult("gather", "completed", "gather");
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "pickup":
+          if (!progressionAttempt) break;
+          if (
+            await instance.service.executePickup(
+              action.targetId,
+              progressionAttempt.attemptId,
+            )
+          ) {
+            actionExecution = actionResult("pickup", "completed", "pickup");
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "lootGravestone": {
+          if (!progressionAttempt) break;
+          if (
+            await instance.service.executeLootGravestone(
+              action.gravestoneId,
+              progressionAttempt.attemptId,
+            )
+          ) {
+            actionExecution = actionResult(
+              "lootGravestone",
+              "completed",
+              "lootGravestone",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "move":
+          if (
+            await instance.service.executeMove(action.target, action.runMode)
+          ) {
+            actionExecution = actionResult("move", "dispatched", "move");
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "firemake": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeFiremake(
+            action.logsItemId,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("firemake", "completed", "firemake");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "questAccept": {
+          const accepted = await instance.service.executeQuestAccept(
+            action.questId,
+          );
+          if (accepted) {
+            // Verify quest actually started by checking quest state after a moment
+            // (QUEST_START_ACCEPTED is handled synchronously by QuestSystem)
+            const postAcceptState = instance.service.getQuestState();
+            const questStarted = postAcceptState.some(
+              (q) => q.questId === action.questId,
+            );
+            if (questStarted) {
+              instance.questsAccepted.add(action.questId);
+              actionExecution = actionResult(
+                "questAccept",
+                "completed",
+                "questAccept",
+              );
+              instance.lastActivity = Date.now();
+            } else {
+              console.warn(
+                `[AgentManager] ${instance.config.name} quest accept sent but not started yet: ${action.questId} (will retry)`,
+              );
+            }
+          }
+          break;
+        }
+
+        case "questComplete": {
+          if (!instance.questCompleteFailures) {
+            instance.questCompleteFailures = new Map();
+          }
+          const qcFailCount =
+            instance.questCompleteFailures.get(action.questId) || 0;
+          if (qcFailCount >= 3) {
+            // Too many failures — skip and let agent try something else
+            instance.goal = null;
+            break;
+          }
+          const qcCompleted = await instance.service.executeQuestComplete(
+            action.questId,
+          );
+          if (qcCompleted) {
+            instance.goal = null;
+            instance.questCompleteFailures.delete(action.questId);
+            actionExecution = actionResult(
+              "questComplete",
+              "completed",
+              "questComplete",
+            );
+            instance.lastActivity = Date.now();
+          } else {
+            instance.questCompleteFailures.set(action.questId, qcFailCount + 1);
+            // Navigate to the turn-in NPC on failure
+            const qcState = instance.service.getQuestState();
+            const qcQuest = qcState.find((q) => q.questId === action.questId);
+            const qcNpc = qcQuest?.startNpc;
+            if (qcNpc) {
+              const qcGameState = instance.service.getGameState();
+              const qcPos = qcGameState?.position ?? null;
+              const qcCoords = findWorldMapMoveTarget(
+                qcNpc,
+                instance.service,
+                qcPos,
+              );
+              if (qcCoords) {
+                if (await instance.service.executeMove(qcCoords, true)) {
+                  actionExecution = actionResult(
+                    "questComplete",
+                    "dispatched",
+                    "move",
+                  );
+                  instance.lastActivity = Date.now();
+                }
+              }
+            }
+          }
+          break;
+        }
+
+        case "navigateTo": {
+          const navGameState = instance.service.getGameState();
+          const navPlayerPos = navGameState?.position ?? null;
+          const navCoords = findWorldMapMoveTarget(
+            action.destination,
+            instance.service,
+            navPlayerPos,
+          );
+          if (navCoords) {
+            if (await instance.service.executeMove(navCoords, true)) {
+              actionExecution = actionResult(
+                "navigateTo",
+                "dispatched",
+                "move",
+              );
+              instance.lastActivity = Date.now();
+            }
+          }
+          break;
+        }
+
+        case "use":
+          if ((await instance.service.executeUse(action.itemId)).ok) {
+            actionExecution = actionResult("use", "completed", "use");
+            instance.lastActivity = Date.now();
+            const healAmount = (
+              getItem(action.itemId) as { healAmount?: number } | undefined
+            )?.healAmount;
+            if (typeof healAmount === "number" && healAmount > 0) {
+              instance.lastAteAt = Date.now();
+            }
+          }
+          break;
+
+        case "bury": {
+          if (!progressionAttempt) break;
+          const burial = await executeOrdinaryBoneBurial(
+            instance,
+            action.itemId,
+            progressionAttempt,
+          );
+          if (!burial.settled) return;
+          if (burial.applied) {
+            actionExecution = actionResult("bury", "completed", "bury");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "equip":
+          if ((await instance.service.executeEquip(action.itemId)).ok) {
+            actionExecution = actionResult("equip", "completed", "equip");
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "setAutocast":
+          if (await instance.service.executeSetAutocast(action.spellId)) {
+            actionExecution = actionResult(
+              "setAutocast",
+              "completed",
+              "setAutocast",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "cook": {
+          if (!progressionAttempt) break;
+          const cooked = await instance.service.executeCook(
+            action.itemId,
+            progressionAttempt.attemptId,
+          );
+          if (cooked) {
+            actionExecution = actionResult("cook", "completed", "cook");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "smelt": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeSmelt(
+            action.recipe,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("smelt", "completed", "smelt");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "smith": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeSmith(
+            action.recipe,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("smith", "completed", "smith");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "runecraft": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeRunecraft(
+            action.runeType,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult(
+              "runecraft",
+              "completed",
+              "runecraft",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "craft": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeCraft(
+            action.recipeId,
+            action.quantity ?? 1,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("craft", "completed", "craft");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "fletch": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeFletch(
+            action.recipeId,
+            action.quantity ?? 1,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("fletch", "completed", "fletch");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "tan": {
+          if (!progressionAttempt) break;
+          const completed = await instance.service.executeTan(
+            action.inputItemId,
+            action.quantity ?? 1,
+            progressionAttempt.attemptId,
+          );
+          if (completed) {
+            actionExecution = actionResult("tan", "completed", "tan");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "storeBuy": {
+          if (!progressionAttempt) break;
+          const purchase = await executeOrdinaryStoreBuy(
+            instance,
+            action.storeId,
+            action.itemId,
+            action.quantity,
+            progressionAttempt,
+          );
+          if (!purchase.settled) {
+            // Keep the durable attempt open for startup receipt recovery.
+            return;
+          }
+          recordOrdinaryStoreBuyOutcome(instance, purchase, action);
+          if (purchase.applied) {
+            actionExecution = actionResult("storeBuy", "completed", "storeBuy");
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "bankDepositAll": {
+          if (!progressionAttempt) break;
+          const banking = await executeOrdinaryBankDepositSurplus(
+            instance,
+            action.bankId,
+            progressionAttempt,
+          );
+          if (!banking.settled) {
+            // Keep the durable attempt open for startup reconciliation.
+            return;
+          }
+          if (banking.applied) {
+            actionExecution = actionResult(
+              "bankDepositAll",
+              "completed",
+              "bankDepositAll",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "bankWithdraw": {
+          if (!progressionAttempt) break;
+          const banking = await executeOrdinaryBankStageMaterials(
+            instance,
+            action.bankId,
+            progressionAttempt,
+          );
+          if (!banking.settled) {
+            // Keep the durable attempt open for startup reconciliation.
+            return;
+          }
+          recordOrdinaryBankStageOutcome(instance, banking);
+          if (banking.applied) {
+            actionExecution = actionResult(
+              "bankWithdraw",
+              "completed",
+              "bankWithdraw",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+        }
+
+        case "homeTeleport":
+          if (await instance.service.executeHomeTeleport()) {
+            actionExecution = actionResult(
+              "homeTeleport",
+              "dispatched",
+              "homeTeleport",
+            );
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "stop":
+          if (await instance.service.executeStop()) {
+            actionExecution = actionResult("stop", "completed", "stop");
+            instance.lastActivity = Date.now();
+          }
+          break;
+
+        case "idle":
+        default:
+          break;
+      }
+    } catch (error) {
+      actionExecution = actionResult(action.type, "failed");
+      console.warn(
+        `[AgentManager] Action ${action.type} failed for ${characterId}: ${errMsg(error)}`,
+      );
+    }
+
+    if (
+      !resultIsStale() &&
+      actionExecution.appliedActionType !== null &&
+      actionExecution.appliedActionType !== "gather"
+    ) {
+      // A successfully applied non-gather action closes the old gathering
+      // phase. Keep the throttle across idle/rejected decisions, but do not
+      // strand immediate burn or material recovery after moving/processing.
+      instance.lastGatherTargetId = null;
+      instance.lastGatherQueuedAt = 0;
+    } else if (
+      actionExecution.appliedActionType !== "gather" ||
+      resultIsStale()
+    ) {
+      restoreUncommittedGatherThrottle();
+    }
+
+    if (resultIsStale()) {
+      if (
+        progressionAttempt &&
+        preActionCheckpointContext &&
+        this.persistAutonomyCheckpoint
+      ) {
+        try {
+          await this.persistAutonomyCheckpoint(
+            instance,
+            actionExecution,
+            progressionAttempt,
+            preActionCheckpointContext,
+          );
+        } catch (error) {
+          console.warn(
+            `[AgentManager] Failed to close stale autonomy attempt for ${characterId}: ${errMsg(error)}`,
+          );
+        }
+      }
+      return;
+    }
+
+    recordOrdinaryProcessingActionOutcome(instance, action, actionExecution);
+
+    recordAuthoritativeBehaviorOutcome(instance, {
+      action,
+      execution: actionExecution,
+      source: decisionPath,
+      llmResult: consumedLlmResult,
+    });
+
+    if (this.persistAutonomyCheckpoint) {
+      try {
+        if (progressionAttempt) {
+          await this.persistAutonomyCheckpoint(
+            instance,
+            actionExecution,
+            progressionAttempt,
+          );
         } else {
-          instance.questCompleteFailures.set(action.questId, qcFailCount + 1);
-          // Navigate to the turn-in NPC on failure
-          const qcState = instance.service.getQuestState();
-          const qcQuest = qcState.find((q) => q.questId === action.questId);
-          const qcNpc = qcQuest?.startNpc;
-          if (qcNpc) {
-            const qcGameState = instance.service.getGameState();
-            const qcPos = qcGameState?.position ?? null;
-            const qcCoords = findWorldMapMoveTarget(
-              qcNpc,
-              instance.service,
-              qcPos,
-            );
-            if (qcCoords) {
-              await instance.service.executeMove(qcCoords, true);
-            }
-          }
+          await this.persistAutonomyCheckpoint(instance, actionExecution);
         }
-        instance.lastActivity = Date.now();
-        break;
+      } catch (error) {
+        console.warn(
+          `[AgentManager] Failed to persist autonomy checkpoint for ${characterId}: ${errMsg(error)}`,
+        );
       }
-
-      case "navigateTo": {
-        const navGameState = instance.service.getGameState();
-        const navPlayerPos = navGameState?.position ?? null;
-        const navCoords = findWorldMapMoveTarget(
-          action.destination,
-          instance.service,
-          navPlayerPos,
-        );
-        if (navCoords) {
-          await instance.service.executeMove(navCoords, true);
-          instance.lastActivity = Date.now();
-        }
-        break;
-      }
-
-      case "use":
-        await instance.service.executeUse(action.itemId);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "equip":
-        await instance.service.executeEquip(action.itemId);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "cook": {
-        const cooked = await instance.service.executeCook(action.itemId);
-        if (!cooked) {
-          const fireLit = await instance.service.executeFiremake();
-          if (!fireLit) {
-            const nearby = instance.service.getNearbyEntities();
-            const tree = nearby.find(
-              (e) =>
-                e.type === "resource" &&
-                (e.name || "").toLowerCase().includes("tree"),
-            );
-            if (tree) {
-              await instance.service.executeGather(tree.id);
-            }
-          }
-        }
-        instance.lastActivity = Date.now();
-        break;
-      }
-
-      case "smelt":
-        await instance.service.executeSmelt(action.recipe);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "smith":
-        await instance.service.executeSmith(action.recipe);
-        instance.lastActivity = Date.now();
-        break;
-
-      case "craft":
-        await instance.service.executeCraft(
-          action.recipeId,
-          action.quantity ?? 1,
-        );
-        instance.lastActivity = Date.now();
-        break;
-
-      case "fletch":
-        await instance.service.executeFletch(
-          action.recipeId,
-          action.quantity ?? 1,
-        );
-        instance.lastActivity = Date.now();
-        break;
-
-      case "tan":
-        await instance.service.executeTan(
-          action.inputItemId,
-          action.quantity ?? 1,
-        );
-        instance.lastActivity = Date.now();
-        break;
-
-      case "bankDepositAll":
-        await instance.service.executeBankDepositAll();
-        instance.lastActivity = Date.now();
-        break;
-
-      case "homeTeleport":
-        await instance.service.executeHomeTeleport();
-        instance.lastActivity = Date.now();
-        break;
-
-      case "stop":
-        await instance.service.executeStop();
-        instance.lastActivity = Date.now();
-        break;
-
-      case "idle":
-      default:
-        break;
     }
 
     syncEmbeddedAgentDashboardForTick(
@@ -729,8 +1249,10 @@ export class AgentBehaviorTicker {
       instance.service.getQuestState(),
       instance.service.getAvailableQuests(),
       instance.startedAt,
-      action.type,
-      actionThought,
+      actionExecution.appliedActionType ?? "idle",
+      actionExecution.appliedActionType === null
+        ? `${actionExecution.attemptedActionType} ${actionExecution.outcome}`
+        : `${actionExecution.attemptedActionType} ${actionExecution.outcome} as ${actionExecution.appliedActionType}`,
     );
   }
 
@@ -783,12 +1305,22 @@ export class AgentBehaviorTicker {
         return `Runecrafting ${action.runeType} runes.`;
       case "use":
         return `Using item ${action.itemId}.`;
+      case "bury":
+        return `Training Prayer with ${action.itemId}.`;
       case "equip":
         return `Equipping ${action.itemId}.`;
+      case "setAutocast":
+        return `Preparing combat spell ${action.spellId}.`;
       case "navigateTo":
         return `Navigating to ${action.destination}.`;
       case "bankDepositAll":
-        return "Depositing all items at bank.";
+        return "Depositing surplus items at bank.";
+      case "bankWithdraw":
+        return instance.goal?.bankPurpose === "survival_food"
+          ? "Staging survival food from private bank."
+          : instance.goal?.bankPurpose === "combat_supply"
+            ? "Checking exact combat supplies in private bank."
+            : "Staging an authored processing batch from bank.";
       case "homeTeleport":
         return "Teleporting home.";
       case "stop":
@@ -864,16 +1396,13 @@ export class AgentBehaviorTicker {
 
     // No active quest — accept the next available one.
     // Kill quests first (reliable), then gather quests only if resources exist.
-    const questPriority = [
-      "goblin_slayer",
-      ...(resourceSystemAvailable
-        ? ["lumberjacks_first_lesson", "fresh_catch", "torvins_tools"]
-        : []),
-    ];
+    const questPriority = getOrdinaryAgentQuestPriority(
+      resourceSystemAvailable,
+    );
 
     for (const questId of questPriority) {
       const quest = availableQuests.find(
-        (q) => q.questId === questId && q.status === "not_started",
+        (q) => q.questId === questId && isStartableAgentQuest(q),
       );
       if (quest && !instance.questsAccepted.has(questId)) {
         if (!llmDrivesGoals) {
@@ -889,6 +1418,26 @@ export class AgentBehaviorTicker {
       }
     }
 
+    const gameState = instance.service.getGameState();
+    const trainingTarget = gameState
+      ? findOrdinaryQuestEntrySkillTarget({
+          availableQuests,
+          skills: gameState.skills,
+          resourceSystemAvailable,
+        })
+      : null;
+    if (trainingTarget) {
+      if (!llmDrivesGoals) {
+        instance.goal = {
+          type: "provisioning",
+          description: `Train ${trainingTarget.skill} from ${trainingTarget.currentLevel} to ${trainingTarget.targetLevel} for ${trainingTarget.questName}`,
+          questId: trainingTarget.questId,
+          questName: trainingTarget.questName,
+        };
+      }
+      return;
+    }
+
     // All quests done or accepted — combat training
     if (!llmDrivesGoals) {
       instance.goal = {
@@ -900,9 +1449,12 @@ export class AgentBehaviorTicker {
 
   /**
    * Buy tools and weapons the agent needs but doesn't have.
-   * Agents bypass coin payment via executeStoreBuy. One purchase per tick.
+   * Purchases use the same proximity, session, coin, and inventory transaction
+   * checks as player shopping. One request per tick.
    */
-  public manageShopping(instance: AgentInstance): void {
+  public pickShoppingAction(
+    instance: AgentInstance,
+  ): Extract<EmbeddedBehaviorAction, { type: "storeBuy" }> | null {
     const inventory = instance.service.getInventoryItems();
     const equipped = instance.service.getEquippedItems();
     const goal = instance.goal;
@@ -936,8 +1488,12 @@ export class AgentBehaviorTicker {
         return item?.equipSlot === "weapon" || item?.equipSlot === "2h";
       })
     ) {
-      instance.service.executeStoreBuy("sword_store", "bronze_shortsword", 1);
-      return;
+      return {
+        type: "storeBuy",
+        storeId: "sword_store",
+        itemId: "bronze_shortsword",
+        quantity: 1,
+      };
     }
 
     // Priority 2: Buy tools needed for current quest
@@ -952,12 +1508,12 @@ export class AgentBehaviorTicker {
         goal.questId === "fletchers_introduction"
       ) {
         if (!hasAnyOfType("hatchet")) {
-          instance.service.executeStoreBuy(
-            "general_store",
-            "bronze_hatchet",
-            1,
-          );
-          return;
+          return {
+            type: "storeBuy",
+            storeId: "general_store",
+            itemId: "bronze_hatchet",
+            quantity: 1,
+          };
         }
       }
 
@@ -969,12 +1525,12 @@ export class AgentBehaviorTicker {
         goal.questId === "rune_mysteries"
       ) {
         if (!hasAnyOfType("pickaxe")) {
-          instance.service.executeStoreBuy(
-            "general_store",
-            "bronze_pickaxe",
-            1,
-          );
-          return;
+          return {
+            type: "storeBuy",
+            storeId: "general_store",
+            itemId: "bronze_pickaxe",
+            quantity: 1,
+          };
         }
       }
 
@@ -993,20 +1549,24 @@ export class AgentBehaviorTicker {
           hasAnyOfType("harpoon") ||
           hasAnyOfType("lobster_pot");
         if (!hasNet && !hasOtherFishingTool) {
-          instance.service.executeStoreBuy(
-            "fishing_store",
-            "small_fishing_net",
-            1,
-          );
-          return;
+          return {
+            type: "storeBuy",
+            storeId: "fishing_store",
+            itemId: "small_fishing_net",
+            quantity: 1,
+          };
         }
       }
 
       // Need tinderbox for firemaking quests
       if (stageType === "interact" && stageTarget.includes("fire")) {
         if (!hasItemInInventoryOrEquipped("tinderbox")) {
-          instance.service.executeStoreBuy("general_store", "tinderbox", 1);
-          return;
+          return {
+            type: "storeBuy",
+            storeId: "general_store",
+            itemId: "tinderbox",
+            quantity: 1,
+          };
         }
       }
 
@@ -1016,109 +1576,22 @@ export class AgentBehaviorTicker {
         stageTarget === "headless_arrow"
       ) {
         if (!inventory.some((i) => i.itemId === "feathers")) {
-          instance.service.executeStoreBuy("general_store", "feathers", 15);
-          return;
+          return {
+            type: "storeBuy",
+            storeId: "general_store",
+            itemId: "feathers",
+            quantity: 15,
+          };
         }
       }
     }
-  }
-
-  /**
-   * Keep inventory tidy: drop low-value junk to make room for useful items.
-   * Agents get inventories clogged with sharks from duels and bones from kills.
-   * Runs once per tick. Drops one item per tick to avoid spam.
-   *
-   * Priority to keep: weapons > armor > tools > food (max 5) > everything else
-   * Priority to drop: bones, excess food beyond 5, other junk
-   */
-  public manageInventory(instance: AgentInstance): void {
-    const inventory = instance.service.getInventoryItems();
-    if (inventory.length < 20) return; // Keep 8+ free slots for quest loot and gear
-    if (Date.now() < instance.dropCooldownUntil) return;
-
-    // Count food items
-    let foodCount = 0;
-    const dropCandidates: Array<{
-      itemId: string;
-      slot: number;
-      priority: number;
-    }> = [];
-
-    for (const slot of inventory) {
-      const itemData = getItem(slot.itemId);
-      const healAmount = itemData
-        ? ((itemData as unknown as Record<string, unknown>).healAmount as
-            | number
-            | undefined)
-        : undefined;
-      const isFood = healAmount && healAmount > 0;
-      const isWeapon =
-        itemData?.equipSlot === "weapon" || itemData?.equipSlot === "2h";
-      const isArmor = itemData?.equipSlot && !isWeapon;
-      const isTool = itemData?.type === "tool";
-
-      if (isFood) {
-        foodCount++;
-        if (foodCount > 5) {
-          dropCandidates.push({
-            itemId: slot.itemId,
-            slot: slot.slot,
-            priority: 2,
-          });
-        }
-        continue;
-      }
-
-      // Never drop weapons, armor, tools, or quest-critical items
-      const questTools = [
-        "tinderbox",
-        "bronze_hatchet",
-        "hatchet",
-        "bronze_pickaxe",
-        "pickaxe",
-        "fishing_rod",
-        "small_fishing_net",
-        "net",
-        "logs",
-        "oak_logs",
-      ];
-      if (isWeapon || isArmor || isTool || questTools.includes(slot.itemId))
-        continue;
-
-      // Bones — bury for prayer XP instead of dropping
-      if (slot.itemId === "bones" || slot.itemId.endsWith("_bones")) {
-        instance.service.executeUse(slot.itemId);
-        return; // One action per tick
-      }
-
-      // Other non-essential items
-      dropCandidates.push({
-        itemId: slot.itemId,
-        slot: slot.slot,
-        priority: 1,
-      });
-    }
-
-    if (dropCandidates.length === 0) return;
-
-    // Sort by priority (lowest first = drop first)
-    dropCandidates.sort((a, b) => a.priority - b.priority);
-
-    // Drop up to 3 items when very full, 1 otherwise
-    const dropCount =
-      inventory.length >= 27 ? Math.min(3, dropCandidates.length) : 1;
-    for (let i = 0; i < dropCount; i++) {
-      const toDrop = dropCandidates[i];
-      instance.service.executeDrop(toDrop.itemId, 1);
-    }
-
-    // Set cooldown so agent doesn't immediately pick up what it dropped
-    instance.dropCooldownUntil = Date.now() + 25000; // 25 seconds (~3 ticks)
+    return null;
   }
 
   /**
    * Assess health situation and eat food if needed.
-   * Returns true if food was eaten this tick (caller should skip other actions).
+   * Returns one typed food-use action. The caller commits its cooldown only
+   * after the authoritative consumption receipt succeeds.
    *
    * Decision logic is contextual:
    * - In combat: eat when health drops below 50% (urgent)
@@ -1126,31 +1599,31 @@ export class AgentBehaviorTicker {
    * - Don't waste high-value food on small damage (pick lowest heal that covers the gap)
    * - Don't eat at full health
    */
-  public assessAndEat(
+  public pickFoodAction(
     instance: AgentInstance,
     gameState: EmbeddedGameState,
-  ): boolean {
+  ): Extract<EmbeddedBehaviorAction, { type: "use" }> | null {
     const { health, maxHealth, inCombat } = gameState;
-    if (maxHealth <= 0) return false;
+    if (maxHealth <= 0) return null;
 
     const healthPercent = health / maxHealth;
     // Cooldown is shorter in combat and can be bypassed at critical HP.
     const EAT_COOLDOWN_MS = inCombat ? 6000 : 12000;
     const criticalInCombat = inCombat && healthPercent <= 0.25;
     if (!criticalInCombat && Date.now() - instance.lastAteAt < EAT_COOLDOWN_MS)
-      return false;
+      return null;
 
     const missingHp = maxHealth - health;
 
-    if (missingHp < 2) return false;
+    if (missingHp < 2) return null;
 
     // Decide threshold based on situation
     const eatThreshold = inCombat ? 0.5 : 0.7;
-    if (healthPercent >= eatThreshold) return false;
+    if (healthPercent >= eatThreshold) return null;
 
     // Find food in inventory
     const inventory = instance.service.getInventoryItems();
-    if (inventory.length === 0) return false;
+    if (inventory.length === 0) return null;
 
     // Score each food item: prefer the smallest heal that covers the gap
     // (don't waste a shark healing 20hp when we only need 3hp)
@@ -1185,11 +1658,7 @@ export class AgentBehaviorTicker {
       }
     }
 
-    if (!bestFood) return false;
-
-    instance.service.executeUse(bestFood.itemId);
-    instance.lastAteAt = Date.now();
-    return true;
+    return bestFood ? { type: "use", itemId: bestFood.itemId } : null;
   }
 
   /**
@@ -1200,13 +1669,12 @@ export class AgentBehaviorTicker {
    * Reads directly from InventorySystem and EquipmentSystem
    * (entity data.inventory is unreliable — often empty).
    */
-  public manageEquipment(
+  public pickEquipmentAction(
     instance: AgentInstance,
-    _gameState: EmbeddedGameState,
-  ): void {
+  ): Extract<EmbeddedBehaviorAction, { type: "equip" }> | null {
     // Read real inventory from InventorySystem (not entity data)
     const inventory = instance.service.getInventoryItems();
-    if (inventory.length === 0) return;
+    if (inventory.length === 0) return null;
 
     // Read real equipment from EquipmentSystem
     const equipped = instance.service.getEquippedItems();
@@ -1243,8 +1711,7 @@ export class AgentBehaviorTicker {
       bestWeapon.score > equippedWeaponScore &&
       bestWeapon.itemId !== equippedWeaponId
     ) {
-      instance.service.executeEquip(bestWeapon.itemId);
-      return; // one equip per tick
+      return { type: "equip", itemId: bestWeapon.itemId };
     }
 
     // --- ARMOR SLOTS ---
@@ -1287,11 +1754,11 @@ export class AgentBehaviorTicker {
         }
 
         if (bestArmor.score > currentScore && bestArmor.itemId !== equippedId) {
-          instance.service.executeEquip(bestArmor.itemId);
-          return; // one equip per tick
+          return { type: "equip", itemId: bestArmor.itemId };
         }
       }
     }
+    return null;
   }
 
   /**
@@ -1369,6 +1836,61 @@ export class AgentBehaviorTicker {
 
     // Other resources (e.g. custom) — let the world reject if invalid.
     return true;
+  }
+
+  /** Resolve the authoritative level requirement for a nearby resource. */
+  private getRequiredWoodcuttingLevel(entity: NearbyEntityData): number {
+    const direct = this.normalizeRequiredResourceLevel(entity.requiredLevel);
+    if (direct !== null) return direct;
+
+    const resourceSystem = this.world.getSystem("resource") as
+      | {
+          getResource?: (
+            resourceId: string,
+          ) => { levelRequired?: number } | undefined;
+        }
+      | undefined;
+    const resource = resourceSystem?.getResource?.(entity.id);
+    return this.normalizeRequiredResourceLevel(resource?.levelRequired) ?? 1;
+  }
+
+  /** Resolve a world-entity resource requirement without guessing from its name. */
+  private getRequiredWoodcuttingLevelFromData(
+    data: Record<string, unknown>,
+  ): number {
+    return (
+      this.normalizeRequiredResourceLevel(data.requiredLevel) ??
+      this.normalizeRequiredResourceLevel(data.levelRequired) ??
+      1
+    );
+  }
+
+  private normalizeRequiredResourceLevel(value: unknown): number | null {
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 1
+      ? value
+      : null;
+  }
+
+  /** Ask the authoritative resource system whether this exact session is live. */
+  private isActivelyGatheringResource(
+    instance: AgentInstance,
+    resourceId: string,
+  ): boolean {
+    const playerId = instance.service.getPlayerId();
+    if (!playerId) return false;
+    const resourceSystem = this.world.getSystem("resource") as
+      | {
+          isPlayerGatheringResource?: (
+            playerId: string,
+            resourceId: string,
+          ) => boolean;
+        }
+      | undefined;
+    return (
+      resourceSystem?.isPlayerGatheringResource?.(playerId, resourceId) === true
+    );
   }
 
   // ─── ACTION SELECTION ─────────────────────────────────────────────────
@@ -1460,8 +1982,19 @@ export class AgentBehaviorTicker {
           offensivePrayer &&
           !gameState.activePrayers.includes(offensivePrayer)
         ) {
-          void instance.service.executePrayer(offensivePrayer).catch(() => {});
-          instance.combatPrayerActive = true;
+          void instance.service
+            .executePrayer(offensivePrayer)
+            .then((receipt) => {
+              const stillInCombat =
+                instance.service.getGameState()?.inCombat === true;
+              instance.combatPrayerActive =
+                stillInCombat &&
+                receipt.success &&
+                receipt.activePrayers.includes(offensivePrayer);
+            })
+            .catch(() => {
+              instance.combatPrayerActive = false;
+            });
         } else if (
           offensivePrayer &&
           gameState.activePrayers.includes(offensivePrayer)
@@ -1493,10 +2026,21 @@ export class AgentBehaviorTicker {
 
     // Left combat — reset trackers. Deactivate prayers to save prayer points.
     if (instance.combatPrayerActive) {
-      void instance.service.executePrayerDeactivateAll().catch(() => {});
+      void instance.service
+        .executePrayerDeactivateAll()
+        .then((receipt) => {
+          instance.combatPrayerActive =
+            receipt.success && receipt.activePrayers.length > 0;
+        })
+        .catch(() => {});
     }
     instance.combatPrayerActive = false;
     instance.lastCombatReEngageAt = 0;
+
+    if (instance.attackObservationRetryAfter > now) {
+      instance.currentTargetId = null;
+      return { type: "idle" };
+    }
 
     // Gravestone recovery: if agent's own gravestone is nearby, walk to it and loot
     const gravestone = this.findOwnGravestone(instance, gameState);
@@ -1808,14 +2352,26 @@ export class AgentBehaviorTicker {
           // Firemaking: need tinderbox + logs in inventory
           const inventory = instance.service.getInventoryItems();
           const hasTinderbox = inventory.some((i) => i.itemId === "tinderbox");
-          const logTypes = [
-            "logs",
-            "oak_logs",
-            "willow_logs",
-            "teak_logs",
-            "maple_logs",
-          ];
-          const logsItem = inventory.find((i) => logTypes.includes(i.itemId));
+          const firemakingLevel = Number(
+            instance.service.getGameState()?.skills.firemaking?.level ?? 1,
+          );
+          const processingData = ProcessingDataProvider.getInstance();
+          const logsItem = inventory
+            .filter((item) => {
+              const recipe = processingData.getFiremakingData(item.itemId);
+              return (
+                item.quantity > 0 &&
+                recipe !== null &&
+                recipe.levelRequired <= firemakingLevel
+              );
+            })
+            .sort((a, b) => {
+              const levelA =
+                processingData.getFiremakingData(a.itemId)?.levelRequired ?? 0;
+              const levelB =
+                processingData.getFiremakingData(b.itemId)?.levelRequired ?? 0;
+              return levelB - levelA || a.itemId.localeCompare(b.itemId);
+            })[0];
 
           if (hasTinderbox && logsItem) {
             return { type: "firemake", logsItemId: logsItem.itemId };

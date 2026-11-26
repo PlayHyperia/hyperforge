@@ -4,63 +4,19 @@
  * Build script to compile TypeScript services for server-side use
  */
 
-import { execSync } from 'child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { execFileSync } from "node:child_process";
 
-console.log('🔨 Building TypeScript services...')
-
-// Ensure dist directory exists
-const distDir = join(process.cwd(), 'dist')
-if (!existsSync(distDir)) {
-  mkdirSync(distDir, { recursive: true })
-}
-
-// Create a temporary tsconfig for building services
-const buildConfig = {
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "module": "es2022",
-    "moduleResolution": "bundler",
-    "target": "es2022",
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "allowJs": true,
-    "checkJs": false,
-    "isolatedModules": false,
-    "skipLibCheck": true
-  },
-  "include": [
-    "src/core/**/*",
-    "src/services/**/*",
-    "src/types/**/*",
-    "src/utils/**/*",
-    "src/config/**/*"
-  ],
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
-}
-
-const configPath = join(process.cwd(), 'tsconfig.services.json')
+console.log("🔨 Building TypeScript services...");
 
 try {
-  // Write temporary config
-  writeFileSync(configPath, JSON.stringify(buildConfig, null, 2))
-
-  // Compile using the specific config
-  execSync(`bunx tsc -p ${configPath}`, {
-    stdio: 'inherit'
-  })
-
-  console.log('✅ TypeScript services built successfully!')
+  // Keep the build contract checked in and reviewable. The previous script
+  // rewrote/deleted tsconfig.services.json at runtime and left it behind on a
+  // failed compiler process, making identical runs depend on the prior exit.
+  execFileSync("bunx", ["tsc", "-p", "tsconfig.services.json"], {
+    stdio: "inherit",
+  });
+  console.log("✅ TypeScript services built successfully!");
 } catch (error) {
-  console.error('❌ Build failed:', error)
-  process.exit(1)
-} finally {
-  // Clean up temporary config
-  try {
-    const { unlinkSync } = await import('fs')
-    unlinkSync(configPath)
-  } catch (e) {
-    // Ignore cleanup errors
-  }
-} 
+  console.error("❌ Build failed:", error);
+  process.exitCode = 1;
+}

@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "title": "One-hand sword primary-grip close review",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "idle-grip-front",
+      "name": "Idle grip · front",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-left",
+      "name": "Idle grip · left profile",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-rear",
+      "name": "Idle grip · rear",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "idle-grip-right",
+      "name": "Idle grip · right profile",
+      "asset": "emotes/emote-idle.glb",
+      "sampleRatio": 0.35,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "impact-grip-front",
+      "name": "Impact grip · front",
+      "asset": "emotes/emote_sword_swing.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": 0,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "impact-grip-left",
+      "name": "Impact grip · left profile",
+      "asset": "emotes/emote_sword_swing.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": -90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "impact-grip-rear",
+      "name": "Impact grip · rear",
+      "asset": "emotes/emote_sword_swing.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": 180,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    },
+    {
+      "id": "impact-grip-right",
+      "name": "Impact grip · right profile",
+      "asset": "emotes/emote_sword_swing.glb",
+      "sampleRatio": 0.45,
+      "cameraYawDegrees": 90,
+      "cameraPitchDegrees": 4,
+      "cameraTarget": "primary-grip"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ import {
 import type { ServerSocket } from "../../../../shared/types";
 import { BankRepository } from "../../../../database/repositories/BankRepository";
 import * as schema from "../../../../database/schema";
+import { validatePhysicalBankAccess } from "../../../../shared/PhysicalBankAccess";
 import { eq, sql } from "drizzle-orm";
 
 import { isValidItemId, isValidQuantity, wouldOverflow } from "../../services";
@@ -49,6 +50,15 @@ import {
 // Import coin handler for bank withdraw redirect (coins go to money pouch, modern MMORPG-style)
 import { handleBankWithdrawCoins } from "./coins";
 
+const BANK_REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function getBankRequestId(value: unknown): string | undefined {
+  return typeof value === "string" && BANK_REQUEST_ID_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
 /**
  * Handle bank open request
  *
@@ -57,7 +67,7 @@ import { handleBankWithdrawCoins } from "./coins";
  */
 export async function handleBankOpen(
   socket: ServerSocket,
-  data: { bankId: string },
+  data: { bankId: string; requestId?: string },
   world: World,
 ): Promise<void> {
   const playerId = getPlayerId(socket);
@@ -68,8 +78,7 @@ export async function handleBankOpen(
 
   // Block bank access during duels
   const duelSystemBank = world.getSystem("duel") as
-    | { isPlayerInDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInDuel?: (id: string) => boolean } | undefined;
   if (duelSystemBank?.isPlayerInDuel?.(playerId)) {
     sendToSocket(socket, "showToast", {
       message: "You can't use a bank during a duel.",
@@ -79,12 +88,34 @@ export async function handleBankOpen(
   }
 
   // Validate bankId before processing
-  if (!data.bankId) {
+  if (
+    typeof data.bankId !== "string" ||
+    !data.bankId ||
+    data.bankId.trim() !== data.bankId
+  ) {
     console.warn(
       `[BankHandler] bankOpen called with undefined bankId for player ${playerId}`,
     );
     sendToSocket(socket, "showToast", {
       message: "Invalid bank",
+      type: "error",
+    });
+    return;
+  }
+
+  const accessFailure = validatePhysicalBankAccess(
+    world,
+    playerId,
+    data.bankId,
+  );
+  if (accessFailure) {
+    sendToSocket(socket, "showToast", {
+      message:
+        accessFailure === "bank_out_of_range"
+          ? "You need to be closer to the bank."
+          : accessFailure === "duel_locked"
+            ? "You can't use a bank during a duel."
+            : "Invalid bank",
       type: "error",
     });
     return;
@@ -116,6 +147,9 @@ export async function handleBankOpen(
       alwaysSetPlaceholder,
       maxSlots: MAX_BANK_SLOTS,
       isOpen: true,
+      ...(getBankRequestId(data.requestId)
+        ? { requestId: data.requestId }
+        : {}),
     });
 
     // Emit event for InteractionSessionManager to track the session
@@ -162,6 +196,7 @@ export async function handleBankDeposit(
     quantity: number;
     slot?: number;
     targetTabIndex?: number;
+    requestId?: string;
   },
   world: World,
 ): Promise<void> {
@@ -206,8 +241,7 @@ export async function handleBankDeposit(
   // Block depositing staked items during duels
   if (data.slot !== undefined) {
     const duelSystemDeposit = world.getSystem("duel") as
-      | { getStakedSlots?: (id: string) => Set<number> }
-      | undefined;
+      { getStakedSlots?: (id: string) => Set<number> } | undefined;
     const stakedSlotsDeposit = duelSystemDeposit?.getStakedSlots?.(
       ctx.playerId,
     );
@@ -370,7 +404,9 @@ export async function handleBankDeposit(
 
   // Step 4: Send updated bank state to client (with tabs for consistency)
   // NOTE: Inventory update is handled by reloadFromDatabase() which emits INVENTORY_UPDATED
-  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db);
+  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db, {
+    requestId: getBankRequestId(data.requestId),
+  });
 
   // NOTE: emitInventorySyncEvents removed - reloadFromDatabase() handles in-memory sync
 }
@@ -395,7 +431,12 @@ export async function handleBankDeposit(
  */
 export async function handleBankWithdraw(
   socket: ServerSocket,
-  data: { itemId: string; quantity: number; asNote?: boolean },
+  data: {
+    itemId: string;
+    quantity: number;
+    asNote?: boolean;
+    requestId?: string;
+  },
   world: World,
 ): Promise<void> {
   // SPECIAL CASE: Coins should go to money pouch (CoinPouchSystem), not inventory
@@ -561,8 +602,7 @@ export async function handleBankWithdraw(
         const alwaysSetPlaceholder =
           (
             settingResult.rows[0] as
-              | { alwaysSetPlaceholder: number }
-              | undefined
+              { alwaysSetPlaceholder: number } | undefined
           )?.alwaysSetPlaceholder === 1;
 
         // Remove from bank
@@ -730,7 +770,9 @@ export async function handleBankWithdraw(
 
   // Step 4: Send updated bank state to client (with tabs for consistency)
   // NOTE: Inventory update is handled by reloadFromDatabase() which emits INVENTORY_UPDATED
-  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db);
+  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db, {
+    requestId: getBankRequestId(data.requestId),
+  });
 
   // NOTE: emitInventorySyncEvents removed - reloadFromDatabase() handles in-memory sync
 }
@@ -747,7 +789,7 @@ export async function handleBankWithdraw(
  */
 export async function handleBankDepositAll(
   socket: ServerSocket,
-  data: { targetTabIndex?: number },
+  data: { targetTabIndex?: number; requestId?: string },
   world: World,
 ): Promise<void> {
   // Step 1: Common validation (player, rate limit, distance, db)
@@ -945,7 +987,9 @@ export async function handleBankDepositAll(
 
   // Step 3: Send updated bank state to client (with tabs for consistency)
   // NOTE: Inventory update is handled by reloadFromDatabase() which emits INVENTORY_UPDATED
-  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db);
+  await sendBankStateWithTabs(socket, ctx.playerId, ctx.db, {
+    requestId: getBankRequestId(data.requestId),
+  });
 
   // NOTE: emitInventorySyncEvents removed - reloadFromDatabase() handles in-memory sync
 }

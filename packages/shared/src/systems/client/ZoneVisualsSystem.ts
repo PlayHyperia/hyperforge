@@ -23,6 +23,7 @@ import { ZoneDetectionSystem } from "../shared/death/ZoneDetectionSystem";
 import { Chat } from "../shared/presentation/Chat";
 import { ALL_WORLD_AREAS } from "../../data/world-areas";
 import type { WorldArea } from "../../types/core/core";
+import { resolveZoneNavigationMode } from "../../runtime/clientViewportMode";
 
 // Zone visual colors
 const ZONE_COLORS = {
@@ -32,6 +33,17 @@ const ZONE_COLORS = {
 
 // Emoji types for different zones
 type ZoneEmojiType = "skull" | "home" | "swords";
+
+/**
+ * Broadcast and embedded spectator cameras cover preparation as well as the
+ * arena. Eight-metre floating navigation emojis obscure those scenes and can
+ * be mistaken for buildings. The explicit minimap presentation moves ordinary
+ * discovery cues into the HUD; omission preserves the existing world markers.
+ * This policy does not affect zone detection, borders or warnings.
+ */
+export function shouldRenderZoneMarker(_areaId: string, win?: Window): boolean {
+  return resolveZoneNavigationMode(win) === "world-v1";
+}
 
 // Visual configuration
 const ZONE_VISUAL_CONFIG = {
@@ -318,7 +330,9 @@ export class ZoneVisualsSystem extends SystemBase {
       // Create floating marker sprite based on zone type
       let markerSprite: THREE.Sprite | null = null;
       const baseMarkerY = terrainY + ZONE_VISUAL_CONFIG.MARKER_HEIGHT;
-      const emojiType = this.getZoneEmojiType(area);
+      const emojiType = shouldRenderZoneMarker(area.id)
+        ? this.getZoneEmojiType(area)
+        : null;
 
       if (emojiType) {
         markerSprite = this.createMarkerSprite(emojiType);

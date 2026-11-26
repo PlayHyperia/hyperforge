@@ -637,7 +637,9 @@ export class RuntimeComputeContext {
 
     // Map and read
     await staging.mapAsync(GPUMapMode.READ);
-    const data = new ArrayType(staging.getMappedRange().slice(0));
+    // The pool may return a larger size tier. Only requested bytes belong to
+    // this result; the remaining mapped capacity can contain an older job.
+    const data = new ArrayType(staging.getMappedRange().slice(0, size));
 
     // Release back to pool
     staging.unmap();

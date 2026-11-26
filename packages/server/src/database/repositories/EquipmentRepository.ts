@@ -64,7 +64,7 @@ export class EquipmentRepository extends BaseRepository {
 
     this.ensureDatabase();
 
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       if (items.length > 0) {
         // Upsert each equipment slot - handles concurrent saves safely
         for (const item of items) {

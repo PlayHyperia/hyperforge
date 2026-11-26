@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia isolated harpoon technical candidate",
+  "equipments": [
+    {
+      "asset": "fishing-tool-candidates/fitted/harpoon-fitted.glb",
+      "itemId": "harpoon",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

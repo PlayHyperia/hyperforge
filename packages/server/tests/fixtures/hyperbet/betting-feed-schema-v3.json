@@ -1,0 +1,5307 @@
+{
+  "contract": "hyperia-betting-feed",
+  "schemaVersion": 3,
+  "producer": "packages/server/src/routes/streaming-betting-feed.ts#buildBettingFeedPayload",
+  "cases": [
+    {
+      "name": "idle",
+      "expected": {
+        "callbacks": [],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 1,
+        "emittedAt": 1785829602000,
+        "duelId": null,
+        "duelKey": null,
+        "competitiveSnapshotVersion": null,
+        "competitiveSnapshotDigest": null,
+        "competitiveSnapshot": null,
+        "phase": null,
+        "phaseVersion": 0,
+        "betOpenTime": null,
+        "betCloseTime": null,
+        "fightStartTime": null,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": null,
+        "agent2": null,
+        "arenaPositions": null,
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829602000
+        }
+      }
+    },
+    {
+      "name": "announcement",
+      "expected": {
+        "callbacks": [
+          "start"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 2,
+        "emittedAt": 1785829603000,
+        "duelId": "streaming-contract-announcement",
+        "duelKey": "de9ab1a0829b516dedbf935c8771133a51ed7c16c6cf875c0bdb24a48222fac0",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "73bf480d3d584d36afada8c2c6ec269f91e4277036c0f741863c335eefb09663",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "6ee1af48-42f0-4081-afe9-d7e256d96e2b",
+          "cycleId": "contract-announcement",
+          "duelId": "streaming-contract-announcement",
+          "duelKey": "de9ab1a0829b516dedbf935c8771133a51ed7c16c6cf875c0bdb24a48222fac0",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829603000
+        }
+      }
+    },
+    {
+      "name": "countdown",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 3,
+        "emittedAt": 1785829661000,
+        "duelId": "streaming-contract-countdown",
+        "duelKey": "72ecad31d4f2b552403e0fc018a75d764dd347fbee5812684b31fdc7767c413d",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "d168ff6d9d004666ba1f3260b5008c4338dd709fd983e771e12334be9d428305",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "4873c4dc-a403-4ef1-ac35-0669fd63815f",
+          "cycleId": "contract-countdown",
+          "duelId": "streaming-contract-countdown",
+          "duelKey": "72ecad31d4f2b552403e0fc018a75d764dd347fbee5812684b31fdc7767c413d",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "COUNTDOWN",
+        "phaseVersion": 2,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829661000
+        }
+      }
+    },
+    {
+      "name": "fighting",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock"
+        ],
+        "terminalDisposition": null
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 4,
+        "emittedAt": 1785829665000,
+        "duelId": "streaming-contract-fighting",
+        "duelKey": "308a4460d7d3cd6f9d9d452a3335f3cbbdd5fdd6f2a5032dbc4af4d67eeed83a",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "04b062c43c4528b270fd0f4999305f85fc141404f1b2294f0f0b813952244076",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "0b1e028e-64e1-45fb-a874-6b0c913caa1b",
+          "cycleId": "contract-fighting",
+          "duelId": "streaming-contract-fighting",
+          "duelKey": "308a4460d7d3cd6f9d9d452a3335f3cbbdd5fdd6f2a5032dbc4af4d67eeed83a",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": null,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": null,
+        "cancellationReason": null,
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829665000
+        }
+      }
+    },
+    {
+      "name": "win-agent-a-kill",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock",
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "settle",
+          "winnerSide": "A"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 5,
+        "emittedAt": 1785829670000,
+        "duelId": "streaming-contract-win-agent-a-kill",
+        "duelKey": "1efd0132383c42a633569456e17e2d582dd67ac52505739262955732a631ee82",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "bebdc017579c17cf4ffc8c7268350ca39870219d4d46dfba0a99e0a4ad7cef06",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "3c2880e6-417d-47df-aa68-5c47a10c6cf1",
+          "cycleId": "contract-win-agent-a-kill",
+          "duelId": "streaming-contract-win-agent-a-kill",
+          "duelKey": "1efd0132383c42a633569456e17e2d582dd67ac52505739262955732a631ee82",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "RESOLUTION",
+        "phaseVersion": 4,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829670000,
+        "winnerId": "agent-a",
+        "winnerName": "Agent Alpha",
+        "outcome": "win",
+        "cancellationReason": null,
+        "winReason": "kill",
+        "seed": "18242515627239552030",
+        "replayHash": "e0612d55b70de4b8306ee49f6d873e46cdd88421d33e72dbc93b24d85cedb06a",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829670000
+        }
+      }
+    },
+    {
+      "name": "win-agent-b-forfeit",
+      "expected": {
+        "callbacks": [
+          "start",
+          "lock",
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "settle",
+          "winnerSide": "B"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 6,
+        "emittedAt": 1785829671000,
+        "duelId": "streaming-contract-win-agent-b-forfeit",
+        "duelKey": "17de043a4a964b7b692e6b98dd50a9468f83d89ab2c08ac4961beaf3542784e8",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "4d137c34d38c5363c9fd64ae7607c5c7b43647a3929a592e972cbc8106eca0d2",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "039fc269-9df3-40c3-a3ae-f07a0cb39380",
+          "cycleId": "contract-win-agent-b-forfeit",
+          "duelId": "streaming-contract-win-agent-b-forfeit",
+          "duelKey": "17de043a4a964b7b692e6b98dd50a9468f83d89ab2c08ac4961beaf3542784e8",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "RESOLUTION",
+        "phaseVersion": 4,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829671000,
+        "winnerId": "agent-b",
+        "winnerName": "Agent Beta",
+        "outcome": "win",
+        "cancellationReason": null,
+        "winReason": "forfeit",
+        "seed": "4566727931717607671",
+        "replayHash": "72fc41faeb10b2e95c3f0b99be5622894480652819c7ea2351e94a39e0ae903e",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829671000
+        }
+      }
+    },
+    {
+      "name": "draw",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "draw",
+          "reason": "draw"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 7,
+        "emittedAt": 1785829672000,
+        "duelId": "streaming-contract-draw",
+        "duelKey": "e7c277d273f36d64b3c8502e5bade57fb6745351a407078923a45ceb7fa94db5",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "696935649b96434fc4ab9e9040708d66fa12647fcbf108fa18de17196e15782d",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "04483182-2dd2-4b6e-a9dd-a8878fef4d24",
+          "cycleId": "contract-draw",
+          "duelId": "streaming-contract-draw",
+          "duelKey": "e7c277d273f36d64b3c8502e5bade57fb6745351a407078923a45ceb7fa94db5",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "RESOLUTION",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829672000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "draw",
+        "cancellationReason": "draw",
+        "winReason": "draw",
+        "seed": "696993658315208374",
+        "replayHash": "605d39d17ce03f124554704624ca6c321e7b432fcfd5262c1ef19a1877f1c4f2",
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829672000
+        }
+      }
+    },
+    {
+      "name": "cancel-contestant-prep-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "contestant_prep_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 8,
+        "emittedAt": 1785829609000,
+        "duelId": "streaming-contract-cancel-contestant-prep-failed",
+        "duelKey": "25f7b969cad3e8d818dbf1aa73965fddaea903c634eac613cbf3a4d08f7c06ee",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "b5d5a42daeca0d83587b7a2da35f67d1e95ea6b3f416326ae51143e8583f4314",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "1f9ee580-27fd-44dc-ab03-47e3be7bb748",
+          "cycleId": "contract-cancel-contestant-prep-failed",
+          "duelId": "streaming-contract-cancel-contestant-prep-failed",
+          "duelKey": "25f7b969cad3e8d818dbf1aa73965fddaea903c634eac613cbf3a4d08f7c06ee",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829609000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "contestant_prep_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829609000
+        }
+      }
+    },
+    {
+      "name": "cancel-both-agents-lost-during-prep",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "both_agents_lost_during_prep"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 9,
+        "emittedAt": 1785829610000,
+        "duelId": "streaming-contract-cancel-both-agents-lost-during-prep",
+        "duelKey": "1f7caf79260e1e2462106915431560d6f4dd112fd14df2a0ac192670689fb6ad",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "a7e54daab2a387e290c9b10da387190e6f800aa79d478dc8a17fb7f922905f84",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "550a08ae-d3f4-4916-a20c-343711028166",
+          "cycleId": "contract-cancel-both-agents-lost-during-prep",
+          "duelId": "streaming-contract-cancel-both-agents-lost-during-prep",
+          "duelKey": "1f7caf79260e1e2462106915431560d6f4dd112fd14df2a0ac192670689fb6ad",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829610000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "both_agents_lost_during_prep",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829610000
+        }
+      }
+    },
+    {
+      "name": "cancel-arena-teleport-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "arena_teleport_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 10,
+        "emittedAt": 1785829611000,
+        "duelId": "streaming-contract-cancel-arena-teleport-failed",
+        "duelKey": "521ce369bc3932487b0ce87acb275aaf590d434475b74f3ad642684c0da56dea",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "332d6c0a286fb7cb562a69b12f7d52f46c678fa2623ff68b86988b0a0419186c",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "7be54b0d-85ac-460c-aee2-8a2f7654e27b",
+          "cycleId": "contract-cancel-arena-teleport-failed",
+          "duelId": "streaming-contract-cancel-arena-teleport-failed",
+          "duelKey": "521ce369bc3932487b0ce87acb275aaf590d434475b74f3ad642684c0da56dea",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829611000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "arena_teleport_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829611000
+        }
+      }
+    },
+    {
+      "name": "cancel-both-agents-missing",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "both_agents_missing"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 11,
+        "emittedAt": 1785829676000,
+        "duelId": "streaming-contract-cancel-both-agents-missing",
+        "duelKey": "0cf9295978c7e6fdc9700494e091df8b3de7000d8bda8e3abdebb9b1911ab2e5",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "49b0e8d57c8c81c53fa7e385efa00486fdd493c8fcd88c8d16b011dd61a916bf",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "0b495b37-6894-4544-a2a5-2ea1fd9a0c95",
+          "cycleId": "contract-cancel-both-agents-missing",
+          "duelId": "streaming-contract-cancel-both-agents-missing",
+          "duelKey": "0cf9295978c7e6fdc9700494e091df8b3de7000d8bda8e3abdebb9b1911ab2e5",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829676000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "both_agents_missing",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829676000
+        }
+      }
+    },
+    {
+      "name": "cancel-combat-engagement-failed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "combat_engagement_failed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 12,
+        "emittedAt": 1785829677000,
+        "duelId": "streaming-contract-cancel-combat-engagement-failed",
+        "duelKey": "303f43ee89e06a36232ef26161dd1fe8c0c442d8a54b44d00cb40a4f767e77ba",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "88ee01d29e3911287abf72330fd7605d342ff41ba5b606db4a972af470522af9",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "cd6ab4de-b6ec-4750-aca2-dc020a364c26",
+          "cycleId": "contract-cancel-combat-engagement-failed",
+          "duelId": "streaming-contract-cancel-combat-engagement-failed",
+          "duelKey": "303f43ee89e06a36232ef26161dd1fe8c0c442d8a54b44d00cb40a4f767e77ba",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829677000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "combat_engagement_failed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829677000
+        }
+      }
+    },
+    {
+      "name": "cancel-no-combat-activity",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "no_combat_activity"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 13,
+        "emittedAt": 1785829678000,
+        "duelId": "streaming-contract-cancel-no-combat-activity",
+        "duelKey": "9aca1fb5d879bfc1284ea3f42920c9af7c0408357112f8cfad43553ad1a370ec",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "8c8ad30b20a2ea1f784bbda7661752e5ee681fae8b28c4fbd212ca7a1b8a75f9",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "63ae7dd3-f742-4746-a484-38929993f6e1",
+          "cycleId": "contract-cancel-no-combat-activity",
+          "duelId": "streaming-contract-cancel-no-combat-activity",
+          "duelKey": "9aca1fb5d879bfc1284ea3f42920c9af7c0408357112f8cfad43553ad1a370ec",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829678000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "no_combat_activity",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829678000
+        }
+      }
+    },
+    {
+      "name": "cancel-watchdog-announcement-timeout",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "watchdog_announcement_timeout"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 14,
+        "emittedAt": 1785829615000,
+        "duelId": "streaming-contract-cancel-watchdog-announcement-timeout",
+        "duelKey": "376e439fd12ca28ddd86a48108eeb4b13654fc19a6695d5703dc35ae033a0b72",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "5a9a7dae0073fcc9f55d0f5b5559e93d7779a1a1324a6272fcd5dd3f4434c22a",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "0bf93716-bd1b-478d-a9c2-c96c9fa59109",
+          "cycleId": "contract-cancel-watchdog-announcement-timeout",
+          "duelId": "streaming-contract-cancel-watchdog-announcement-timeout",
+          "duelKey": "376e439fd12ca28ddd86a48108eeb4b13654fc19a6695d5703dc35ae033a0b72",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829615000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "watchdog_announcement_timeout",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829615000
+        }
+      }
+    },
+    {
+      "name": "cancel-watchdog-fighting-timeout",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "watchdog_fighting_timeout"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 15,
+        "emittedAt": 1785829680000,
+        "duelId": "streaming-contract-cancel-watchdog-fighting-timeout",
+        "duelKey": "5edd960026813540718e39680f1b8997354f2885391e611a86b17f7dce23413d",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "9f011fb1333bf805876717384166544771ab166185e5c811b5fe84465c990616",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "3a31946e-0fb1-4d33-ab13-57b6408e2c7e",
+          "cycleId": "contract-cancel-watchdog-fighting-timeout",
+          "duelId": "streaming-contract-cancel-watchdog-fighting-timeout",
+          "duelKey": "5edd960026813540718e39680f1b8997354f2885391e611a86b17f7dce23413d",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829680000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "watchdog_fighting_timeout",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829680000
+        }
+      }
+    },
+    {
+      "name": "cancel-competitive-snapshot-recovery-window-elapsed",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "competitive_snapshot_recovery_window_elapsed"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 16,
+        "emittedAt": 1785829617000,
+        "duelId": "streaming-contract-cancel-competitive-snapshot-recovery-window-elapsed",
+        "duelKey": "cad5dc6aec777f68a2b28c3742517972099a24a872c31d81b7c3ec78448ddc81",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "9ed98c1ef8646ff642b0d7e38982d27fe8ec8a1f92382cb774a1dc5a58bc74b6",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "9666c15f-db80-4761-a391-3a485a89803c",
+          "cycleId": "contract-cancel-competitive-snapshot-recovery-window-elapsed",
+          "duelId": "streaming-contract-cancel-competitive-snapshot-recovery-window-elapsed",
+          "duelKey": "cad5dc6aec777f68a2b28c3742517972099a24a872c31d81b7c3ec78448ddc81",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "ANNOUNCEMENT",
+        "phaseVersion": 1,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": null,
+        "duelEndTime": 1785829617000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "competitive_snapshot_recovery_window_elapsed",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": null,
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829617000
+        }
+      }
+    },
+    {
+      "name": "cancel-scheduler-shutdown",
+      "expected": {
+        "callbacks": [
+          "end"
+        ],
+        "terminalDisposition": {
+          "action": "cancel",
+          "outcome": "cancelled",
+          "reason": "scheduler_shutdown"
+        }
+      },
+      "payload": {
+        "schemaVersion": 3,
+        "sourceEpoch": 1785829600000,
+        "seq": 17,
+        "emittedAt": 1785829682000,
+        "duelId": "streaming-contract-cancel-scheduler-shutdown",
+        "duelKey": "7dac2cbb5b643f4d66f3338433fe7b545bd288f754a65e9e7e3dfef6a5a23ffd",
+        "competitiveSnapshotVersion": 4,
+        "competitiveSnapshotDigest": "266bcc110abeada523d060722e8392e50e1188ff88fe295c9ce38b74f554b818",
+        "competitiveSnapshot": {
+          "snapshotVersion": 4,
+          "persisted": true,
+          "diagnostic": false,
+          "preparationId": "4c7508f1-3031-428d-a856-c0c78089fb76",
+          "cycleId": "contract-cancel-scheduler-shutdown",
+          "duelId": "streaming-contract-cancel-scheduler-shutdown",
+          "duelKey": "7dac2cbb5b643f4d66f3338433fe7b545bd288f754a65e9e7e3dfef6a5a23ffd",
+          "frozenAt": 1785829601000,
+          "betOpenTime": 1785829601000,
+          "betCloseTime": 1785829661000,
+          "combatPolicyVersion": "duel-combat-policy-v2",
+          "timing": {
+            "contractVersion": 2,
+            "timeoutPolicy": "hp_percentage_then_damage_then_draw_v1",
+            "countdownDurationMs": 4000,
+            "fightingDurationMs": 270000,
+            "endWarningDurationMs": 15000,
+            "maxFightDurationMs": 285000,
+            "fightStartTime": 1785829665000,
+            "fightDeadline": 1785829950000
+          },
+          "contestants": [
+            {
+              "side": "agent1",
+              "agentId": "agent-a",
+              "name": "Agent Alpha",
+              "provider": "openai",
+              "model": "agent-alpha-v1",
+              "combatLevel": 42,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 12,
+              "losses": 4,
+              "rank": 1,
+              "headToHeadWins": 3,
+              "headToHeadLosses": 2,
+              "loadoutFingerprint": "4ad5f8efa8d2e528bf461fcb226b2bb62cc6f8757761df8d59078a006e1ecbe0",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "acaddc65239f2dea372049add0e46ecf4ff8d258d5c651de3ac13338ff0161c0",
+                "modelProvider": "openai",
+                "model": "agent-alpha-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            },
+            {
+              "side": "agent2",
+              "agentId": "agent-b",
+              "name": "Agent Beta",
+              "provider": "anthropic",
+              "model": "agent-beta-v1",
+              "combatLevel": 41,
+              "startingHp": 30,
+              "maxHp": 30,
+              "wins": 10,
+              "losses": 6,
+              "rank": 2,
+              "headToHeadWins": 2,
+              "headToHeadLosses": 3,
+              "loadoutFingerprint": "1c71ba44b60f8c8044fdf69e74f2cff8a9fe11595a94245b907729cdbc9da7de",
+              "equipment": [
+                {
+                  "slot": "weapon",
+                  "itemId": "iron_sword",
+                  "quantity": 1
+                }
+              ],
+              "inventory": [
+                {
+                  "slot": 0,
+                  "itemId": "shark",
+                  "quantity": 3
+                }
+              ],
+              "selectedSpell": null,
+              "skillLevels": [
+                {
+                  "skill": "attack",
+                  "level": 40
+                },
+                {
+                  "skill": "constitution",
+                  "level": 30
+                },
+                {
+                  "skill": "defense",
+                  "level": 40
+                },
+                {
+                  "skill": "strength",
+                  "level": 40
+                }
+              ],
+              "prayer": {
+                "pointUnits": 300,
+                "points": 30,
+                "maxPoints": 30,
+                "activePrayers": []
+              },
+              "initialCombatStyle": "melee",
+              "availableCombatStyles": [
+                "melee"
+              ],
+              "combatLoadouts": {
+                "melee": {
+                  "role": "melee",
+                  "weaponId": "iron_sword",
+                  "arrowsId": null,
+                  "shieldId": null,
+                  "spellId": null,
+                  "armorIds": {
+                    "helmet": null,
+                    "body": null,
+                    "legs": null,
+                    "boots": null,
+                    "gloves": null,
+                    "cape": null,
+                    "amulet": null,
+                    "ring": null
+                  }
+                }
+              },
+              "preparation": {
+                "primaryStyle": "melee",
+                "availableStyles": [
+                  "melee"
+                ],
+                "planningSource": "deterministic",
+                "planningPolicyVersion": "fixture-policy-v1",
+                "agentPolicyFingerprint": "b13c3d2d2ae25be88604876eff71aa243408b87102d67d96ae74947302c28f08",
+                "modelProvider": "anthropic",
+                "model": "agent-beta-v1",
+                "tacticalStrategy": {
+                  "approach": "balanced",
+                  "tacticalMacro": "pressure",
+                  "attackStyle": "aggressive",
+                  "prayer": "superhuman_strength",
+                  "preferredCombatRole": null,
+                  "foodThreshold": 40,
+                  "switchDefensiveAt": 30,
+                  "reasoning": "Use the deterministic role-aware competitive fallback."
+                }
+              }
+            }
+          ]
+        },
+        "phase": "FIGHTING",
+        "phaseVersion": 3,
+        "betOpenTime": 1785829601000,
+        "betCloseTime": 1785829661000,
+        "fightStartTime": 1785829665000,
+        "duelEndTime": 1785829682000,
+        "winnerId": null,
+        "winnerName": null,
+        "outcome": "cancelled",
+        "cancellationReason": "scheduler_shutdown",
+        "winReason": null,
+        "seed": null,
+        "replayHash": null,
+        "agent1": {
+          "id": "agent-a",
+          "name": "Agent Alpha",
+          "provider": "openai",
+          "model": "agent-alpha-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 42,
+          "wins": 12,
+          "losses": 4,
+          "damageDealtThisFight": 0,
+          "rank": 1,
+          "headToHeadWins": 3,
+          "headToHeadLosses": 2,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "agent2": {
+          "id": "agent-b",
+          "name": "Agent Beta",
+          "provider": "anthropic",
+          "model": "agent-beta-v1",
+          "hp": 30,
+          "maxHp": 30,
+          "combatLevel": 41,
+          "wins": 10,
+          "losses": 6,
+          "damageDealtThisFight": 0,
+          "rank": 2,
+          "headToHeadWins": 2,
+          "headToHeadLosses": 3,
+          "strategySummary": {
+            "schemaVersion": 1,
+            "approach": "balanced",
+            "tacticalMacro": "pressure",
+            "attackStyle": "aggressive",
+            "prayer": "superhuman_strength",
+            "preferredCombatRole": null,
+            "foodThreshold": 40,
+            "switchDefensiveAt": 30,
+            "source": "deterministic",
+            "policyVersion": "fixture-policy-v1"
+          }
+        },
+        "arenaPositions": {
+          "agent1": [
+            -1,
+            0,
+            0
+          ],
+          "agent2": [
+            1,
+            0,
+            0
+          ]
+        },
+        "rendererHealth": {
+          "ready": true,
+          "degradedReason": null,
+          "updatedAt": 1785829682000
+        }
+      }
+    }
+  ]
+}

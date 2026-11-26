@@ -20,6 +20,7 @@
  */
 
 import * as THREE from "../../../extras/three/three";
+import type { Node, UniformNode } from "three/webgpu";
 import {
   attribute,
   uniform,
@@ -43,7 +44,6 @@ import {
   time,
   positionLocal,
 } from "../../../extras/three/three";
-import type { ShaderNode } from "../../../extras/three/three";
 
 // =============================================================================
 // POOL SIZES
@@ -179,8 +179,8 @@ export class WaterParticleManager {
   private glowTexture: THREE.DataTexture;
   private ringTexture: THREE.DataTexture;
 
-  private uCameraRight: { value: THREE.Vector3 };
-  private uCameraUp: { value: THREE.Vector3 };
+  private uCameraRight: UniformNode<"vec3", THREE.Vector3>;
+  private uCameraUp: UniformNode<"vec3", THREE.Vector3>;
 
   private splashLayer!: ParticleLayer;
   private bubbleLayer!: ParticleLayer;
@@ -193,10 +193,8 @@ export class WaterParticleManager {
     this.glowTexture = this.createGlowTexture(64, 2.0);
     this.ringTexture = this.createRingTexture(64, 0.65, 0.22);
 
-    const uRight = uniform(new THREE.Vector3(1, 0, 0));
-    const uUp = uniform(new THREE.Vector3(0, 1, 0));
-    this.uCameraRight = uRight as unknown as { value: THREE.Vector3 };
-    this.uCameraUp = uUp as unknown as { value: THREE.Vector3 };
+    this.uCameraRight = uniform(new THREE.Vector3(1, 0, 0));
+    this.uCameraUp = uniform(new THREE.Vector3(0, 1, 0));
 
     this.splashLayer = this.createParticleLayer(MAX_SPLASH, 0xddeeff, "splash");
     this.bubbleLayer = this.createParticleLayer(MAX_BUBBLE, 0x88ccee, "bubble");
@@ -413,26 +411,26 @@ export class WaterParticleManager {
     material.depthWrite = false;
     material.side = THREE.DoubleSide;
 
-    const spotPos = attribute("spotPos", "vec3");
-    const ageLifetime = attribute("ageLifetime", "vec2");
+    const spotPos = attribute<"vec3">("spotPos", "vec3");
+    const ageLifetime = attribute<"vec2">("ageLifetime", "vec2");
     const age = ageLifetime.x;
     const lifetime = ageLifetime.y;
     const t = div(age, lifetime);
 
-    const angleRadius = attribute("angleRadius", "vec2");
+    const angleRadius = attribute<"vec2">("angleRadius", "vec2");
     const angle = angleRadius.x;
     const radius = angleRadius.y;
 
-    const dynamics = attribute("dynamics", "vec4");
+    const dynamics = attribute<"vec4">("dynamics", "vec4");
     const peakHeight = dynamics.x;
     const size = dynamics.y;
     const speed = dynamics.z;
     const direction = dynamics.w;
 
-    const camRight = this.uCameraRight as unknown as ReturnType<typeof uniform>;
-    const camUp = this.uCameraUp as unknown as ReturnType<typeof uniform>;
+    const camRight = this.uCameraRight;
+    const camUp = this.uCameraUp;
 
-    let particleCenter: ShaderNode;
+    let particleCenter: Node<"vec3">;
 
     if (layerType === "splash") {
       const arcY = mul(peakHeight, mul(float(4), mul(t, sub(float(1), t))));
@@ -459,10 +457,10 @@ export class WaterParticleManager {
     }
 
     const localXY = positionLocal.xy;
-    const billboardOffset = add(
-      mul(mul(localXY.x, size), camRight),
-      mul(mul(localXY.y, size), camUp),
-    );
+    const billboardOffset = camRight
+      .mul(localXY.x)
+      .mul(size)
+      .add(camUp.mul(localXY.y).mul(size));
     material.positionNode = add(particleCenter, billboardOffset);
 
     const [r, g, b] = hexToVec3(colorHex);
@@ -515,8 +513,8 @@ export class WaterParticleManager {
     material.depthWrite = false;
     material.side = THREE.DoubleSide;
 
-    const spotPos = attribute("spotPos", "vec3");
-    const rippleParams = attribute("rippleParams", "vec2");
+    const spotPos = attribute<"vec3">("spotPos", "vec3");
+    const rippleParams = attribute<"vec2">("rippleParams", "vec2");
     const phaseOffset = rippleParams.x;
     const rippleSpeed = rippleParams.y;
 

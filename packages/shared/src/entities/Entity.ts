@@ -483,8 +483,7 @@ export class Entity implements IEntity {
     // 2. entityData.health and entityData.maxHealth (if EntityData was passed)
     // 3. Default to 100/100
     const healthData = config?.properties?.health as
-      | { current: number; max: number }
-      | undefined;
+      { current: number; max: number } | undefined;
     if (healthData) {
       this.health = healthData.current;
       this.maxHealth = healthData.max;
@@ -990,8 +989,7 @@ export class Entity implements IEntity {
   protected createHealthBar(): void {
     // Try to use atlas-based HealthBars system (much more efficient)
     const healthbars = this.world.getSystem?.("healthbars") as
-      | HealthBarsSystem
-      | undefined;
+      HealthBarsSystem | undefined;
 
     if (healthbars) {
       // Atlas-based: Register with HealthBars system
@@ -1060,7 +1058,25 @@ export class Entity implements IEntity {
    * Update health and refresh health bar - from BaseEntity
    */
   public setHealth(newHealth: number): void {
-    this.health = Math.max(0, Math.min(this.maxHealth, newHealth));
+    this.setHealthAndMaxHealth(newHealth, this.maxHealth);
+  }
+
+  /**
+   * Atomically update the current and maximum health pool.
+   *
+   * Callers that change constitution or another max-health source must use
+   * this instead of mutating serialized data around setHealth(): setHealth()
+   * clamps against the entity's authoritative maxHealth field.
+   */
+  public setHealthAndMaxHealth(newHealth: number, newMaxHealth: number): void {
+    const nextMaxHealth =
+      Number.isFinite(newMaxHealth) && newMaxHealth > 0
+        ? newMaxHealth
+        : this.maxHealth;
+    const nextHealth = Number.isFinite(newHealth) ? newHealth : this.health;
+
+    this.maxHealth = nextMaxHealth;
+    this.health = Math.max(0, Math.min(this.maxHealth, nextHealth));
 
     // Update health in entity data for network sync
     this.data.health = this.health;
@@ -1070,6 +1086,7 @@ export class Entity implements IEntity {
     const healthComponent = this.getComponent("health");
     if (healthComponent && healthComponent.data) {
       healthComponent.data.current = this.health;
+      healthComponent.data.max = this.maxHealth;
       healthComponent.data.isDead = this.health <= 0;
     }
 
@@ -1281,9 +1298,11 @@ export class Entity implements IEntity {
   }
 
   async init(): Promise<void> {
+    if (this.destroyed) return;
     // Create the visual representation (mesh)
     // Note: createMesh() in subclasses may call loadModel() internally
     await this.createMesh();
+    if (this.destroyed) return;
 
     // Initialize UI elements (name tag, health bar) - only on client
     // Check if we're in a real browser environment with full Canvas API support
@@ -1298,6 +1317,7 @@ export class Entity implements IEntity {
 
     // Call custom initialization
     await this.onInit();
+    if (this.destroyed) return;
 
     // FINAL VALIDATION (only on client where we have meshes)
     if (!this.world.isServer) {
@@ -2028,6 +2048,11 @@ export class Entity implements IEntity {
   ): Promise<void> {
     if (!this.hlodState || this.hlodState.impostorPending) return;
 
+    // Retain the exact state that owns this asynchronous bake. Avatars can
+    // replace their geometry while a prior LOD is still baking; an old result
+    // must never be installed into the replacement state's mesh/material slots.
+    const requestedState = this.hlodState;
+
     const manager = ImpostorManager.getInstance(this.world);
 
     // Initialize baker if needed
@@ -2044,36 +2069,42 @@ export class Entity implements IEntity {
       atlasSize: options.atlasSize ?? 1024,
       hemisphere: options.hemisphere ?? true,
       priority: options.priority ?? BakePriority.NORMAL,
-      category: this.hlodState.category,
+      category: requestedState.category,
       // AAA LOD: Pass prepareForBake to ImpostorManager - it calls it RIGHT BEFORE baking
       prepareForBake: options.prepareForBake,
     };
 
     try {
       const bakeResult = await manager.getOrCreate(
-        this.hlodState.modelId,
+        requestedState.modelId,
         source,
         impostorOptions,
       );
 
+      if (this.hlodState !== requestedState) {
+        return;
+      }
+
       const meshCreated = this.createHLODImpostorMesh(bakeResult);
-      this.hlodState.bakeResult = bakeResult;
+      requestedState.bakeResult = bakeResult;
       // Only mark as ready if mesh was actually created
       if (meshCreated) {
-        this.hlodState.impostorReady = true;
+        requestedState.impostorReady = true;
         console.log(`[Entity HLOD] ✅ Impostor ready for ${this.name}`);
       } else {
         console.warn(
           `[Entity HLOD] ⚠️ Bake succeeded but mesh creation failed for ${this.name}`,
         );
       }
-      this.hlodState.impostorPending = false;
+      requestedState.impostorPending = false;
     } catch (err) {
       console.warn(
         `[Entity] Failed to create HLOD impostor for ${this.name}:`,
         err,
       );
-      this.hlodState.impostorPending = false;
+      if (this.hlodState === requestedState) {
+        requestedState.impostorPending = false;
+      }
     }
   }
 
@@ -3013,7 +3044,9 @@ export class Entity implements IEntity {
 
   // Property management
   getProperty<T>(key: string, defaultValue?: T): T {
-    return (this.config.properties?.[key] ?? defaultValue) as T;
+    return ((this.config.properties as unknown as Record<string, unknown>)?.[
+      key
+    ] ?? defaultValue) as T;
   }
 
   setProperty(key: string, value: unknown): void {

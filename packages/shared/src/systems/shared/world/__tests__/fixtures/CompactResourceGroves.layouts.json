@@ -1,0 +1,448 @@
+{
+  "previous": {
+    "schemaVersion": 1,
+    "layoutId": "compact-functional-groves-v1",
+    "terrainProfileId": "compact-duel-island-v5",
+    "regions": [
+      {
+        "id": "west-ridge-foot",
+        "bounds": {
+          "minX": 284,
+          "maxX": 306,
+          "minZ": 382,
+          "maxZ": 466
+        },
+        "anchors": [
+          {
+            "id": "tree_288_387",
+            "subType": "general",
+            "position": {
+              "x": 287.5,
+              "y": 28.48015895236134,
+              "z": 386.5
+            },
+            "scale": 1,
+            "rotation": 5.957135646649439
+          },
+          {
+            "id": "tree_290_432",
+            "subType": "general",
+            "position": {
+              "x": 289.5,
+              "y": 28.021376312168808,
+              "z": 431.5
+            },
+            "scale": 1,
+            "rotation": 4.88225076670659
+          },
+          {
+            "id": "tree_293_460",
+            "subType": "general",
+            "position": {
+              "x": 292.5,
+              "y": 29.907180337731035,
+              "z": 459.5
+            },
+            "scale": 1,
+            "rotation": 5.463255976132361
+          },
+          {
+            "id": "tree_294_422",
+            "subType": "general",
+            "position": {
+              "x": 293.5,
+              "y": 28.502276424890116,
+              "z": 421.5
+            },
+            "scale": 1,
+            "rotation": 3.2323217466703933
+          },
+          {
+            "id": "tree_297_449",
+            "subType": "general",
+            "position": {
+              "x": 296.5,
+              "y": 28.200982432827626,
+              "z": 448.5
+            },
+            "scale": 1,
+            "rotation": 2.999766459389365
+          },
+          {
+            "id": "tree_305_410",
+            "subType": "general",
+            "position": {
+              "x": 304.5,
+              "y": 28.276596896652745,
+              "z": 409.5
+            },
+            "scale": 1,
+            "rotation": 0.653820057970581
+          }
+        ]
+      },
+      {
+        "id": "southern-meadow",
+        "bounds": {
+          "minX": 308,
+          "maxX": 376,
+          "minZ": 462,
+          "maxZ": 504
+        },
+        "anchors": [
+          {
+            "id": "tree_310_471",
+            "subType": "general",
+            "position": {
+              "x": 309.5,
+              "y": 29.74228787252871,
+              "z": 470.5
+            },
+            "scale": 1,
+            "rotation": 3.856417325164458
+          },
+          {
+            "id": "tree_315_492",
+            "subType": "general",
+            "position": {
+              "x": 314.5,
+              "y": 31.709640947499903,
+              "z": 491.5
+            },
+            "scale": 1,
+            "rotation": 3.8341991602778216
+          },
+          {
+            "id": "tree_318_465",
+            "subType": "general",
+            "position": {
+              "x": 317.5,
+              "y": 29.000564601553858,
+              "z": 464.5
+            },
+            "scale": 1,
+            "rotation": 2.193638293116405
+          },
+          {
+            "id": "tree_320_501",
+            "subType": "general",
+            "position": {
+              "x": 319.5,
+              "y": 31.587562943265183,
+              "z": 500.5
+            },
+            "scale": 1,
+            "rotation": 2.56340195152592
+          },
+          {
+            "id": "tree_328_484",
+            "subType": "general",
+            "position": {
+              "x": 327.5,
+              "y": 31.07937128145523,
+              "z": 483.5
+            },
+            "scale": 1,
+            "rotation": 0.5672973890654115
+          },
+          {
+            "id": "tree_330_500",
+            "subType": "oak",
+            "position": {
+              "x": 329.5,
+              "y": 31.09092755483008,
+              "z": 499.5
+            },
+            "scale": 1,
+            "rotation": 5.37918529836875
+          },
+          {
+            "id": "tree_333_466",
+            "subType": "general",
+            "position": {
+              "x": 332.5,
+              "y": 28.769446037411278,
+              "z": 465.5
+            },
+            "scale": 1,
+            "rotation": 4.738462921515067
+          }
+        ]
+      },
+      {
+        "id": "eastern-shoulder",
+        "bounds": {
+          "minX": 442,
+          "maxX": 480,
+          "minZ": 355,
+          "maxZ": 411
+        },
+        "anchors": [
+          {
+            "id": "tree_443_383",
+            "subType": "general",
+            "position": {
+              "x": 442.5,
+              "y": 31.20080767150329,
+              "z": 382.5
+            },
+            "scale": 1,
+            "rotation": 5.001814136788706
+          },
+          {
+            "id": "tree_459_383",
+            "subType": "general",
+            "position": {
+              "x": 458.5,
+              "y": 29.96964257183416,
+              "z": 382.5
+            },
+            "scale": 1,
+            "rotation": 1.4584115926477377
+          },
+          {
+            "id": "tree_461_396",
+            "subType": "oak",
+            "position": {
+              "x": 460.5,
+              "y": 29.221441419795323,
+              "z": 395.5
+            },
+            "scale": 1,
+            "rotation": 2.4609919966649643
+          }
+        ]
+      }
+    ]
+  },
+  "additions": [
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_298_401",
+      "subType": "general",
+      "position": {
+        "x": 297.5,
+        "y": 27.872735105819288,
+        "z": 400.5
+      },
+      "scale": 1,
+      "rotation": 3.211083774932964
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_297_439",
+      "subType": "general",
+      "position": {
+        "x": 296.5,
+        "y": 27.885458137763685,
+        "z": 438.5
+      },
+      "scale": 1,
+      "rotation": 5.400508081318926
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_287_400",
+      "subType": "general",
+      "position": {
+        "x": 286.5,
+        "y": 28.041326685126233,
+        "z": 399.5
+      },
+      "scale": 1,
+      "rotation": 6.180383319531658
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_308_438",
+      "subType": "general",
+      "position": {
+        "x": 307.5,
+        "y": 28.41717321328919,
+        "z": 437.5
+      },
+      "scale": 1,
+      "rotation": 1.5589665995679485
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_288_441",
+      "subType": "general",
+      "position": {
+        "x": 287.5,
+        "y": 29.310602477934122,
+        "z": 440.5
+      },
+      "scale": 0.8,
+      "rotation": 4.360747080343369
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_292_410",
+      "subType": "general",
+      "position": {
+        "x": 291.5,
+        "y": 28.055174688391514,
+        "z": 409.5
+      },
+      "scale": 0.8,
+      "rotation": 5.718042926645146
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_309_450",
+      "subType": "general",
+      "position": {
+        "x": 308.5,
+        "y": 28.542703592812536,
+        "z": 449.5
+      },
+      "scale": 0.8,
+      "rotation": 3.6570294423952516
+    },
+    {
+      "region": "west-ridge-foot",
+      "id": "tree_302_387",
+      "subType": "general",
+      "position": {
+        "x": 301.5,
+        "y": 28.447249193059076,
+        "z": 386.5
+      },
+      "scale": 0.8,
+      "rotation": 0.184668283395382
+    },
+    {
+      "region": "southern-meadow",
+      "id": "tree_334_475",
+      "subType": "general",
+      "position": {
+        "x": 333.5,
+        "y": 29.65215463826227,
+        "z": 474.5
+      },
+      "scale": 1,
+      "rotation": 2.8695646802751904
+    },
+    {
+      "region": "southern-meadow",
+      "id": "tree_309_499",
+      "subType": "general",
+      "position": {
+        "x": 308.5,
+        "y": 31.9000731200318,
+        "z": 498.5
+      },
+      "scale": 1,
+      "rotation": 4.341682113955126
+    },
+    {
+      "region": "southern-meadow",
+      "id": "tree_337_488",
+      "subType": "general",
+      "position": {
+        "x": 336.5,
+        "y": 30.58181478284286,
+        "z": 487.5
+      },
+      "scale": 0.8,
+      "rotation": 0.637888395857768
+    },
+    {
+      "region": "southern-meadow",
+      "id": "tree_319_481",
+      "subType": "general",
+      "position": {
+        "x": 318.5,
+        "y": 30.67985722807508,
+        "z": 480.5
+      },
+      "scale": 0.8,
+      "rotation": 2.8312724177198385
+    },
+    {
+      "region": "southern-meadow",
+      "id": "tree_310_482",
+      "subType": "general",
+      "position": {
+        "x": 309.5,
+        "y": 30.361105473161363,
+        "z": 481.5
+      },
+      "scale": 0.8,
+      "rotation": 1.7334121811215286
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_449_369",
+      "subType": "oak",
+      "position": {
+        "x": 448.5,
+        "y": 30.67213457212391,
+        "z": 368.5
+      },
+      "scale": 1,
+      "rotation": 3.2663259154541433
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_474_394",
+      "subType": "oak",
+      "position": {
+        "x": 473.5,
+        "y": 28.315797691492772,
+        "z": 393.5
+      },
+      "scale": 1,
+      "rotation": 4.65246752485874
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_471_406",
+      "subType": "general",
+      "position": {
+        "x": 470.5,
+        "y": 28.12079719909435,
+        "z": 405.5
+      },
+      "scale": 1,
+      "rotation": 2.3972424667120293
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_460_365",
+      "subType": "general",
+      "position": {
+        "x": 459.5,
+        "y": 29.57768278554836,
+        "z": 364.5
+      },
+      "scale": 1,
+      "rotation": 2.2698046255390363
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_458_411",
+      "subType": "general",
+      "position": {
+        "x": 457.5,
+        "y": 28.798755845696373,
+        "z": 410.5
+      },
+      "scale": 0.8,
+      "rotation": 1.031833286981174
+    },
+    {
+      "region": "eastern-shoulder",
+      "id": "tree_449_410",
+      "subType": "general",
+      "position": {
+        "x": 448.5,
+        "y": 29.40324057422774,
+        "z": 409.5
+      },
+      "scale": 0.8,
+      "rotation": 3.5371274272585587
+    }
+  ]
+}

@@ -1,12 +1,9 @@
 import crypto from "node:crypto";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { ethers } from "ethers";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const HYPERIA_AUTH_MESSAGE_TYPE = "HYPERIA_AUTH";
 const PLACEHOLDER_RE =
   /^\[?\s*(REDACTED|PLACEHOLDER|TODO|CHANGEME|EMPTY)\s*]?$/i;
-const MANAGED_EVM_ADDRESS_ENV_KEY = "ELIZA_MANAGED_EVM_ADDRESS";
 const MANAGED_SOLANA_ADDRESS_ENV_KEY = "ELIZA_MANAGED_SOLANA_ADDRESS";
 
 export interface HyperiaBridgeRuntimeLike {
@@ -16,7 +13,6 @@ export interface HyperiaBridgeRuntimeLike {
     walletAddress?: unknown;
     walletAddresses?: Record<string, unknown>;
     settings?: {
-      evmAddress?: unknown;
       solanaAddress?: unknown;
       secrets?: Record<string, unknown>;
     };
@@ -45,10 +41,18 @@ export interface HyperiaViewerAuthMessage {
 
 interface HyperiaWalletCandidate {
   address: string;
-  walletType: "evm" | "solana";
 }
 
-interface HyperiaWalletAuthResponse {
+interface HyperiaWalletChallengeResponse {
+  challengeId?: string;
+  expiresAt?: string;
+  message?: string;
+  signatureEncoding?: string;
+  success?: boolean;
+  error?: string;
+}
+
+interface HyperiaWalletVerifyResponse {
   success?: boolean;
   authToken?: string;
   characterId?: string;
@@ -57,7 +61,6 @@ interface HyperiaWalletAuthResponse {
 }
 
 interface WalletAddresses {
-  evmAddress: string | null;
   solanaAddress: string | null;
 }
 
@@ -75,10 +78,6 @@ function readRuntimeSetting(
     : null;
 }
 
-function isEvmAddress(value: string | null | undefined): value is string {
-  return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value.trim());
-}
-
 function isLikelySolanaAddress(
   value: string | null | undefined,
 ): value is string {
@@ -92,15 +91,6 @@ function readObject(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function normalizeManagedEvmAddress(): string | null {
-  const managedEvmAddress = process.env[MANAGED_EVM_ADDRESS_ENV_KEY];
-  if (!managedEvmAddress) {
-    return null;
-  }
-  const trimmed = managedEvmAddress.trim();
-  return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? trimmed : null;
 }
 
 function base58Encode(data: Buffer | Uint8Array): string {
@@ -166,16 +156,6 @@ function decodeSolanaPrivateKey(key: string): Buffer {
   return base58Decode(key);
 }
 
-function deriveEvmAddress(privateKeyHex: string): string {
-  const cleaned = privateKeyHex.startsWith("0x")
-    ? privateKeyHex.slice(2)
-    : privateKeyHex;
-  const publicKey = secp256k1.getPublicKey(Buffer.from(cleaned, "hex"), false);
-  const publicKeyBytes = publicKey.subarray(1);
-  const hash = ethers.keccak256(publicKeyBytes);
-  return ethers.getAddress(`0x${hash.slice(26)}`);
-}
-
 function deriveSolanaAddress(privateKeyString: string): string {
   const secretBytes = decodeSolanaPrivateKey(privateKeyString);
   if (secretBytes.length === 64) {
@@ -198,15 +178,10 @@ function deriveSolanaAddress(privateKeyString: string): string {
   throw new Error(`Invalid Solana secret key length: ${secretBytes.length}`);
 }
 
-function generateWalletKeys(): {
-  evmAddress: string;
-  evmPrivateKey: string;
+function generateSolanaWalletKeys(): {
   solanaAddress: string;
   solanaPrivateKey: string;
 } {
-  const evmPrivateKey = `0x${crypto.randomBytes(32).toString("hex")}`;
-  const evmAddress = deriveEvmAddress(evmPrivateKey);
-
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
   const privateKeyDer = privateKey.export({ type: "pkcs8", format: "der" });
   const publicKeyDer = publicKey.export({ type: "spki", format: "der" });
@@ -216,11 +191,28 @@ function generateWalletKeys(): {
   const solanaAddress = base58Encode(publicKeyRaw);
 
   return {
-    evmAddress,
-    evmPrivateKey,
     solanaAddress,
     solanaPrivateKey,
   };
+}
+
+function signSolanaMessage(privateKeyString: string, message: string): string {
+  const secretBytes = decodeSolanaPrivateKey(privateKeyString);
+  if (secretBytes.length !== 32 && secretBytes.length !== 64) {
+    throw new Error(`Invalid Solana secret key length: ${secretBytes.length}`);
+  }
+  const seed = secretBytes.subarray(0, 32);
+  const keyObject = crypto.createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from("302e020100300506032b657004220420", "hex"),
+      seed,
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  return base58Encode(
+    crypto.sign(null, Buffer.from(message, "utf8"), keyObject),
+  );
 }
 
 function extractWalletCandidateFromRecord(
@@ -237,26 +229,11 @@ function extractWalletCandidateFromRecord(
   const characterWalletAddresses = readObject(characterRecord?.walletAddresses);
   const characterSecrets = readObject(characterSettings?.secrets);
 
-  const evmCandidates = [
-    directWalletAddresses?.evm,
-    objectRecord.walletAddress,
-    characterWalletAddresses?.evm,
-    characterRecord?.walletAddress,
-    characterSettings?.evmAddress,
-    characterSecrets?.EVM_PUBLIC_KEY,
-  ];
-  for (const candidate of evmCandidates) {
-    if (typeof candidate === "string" && isEvmAddress(candidate)) {
-      return {
-        address: candidate.trim(),
-        walletType: "evm",
-      };
-    }
-  }
-
   const solanaCandidates = [
     directWalletAddresses?.solana,
+    objectRecord.walletAddress,
     characterWalletAddresses?.solana,
+    characterRecord?.walletAddress,
     characterSettings?.solanaAddress,
     characterSecrets?.SOLANA_PUBLIC_KEY,
   ];
@@ -264,7 +241,6 @@ function extractWalletCandidateFromRecord(
     if (typeof candidate === "string" && isLikelySolanaAddress(candidate)) {
       return {
         address: candidate.trim(),
-        walletType: "solana",
       };
     }
   }
@@ -300,17 +276,6 @@ async function resolveRuntimeWalletCandidate(
     };
   }
 
-  const managedEvmAddress = readRuntimeSetting(
-    runtime,
-    MANAGED_EVM_ADDRESS_ENV_KEY,
-  );
-  if (isEvmAddress(managedEvmAddress)) {
-    return {
-      address: managedEvmAddress.trim(),
-      walletType: "evm",
-    };
-  }
-
   const managedSolanaAddress = readRuntimeSetting(
     runtime,
     MANAGED_SOLANA_ADDRESS_ENV_KEY,
@@ -318,7 +283,6 @@ async function resolveRuntimeWalletCandidate(
   if (isLikelySolanaAddress(managedSolanaAddress)) {
     return {
       address: managedSolanaAddress.trim(),
-      walletType: "solana",
     };
   }
 
@@ -326,17 +290,7 @@ async function resolveRuntimeWalletCandidate(
 }
 
 function readWalletAddressesFromEnv(): WalletAddresses {
-  let evmAddress: string | null = null;
   let solanaAddress: string | null = null;
-
-  const evmPrivateKey = process.env.EVM_PRIVATE_KEY;
-  if (evmPrivateKey && !PLACEHOLDER_RE.test(evmPrivateKey)) {
-    try {
-      evmAddress = deriveEvmAddress(evmPrivateKey);
-    } catch {
-      evmAddress = null;
-    }
-  }
 
   const solanaPrivateKey = process.env.SOLANA_PRIVATE_KEY;
   if (solanaPrivateKey && !PLACEHOLDER_RE.test(solanaPrivateKey)) {
@@ -345,10 +299,6 @@ function readWalletAddressesFromEnv(): WalletAddresses {
     } catch {
       solanaAddress = null;
     }
-  }
-
-  if (!evmAddress) {
-    evmAddress = normalizeManagedEvmAddress();
   }
 
   if (!solanaAddress) {
@@ -365,12 +315,11 @@ function readWalletAddressesFromEnv(): WalletAddresses {
     }
   }
 
-  return { evmAddress, solanaAddress };
+  return { solanaAddress };
 }
 
 async function getWalletAddressesWithSteward(): Promise<
   WalletAddresses & {
-    stewardEvmAddress?: string | null;
     stewardSolanaAddress?: string | null;
   }
 > {
@@ -384,7 +333,7 @@ async function getWalletAddressesWithSteward(): Promise<
     process.env.STEWARD_AGENT_ID?.trim() ||
     process.env.MILADY_STEWARD_AGENT_ID?.trim() ||
     process.env.ELIZA_STEWARD_AGENT_ID?.trim() ||
-    base.evmAddress?.trim() ||
+    base.solanaAddress?.trim() ||
     null;
   if (!agentId) {
     return base;
@@ -421,20 +370,18 @@ async function getWalletAddressesWithSteward(): Promise<
       ok?: boolean;
       data?: {
         walletAddress?: string;
-        walletAddresses?: { evm?: string; solana?: string };
+        walletAddresses?: { solana?: string };
       };
     };
     const agent = payload.data ?? (payload as unknown as typeof payload.data);
-    const stewardEvm =
-      agent?.walletAddresses?.evm?.trim() ||
-      agent?.walletAddress?.trim() ||
-      null;
-    const stewardSolana = agent?.walletAddresses?.solana?.trim() || null;
+    const stewardSolana =
+      agent?.walletAddresses?.solana?.trim() ||
+      (isLikelySolanaAddress(agent?.walletAddress)
+        ? agent?.walletAddress?.trim()
+        : null);
 
     return {
-      evmAddress: base.evmAddress ?? stewardEvm,
       solanaAddress: base.solanaAddress ?? stewardSolana,
-      stewardEvmAddress: stewardEvm,
       stewardSolanaAddress: stewardSolana,
     };
   } catch {
@@ -451,16 +398,9 @@ async function resolveHyperiaWalletCandidate(
   }
 
   const walletAddresses = await getWalletAddressesWithSteward();
-  if (isEvmAddress(walletAddresses.evmAddress)) {
-    return {
-      address: walletAddresses.evmAddress.trim(),
-      walletType: "evm",
-    };
-  }
   if (isLikelySolanaAddress(walletAddresses.solanaAddress)) {
     return {
       address: walletAddresses.solanaAddress.trim(),
-      walletType: "solana",
     };
   }
 
@@ -495,8 +435,7 @@ function persistRuntimeSecret(
 function provisionRuntimeWalletCandidate(
   runtime: HyperiaBridgeRuntimeLike,
 ): HyperiaWalletCandidate {
-  const walletKeys = generateWalletKeys();
-  persistRuntimeSecret(runtime, "EVM_PRIVATE_KEY", walletKeys.evmPrivateKey);
+  const walletKeys = generateSolanaWalletKeys();
   persistRuntimeSecret(
     runtime,
     "SOLANA_PRIVATE_KEY",
@@ -504,8 +443,7 @@ function provisionRuntimeWalletCandidate(
   );
 
   return {
-    address: walletKeys.evmAddress,
-    walletType: "evm",
+    address: walletKeys.solanaAddress,
   };
 }
 
@@ -547,6 +485,96 @@ function resolveHyperiaApiBaseUrl(
     : "http://localhost:5555";
 }
 
+function resolveMatchingSolanaPrivateKey(
+  runtime: HyperiaBridgeRuntimeLike,
+  walletAddress: string,
+): string {
+  const candidates = [
+    readRuntimeSetting(runtime, "SOLANA_PRIVATE_KEY"),
+    runtime.character?.settings?.secrets?.SOLANA_PRIVATE_KEY,
+    runtime.character?.secrets?.SOLANA_PRIVATE_KEY,
+  ];
+  for (const candidate of candidates) {
+    if (
+      typeof candidate !== "string" ||
+      candidate.trim().length === 0 ||
+      PLACEHOLDER_RE.test(candidate)
+    ) {
+      continue;
+    }
+    try {
+      if (deriveSolanaAddress(candidate.trim()) === walletAddress) {
+        return candidate.trim();
+      }
+    } catch {
+      // Try the next explicitly configured key source.
+    }
+  }
+  throw new Error(
+    "SOL wallet authentication requires a signing key that exactly matches the configured agent wallet.",
+  );
+}
+
+async function readWalletAuthJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown };
+      if (typeof parsed.error === "string") detail = parsed.error.trim();
+    } catch {
+      // Keep untrusted non-JSON response content out of agent diagnostics.
+    }
+    throw new Error(
+      detail
+        ? `Hyperia SOL wallet authentication failed (${response.status}): ${detail}`
+        : `Hyperia SOL wallet authentication failed with status ${response.status}`,
+    );
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error("Hyperia SOL wallet authentication returned invalid JSON.");
+  }
+}
+
+async function hasActiveAgentCredentialSession(
+  runtime: HyperiaBridgeRuntimeLike,
+  authToken: string,
+): Promise<boolean> {
+  const response = await fetch(
+    new URL(
+      "/api/agents/credentials/status",
+      resolveHyperiaApiBaseUrl(runtime),
+    ),
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+  );
+  if (response.status === 401 || response.status === 403) {
+    return false;
+  }
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Hyperia agent credential validation failed with status ${response.status}.`,
+    );
+  }
+  try {
+    const payload = JSON.parse(text) as { active?: unknown; success?: unknown };
+    if (payload.success !== true || payload.active !== true) {
+      throw new Error("invalid status payload");
+    }
+  } catch {
+    throw new Error(
+      "Hyperia agent credential validation returned invalid JSON.",
+    );
+  }
+  return true;
+}
+
 async function authenticateHyperiaWallet(
   runtime: HyperiaBridgeRuntimeLike,
   wallet: HyperiaWalletCandidate,
@@ -555,8 +583,10 @@ async function authenticateHyperiaWallet(
   characterId: string;
   accountId?: string;
 }> {
-  const response = await fetch(
-    new URL("/api/agents/wallet-auth", resolveHyperiaApiBaseUrl(runtime)),
+  const privateKey = resolveMatchingSolanaPrivateKey(runtime, wallet.address);
+  const apiBaseUrl = resolveHyperiaApiBaseUrl(runtime);
+  const challengeResponse = await fetch(
+    new URL("/api/agents/sol-wallet-auth/challenge", apiBaseUrl),
     {
       method: "POST",
       headers: {
@@ -564,34 +594,83 @@ async function authenticateHyperiaWallet(
       },
       body: JSON.stringify({
         walletAddress: wallet.address,
-        walletType: wallet.walletType,
         agentName: runtime.character?.name || "Agent",
-        agentId: runtime.agentId,
+        characterId:
+          readRuntimeSetting(runtime, "HYPERIA_CHARACTER_ID") ?? undefined,
       }),
-      signal: AbortSignal.timeout(1_500),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     },
   );
-
-  const text = await response.text();
-  const data =
-    text.trim().length > 0
-      ? (JSON.parse(text) as HyperiaWalletAuthResponse)
-      : null;
-
-  if (!response.ok) {
-    const detail =
-      data && typeof data.error === "string" && data.error.trim().length > 0
-        ? data.error.trim()
-        : text.trim();
-    throw new Error(
-      detail.length > 0
-        ? `Hyperia wallet auth failed (${response.status}): ${detail}`
-        : `Hyperia wallet auth failed with status ${response.status}`,
-    );
+  const challenge =
+    await readWalletAuthJson<HyperiaWalletChallengeResponse>(challengeResponse);
+  if (
+    !challenge.success ||
+    typeof challenge.challengeId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      challenge.challengeId,
+    ) ||
+    typeof challenge.message !== "string" ||
+    challenge.message.length < 1 ||
+    challenge.message.length > 4096 ||
+    challenge.signatureEncoding !== "base58" ||
+    typeof challenge.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(challenge.expiresAt)) ||
+    Date.parse(challenge.expiresAt) <= Date.now()
+  ) {
+    throw new Error("Hyperia SOL wallet challenge response is invalid.");
   }
 
-  if (!data?.success || !data.authToken || !data.characterId) {
-    throw new Error("Hyperia wallet auth returned an invalid response.");
+  const signature = signSolanaMessage(privateKey, challenge.message);
+  const verifyResponse = await fetch(
+    new URL("/api/agents/sol-wallet-auth/verify", apiBaseUrl),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: challenge.challengeId,
+        message: challenge.message,
+        signature,
+        walletAddress: wallet.address,
+      }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+  );
+  const data =
+    await readWalletAuthJson<HyperiaWalletVerifyResponse>(verifyResponse);
+  if (
+    !data.success ||
+    !data.authToken ||
+    !data.characterId ||
+    !data.accountId
+  ) {
+    throw new Error("Hyperia SOL wallet verification response is invalid.");
+  }
+
+  if (runtime.agentId) {
+    const mappingResponse = await fetch(
+      new URL("/api/agents/mappings", apiBaseUrl),
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${data.authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          accountId: data.accountId,
+          agentId: runtime.agentId,
+          agentName: runtime.character?.name || "Agent",
+          characterId: data.characterId,
+        }),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      },
+    );
+    await readWalletAuthJson<{ success?: boolean }>(mappingResponse).then(
+      (mapping) => {
+        if (!mapping.success) {
+          throw new Error("Hyperia agent mapping response is invalid.");
+        }
+      },
+    );
   }
 
   return {
@@ -610,15 +689,24 @@ export async function prepareHyperiaAppLaunch(
 
   const authToken = readRuntimeSetting(runtime, "HYPERIA_AUTH_TOKEN");
   const characterId = readRuntimeSetting(runtime, "HYPERIA_CHARACTER_ID");
-  if (authToken && characterId) {
-    return [];
-  }
-
-  const wallet =
-    (await resolveHyperiaWalletCandidate(runtime)) ??
-    provisionRuntimeWalletCandidate(runtime);
 
   try {
+    if (
+      authToken &&
+      characterId &&
+      (await hasActiveAgentCredentialSession(runtime, authToken))
+    ) {
+      return [];
+    }
+    let wallet = await resolveHyperiaWalletCandidate(runtime);
+    if (!wallet) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error(
+          "Production SOL wallet authentication requires an explicitly provisioned agent signing key.",
+        );
+      }
+      wallet = provisionRuntimeWalletCandidate(runtime);
+    }
     const authResult = await authenticateHyperiaWallet(runtime, wallet);
     persistHyperiaCredential(
       runtime,

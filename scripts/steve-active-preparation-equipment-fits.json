@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-08-19T15:00:00.000Z",
+  "avatar": {
+    "id": "steve",
+    "legacyAttachmentId": "/api/assets/steve/model",
+    "path": "packages/server/world/assets/avatars/duel-candidates/duel-steve.vrm",
+    "sha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+    "normalizedHeight": 1.6
+  },
+  "fits": [
+    {
+      "itemId": "bronze_hatchet",
+      "slot": "gatheringtool",
+      "grip": "one-hand",
+      "weaponType": "axe",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/preparation-kit/kaykit-rpg-axe.glb",
+      "sourceSha256": "e8b7e9db723e1c2ebacf57ad668834d076460cd2fd5405310a8fc7b31ccb0c52",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-hatchet-fitted.glb",
+      "targetLengthMetres": 0.65,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-woodcutting.glb",
+        "sha256": "6766481488780dcdef256fcee08ddbdfa4318ab8142ca0ff749351f733e4f782",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "bronze_pickaxe",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "pickaxe",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/preparation-kit/kaykit-rpg-pickaxe.glb",
+      "sourceSha256": "0fb3dd9052e590abb6eeaa53de0f2c9e295441454f8efa653fbe07d285744f0a",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/bronze-pickaxe-fitted.glb",
+      "targetLengthMetres": 0.85,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-mining.glb",
+        "sha256": "cf8c87b240215e98155641193e917fc12cd3d22e909871534fba6b017ad5e4ce",
+        "sampleRatio": 0.55
+      }
+    },
+    {
+      "itemId": "fishing_rod",
+      "slot": "gatheringtool",
+      "grip": "two-hand",
+      "weaponType": "fishing-rod",
+      "attachmentBone": "rightHand",
+      "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-kit/quaternius-fishing-rod-level-1.glb",
+      "sourceSha256": "31f8f360617335c45f2d1c4283dc246f7b91ab0d591fa55ecb0c053fd2f045a2",
+      "outputPath": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-active-preparation/fishing-rod-fitted.glb",
+      "targetLengthMetres": 2.4,
+      "desiredWorldEulerDegrees": [0, 0, 0],
+      "desiredWorldOffsetMetres": [0, 0, 0],
+      "alignHandleToSecondaryHand": {
+        "sourceHandleAxis": [0, -1, 0]
+      },
+      "referenceMotion": {
+        "path": "artifacts/duel-launch-avatar-bakeoff/motions/steve-preparation/steve-fishing-cast.glb",
+        "sha256": "061c247a2e6618daa370bfc759ebabb57ff0ff79c23c9f93dba5dc9c7177ac99",
+        "sampleRatio": 0.55
+      }
+    }
+  ]
+}

@@ -5,8 +5,9 @@ Production-ready game server for Hyperia 3D multiplayer worlds with PostgreSQL b
 ## ✅ Status: FULLY OPERATIONAL
 
 The server has been successfully migrated to PostgreSQL and is production-ready with:
+
 - PostgreSQL database with automatic migrations
-- 54 mobs + 5 NPCs spawning at startup  
+- 54 mobs + 5 NPCs spawning at startup
 - Character creation and multi-character support
 - Complete persistence layer (inventory, equipment, skills, position)
 - Real-time multiplayer via WebSocket
@@ -41,17 +42,20 @@ bun install
 ### Configuration
 
 Copy the example environment file:
+
 ```bash
 cp env.example .env
 ```
 
 **Option 1: Local PostgreSQL (Docker)**
+
 ```env
 USE_LOCAL_POSTGRES=true
 # Docker will automatically start PostgreSQL
 ```
 
 **Option 2: External PostgreSQL**
+
 ```env
 DATABASE_URL=postgresql://user:pass@host:5488/dbname
 USE_LOCAL_POSTGRES=false
@@ -60,16 +64,20 @@ USE_LOCAL_POSTGRES=false
 ### Running
 
 **Development:**
+
 ```bash
 bun run dev
 ```
+
 This automatically starts:
+
 - CDN Server (nginx on port 8080) - via Docker
 - Game Server (Fastify on port 5555)
 - Client (Vite on port 3333)
 - 3D Asset Forge API (port 3001) & UI (port 3003)
 
 **Production Build:**
+
 ```bash
 bun run build
 bun run start
@@ -80,12 +88,14 @@ bun run start
 The development script automatically manages a local CDN server via Docker:
 
 **Automatic Management:**
+
 - Starts when you run `bun run dev`
 - Stops when you exit the dev server (Ctrl+C)
 - Serves game assets from `../../assets/` on port 8080
 - Health check at `http://localhost:8080/health`
 
 **Manual CDN Management:**
+
 ```bash
 # Start CDN only
 bun run cdn:up
@@ -101,10 +111,12 @@ bun run cdn:verify
 ```
 
 **Requirements:**
+
 - Docker Desktop must be installed and running
 - If Docker is not available, the dev script will skip CDN startup and warn you
 
 **Asset Access:**
+
 - All assets served directly from CDN: `http://localhost:8080/assets/world/music/normal/1.mp3`
 - No proxying - client fetches directly from CDN
 
@@ -121,25 +133,23 @@ The server uses PostgreSQL with automatic migrations. On first run:
 ### Manual Database Operations
 
 **Connect to local PostgreSQL:**
+
 ```bash
 docker exec -it hyperia-postgres psql -U hyperia -d hyperia
 ```
 
-**Backup database:**
-```bash
-docker exec hyperia-postgres pg_dump -U hyperia hyperia > backup.sql
-```
+**Backup and recovery:**
 
-**Restore database:**
-```bash
-cat backup.sql | docker exec -i hyperia-postgres psql -U hyperia hyperia
-```
+Do not use an unbound shell redirect as a production backup. Use the full
+snapshot, independent verification, and isolated-restore procedure in
+[`docs/hyperia-postgres-backup-recovery.md`](../../docs/hyperia-postgres-backup-recovery.md).
 
 ### Migrations
 
 Migrations are defined in `src/db.ts` and run automatically on server start. The migration system tracks version in the `config` table.
 
 **Current migrations:**
+
 1. Users table
 2. VRM/avatar column migration
 3. Settings config migration
@@ -155,18 +165,21 @@ Migrations are defined in `src/db.ts` and run automatically on server start. The
 ### Core Systems
 
 **ServerNetwork** (`src/ServerNetwork.ts`)
+
 - WebSocket connection handling
 - Player spawning and lifecycle
 - Character selection flow
 - Message routing and broadcasting
 
 **DatabaseSystem** (`src/DatabaseSystem.ts`)
+
 - PostgreSQL connection management
 - Character CRUD operations
 - Player data persistence
 - Inventory and equipment management
 
 **Database Layer** (`src/db.ts`)
+
 - Connection pooling (pg)
 - Migration runner
 - Query builder for shared code
@@ -180,6 +193,7 @@ The server supports multiple characters per account:
 3. **Player Session** - Character becomes "player" when spawned in world
 
 **Flow:**
+
 ```
 Login → Character List → Select/Create Character → Enter World → Spawn as Player
 ```
@@ -273,6 +287,7 @@ ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
 
 Monitoring endpoints:
+
 - `GET /health` - basic uptime/timestamp (use for uptime checks)
 - `GET /status` - connected users + commit hash
 
@@ -295,6 +310,7 @@ docker run -p 5555:5555 \
 ### Traditional Hosting
 
 Requirements:
+
 - Node.js 22+ or Bun runtime
 - PostgreSQL 16+ (local or managed)
 - Reverse proxy (nginx, caddy) for SSL
@@ -310,11 +326,13 @@ pm2 start dist/index.js --name hyperia-server
 ### Environment-Specific
 
 **Staging:**
+
 ```bash
 NODE_ENV=staging bun run start
 ```
 
 **Production:**
+
 ```bash
 NODE_ENV=production bun run start
 ```
@@ -335,6 +353,7 @@ Rollback uses the same deployment workflows with an explicit ref:
 **Error:** `ECONNREFUSED` or connection timeout
 
 **Solutions:**
+
 1. Check if Docker is running: `docker ps`
 2. Start PostgreSQL: `docker-compose up postgres`
 3. Check connection string in .env
@@ -348,7 +367,8 @@ Rollback uses the same deployment workflows with an explicit ref:
 
 **Error:** Foreign key constraint violation
 
-**Solution:** 
+**Solution:**
+
 ```sql
 -- Connect to database
 docker exec -it hyperia-postgres psql -U hyperia hyperia
@@ -358,6 +378,7 @@ DROP SCHEMA public CASCADE;
 CREATE SCHEMA public;
 \q
 ```
+
 Then restart the server.
 
 ### Character Creation Fails
@@ -365,6 +386,7 @@ Then restart the server.
 **Error:** Missing columns when creating character
 
 **Solution:** The characters table migration may not have run. Check:
+
 ```sql
 SELECT * FROM config WHERE key = 'version';
 ```
@@ -376,11 +398,13 @@ Should be at version 15 or higher. If not, restart server to run migrations.
 **Error:** Docker daemon not running
 
 **Solution:**
+
 1. Install Docker Desktop: https://www.docker.com/products/docker-desktop
 2. Start Docker Desktop
 3. Restart server
 
 **Alternative:** Use external PostgreSQL instead:
+
 ```env
 DATABASE_URL=postgresql://user:pass@host:5488/dbname
 USE_LOCAL_POSTGRES=false
@@ -436,6 +460,7 @@ Adjust in `src/db.ts` and `src/DatabaseSystem.ts` if needed.
 ### Asset Caching
 
 Assets are served with aggressive caching:
+
 ```
 Cache-Control: public, max-age=31536000, immutable
 ```
@@ -447,6 +472,7 @@ For development, disable browser cache or use incognito mode.
 ### Authentication
 
 Optional Privy authentication provides:
+
 - Wallet-based login
 - Farcaster Frame v2 support
 - Account-to-character linking
@@ -454,6 +480,7 @@ Optional Privy authentication provides:
 ### Admin Access
 
 Admin commands require:
+
 1. `ADMIN_CODE` set in environment
 2. `/admin <code>` command in chat
 
@@ -466,6 +493,7 @@ Admin commands require:
 ### Rate Limiting
 
 Not implemented yet. Consider adding:
+
 - Connection rate limiting (websocket)
 - API endpoint rate limiting
 - Upload size limits (currently 50MB)

@@ -124,7 +124,9 @@ export class Socket {
   }
 
   sendPacket(packet: ArrayBuffer | Uint8Array): void {
-    this.ws.send(packet);
+    const payload =
+      packet instanceof Uint8Array ? new Uint8Array(packet).buffer : packet;
+    this.ws.send(payload);
   }
 
   ping(): void {

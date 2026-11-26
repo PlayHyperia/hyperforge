@@ -31,6 +31,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test tests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "anchor:build": "bash anchor/scripts/build-workspace.sh",
     "anchor:deploy:localnet": "bash anchor/scripts/deploy-fight-oracle.sh localnet",

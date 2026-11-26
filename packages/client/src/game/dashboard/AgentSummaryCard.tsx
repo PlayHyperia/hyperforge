@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Agent } from "./types";
 import { Swords, Activity, Target, Coins, Clock, Heart } from "lucide-react";
@@ -131,6 +132,7 @@ export const AgentSummaryCard: React.FC<AgentSummaryCardProps> = ({
       try {
         const response = await fetch(
           `${GAME_API_URL}/api/agents/mapping/${agent.id}`,
+          { headers: getApiAuthorizationHeaders() },
         );
         if (response.ok) {
           const data = await response.json();
@@ -152,6 +154,7 @@ export const AgentSummaryCard: React.FC<AgentSummaryCardProps> = ({
       // Fetch goal data (includes personality)
       const goalResponse = await fetch(
         `${GAME_API_URL}/api/agents/${agent.id}/goal`,
+        { headers: getApiAuthorizationHeaders() },
       );
       let goalData: {
         goal?: { description?: string; progressPercent?: number };
@@ -166,6 +169,7 @@ export const AgentSummaryCard: React.FC<AgentSummaryCardProps> = ({
       try {
         const thoughtsResponse = await fetch(
           `${GAME_API_URL}/api/agents/${agent.id}/thoughts?limit=1`,
+          { headers: getApiAuthorizationHeaders() },
         );
         if (thoughtsResponse.ok) {
           const thoughtsData = await thoughtsResponse.json();
@@ -183,6 +187,7 @@ export const AgentSummaryCard: React.FC<AgentSummaryCardProps> = ({
       if (characterId) {
         const skillsResponse = await fetch(
           `${GAME_API_URL}/api/characters/${characterId}/skills`,
+          { headers: getApiAuthorizationHeaders() },
         );
         if (skillsResponse.ok) {
           const skillsData = await skillsResponse.json();
@@ -192,6 +197,7 @@ export const AgentSummaryCard: React.FC<AgentSummaryCardProps> = ({
         // Fetch position to check online status
         const posResponse = await fetch(
           `${GAME_API_URL}/api/characters/${characterId}/position`,
+          { headers: getApiAuthorizationHeaders() },
         );
         if (posResponse.ok) {
           const posData = await posResponse.json();

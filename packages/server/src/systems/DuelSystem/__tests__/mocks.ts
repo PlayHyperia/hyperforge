@@ -5,6 +5,7 @@
  * for unit testing the duel system components.
  */
 
+import { CollisionMatrix, type ICollisionMatrix } from "@hyperforge/shared";
 import { vi } from "vitest";
 
 // ============================================================================
@@ -27,9 +28,7 @@ export interface MockWorld {
   on: ReturnType<typeof vi.fn>;
   off: ReturnType<typeof vi.fn>;
   getSystem: ReturnType<typeof vi.fn>;
-  collision: {
-    addFlags: ReturnType<typeof vi.fn>;
-  };
+  collision: ICollisionMatrix;
   setPlayerPosition: (
     playerId: string,
     x: number,
@@ -64,9 +63,7 @@ export function createMockWorld(): MockWorld {
     on: onFn,
     off: offFn,
     getSystem: getSystemFn,
-    collision: {
-      addFlags: vi.fn(),
-    },
+    collision: new CollisionMatrix(),
     setPlayerPosition: (playerId: string, x: number, y: number, z: number) => {
       const player = players.get(playerId);
       if (player) {

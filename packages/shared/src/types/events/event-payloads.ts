@@ -8,6 +8,7 @@ import { Entity } from "../../entities/Entity";
 import { PlayerLocal } from "../../entities/player/PlayerLocal";
 import { Skills, InventoryItem, Position3D } from "../core/core";
 import type { Item } from "../core/core";
+import type { TerrainResourceSpawnBatch } from "../world/terrain";
 import type { EntitySpawnedEvent } from "../systems/system-interfaces";
 import { EventType } from "./event-types";
 import { AttackType } from "../game/item-types";
@@ -16,10 +17,31 @@ import type {
   PrayerPointsChangedPayload,
 } from "../game/prayer-types";
 import type { TradeCancelledPayload } from "../game/trade-types";
+import type { FishingInteractionPresentationState } from "../../systems/shared/entities/gathering/FishingInteractionPresentation";
+import type {
+  ProcessingInteractionPresentationState,
+  ProcessingSkill,
+} from "../game/processing-interaction-presentation";
+import type { StreamingDuelDamageObservationContext } from "../game/streaming-duel-action-observation";
+import type {
+  DuelDamageCompetitiveTerminal,
+  GatheringRewardSkill,
+  PrayerPersistenceSnapshot,
+  ProcessingActionSkill,
+  QuestCompletionProgressReceipt,
+} from "../network/database";
+export type { ProcessingSkill } from "../game/processing-interaction-presentation";
 
 // ============================================================================
 // EVENT PAYLOAD INTERFACES
 // ============================================================================
+
+/** Same-transport entry recovery; this is not an authoritative player kick. */
+export type EntryRetryState = Readonly<{
+  characterId: string;
+  status: "available" | "pending" | "expired";
+  message: string;
+}>;
 
 /** Equipment sync data for login - subset of database row for event payloads */
 export interface EquipmentSyncData {
@@ -59,6 +81,10 @@ export interface PlayerEnterPayload {
 
 export interface PlayerLeavePayload {
   playerId: string;
+  /** The authenticated entity is being retained for a bounded socket reconnect. */
+  reconnectGraceActive?: boolean;
+  /** Server-clock deadline for the active reconnect grace, in Unix milliseconds. */
+  reconnectGraceExpiresAt?: number;
 }
 
 export interface EntityCreatedPayload {
@@ -121,9 +147,31 @@ export interface NPCDiedPayload {
   position: { x: number; y: number; z: number };
   loot?: InventoryItem[];
   /** Timestamp when the kill occurred (Unix ms) - for anti-spoof validation */
-  timestamp?: number;
-  /** HMAC signature for kill validation - prevents spoofed kill events */
-  killToken?: string;
+  timestamp: number;
+  /** Exact identity for one mob life, loot roll, and source batch. */
+  lootOperationId: string;
+  /** HMAC signature binding the death fields and loot operation identity. */
+  killToken: string;
+  /** Exact style used by the lethal authoritative hit. */
+  attackStyle: string;
+  /** Existing kill-XP authority: the defeated mob's full health value. */
+  damageDealt: number;
+}
+
+/** Privacy-safe wake-up emitted only after one mob-loot occurrence commits. */
+export interface MobLootCommittedPayload {
+  playerId: string;
+  lootOperationId: string;
+  replayed: boolean;
+  combatProgress: import("../network/database").MobCombatProgressReceipt[];
+}
+
+/** Exact combat progression co-committed with a lethal competitive duel hit. */
+export interface DuelCombatProgressCommittedPayload {
+  playerId: string;
+  damageOperationId: string;
+  replayed: boolean;
+  combatProgress: import("../network/database").DuelCombatProgressReceipt[];
 }
 
 // Item System Event Payloads
@@ -445,6 +493,8 @@ export interface CombatAttackRequestPayload {
 }
 
 export interface CombatDamageDealtPayload {
+  /** Stable server projectile identity for ranged/magic damage. */
+  projectileId?: string;
   attackerId: string;
   targetId: string;
   damage: number;
@@ -452,6 +502,10 @@ export interface CombatDamageDealtPayload {
   targetType?: "player" | "mob";
   position?: Position3D;
   isCritical?: boolean;
+  /** Internal server receipt identity; network forwarding explicitly omits it. */
+  publicActionObservation?: StreamingDuelDamageObservationContext;
+  /** Internal durable terminal proof; network forwarding explicitly omits it. */
+  competitiveTerminal?: DuelDamageCompetitiveTerminal;
 }
 
 export interface CombatKillPayload {
@@ -462,6 +516,8 @@ export interface CombatKillPayload {
 }
 
 export interface CombatProjectileLaunchedPayload {
+  /** Stable server projectile identity shared with its impact event. */
+  projectileId?: string;
   attackerId: string;
   targetId: string;
   projectileType: string;
@@ -474,13 +530,49 @@ export interface CombatProjectileLaunchedPayload {
    *  Derived from the server-side hit-delay so the visual impact
    *  coincides with the damage splat. */
   travelDurationMs?: number;
+  /** Server tick at which this visual packet was broadcast. */
+  tick?: number;
+  /**
+   * Server-instance-unique identity for one authoritative visual event.
+   * Nearby-region subscriptions can deliver the same packet more than once;
+   * clients use this identity to discard only those delivery duplicates.
+   */
+  networkEventId?: string;
 }
 
 export interface CombatProjectileHitPayload {
+  /** Stable server projectile identity shared with its launch event. */
+  projectileId?: string;
   attackerId: string;
   targetId: string;
   damage: number;
   projectileType: string;
+  /** Authoritative impact position used for nearby delivery and visual cleanup. */
+  position?: Position3D | null;
+  /** Server tick at which this visual packet was broadcast. */
+  tick?: number;
+  /** Server-instance-unique identity for one authoritative visual event. */
+  networkEventId?: string;
+}
+
+export interface CombatProjectileCancelledPayload {
+  /** Stable server projectile identity shared with its launch event. */
+  projectileId: string;
+  attackerId: string;
+  targetId: string;
+  projectileType: "arrow" | "spell";
+  /** Authoritative lifecycle boundary that invalidated the queued hit. */
+  reason:
+    | "combat_ended"
+    | "entity_died"
+    | "player_respawned"
+    | "player_disconnected"
+    | "combat_state_missing"
+    | "projectile_expired";
+  /** Server tick at which this terminal packet was broadcast. */
+  tick?: number;
+  /** Server-instance-unique identity for one authoritative visual event. */
+  networkEventId?: string;
 }
 
 export interface CombatSpellCastPayload {
@@ -603,6 +695,13 @@ export interface FireCreatedPayload {
   fireId: string;
   playerId: string;
   position: Position3D;
+  /** Authoritative Unix-millisecond lifetime assigned by the commit transaction. */
+  createdAt: number;
+  expiresAt: number;
+  /** Server Unix time when this payload was emitted; clients must not trust their wall clock. */
+  serverObservedAt: number;
+  /** Optional caller-generated UUID used only to correlate the completion. */
+  requestId?: string;
 }
 
 /**
@@ -621,6 +720,8 @@ export interface CookingCompletedPayload {
   resultItemId: string;
   wasBurnt: boolean;
   xpGained: number;
+  /** Optional caller-generated UUID used only to correlate the completion. */
+  requestId?: string;
 }
 
 /**
@@ -631,6 +732,8 @@ export interface ProcessingFiremakingRequestPayload {
   logsId: string;
   logsSlot: number;
   tinderboxSlot: number;
+  /** Optional validated caller UUID echoed by the authoritative completion. */
+  requestId?: string;
 }
 
 /**
@@ -646,6 +749,8 @@ export interface ProcessingCookingRequestPayload {
   rangeId?: string;
   /** Source type - defaults to "fire" for backwards compatibility */
   sourceType?: "fire" | "range";
+  /** Optional validated caller UUID echoed by the authoritative completion. */
+  requestId?: string;
 }
 
 /**
@@ -654,6 +759,264 @@ export interface ProcessingCookingRequestPayload {
 export interface FiremakingMoveRequestPayload {
   playerId: string;
   position: Position3D;
+}
+
+/**
+ * Minimal server-validated command needed to reconstruct one correlated
+ * processing action after the caller process restarts. It deliberately omits
+ * inventory contents, bank state, results, and free-form text.
+ */
+export type ProcessingRequestEnvelope =
+  | {
+      skill: "firemaking";
+      logsId: string;
+      logsSlot: number;
+      tinderboxSlot: number;
+    }
+  | {
+      skill: "cooking";
+      rawFoodId: string;
+      rawFoodSlot: number;
+      sourceId: string;
+      sourceType: "fire" | "range";
+    }
+  | {
+      skill: "smelting";
+      barItemId: string;
+      furnaceId: string;
+      quantity: 1;
+    }
+  | {
+      skill: "smithing";
+      recipeId: string;
+      anvilId: string;
+      quantity: 1;
+    }
+  | {
+      skill: "crafting";
+      recipeId: string;
+      quantity: 1;
+      stationId?: string;
+    }
+  | {
+      skill: "fletching";
+      recipeId: string;
+      quantity: 1;
+    }
+  | {
+      skill: "runecrafting";
+      altarId: string;
+      runeType: string;
+    }
+  | {
+      skill: "tanning";
+      inputItemId: string;
+      quantity: 1;
+      tannerEntityId: string;
+      tannerNpcId: string;
+    };
+
+export type RecoverableProcessingRequestStatus =
+  "pending" | "interrupted" | "committed" | "rejected";
+
+/** One authenticated player's single unacknowledged processing command. */
+export interface RecoverableProcessingRequest {
+  requestId: string;
+  skill: ProcessingSkill;
+  status: RecoverableProcessingRequestStatus;
+  envelope: ProcessingRequestEnvelope;
+  acceptedAt: number;
+  heartbeatAt: number;
+  terminalAt: number | null;
+}
+
+const PROCESSING_ENVELOPE_ITEM_ID_PATTERN = /^[a-z][a-z0-9_:]{0,63}$/;
+
+function normalizeProcessingEnvelopeId(
+  value: unknown,
+  maxLength = 128,
+): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= maxLength ? normalized : null;
+}
+
+/** Reject malformed or cross-family recovery envelopes before persistence. */
+export function normalizeProcessingRequestEnvelope(
+  skill: ProcessingSkill,
+  value: unknown,
+): ProcessingRequestEnvelope | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Record<string, unknown>;
+  if (input.skill !== skill) return null;
+  const itemId = (candidate: unknown): string | null => {
+    const normalized = normalizeProcessingEnvelopeId(candidate, 64);
+    return normalized && PROCESSING_ENVELOPE_ITEM_ID_PATTERN.test(normalized)
+      ? normalized
+      : null;
+  };
+  const entityId = (candidate: unknown): string | null =>
+    normalizeProcessingEnvelopeId(candidate);
+  const slot = (candidate: unknown): number | null =>
+    Number.isSafeInteger(candidate) &&
+    Number(candidate) >= 0 &&
+    Number(candidate) <= 27
+      ? Number(candidate)
+      : null;
+
+  if (skill === "firemaking") {
+    const logsId = itemId(input.logsId);
+    const logsSlot = slot(input.logsSlot);
+    const tinderboxSlot = slot(input.tinderboxSlot);
+    return logsId &&
+      logsSlot !== null &&
+      tinderboxSlot !== null &&
+      logsSlot !== tinderboxSlot
+      ? { skill, logsId, logsSlot, tinderboxSlot }
+      : null;
+  }
+  if (skill === "cooking") {
+    const rawFoodId = itemId(input.rawFoodId);
+    const rawFoodSlot = slot(input.rawFoodSlot);
+    const sourceId = entityId(input.sourceId);
+    const sourceType = input.sourceType;
+    return rawFoodId &&
+      rawFoodSlot !== null &&
+      sourceId &&
+      (sourceType === "fire" || sourceType === "range")
+      ? { skill, rawFoodId, rawFoodSlot, sourceId, sourceType }
+      : null;
+  }
+  if (skill === "smelting") {
+    const barItemId = itemId(input.barItemId);
+    const furnaceId = entityId(input.furnaceId);
+    return barItemId && furnaceId && input.quantity === 1
+      ? { skill, barItemId, furnaceId, quantity: 1 }
+      : null;
+  }
+  if (skill === "smithing") {
+    const recipeId = itemId(input.recipeId);
+    const anvilId = entityId(input.anvilId);
+    return recipeId && anvilId && input.quantity === 1
+      ? { skill, recipeId, anvilId, quantity: 1 }
+      : null;
+  }
+  if (skill === "crafting") {
+    const recipeId = itemId(input.recipeId);
+    const stationId =
+      input.stationId === undefined ? undefined : entityId(input.stationId);
+    if (!recipeId || input.quantity !== 1 || stationId === null) return null;
+    return {
+      skill,
+      recipeId,
+      quantity: 1,
+      ...(stationId ? { stationId } : {}),
+    };
+  }
+  if (skill === "fletching") {
+    const recipeId = itemId(input.recipeId);
+    return recipeId && input.quantity === 1
+      ? { skill, recipeId, quantity: 1 }
+      : null;
+  }
+  if (skill === "runecrafting") {
+    const altarId = entityId(input.altarId);
+    const runeType = itemId(input.runeType);
+    return altarId && runeType ? { skill, altarId, runeType } : null;
+  }
+  const inputItemId = itemId(input.inputItemId);
+  const tannerEntityId = entityId(input.tannerEntityId);
+  const tannerNpcId = entityId(input.tannerNpcId);
+  return inputItemId && tannerEntityId && tannerNpcId && input.quantity === 1
+    ? { skill, inputItemId, quantity: 1, tannerEntityId, tannerNpcId }
+    : null;
+}
+
+const PROCESSING_REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Normalize a caller identity without reflecting malformed input. */
+export function normalizeProcessingRequestId(value: unknown): string | null {
+  if (typeof value !== "string" || !PROCESSING_REQUEST_ID_PATTERN.test(value)) {
+    return null;
+  }
+  return value.toLowerCase();
+}
+
+/**
+ * Map one correlated processing request to its one durable custody receipt.
+ * Correlated agent requests are deliberately single-action so this identity
+ * remains exact across response loss, reconnect, and process restart.
+ */
+export function getProcessingRequestOperationId(
+  skill: ProcessingSkill,
+  requestId: unknown,
+): string | null {
+  const normalizedRequestId = normalizeProcessingRequestId(requestId);
+  return normalizedRequestId
+    ? `processing-request:${skill}:${normalizedRequestId}`
+    : null;
+}
+
+/**
+ * Stable, viewer-safe rejection classes. Internal errors and custody details
+ * must not cross the player protocol boundary.
+ */
+export type ProcessingRejectionReason =
+  | "busy"
+  | "invalid_request"
+  | "not_authorized"
+  | "requirements_not_met"
+  | "resources_unavailable"
+  | "capacity_unavailable"
+  | "interrupted"
+  | "persistence_rejected";
+
+/** Safe lifecycle phases for correlated processing authority and terminal replay. */
+export type ProcessingProgressPhase =
+  "accepted" | "working" | "reconciling" | "committed";
+
+/**
+ * Positive acknowledgement for one correlated processing request. The
+ * terminal `committed` phase lets a recovered caller finish without
+ * redispatching gameplay when persistence won the resubmission race.
+ * It is player-targeted and intentionally omits inventory, database, and error
+ * details; callers use it to keep an inactivity watchdog from misclassifying a
+ * still-authoritative request as failed.
+ */
+export interface ProcessingRequestProgressPayload {
+  playerId: string;
+  requestId: string;
+  skill: ProcessingSkill;
+  phase: ProcessingProgressPhase;
+}
+
+/** Definitive negative acknowledgement for one correlated processing request. */
+export interface ProcessingRequestRejectedPayload {
+  playerId: string;
+  requestId: string;
+  skill: ProcessingSkill;
+  reason: ProcessingRejectionReason;
+  /** Whether a later retry may succeed without changing the request itself. */
+  retryable: boolean;
+}
+
+/** Durable receipt lookup result for one player-owned processing request. */
+export type ProcessingRequestCommitStatus =
+  | "committed"
+  | "pending"
+  | "interrupted"
+  | "rejected"
+  | "not_found"
+  | "unavailable";
+
+export interface ProcessingRequestStatusPayload {
+  playerId: string;
+  requestId: string;
+  /** Correlates one lookup response so stale negatives cannot win a race. */
+  queryId: string;
+  skill: ProcessingSkill;
+  status: ProcessingRequestCommitStatus;
 }
 
 // =========================================================================
@@ -677,6 +1040,7 @@ export interface ProcessingSmeltingRequestPayload {
   barItemId: string;
   furnaceId: string;
   quantity: number;
+  requestId?: string;
 }
 
 /**
@@ -714,6 +1078,7 @@ export interface SmeltingCompletePayload {
   totalSmelted: number;
   totalFailed: number;
   totalXp: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -737,6 +1102,7 @@ export interface ProcessingSmithingRequestPayload {
   recipeId: string;
   anvilId: string;
   quantity: number;
+  requestId?: string;
 }
 
 /**
@@ -757,6 +1123,7 @@ export interface SmithingCompletePayload {
   outputItemId: string;
   totalSmithed: number;
   totalXp: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -802,6 +1169,7 @@ export interface ProcessingCraftingRequestPayload {
   playerId: string;
   recipeId: string;
   quantity: number;
+  requestId?: string;
 }
 
 /**
@@ -821,6 +1189,7 @@ export interface CraftingCompletePayload {
   outputItemId: string;
   totalCrafted: number;
   totalXp: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -867,6 +1236,7 @@ export interface ProcessingFletchingRequestPayload {
   playerId: string;
   recipeId: string;
   quantity: number;
+  requestId?: string;
 }
 
 /**
@@ -886,6 +1256,7 @@ export interface FletchingCompletePayload {
   outputItemId: string;
   totalCrafted: number;
   totalXp: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -899,6 +1270,7 @@ export interface RunecraftingInteractPayload {
   playerId: string;
   altarId: string;
   runeType: string;
+  requestId?: string;
 }
 
 /**
@@ -912,6 +1284,7 @@ export interface RunecraftingCompletePayload {
   runesProduced: number;
   multiplier: number;
   xpAwarded: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -924,6 +1297,8 @@ export interface RunecraftingCompletePayload {
 export interface TanningInteractPayload {
   playerId: string;
   npcId: string;
+  /** Exact live Tanner entity used for authoritative range validation. */
+  npcEntityId?: string;
 }
 
 /**
@@ -948,6 +1323,7 @@ export interface TanningRequestPayload {
   playerId: string;
   inputItemId: string;
   quantity: number;
+  requestId?: string;
 }
 
 /**
@@ -959,6 +1335,7 @@ export interface TanningCompletePayload {
   outputItemId: string;
   totalTanned: number;
   totalCost: number;
+  requestId?: string;
 }
 
 // =========================================================================
@@ -987,6 +1364,8 @@ export interface EventMap {
     entityType?: "player" | "mob";
     /** Position at time of death - prevents stale position from cache */
     deathPosition?: { x: number; y: number; z: number };
+    /** Internal proof that competitive PvP XP already committed with the hit. */
+    combatProgressCommitted?: boolean;
   };
   [EventType.ENTITY_REVIVED]: { entityId: string; newHealth?: number };
   [EventType.ENTITY_UPDATED]: {
@@ -1012,6 +1391,7 @@ export interface EventMap {
     };
   };
   [EventType.UI_KICK]: { playerId: string; reason: string };
+  [EventType.ENTRY_RETRY_CHANGED]: { state: EntryRetryState | null };
   [EventType.UI_TOAST]: {
     /** Player to receive the toast (server-side routing). Client ignores this. */
     playerId?: string;
@@ -1065,9 +1445,42 @@ export interface EventMap {
   [EventType.ITEM_DROP]: {
     playerId: string;
     itemId: string;
-    quantity: number;
+    quantity?: number;
     slot?: number;
+    operationId?: string;
   };
+  [EventType.ITEM_DROPPED]: {
+    playerId: string;
+    itemId: string;
+    quantity: number;
+    position: Position3D;
+    operationId: string;
+    sourceId: string;
+  };
+  [EventType.ITEM_DROP_RESULT]:
+    | {
+        success: true;
+        committed: true;
+        playerId: string;
+        operationId: string;
+        itemId: string;
+        quantity: number;
+        sourceId: string;
+        position: Position3D;
+        replayed: boolean;
+        liveInventoryApplied: boolean;
+        liveCoinsApplied: boolean;
+        presentationReady: boolean;
+      }
+    | {
+        success: false;
+        committed: false | "unknown";
+        playerId: string;
+        operationId: string;
+        itemId: string;
+        quantity: number;
+        reason: string;
+      };
   [EventType.INVENTORY_USE]: { playerId: string; itemId: string; slot: number };
   [EventType.ITEM_PICKUP]: {
     playerId: string;
@@ -1124,23 +1537,25 @@ export interface EventMap {
     resourceId: string;
     position?: { x: number; y: number; z: number };
   };
+  [EventType.RESOURCE_GATHERING_COMPLETED]: {
+    playerId: string;
+    resourceId: string;
+    successful: boolean;
+    skill: string;
+    /** Present on the server only after atomic reward custody commits. */
+    operationId?: string;
+    /** Present on the server only; clients need no private inventory snapshot. */
+    rewardItemId?: string;
+    /** Exact committed reward quantity, when server-authored. */
+    rewardQuantity?: number;
+    /** Server-only terminal reason for a completion-bound rejected attempt. */
+    failureReason?: string;
+  };
   [EventType.RESOURCE_RESPAWNED]: {
     resourceId: string;
     position?: { x: number; y: number; z: number };
   };
-  [EventType.RESOURCE_SPAWN_POINTS_REGISTERED]: {
-    spawnPoints: Array<{
-      id: string;
-      type: string;
-      /** Specific variant (e.g., "oak" for tree_oak, "copper" for ore_copper) */
-      subType?: string;
-      position: { x: number; y: number; z: number };
-      /** Scale multiplier for visual variation */
-      scale?: number;
-      /** Y-axis rotation in radians for visual variation */
-      rotation?: number;
-    }>;
-  };
+  [EventType.RESOURCE_SPAWN_POINTS_REGISTERED]: TerrainResourceSpawnBatch;
   [EventType.RESOURCE_MESH_CREATED]: {
     mesh: unknown;
     instanceId: number | null;
@@ -1235,6 +1650,8 @@ export interface EventMap {
     tileX: number;
     tileZ: number;
     biome: string;
+    /** False for geometry-only horizon tiles. Defaults to true for legacy emitters. */
+    contentGenerated?: boolean;
     resources: Array<{
       id: string;
       type: string;
@@ -1301,6 +1718,7 @@ export interface EventMap {
   [EventType.COMBAT_KILL]: CombatKillPayload;
   [EventType.COMBAT_PROJECTILE_LAUNCHED]: CombatProjectileLaunchedPayload;
   [EventType.COMBAT_PROJECTILE_HIT]: CombatProjectileHitPayload;
+  [EventType.COMBAT_PROJECTILE_CANCELLED]: CombatProjectileCancelledPayload;
   [EventType.COMBAT_SPELL_CAST]: CombatSpellCastPayload;
   [EventType.COMBAT_RUNE_CONSUMED]: CombatRuneConsumedPayload;
   [EventType.COMBAT_AMMO_CONSUMED]: CombatAmmoConsumedPayload;
@@ -1328,6 +1746,9 @@ export interface EventMap {
   [EventType.COOKING_COMPLETED]: CookingCompletedPayload;
   [EventType.PROCESSING_FIREMAKING_REQUEST]: ProcessingFiremakingRequestPayload;
   [EventType.PROCESSING_COOKING_REQUEST]: ProcessingCookingRequestPayload;
+  [EventType.PROCESSING_REQUEST_PROGRESS]: ProcessingRequestProgressPayload;
+  [EventType.PROCESSING_REQUEST_REJECTED]: ProcessingRequestRejectedPayload;
+  [EventType.PROCESSING_REQUEST_STATUS]: ProcessingRequestStatusPayload;
   [EventType.FIREMAKING_MOVE_REQUEST]: FiremakingMoveRequestPayload;
 
   // Smelting Events (furnace: ore → bars)
@@ -1376,6 +1797,7 @@ export interface EventMap {
   [EventType.QUEST_START_DECLINED]: QuestStartDeclinedPayload;
   [EventType.QUEST_STARTED]: QuestStartedPayload;
   [EventType.QUEST_PROGRESSED]: QuestProgressedPayload;
+  [EventType.QUEST_COMPLETION_COMMITTED]: QuestCompletionCommittedPayload;
   [EventType.QUEST_COMPLETED]: QuestCompletedPayload;
   [EventType.QUEST_ABANDONED]: QuestAbandonedPayload;
 
@@ -1387,6 +1809,8 @@ export interface EventMap {
   // Gathering Events
   [EventType.GATHERING_TOOL_SHOW]: GatheringToolShowPayload;
   [EventType.GATHERING_TOOL_HIDE]: GatheringToolHidePayload;
+  [EventType.FISHING_INTERACTION_PRESENTATION]: FishingInteractionPresentationPayload;
+  [EventType.PROCESSING_INTERACTION_PRESENTATION]: ProcessingInteractionPresentationPayload;
 
   // Inventory Events
   [EventType.INVENTORY_UPDATED]: InventoryUpdatedPayload;
@@ -1396,6 +1820,8 @@ export interface EventMap {
 
   // Skills Events
   [EventType.SKILLS_UPDATED]: SkillsUpdatedPayload;
+  [EventType.SKILLS_PROGRESS_COMMITTED]: SkillsProgressCommittedPayload;
+  [EventType.DUEL_COMBAT_PROGRESS_COMMITTED]: DuelCombatProgressCommittedPayload;
   [EventType.XP_DROP_BROADCAST]: XpDropBroadcastPayload;
 
   // Prayer Events
@@ -1483,6 +1909,8 @@ export interface EventMap {
 
   // NPC/Mob Events (ServerNetwork)
   [EventType.NPC_DIED]: NPCDiedPayload;
+  [EventType.MOB_LOOT_COMMITTED]: MobLootCommittedPayload;
+  [EventType.DUEL_COMBAT_PROGRESS_COMMITTED]: DuelCombatProgressCommittedPayload;
 }
 
 /**
@@ -1546,6 +1974,18 @@ export interface QuestCompletedPayload {
     items: Array<{ itemId: string; quantity: number }>;
     xp: Record<string, number>;
   };
+  /** True when skill rewards already committed with the quest result. */
+  progressionCommitted?: boolean;
+}
+
+/** Internal live convergence emitted only after a durable quest completion. */
+export interface QuestCompletionCommittedPayload {
+  playerId: string;
+  questId: string;
+  operationId: string;
+  replayed: boolean;
+  progress: QuestCompletionProgressReceipt[];
+  prayer: PrayerPersistenceSnapshot | null;
 }
 
 /**
@@ -1668,11 +2108,23 @@ export interface GatheringToolShowPayload {
   playerId: string;
   itemId: string;
   slot: string;
+  /** Monotonic server-owned transition revision for snapshot/reorder safety. */
+  revision?: number;
 }
 
 export interface GatheringToolHidePayload {
   playerId: string;
   slot: string;
+  /** Monotonic server-owned transition revision for snapshot/reorder safety. */
+  revision?: number;
+}
+
+export interface FishingInteractionPresentationPayload extends FishingInteractionPresentationState {
+  playerId: string;
+}
+
+export interface ProcessingInteractionPresentationPayload extends ProcessingInteractionPresentationState {
+  playerId: string;
 }
 
 // =========================================================================
@@ -1707,6 +2159,21 @@ export interface InventoryRequestPayload {
 export interface SkillsUpdatedPayload {
   playerId?: string;
   skills?: unknown;
+  /** Prevents an already committed receipt from being saved as a new mutation. */
+  persistence?: "already_committed";
+}
+
+/** Exact progression snapshot returned by an already committed custody action. */
+export interface SkillsProgressCommittedPayload {
+  playerId: string;
+  operationId: string;
+  replayed: boolean;
+  skill: GatheringRewardSkill | ProcessingActionSkill;
+  xpAmount: number;
+  awardedXp: number;
+  operationCommittedXp: number;
+  currentXp: number;
+  currentLevel: number;
 }
 
 export interface XpDropBroadcastPayload {
@@ -2049,6 +2516,10 @@ export type EventPayloads = {
   [EventType.PENDING_ATTACK_CANCEL]: PendingAttackCancelPayload;
   [EventType.INVENTORY_ITEM_ADDED]: InventoryItemAddedPayload;
   [EventType.NPC_DIED]: NPCDiedPayload;
+  [EventType.MOB_LOOT_COMMITTED]: MobLootCommittedPayload;
+  [EventType.SKILLS_PROGRESS_COMMITTED]: SkillsProgressCommittedPayload;
+  [EventType.DUEL_COMBAT_PROGRESS_COMMITTED]: DuelCombatProgressCommittedPayload;
+  [EventType.QUEST_COMPLETION_COMMITTED]: QuestCompletionCommittedPayload;
 };
 
 /**

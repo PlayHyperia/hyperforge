@@ -13,8 +13,6 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
 } from "@solana/web3.js";
-import { createPublicClient, http } from "viem";
-import { foundry } from "viem/chains";
 import {
   findFightOracleConfigPda,
   findFightOracleDuelStatePda,
@@ -33,7 +31,7 @@ const values = parseArgs({
 
 if (values.help) {
   console.log(`
-Verify local streaming duel + duel-oracle publishing against Anvil and Solana localnet.
+Verify local streaming duel + duel-oracle publishing against Solana localnet.
 
 Usage:
   bun scripts/verify-duel-oracle-local.mjs [options]
@@ -57,18 +55,20 @@ const keepRunning = values["keep-running"] === true;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const runtimeDir = path.join(rootDir, ".runtime-locks", "duel-oracle-local");
-const anvilStatePath = path.join(rootDir, ".anvil", "duel-oracle-local-state.json");
-const duelOracleStorePath = path.join(runtimeDir, "duel-arena-oracle-records.json");
-const duelOutcomeOracleArtifactPath = path.join(
-  rootDir,
-  "packages/duel-oracle-evm/artifacts/contracts/DuelOutcomeOracle.sol/DuelOutcomeOracle.json",
+const duelOracleStorePath = path.join(
+  runtimeDir,
+  "duel-arena-oracle-records.json",
 );
 const solanaLedgerPath = path.join(runtimeDir, "solana-ledger");
 const solanaAuthorityPath = path.join(runtimeDir, "solana-authority.json");
-const anvilLogPath = path.join(runtimeDir, "anvil.log");
 const solanaValidatorLogPath = path.join(runtimeDir, "solana-validator.log");
 const duelStackLogPath = path.join(runtimeDir, "duel-stack.log");
-const anvilRpcUrl = process.env.ANVIL_RPC_URL?.trim() || "http://127.0.0.1:8545";
+const runId = crypto.randomBytes(6).toString("hex");
+const postgresContainer = `hyperia-duel-oracle-${runId}`;
+const postgresVolume = `${postgresContainer}-data`;
+const postgresPort =
+  Number.parseInt(process.env.DUEL_ORACLE_LOCAL_POSTGRES_PORT || "35559", 10) ||
+  35559;
 const solanaRpcUrl =
   process.env.DUEL_ARENA_ORACLE_SOLANA_LOCALNET_RPC_URL?.trim() ||
   "http://127.0.0.1:8899";
@@ -77,17 +77,15 @@ const solanaWsUrl =
   "ws://127.0.0.1:8900";
 const serverPort =
   Number.parseInt(process.env.DUEL_LOCAL_SERVER_PORT || "5565", 10) || 5565;
+const serverWsPort =
+  Number.parseInt(process.env.DUEL_LOCAL_WS_PORT || "5566", 10) || 5566;
 const clientPort =
   Number.parseInt(process.env.DUEL_LOCAL_CLIENT_PORT || "3333", 10) || 3333;
 const rtmpPort =
   Number.parseInt(process.env.DUEL_LOCAL_RTMP_PORT || "8766", 10) || 8766;
 const serverUrl = `http://127.0.0.1:${serverPort}`;
-const serverWsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+const serverWsUrl = `ws://127.0.0.1:${serverWsPort}/ws`;
 const clientUrl = `http://127.0.0.1:${clientPort}`;
-const defaultAnvilPrivateKey =
-  process.env.DUEL_ARENA_ORACLE_ANVIL_PRIVATE_KEY?.trim() ||
-  process.env.ANVIL_PRIVATE_KEY?.trim() ||
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const enabledStreamDestinations = resolveEnabledStreamDestinations(
   process.env.STREAM_ENABLED_DESTINATIONS ||
     process.env.DUEL_STREAM_DESTINATIONS,
@@ -134,8 +132,10 @@ function resolveEnabledStreamDestinations(rawValue) {
 }
 
 function isStreamDestinationEnabled(destination) {
-  return enabledStreamDestinations === null ||
-    enabledStreamDestinations.has(destination);
+  return (
+    enabledStreamDestinations === null ||
+    enabledStreamDestinations.has(destination)
+  );
 }
 
 function hasConfiguredEnvValue(...keys) {
@@ -178,6 +178,17 @@ function resolveRequiredStreamDestinations() {
 
 async function ensureDir(directory) {
   await fsp.mkdir(directory, { recursive: true });
+}
+
+async function clearOwnedRunLogs() {
+  const entries = await fsp.readdir(runtimeDir, { withFileTypes: true });
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".log"))
+      .map((entry) =>
+        fsp.rm(path.join(runtimeDir, entry.name), { force: true }),
+      ),
+  );
 }
 
 function assert(condition, message) {
@@ -258,6 +269,20 @@ function killProcessGroup(pid) {
   } catch {
     return;
   }
+}
+
+function removeOwnedDockerResource(kind, name) {
+  const args =
+    kind === "container" ? ["rm", "-f", name] : ["volume", "rm", name];
+  const result = spawnSync("docker", args, {
+    cwd: rootDir,
+    encoding: "utf8",
+  });
+  if (result.status === 0) return;
+
+  const detail = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  if (/no such (container|volume)/i.test(detail)) return;
+  fail(`Failed to remove owned PostgreSQL ${kind} ${name}: ${detail}`);
 }
 
 function listListeningPids(port) {
@@ -344,9 +369,32 @@ async function cleanupManagedChildren() {
   }
 }
 
+let cleanupPromise = null;
+function cleanupOwnedResources() {
+  cleanupPromise ||= (async () => {
+    await cleanupManagedChildren();
+    removeOwnedDockerResource("container", postgresContainer);
+    removeOwnedDockerResource("volume", postgresVolume);
+  })();
+  return cleanupPromise;
+}
+
+async function handleSignal(signal, exitCode) {
+  log(`received ${signal}; stopping only verifier-owned resources`);
+  try {
+    await cleanupOwnedResources();
+  } finally {
+    process.exit(exitCode);
+  }
+}
+
+process.once("SIGINT", () => void handleSignal("SIGINT", 130));
+process.once("SIGTERM", () => void handleSignal("SIGTERM", 143));
+
 function runCommand(label, command, args, options = {}) {
   const logPath =
-    options.logPath || path.join(runtimeDir, `${label.replace(/[^a-z0-9_-]/gi, "-")}.log`);
+    options.logPath ||
+    path.join(runtimeDir, `${label.replace(/[^a-z0-9_-]/gi, "-")}.log`);
 
   return new Promise((resolve, reject) => {
     const logFd = openLogFile(logPath);
@@ -382,47 +430,6 @@ function runCommand(label, command, args, options = {}) {
   });
 }
 
-async function isAnvilReady() {
-  try {
-    const response = await fetch(anvilRpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_chainId",
-        params: [],
-      }),
-    });
-    if (!response.ok) return false;
-    const payload = await response.json();
-    return typeof payload.result === "string" && payload.result.length > 2;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureAnvil() {
-  if (await isAnvilReady()) {
-    log(`reusing Anvil at ${anvilRpcUrl}`);
-    return { managed: false };
-  }
-
-  await ensureDir(path.dirname(anvilStatePath));
-  spawnDetached("anvil", "anvil", [
-    "--silent",
-    "--chain-id",
-    "31337",
-    "--state",
-    anvilStatePath,
-  ], {
-    logPath: anvilLogPath,
-  });
-
-  await waitFor("anvil rpc", isAnvilReady, 30_000);
-  return { managed: true };
-}
-
 async function isSolanaReady() {
   try {
     const connection = new Connection(solanaRpcUrl, "confirmed");
@@ -450,31 +457,53 @@ async function ensureSolanaKeypair(filePath) {
   }
 }
 
-async function ensureSolanaValidator() {
+async function ensureSolanaValidator({
+  programId,
+  binaryPath,
+  upgradeAuthority,
+}) {
   if (await isSolanaReady()) {
-    log(`reusing Solana local validator at ${solanaRpcUrl}`);
-    return { managed: false };
+    fail(
+      `Solana RPC ${solanaRpcUrl} is already active; refusing to reuse an unowned validator`,
+    );
   }
 
   await ensureDir(runtimeDir);
   await ensureDir(solanaLedgerPath);
-  spawnDetached("solana-test-validator", "solana-test-validator", [
-    "--reset",
-    "--ledger",
-    solanaLedgerPath,
-    "--rpc-port",
-    "8899",
-    "--faucet-port",
-    "9900",
-    "--bind-address",
-    "127.0.0.1",
-    "--quiet",
-  ], {
-    logPath: solanaValidatorLogPath,
-  });
+  spawnDetached(
+    "solana-test-validator",
+    "solana-test-validator",
+    [
+      "--reset",
+      "--ledger",
+      solanaLedgerPath,
+      "--rpc-port",
+      "8899",
+      "--faucet-port",
+      "9900",
+      "--bind-address",
+      "127.0.0.1",
+      "--upgradeable-program",
+      programId,
+      binaryPath,
+      upgradeAuthority,
+      "--quiet",
+    ],
+    {
+      logPath: solanaValidatorLogPath,
+    },
+  );
 
   await waitFor("solana local validator", isSolanaReady, 45_000);
-  return { managed: true };
+  const connection = new Connection(solanaRpcUrl, "confirmed");
+  const programAccount = await connection.getAccountInfo(
+    new PublicKey(programId),
+    "confirmed",
+  );
+  assert(
+    programAccount?.executable === true,
+    `Preloaded Solana program ${programId} is not executable`,
+  );
 }
 
 async function airdropSol(authorityPath, sol) {
@@ -499,90 +528,48 @@ async function airdropSol(authorityPath, sol) {
   return authority;
 }
 
-async function deployEvmOracle() {
-  log("deploying local EVM duel oracle to Anvil");
-  await runCommand("compile-evm-oracle", "bun", [
-    "run",
-    "--cwd",
-    "packages/duel-oracle-evm",
-    "compile",
-  ]);
-  await runCommand(
-    "deploy-evm-oracle",
-    "bun",
-    ["run", "--cwd", "packages/duel-oracle-evm", "deploy:anvil"],
-    {
-      env: {
-        ANVIL_RPC_URL: anvilRpcUrl,
-        ANVIL_PRIVATE_KEY: defaultAnvilPrivateKey,
-        PRIVATE_KEY: defaultAnvilPrivateKey,
-      },
-    },
-  );
-
-  const receiptPath = path.join(
-    rootDir,
-    "packages/duel-oracle-evm/deployments/duel-outcome-oracle/anvil.json",
-  );
-  const receipt = JSON.parse(await fsp.readFile(receiptPath, "utf8"));
-  assert(
-    typeof receipt.oracleAddress === "string" &&
-      /^0x[0-9a-fA-F]{40}$/.test(receipt.oracleAddress),
-    `invalid EVM oracle receipt at ${receiptPath}`,
-  );
-  return {
-    address: receipt.oracleAddress,
-    adminAddress: receipt.adminAddress,
-    reporterAddress: receipt.reporterAddress,
-    receiptPath,
-  };
-}
-
-async function loadDuelOutcomeOracleAbi() {
-  const artifact = JSON.parse(
-    await fsp.readFile(duelOutcomeOracleArtifactPath, "utf8"),
-  );
-  assert(Array.isArray(artifact?.abi), "missing DuelOutcomeOracle ABI artifact");
-  return artifact.abi;
-}
-
-async function deploySolanaOracle(authorityPath) {
-  log("building and deploying Solana duel oracle to localnet");
+async function buildSolanaOracle() {
+  log("building canonical Solana duel oracle artifacts");
   await runCommand("build-solana-oracle", "bun", [
     "run",
     "--cwd",
     "packages/duel-oracle-solana",
     "anchor:build",
   ]);
-  await runCommand(
-    "deploy-solana-oracle",
-    "bun",
-    [
-      "run",
-      "--cwd",
-      "packages/duel-oracle-solana",
-      "anchor:deploy:localnet",
-    ],
-    {
-      env: {
-        ANCHOR_WALLET: authorityPath,
-        SOLANA_LOCALNET_RPC_URL: solanaRpcUrl,
-      },
-    },
-  );
-
-  const programKeypairPath = path.join(
+  const idlPath = path.join(
     rootDir,
-    "packages/duel-oracle-solana/anchor/target/deploy/fight_oracle-keypair.json",
+    "packages/duel-oracle-solana/anchor/target/idl/fight_oracle.json",
   );
-  const secret = Uint8Array.from(
-    JSON.parse(await fsp.readFile(programKeypairPath, "utf8")),
+  const binaryPath = path.join(
+    rootDir,
+    "packages/duel-oracle-solana/anchor/target/deploy/fight_oracle.so",
   );
-  const programId = Keypair.fromSecretKey(secret).publicKey.toBase58();
+  const idl = JSON.parse(await fsp.readFile(idlPath, "utf8"));
+  const programId = String(idl?.address || "").trim();
+  assert(
+    programId,
+    "Canonical fight_oracle IDL is missing its program address",
+  );
+  assert(
+    fs.existsSync(binaryPath),
+    `Canonical fight_oracle SBF binary is missing: ${binaryPath}`,
+  );
+  new PublicKey(programId);
   return {
     programId,
-    programKeypairPath,
+    binaryPath,
   };
+}
+
+async function verifyPreloadedSolanaOracle(programId) {
+  log(`verifying preloaded Solana duel oracle ${programId}`);
+  await runCommand("verify-solana-oracle", "solana", [
+    "program",
+    "show",
+    "--url",
+    solanaRpcUrl,
+    programId,
+  ]);
 }
 
 async function waitForHttpOk(url, label, deadlineMs) {
@@ -607,12 +594,19 @@ function decodeAnchorString(buffer, offset) {
 }
 
 function anchorDiscriminator(name) {
-  return crypto.createHash("sha256").update(`account:${name}`).digest().subarray(0, 8);
+  return crypto
+    .createHash("sha256")
+    .update(`account:${name}`)
+    .digest()
+    .subarray(0, 8);
 }
 
 function decodeOracleConfigAccount(data) {
   const expected = anchorDiscriminator("OracleConfig");
-  assert(data.subarray(0, 8).equals(expected), "invalid OracleConfig discriminator");
+  assert(
+    data.subarray(0, 8).equals(expected),
+    "invalid OracleConfig discriminator",
+  );
   return {
     authority: new PublicKey(data.subarray(8, 40)).toBase58(),
     reporter: new PublicKey(data.subarray(40, 72)).toBase58(),
@@ -622,7 +616,10 @@ function decodeOracleConfigAccount(data) {
 
 function decodeDuelStateAccount(data) {
   const expected = anchorDiscriminator("DuelState");
-  assert(data.subarray(0, 8).equals(expected), "invalid DuelState discriminator");
+  assert(
+    data.subarray(0, 8).equals(expected),
+    "invalid DuelState discriminator",
+  );
 
   let offset = 8;
   const duelKey = data.subarray(offset, offset + 32);
@@ -671,17 +668,19 @@ function decodeDuelStateAccount(data) {
   };
 }
 
-async function startDuelStack({
-  evmOracleAddress,
-  solanaProgramId,
-  solanaAuthoritySecret,
-}) {
+async function startDuelStack({ solanaProgramId, solanaAuthoritySecret }) {
   log("starting local duel stack");
   await ensureDir(runtimeDir);
   await fsp.rm(duelOracleStorePath, { force: true });
   await clearPortListeners(serverPort, "game server");
+  await clearPortListeners(serverWsPort, "game websocket");
   await clearPortListeners(clientPort, "game client");
   await clearPortListeners(rtmpPort, "rtmp bridge");
+  const postgresListeners = listListeningPids(postgresPort);
+  assert(
+    postgresListeners.length === 0,
+    `Port ${postgresPort} (owned PostgreSQL) is already in use by pid(s): ${postgresListeners.join(", ")}`,
+  );
 
   spawnDetached(
     "duel-stack",
@@ -689,6 +688,7 @@ async function startDuelStack({
     [
       "scripts/duel-stack.mjs",
       "--fresh",
+      "--isolated",
       "--skip-betting",
       "--skip-keeper",
       "--server-url",
@@ -704,28 +704,54 @@ async function startDuelStack({
       logPath: duelStackLogPath,
       env: {
         PORT: String(serverPort),
+        UWS_PORT: String(serverWsPort),
         DUEL_ARENA_ORACLE_ENABLED: "true",
         DUEL_ARENA_ORACLE_PROFILE: "local",
         DUEL_ARENA_ORACLE_STORE_PATH: duelOracleStorePath,
         DUEL_ARENA_ORACLE_METADATA_BASE_URL: `${serverUrl}/api/duel-arena/oracle`,
-        DUEL_ARENA_ORACLE_ANVIL_RPC_URL: anvilRpcUrl,
-        DUEL_ARENA_ORACLE_ANVIL_CONTRACT_ADDRESS: evmOracleAddress,
-        DUEL_ARENA_ORACLE_ANVIL_PRIVATE_KEY: defaultAnvilPrivateKey,
         DUEL_ARENA_ORACLE_SOLANA_LOCALNET_RPC_URL: solanaRpcUrl,
         DUEL_ARENA_ORACLE_SOLANA_LOCALNET_WS_URL: solanaWsUrl,
         DUEL_ARENA_ORACLE_SOLANA_LOCALNET_PROGRAM_ID: solanaProgramId,
-        DUEL_ARENA_ORACLE_SOLANA_LOCALNET_AUTHORITY_SECRET: solanaAuthoritySecret,
-        DUEL_ARENA_ORACLE_SOLANA_LOCALNET_REPORTER_SECRET: solanaAuthoritySecret,
-        STREAMING_ANNOUNCEMENT_MS: process.env.STREAMING_ANNOUNCEMENT_MS || "12000",
+        DUEL_ARENA_ORACLE_SOLANA_LOCALNET_AUTHORITY_SECRET:
+          solanaAuthoritySecret,
+        DUEL_ARENA_ORACLE_SOLANA_LOCALNET_REPORTER_SECRET:
+          solanaAuthoritySecret,
+        DUEL_DATABASE_MODE: "local",
+        DUEL_DATABASE_URL: "",
+        DATABASE_URL: "",
+        USE_LOCAL_POSTGRES: "true",
+        POSTGRES_CONTAINER: postgresContainer,
+        POSTGRES_PORT: String(postgresPort),
+        POSTGRES_USER: "hyperia_duel_oracle",
+        POSTGRES_PASSWORD: `oracle-${runId}`,
+        POSTGRES_DB: "hyperia_duel_oracle",
+        POSTGRES_IMAGE: "postgres:16-alpine",
+        // This harness validates transport/oracle integration with synthetic
+        // local contestants. It must never enable a money-bearing market.
+        DUEL_WITH_HYPERBET: "false",
+        DUEL_LOCAL_SMOKE_MODE: "true",
+        LOAD_TEST_MODE: "true",
+        DUEL_LOG_LEVEL: "info",
+        // This is a local verification fixture, not a production timing
+        // default. Production intentionally requires an approved value.
+        STREAMING_DUEL_PREPARATION_MS:
+          process.env.STREAMING_DUEL_PREPARATION_MS || "5000",
+        STREAMING_ANNOUNCEMENT_MS:
+          process.env.STREAMING_ANNOUNCEMENT_MS || "12000",
         STREAMING_FIGHTING_MS: process.env.STREAMING_FIGHTING_MS || "45000",
-        STREAMING_END_WARNING_MS: process.env.STREAMING_END_WARNING_MS || "5000",
+        STREAMING_END_WARNING_MS:
+          process.env.STREAMING_END_WARNING_MS || "5000",
         STREAMING_RESOLUTION_MS: process.env.STREAMING_RESOLUTION_MS || "5000",
       },
     },
   );
 
   await waitForHttpOk(`${serverUrl}/health`, "game server health", timeoutMs);
-  await waitForHttpOk(`${serverUrl}/api/streaming/state`, "streaming state", timeoutMs);
+  await waitForHttpOk(
+    `${serverUrl}/api/streaming/state`,
+    "streaming state",
+    timeoutMs,
+  );
   await waitForHttpOk(`${clientUrl}/`, "game client", timeoutMs);
 }
 
@@ -758,18 +784,17 @@ async function verifyDuelAndStreaming() {
 
 async function waitForResolvedOracleRecord() {
   return waitFor(
-    "resolved oracle record on both local chains",
+    "resolved oracle record on Solana localnet",
     async () => {
-      const payload = await fetchJson(`${serverUrl}/api/duel-arena/oracle/recent`);
+      const payload = await fetchJson(
+        `${serverUrl}/api/duel-arena/oracle/recent`,
+      );
       const records = Array.isArray(payload?.records) ? payload.records : [];
       for (const record of records) {
-        const anvilState = record?.chainState?.anvil;
         const solanaState = record?.chainState?.solanaLocalnet;
         if (
           record?.status === "RESOLVED" &&
-          anvilState?.lastAction === "RESOLVE" &&
           solanaState?.lastAction === "RESOLVE" &&
-          !anvilState?.lastError &&
           !solanaState?.lastError &&
           typeof record?.duelKeyHex === "string"
         ) {
@@ -782,88 +807,64 @@ async function waitForResolvedOracleRecord() {
   );
 }
 
-async function verifyEvmState(record, oracleAddress) {
-  const abi = await loadDuelOutcomeOracleAbi();
-  const publicClient = createPublicClient({
-    chain: foundry,
-    transport: http(anvilRpcUrl),
-  });
-  const duelKeyHex = `0x${record.duelKeyHex}`;
-  const duel = await publicClient.readContract({
-    address: oracleAddress,
-    abi,
-    functionName: "getDuel",
-    args: [duelKeyHex],
-  });
-
-  assert(Number(duel.status) === 4, `expected EVM duel status RESOLVED, got ${duel.status}`);
-  assert(
-    Number(duel.winner) === (record.winnerSide === "A" ? 1 : 2),
-    `unexpected EVM duel winner ${duel.winner}`,
-  );
-  assert(
-    duel.metadataUri === record.metadataUri,
-    "EVM metadata URI mismatch",
-  );
-  assert(
-    duel.replayHash.toLowerCase() === `0x${record.replayHashHex}`.toLowerCase(),
-    "EVM replay hash mismatch",
-  );
-  assert(
-    duel.resultHash.toLowerCase() === `0x${record.resultHashHex}`.toLowerCase(),
-    "EVM result hash mismatch",
-  );
-  assert(String(duel.seed) === String(record.seed), "EVM seed mismatch");
-
-  const chainState = record.chainState.anvil;
-  assert(
-    typeof chainState?.lastTxHash === "string" && chainState.lastTxHash.startsWith("0x"),
-    "missing EVM oracle transaction hash",
-  );
-  const receipt = await publicClient.getTransactionReceipt({
-    hash: chainState.lastTxHash,
-  });
-  assert(receipt.status === "success", "EVM oracle resolution transaction failed");
-
-  return {
-    txHash: chainState.lastTxHash,
-    duel,
-  };
-}
-
 async function verifySolanaState(record, programId, authorityPubkey) {
   const connection = new Connection(solanaRpcUrl, "confirmed");
   const programKey = new PublicKey(programId);
   const [configPda] = findFightOracleConfigPda(programKey);
   const [duelPda] = findFightOracleDuelStatePda(record.duelKeyHex, programKey);
   const configAccount = await connection.getAccountInfo(configPda, "confirmed");
-  assert(configAccount, `missing Solana oracle config account ${configPda.toBase58()}`);
+  assert(
+    configAccount,
+    `missing Solana oracle config account ${configPda.toBase58()}`,
+  );
   const config = decodeOracleConfigAccount(Buffer.from(configAccount.data));
-  assert(config.authority === authorityPubkey, "Solana oracle authority mismatch");
-  assert(config.reporter === authorityPubkey, "Solana oracle reporter mismatch");
+  assert(
+    config.authority === authorityPubkey,
+    "Solana oracle authority mismatch",
+  );
+  assert(
+    config.reporter === authorityPubkey,
+    "Solana oracle reporter mismatch",
+  );
 
   const duelAccount = await connection.getAccountInfo(duelPda, "confirmed");
   assert(duelAccount, `missing Solana duel account ${duelPda.toBase58()}`);
   const duel = decodeDuelStateAccount(Buffer.from(duelAccount.data));
-  assert(duel.status === 3, `expected Solana duel status RESOLVED, got ${duel.status}`);
+  assert(
+    duel.status === 3,
+    `expected Solana duel status RESOLVED, got ${duel.status}`,
+  );
   assert(
     duel.winner === (record.winnerSide === "A" ? 1 : 2),
     `unexpected Solana duel winner ${duel.winner}`,
   );
-  assert(duel.metadataUri === record.metadataUri, "Solana metadata URI mismatch");
-  assert(duel.resultHashHex === record.resultHashHex, "Solana result hash mismatch");
-  assert(duel.replayHashHex === record.replayHashHex, "Solana replay hash mismatch");
+  assert(
+    duel.metadataUri === record.metadataUri,
+    "Solana metadata URI mismatch",
+  );
+  assert(
+    duel.resultHashHex === record.resultHashHex,
+    "Solana result hash mismatch",
+  );
+  assert(
+    duel.replayHashHex === record.replayHashHex,
+    "Solana replay hash mismatch",
+  );
   assert(String(duel.seed) === String(record.seed), "Solana seed mismatch");
 
   const chainState = record.chainState.solanaLocalnet;
   assert(
-    typeof chainState?.lastTxHash === "string" && chainState.lastTxHash.length > 20,
+    typeof chainState?.lastTxHash === "string" &&
+      chainState.lastTxHash.length > 20,
     "missing Solana oracle signature",
   );
   const signature = await connection.getSignatureStatus(chainState.lastTxHash, {
     searchTransactionHistory: true,
   });
-  assert(signature.value?.confirmationStatus, "Solana oracle signature not found");
+  assert(
+    signature.value?.confirmationStatus,
+    "Solana oracle signature not found",
+  );
 
   return {
     signature: chainState.lastTxHash,
@@ -876,24 +877,26 @@ async function verifySolanaState(record, programId, authorityPubkey) {
 
 async function main() {
   await ensureDir(runtimeDir);
+  await clearOwnedRunLogs();
 
   let completed = false;
   try {
-    await ensureAnvil();
-    await ensureSolanaValidator();
-    const authority = await airdropSol(solanaAuthorityPath, 200);
-    const evm = await deployEvmOracle();
-    const solana = await deploySolanaOracle(solanaAuthorityPath);
+    const solana = await buildSolanaOracle();
+    const authority = await ensureSolanaKeypair(solanaAuthorityPath);
+    await ensureSolanaValidator({
+      ...solana,
+      upgradeAuthority: authority.publicKey.toBase58(),
+    });
+    await airdropSol(solanaAuthorityPath, 200);
+    await verifyPreloadedSolanaOracle(solana.programId);
 
     await startDuelStack({
-      evmOracleAddress: evm.address,
       solanaProgramId: solana.programId,
       solanaAuthoritySecret: solanaAuthorityPath,
     });
 
     await verifyDuelAndStreaming();
     const record = await waitForResolvedOracleRecord();
-    const evmState = await verifyEvmState(record, evm.address);
     const solanaState = await verifySolanaState(
       record,
       solana.programId,
@@ -907,19 +910,11 @@ async function main() {
           ok: true,
           serverUrl,
           clientUrl,
-          anvilRpcUrl,
           solanaRpcUrl,
           duelId: record.duelId,
           duelKeyHex: record.duelKeyHex,
           winnerId: record.winnerId,
           winnerSide: record.winnerSide,
-          evm: {
-            oracleAddress: evm.address,
-            txHash: evmState.txHash,
-            status: Number(evmState.duel.status),
-            winner: Number(evmState.duel.winner),
-            seed: String(evmState.duel.seed),
-          },
           solana: {
             programId: solana.programId,
             signature: solanaState.signature,
@@ -930,7 +925,6 @@ async function main() {
             seed: String(solanaState.duel.seed),
           },
           logs: {
-            anvil: anvilLogPath,
             solanaValidator: solanaValidatorLogPath,
             duelStack: duelStackLogPath,
           },
@@ -940,11 +934,7 @@ async function main() {
       ),
     );
   } finally {
-    if (!keepRunning && completed) {
-      await cleanupManagedChildren();
-    } else if (!keepRunning && !completed) {
-      await cleanupManagedChildren();
-    }
+    if (!keepRunning) await cleanupOwnedResources();
   }
 }
 
@@ -952,9 +942,8 @@ main().catch(async (error) => {
   const detail = error instanceof Error ? error.message : String(error);
   console.error(`[duel-oracle-local] FAILED: ${detail}`);
   console.error(`[duel-oracle-local] logs:`);
-  console.error(`  anvil: ${anvilLogPath}`);
   console.error(`  solana-validator: ${solanaValidatorLogPath}`);
   console.error(`  duel-stack: ${duelStackLogPath}`);
-  await cleanupManagedChildren();
+  await cleanupOwnedResources();
   process.exit(1);
 });

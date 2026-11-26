@@ -338,4 +338,24 @@ describe("InteractionSessionManager - Combat Closes Sessions", () => {
       expect(mockBroadcast.sendToPlayer).not.toHaveBeenCalled();
     });
   });
+
+  describe("store identity provenance", () => {
+    it("copies the spawned NPC's exact runtime store identity into the session", () => {
+      mockWorld.entities.set("sword-store-npc", {
+        data: { storeId: "sword_store" },
+      });
+
+      mockWorld._triggerEvent(EventType.STORE_OPEN_REQUEST, {
+        playerId: "store-player",
+        npcId: "torvin",
+        npcEntityId: "sword-store-npc",
+      });
+
+      expect(manager.getSession("store-player")).toMatchObject({
+        sessionType: "store",
+        targetEntityId: "sword-store-npc",
+        targetStoreId: "sword_store",
+      });
+    });
+  });
 });

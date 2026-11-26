@@ -6,10 +6,14 @@
  */
 
 import { Elysia, t } from "elysia";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import type { ShellTextureService } from "../services/armor-pipeline/ShellTextureService";
+import {
+  ArmorPublishValidationError,
+  validatePublishedArmorGlb,
+} from "../services/armor-pipeline/DuelFitMetadata";
 
 /** Only allow alphanumeric, hyphens, and underscores in path segments */
 const SAFE_PATH_RE = /^[a-zA-Z0-9_-]+$/;
@@ -48,9 +52,37 @@ function isValidPublicUrl(urlStr: string): boolean {
 function parseBonuses(raw: string | undefined): Record<string, number> | null {
   if (!raw) return {};
   try {
-    return JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.entries(parsed).some(
+        ([key, value]) =>
+          !SAFE_PATH_RE.test(key) ||
+          typeof value !== "number" ||
+          !Number.isFinite(value),
+      )
+    ) {
+      return null;
+    }
+    return parsed as Record<string, number>;
   } catch {
     return null;
+  }
+}
+
+async function writeFileAtomically(
+  targetPath: string,
+  data: string | Uint8Array,
+): Promise<void> {
+  const temporaryPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, data);
+    await rename(temporaryPath, targetPath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -376,6 +408,15 @@ export const createArmorPipelineRoutes = (
 
             const itemName = body.itemName || itemId.replace(/_/g, " ");
             const tier = body.tier || "bronze";
+            if (
+              !SAFE_PATH_RE.test(tier) ||
+              itemName.length > 100 ||
+              /[\u0000-\u001f\u007f]/u.test(itemName)
+            ) {
+              throw new ArmorPublishValidationError(
+                "tier or itemName contains invalid publish metadata",
+              );
+            }
 
             // Determine game model directory based on slot
             const slotDirMap: Record<string, string> = {
@@ -393,6 +434,17 @@ export const createArmorPipelineRoutes = (
                 success: false,
                 error: `Unknown equipment slot: ${slot}. Must be one of: ${Object.keys(slotDirMap).join(", ")}`,
               };
+            }
+
+            // Validate the exact competitive identity embedded in the GLB and
+            // all request-derived data before creating or replacing any file.
+            const duelFit = validatePublishedArmorGlb(glbBuffer, {
+              itemId,
+              slot,
+            });
+            const bonuses = parseBonuses(body.bonuses);
+            if (bonuses === null) {
+              throw new ArmorPublishValidationError("Invalid bonuses JSON");
             }
 
             // Resolve paths relative to the monorepo
@@ -413,12 +465,7 @@ export const createArmorPipelineRoutes = (
               "armor.json",
             );
 
-            // Write GLB to game models directory
-            await mkdir(modelDir, { recursive: true });
             const glbPath = join(modelDir, `${itemId}.glb`);
-            await writeFile(glbPath, glbBuffer);
-
-            // Write metadata.json alongside the GLB
             const metadata = {
               name: itemId,
               gameId: itemId,
@@ -431,13 +478,12 @@ export const createArmorPipelineRoutes = (
               modelPath: `models/${slotDir}/${itemId}/${itemId}.glb`,
               gddCompliant: true,
               workflow: "Shell Extraction → Meshy Texture → Rig → Publish",
+              duelFit,
             };
-            await writeFile(
-              join(modelDir, "metadata.json"),
-              JSON.stringify(metadata, null, 2),
-            );
 
-            // Update armor manifest — add or update the item entry
+            // Parse and construct every output before creating or replacing a
+            // file. Each replacement is atomic, so readers never observe a
+            // partially-written GLB, metadata document, or manifest.
             let manifest: Record<string, unknown>[] = [];
             if (existsSync(manifestPath)) {
               const raw = await readFile(manifestPath, "utf-8");
@@ -460,13 +506,7 @@ export const createArmorPipelineRoutes = (
               examine: `A piece of ${tier} armor.`,
               tradeable: true,
               rarity: "common",
-              bonuses: (() => {
-                const parsed = parseBonuses(body.bonuses);
-                if (parsed === null) {
-                  throw new Error("Invalid bonuses JSON");
-                }
-                return parsed;
-              })(),
+              bonuses,
             };
 
             if (existingIndex >= 0) {
@@ -478,7 +518,16 @@ export const createArmorPipelineRoutes = (
               manifest.push(entry);
             }
 
-            await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+            await mkdir(modelDir, { recursive: true });
+            await writeFileAtomically(glbPath, glbBuffer);
+            await writeFileAtomically(
+              join(modelDir, "metadata.json"),
+              JSON.stringify(metadata, null, 2),
+            );
+            await writeFileAtomically(
+              manifestPath,
+              JSON.stringify(manifest, null, 2),
+            );
 
             console.log(
               `[ArmorPipeline] Published ${itemId} → ${glbPath} (${(glbBuffer.length / 1024).toFixed(1)}KB)`,
@@ -493,7 +542,7 @@ export const createArmorPipelineRoutes = (
               manifestUpdated: true,
             };
           } catch (err) {
-            set.status = 500;
+            set.status = err instanceof ArmorPublishValidationError ? 400 : 500;
             return {
               success: false,
               error: err instanceof Error ? err.message : String(err),

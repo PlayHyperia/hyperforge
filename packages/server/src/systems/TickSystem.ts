@@ -16,7 +16,12 @@
  * 5. State broadcast to clients
  */
 
-import { TICK_DURATION_MS, updateCachedTimestamp } from "@hyperforge/shared";
+import {
+  DurationHistogram,
+  type DurationPercentiles,
+  TICK_DURATION_MS,
+  updateCachedTimestamp,
+} from "@hyperforge/shared";
 
 /**
  * Tick callback priority levels
@@ -39,6 +44,8 @@ interface TickListener {
   priority: TickPriority;
   name: string;
 }
+
+export type { DurationPercentiles } from "@hyperforge/shared";
 
 /**
  * Server tick system for classic fantasy MMORPG-style game loop
@@ -83,6 +90,14 @@ export class TickSystem {
 
   /** Track total tick processing time */
   private lastTickDuration = 0;
+
+  /** Full-window tick latency distributions for launch/soak verification. */
+  private readonly tickDurationHistogram = new DurationHistogram();
+  private readonly tickLatenessHistogram = new DurationHistogram();
+  private readonly handlerDurationHistograms = new Map<
+    string,
+    DurationHistogram
+  >();
 
   // ============================================================================
   // MISSED TICK TRACKING
@@ -188,6 +203,7 @@ export class TickSystem {
     if (lateness > this.maxTickLateness) {
       this.maxTickLateness = lateness;
     }
+    this.tickLatenessHistogram.record(lateness);
 
     // Count late ticks (>50% of tick duration)
     if (lateness > TICK_DURATION_MS * 0.5) {
@@ -247,6 +263,12 @@ export class TickSystem {
 
       // Track handler timing
       const handlerDuration = Date.now() - handlerStart;
+      let handlerHistogram = this.handlerDurationHistograms.get(listener.name);
+      if (!handlerHistogram) {
+        handlerHistogram = new DurationHistogram();
+        this.handlerDurationHistograms.set(listener.name, handlerHistogram);
+      }
+      handlerHistogram.record(handlerDuration);
 
       // Warn about slow handlers (but don't skip - could break game logic)
       if (handlerDuration > TickSystem.SLOW_HANDLER_THRESHOLD_MS) {
@@ -278,6 +300,7 @@ export class TickSystem {
 
     // Track total tick duration
     this.lastTickDuration = Date.now() - tickStart;
+    this.tickDurationHistogram.record(this.lastTickDuration);
 
     // Warn if total tick exceeds budget
     if (this.lastTickDuration > TICK_DURATION_MS * 0.8) {
@@ -386,6 +409,15 @@ export class TickSystem {
     return stats;
   }
 
+  /** Full-window per-listener percentiles, keyed by stable listener name. */
+  getHandlerTimingPercentiles(): Record<string, DurationPercentiles> {
+    const stats: Record<string, DurationPercentiles> = {};
+    for (const [name, histogram] of this.handlerDurationHistograms) {
+      stats[name] = histogram.snapshot();
+    }
+    return stats;
+  }
+
   /**
    * Get tick health statistics for monitoring
    * @returns Tick health metrics
@@ -397,6 +429,8 @@ export class TickSystem {
     maxLateness: number;
     lastResetTick: number;
     lastTickDuration: number;
+    tickDurations: DurationPercentiles;
+    tickLateness: DurationPercentiles;
     isHealthy: boolean;
   } {
     // Healthy if missed <1% of ticks and max lateness < 2 tick durations
@@ -412,6 +446,8 @@ export class TickSystem {
       maxLateness: this.maxTickLateness,
       lastResetTick: this.lastScheduleReset,
       lastTickDuration: this.lastTickDuration,
+      tickDurations: this.tickDurationHistogram.snapshot(),
+      tickLateness: this.tickLatenessHistogram.snapshot(),
       isHealthy,
     };
   }
@@ -424,5 +460,10 @@ export class TickSystem {
     this.lateTickCount = 0;
     this.maxTickLateness = 0;
     this.lastScheduleReset = 0;
+    this.tickDurationHistogram.reset();
+    this.tickLatenessHistogram.reset();
+    for (const histogram of this.handlerDurationHistograms.values()) {
+      histogram.reset();
+    }
   }
 }

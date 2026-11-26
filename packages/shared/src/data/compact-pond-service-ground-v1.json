@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "terrainProfileId": "compact-duel-island-v6",
+  "courtRecipeId": "open-timber-pond-bank-haven-v1",
+  "landingRecipeId": "haven-fishing-landing-v1",
+  "entryDistance": 6,
+  "landwardApronDistance": 3.5,
+  "feather": 0.75,
+  "wornHeightScale": 0.35,
+  "lobes": [
+    {
+      "from": "standing",
+      "to": "center",
+      "coreRadius": 1.5,
+      "outerRadius": 4.2,
+      "strength": 0.92
+    },
+    {
+      "from": "center",
+      "to": "clerk",
+      "coreRadius": 1.2,
+      "outerRadius": 3.4,
+      "strength": 0.86
+    },
+    {
+      "from": "center",
+      "to": "entry",
+      "coreRadius": 0.85,
+      "outerRadius": 2.7,
+      "strength": 0.78
+    }
+  ]
+}

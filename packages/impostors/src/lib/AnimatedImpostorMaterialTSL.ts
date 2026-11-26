@@ -34,6 +34,7 @@ import {
   clamp,
   Discard,
   If,
+  select,
   varying,
 } from "three/tsl";
 import type { AnimatedImpostorMaterialConfig } from "./types";
@@ -140,7 +141,10 @@ export function createAnimatedImpostorMaterial(
     }).Else(() => {
       const dir = cameraDir.div(dot(abs(cameraDir), vec3(1.0))).toVar();
       If(dir.y.lessThan(0.0), () => {
-        const signNotZero = mix(vec2(1.0), sign(dir.xz), step(0.0, dir.xz));
+        const signNotZero = vec2(
+          select(dir.x.lessThan(0.0), float(-1.0), float(1.0)),
+          select(dir.z.lessThan(0.0), float(-1.0), float(1.0)),
+        );
         const oldX = dir.x;
         dir.x.assign(float(1.0).sub(abs(dir.z)).mul(signNotZero.x));
         dir.z.assign(float(1.0).sub(abs(oldX)).mul(signNotZero.y));

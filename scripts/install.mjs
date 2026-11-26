@@ -24,9 +24,7 @@ function run(label, command, args) {
   });
 
   if (result.status !== 0) {
-    throw new Error(
-      `${label} failed (exit ${result.status ?? "unknown"}).`,
-    );
+    throw new Error(`${label} failed (exit ${result.status ?? "unknown"}).`);
   }
 }
 
@@ -40,11 +38,16 @@ function main() {
       "[install] Skipping browser installation (HYPERIA_SKIP_BROWSER_INSTALL=true)",
     );
   } else {
-    run(
-      "Installing Playwright Chromium",
-      isWindows ? "bunx.cmd" : "bunx",
-      ["playwright", "install", "chromium"],
-    );
+    const installSystemDependencies =
+      process.platform === "linux" &&
+      (Boolean(process.env.CI) ||
+        process.env.HYPERIA_REQUIRE_BROWSER_SYSTEM_DEPS === "true");
+    run("Installing Playwright Chromium", isWindows ? "bunx.cmd" : "bunx", [
+      "playwright",
+      "install",
+      ...(installSystemDependencies ? ["--with-deps"] : []),
+      "chromium",
+    ]);
   }
 
   console.log("[install] Done. Next: bun run duel --fresh");

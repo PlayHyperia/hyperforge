@@ -112,13 +112,9 @@ export function findFishingSpotTiles(
       // The water mesh is flat at waterSurface — terrain above it hides the mesh.
       const landCX = tx + 0.5;
       const landCZ = tz + 0.5;
-      const waterSurface = getWaterSurfaceAt(
-        landCX + waterDx,
-        landCZ + waterDz,
-      );
-
       let spotX = 0;
       let spotZ = 0;
+      let waterSurface = 0;
       let found = false;
 
       // Search from 0.5m (tile boundary) to 3m into water, stepping 0.25m.
@@ -128,9 +124,15 @@ export function findFishingSpotTiles(
       for (let d = 0.5; d <= 3.0; d += 0.25) {
         const sx = landCX + waterDx * d;
         const sz = landCZ + waterDz * d;
-        if (getHeightAt(sx, sz) < waterSurface) {
+        // Resolve the surface at each probe. Conservative WATER flags may
+        // extend just outside a circular elevated body; sampling only the
+        // neighbor center can incorrectly return the ocean level and hide an
+        // otherwise valid pond shore.
+        const sampledSurface = getWaterSurfaceAt(sx, sz);
+        if (getHeightAt(sx, sz) < sampledSurface) {
           spotX = landCX + waterDx * (d + WATER_INSET);
           spotZ = landCZ + waterDz * (d + WATER_INSET);
+          waterSurface = getWaterSurfaceAt(spotX, spotZ);
           found = true;
           break;
         }

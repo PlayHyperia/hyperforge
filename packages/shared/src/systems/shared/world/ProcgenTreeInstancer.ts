@@ -18,6 +18,7 @@
  * LOD Levels: LOD0 (0-30m) → LOD1 (30-60m) → LOD2 (60-120m) → Impostor (120-200m) → Culled
  */
 
+import type { Node } from "three/webgpu";
 import THREE, {
   uniform,
   Fn,
@@ -55,6 +56,7 @@ import THREE, {
   If,
 } from "../../../extras/three/three";
 import type { World } from "../../../core/World";
+import type { UniformNode } from "three/webgpu";
 import {
   ImpostorManager,
   BakePriority,
@@ -319,14 +321,40 @@ interface WindMat extends THREE.MeshStandardNodeMaterial {
 
 type LODKey = "lod0" | "lod1" | "lod2";
 
+/** Immutable metadata only; the Three.js render handles remain borrowed. */
+export type ProcgenTreeRenderOwnershipRecord = Readonly<{
+  kind:
+    | "pool"
+    | "shadow"
+    | "impostor"
+    | "global-leaves"
+    | "global-clusters"
+    | "debug-impostor"
+    | "debug-atlas-color"
+    | "debug-atlas-normal"
+    | "debug-atlas-depth";
+  preset: string | null;
+  lod: LODKey | null;
+  mesh: THREE.InstancedMesh;
+  geometry: THREE.BufferGeometry;
+  material: THREE.Material | THREE.Material[];
+}>;
+
+export type ProcgenTreeRenderOwnership = Readonly<{
+  owner: ProcgenTreeInstancer;
+  world: World;
+  scene: THREE.Scene;
+  records: readonly ProcgenTreeRenderOwnershipRecord[];
+}>;
+
 interface LeafNodeMaterial extends THREE.MeshStandardNodeMaterial {
   leafUniforms: {
-    time: ReturnType<typeof uniform<number>>;
-    windStrength: ReturnType<typeof uniform<number>>;
-    windDirection: ReturnType<typeof uniform<THREE.Vector3>>;
-    baseColor: ReturnType<typeof uniform<THREE.Color>>;
-    sunDirection: ReturnType<typeof uniform<THREE.Vector3>>;
-    dayNightMix: ReturnType<typeof uniform<number>>;
+    time: UniformNode<"float", number>;
+    windStrength: UniformNode<"float", number>;
+    windDirection: UniformNode<"vec3", THREE.Vector3>;
+    baseColor: UniformNode<"color", THREE.Color>;
+    sunDirection: UniformNode<"vec3", THREE.Vector3>;
+    dayNightMix: UniformNode<"float", number>;
   };
 }
 
@@ -462,8 +490,8 @@ class GlobalLeafInstancer {
     const uDayNightMix = uniform(1.0); // 1.0 = full day, 0.0 = night
 
     // Get per-instance attributes
-    const instanceColor = attribute("instanceColor", "vec3");
-    const instanceFade = attribute("instanceFade", "float");
+    const instanceColor = attribute<"vec3">("instanceColor", "vec3");
+    const instanceFade = attribute<"float">("instanceFade", "float");
 
     // Wind animation constants
     const WIND_SPEED = 2.0;
@@ -531,7 +559,7 @@ class GlobalLeafInstancer {
 
     // ========== LEAF SHAPE FUNCTION ==========
     // Define leaf shape as a separate function (matching procgen pattern)
-    const getLeafAlpha = Fn(([uvCoord]: [ReturnType<typeof vec2>]) => {
+    const getLeafAlpha = Fn(([uvCoord]: [Node<"vec2">]) => {
       // Centered coordinates
       const px = sub(uvCoord.x, float(0.5));
       const py = sub(uvCoord.y, float(0.35));
@@ -810,6 +838,10 @@ class GlobalLeafInstancer {
     };
   }
 
+  getRenderMesh(): THREE.InstancedMesh {
+    return this.mesh;
+  }
+
   dispose(): void {
     this.mesh.parent?.remove(this.mesh);
     this.geometry.dispose();
@@ -1013,26 +1045,26 @@ class GlobalLeafClusterInstancer {
     };
 
     // Get per-instance attributes
-    const instanceColor = attribute("instanceColor", "vec3");
-    const instanceFade = attribute("instanceFade", "float");
-    const instanceDensity = attribute("instanceDensity", "float");
-    const instanceTreeCenter = attribute("instanceTreeCenter", "vec3");
+    const instanceColor = attribute<"vec3">("instanceColor", "vec3");
+    const instanceFade = attribute<"float">("instanceFade", "float");
+    const instanceDensity = attribute<"float">("instanceDensity", "float");
+    const instanceTreeCenter = attribute<"vec3">("instanceTreeCenter", "vec3");
     // instanceCellId available via attribute but not used currently
     // const instanceCellId = attribute("instanceCellId", "float");
 
     // TSL hash function for variation
-    const hash = Fn(([n]: [ReturnType<typeof float>]) => {
+    const hash = Fn(([n]: [Node<"float">]) => {
       return fract(mul(sin(mul(n, 127.1)), 43758.5453123));
     });
 
     // TSL hash2D function for noise
-    const hash2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+    const hash2D = Fn(([p]: [Node<"vec2">]) => {
       const dotProd = add(mul(p.x, 127.1), mul(p.y, 311.7));
       return fract(mul(sin(dotProd), 43758.5453123));
     });
 
     // TSL value noise function
-    const noise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+    const noise2D = Fn(([p]: [Node<"vec2">]) => {
       const i = floor(p);
       const f = fract(p);
       // Smoothstep interpolation: f * f * (3.0 - 2.0 * f)
@@ -1138,10 +1170,10 @@ class GlobalLeafClusterInstancer {
     // Single leaf silhouette - creates an actual leaf shape with pointed tip and lobed edges
     const leafSilhouette = Fn(
       ([p, leafAngle, leafScale, seed]: [
-        ReturnType<typeof vec2>,
-        ReturnType<typeof float>,
-        ReturnType<typeof float>,
-        ReturnType<typeof float>,
+        Node<"vec2">,
+        Node<"float">,
+        Node<"float">,
+        Node<"float">,
       ]) => {
         // Rotate point to leaf orientation
         const cosA = cos(leafAngle);
@@ -1909,6 +1941,10 @@ class GlobalLeafClusterInstancer {
     };
   }
 
+  getRenderMesh(): THREE.InstancedMesh {
+    return this.mesh;
+  }
+
   dispose(): void {
     this.mesh.parent?.remove(this.mesh);
     this.geometry.dispose();
@@ -2062,7 +2098,7 @@ function copyMaterialProps(
 
 /** Create screen-space dithering opacity node */
 function createDitherOpacity() {
-  const fade = attribute("instanceFade", "float");
+  const fade = attribute<"float">("instanceFade", "float");
   return Fn(() => {
     const screen = screenUV.mul(viewportSize);
     const px = floor(screen.x).mod(float(4));
@@ -2362,10 +2398,80 @@ export class ProcgenTreeInstancer {
     return ProcgenTreeInstancer.inst;
   }
 
+  /**
+   * Inspect only an existing owner; never create, load, or update trees.
+   * Includes hidden/empty render members. The owner identifies its lifetime,
+   * not later preset publication: consumers must revalidate the complete fresh
+   * mapping and each handle before classifying draws. Do not mutate or dispose
+   * any borrowed mesh, geometry, material, world, or scene through this snapshot.
+   */
+  static getRenderOwnership(
+    expectedWorld: World,
+    expectedScene: THREE.Scene,
+  ): ProcgenTreeRenderOwnership | null {
+    const owner = ProcgenTreeInstancer.inst;
+    if (
+      !owner ||
+      owner.world !== expectedWorld ||
+      owner.scene !== expectedScene
+    ) {
+      return null;
+    }
+    const records: ProcgenTreeRenderOwnershipRecord[] = [];
+    const append = (
+      kind: ProcgenTreeRenderOwnershipRecord["kind"],
+      preset: string | null,
+      lod: LODKey | null,
+      mesh: THREE.InstancedMesh,
+    ): void => {
+      records.push(
+        Object.freeze({
+          kind,
+          preset,
+          lod,
+          mesh,
+          geometry: mesh.geometry,
+          material: mesh.material,
+        }),
+      );
+    };
+    for (const [preset, lods] of owner.meshes) {
+      for (const [lod, member] of lods) {
+        append("pool", preset, lod, member.mesh);
+        if (member.shadowMesh) append("shadow", preset, lod, member.shadowMesh);
+      }
+    }
+    for (const [preset, member] of owner.impostors)
+      append("impostor", preset, null, member.mesh);
+    if (owner.globalLeaves)
+      append("global-leaves", null, null, owner.globalLeaves.getRenderMesh());
+    if (owner.globalClusters)
+      append(
+        "global-clusters",
+        null,
+        null,
+        owner.globalClusters.getRenderMesh(),
+      );
+    for (const [preset, member] of owner.debugImpostors)
+      append("debug-impostor", preset, null, member.mesh);
+    for (const [preset, member] of owner.debugAtlasPlanes) {
+      append("debug-atlas-color", preset, null, member.colorMesh);
+      if (member.normalMesh)
+        append("debug-atlas-normal", preset, null, member.normalMesh);
+      if (member.depthMesh)
+        append("debug-atlas-depth", preset, null, member.depthMesh);
+    }
+    return Object.freeze({
+      owner,
+      world: owner.world,
+      scene: owner.scene,
+      records: Object.freeze(records),
+    });
+  }
+
   private checkWebGPU(): boolean {
     const stage = this.world.stage as
-      | { renderer?: { isWebGPURenderer?: boolean } }
-      | undefined;
+      { renderer?: { isWebGPURenderer?: boolean } } | undefined;
     return stage?.renderer?.isWebGPURenderer === true;
   }
 
@@ -2473,8 +2579,7 @@ export class ProcgenTreeInstancer {
     const tex = result.atlasTexture;
     const hasImage = !!tex?.image;
     const atlasImage = tex?.image as
-      | { width?: number; height?: number }
-      | undefined;
+      { width?: number; height?: number } | undefined;
     const imgWidth = atlasImage?.width ?? 0;
     const imgHeight = atlasImage?.height ?? 0;
     console.log(

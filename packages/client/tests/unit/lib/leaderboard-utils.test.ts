@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatPhaseLabel,
   formatRelativeTime,
+  formatWinDrawLoss,
   formatWinLoss,
   normalizeSearchTerm,
   toWinRatePercent,
@@ -29,6 +30,16 @@ describe("leaderboard-utils", () => {
 
     it("guards negative values", () => {
       expect(formatWinLoss(-2, -5)).toBe("0-0");
+    });
+  });
+
+  describe("formatWinDrawLoss", () => {
+    it("keeps draws visible without folding them into wins or losses", () => {
+      expect(formatWinDrawLoss(10, 3, 4)).toBe("10-3-4");
+    });
+
+    it("sanitizes invalid draw counts", () => {
+      expect(formatWinDrawLoss(2, Number.NaN, 1)).toBe("2-0-1");
     });
   });
 

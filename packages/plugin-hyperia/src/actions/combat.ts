@@ -176,7 +176,7 @@ export const togglePrayerAction: Action = {
   name: "TOGGLE_PRAYER",
   similes: ["PRAY", "TOGGLE_PRAY", "ACTIVATE_PRAYER", "DEACTIVATE_PRAYER"],
   description:
-    "Toggle a prayer on or off. Specify the prayer by its id like protect_from_melee, protect_from_magic, protect_from_missiles, piety, eagle_eye, mystic_might, etc. Example: 'pray protect_from_melee'.",
+    "Toggle a Prayer exposed by the current game manifest. Specify its exact id, for example: 'pray rock_skin'.",
 
   validate: async (runtime: IAgentRuntime) => {
     const service = runtime.getService<HyperiaService>("hyperiaService");
@@ -197,6 +197,16 @@ export const togglePrayerAction: Action = {
       // Match prayer from manifest (data-driven) with space/underscore normalization
       let prayerId: string | null = null;
       const knownPrayers = getPrayerIds();
+      if (knownPrayers.length === 0) {
+        const text =
+          "Prayer data is unavailable, so no Prayer request was submitted.";
+        await callback?.({ text, error: true });
+        return {
+          success: false,
+          text,
+          error: new Error("Prayer manifest unavailable"),
+        };
+      }
       const normalizedInput = content.replace(/\s+/g, "_");
       for (const id of knownPrayers) {
         if (
@@ -208,18 +218,14 @@ export const togglePrayerAction: Action = {
         }
       }
 
-      // Regex fallback for when manifests aren't loaded or prayer not in manifest
       if (!prayerId) {
-        const match = content.match(/(?:toggle prayer|pray)\s+([a-z_]+)/i);
-        if (match && match[1]) {
-          prayerId = match[1];
-        } else {
-          return {
-            success: false,
-            text: "Specify which prayer to toggle.",
-            error: new Error("No prayer specified"),
-          };
-        }
+        const text = "Specify a Prayer available in the current game manifest.";
+        await callback?.({ text, error: true });
+        return {
+          success: false,
+          text,
+          error: new Error("Unknown or missing Prayer"),
+        };
       }
 
       const service = runtime.getService<HyperiaService>("hyperiaService");
@@ -230,14 +236,30 @@ export const togglePrayerAction: Action = {
         };
       }
 
-      await service.executeTogglePrayer(prayerId);
+      const receipt = await service.executeTogglePrayer(prayerId);
+      if (!receipt.success) {
+        const text = `Prayer request rejected: ${receipt.message ?? receipt.reason ?? "unknown reason"}`;
+        await callback?.({ text, error: true });
+        return {
+          success: false,
+          text,
+          error: new Error(receipt.reason ?? "Prayer request rejected"),
+        };
+      }
+
+      const isActive = receipt.activePrayers.includes(prayerId);
+      const state = isActive ? "active" : "inactive";
 
       await callback?.({
-        text: `Toggled prayer: ${prayerId}`,
+        text: `Prayer ${prayerId} is ${state}.`,
         action: "TOGGLE_PRAYER",
       });
 
-      return { success: true, text: `Prayer ${prayerId} toggled.` };
+      return {
+        success: true,
+        text: `Prayer ${prayerId} is ${state}.`,
+        data: { active: isActive, receipt },
+      };
     } catch (error) {
       await callback?.({
         text: `Failed to toggle prayer: ${error instanceof Error ? error.message : ""}`,
@@ -249,11 +271,11 @@ export const togglePrayerAction: Action = {
 
   examples: [
     [
-      { name: "user", content: { text: "Toggle protect from melee" } },
+      { name: "user", content: { text: "Activate rock skin" } },
       {
         name: "agent",
         content: {
-          text: "Toggled prayer: protect_from_melee",
+          text: "Prayer rock_skin is active.",
           action: "TOGGLE_PRAYER",
         },
       },

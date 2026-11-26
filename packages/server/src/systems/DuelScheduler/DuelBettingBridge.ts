@@ -55,6 +55,7 @@ interface DuelMarket {
   duelId: string;
   duelKeyHex: string;
   roundSeedHex: string;
+  source: "legacy" | "streaming";
   agent1Id: string;
   agent2Id: string;
   agent1Name: string;
@@ -212,8 +213,10 @@ function parseStreamingFightStartPayload(payload: unknown): {
 
 function parseStreamingResolutionPayload(payload: unknown): {
   duelId: string;
-  winnerId: string;
-  loserId: string;
+  duelKeyHex: string;
+  outcome: "win" | "draw";
+  winnerId: string | null;
+  loserId: string | null;
   winnerName: string | null;
   loserName: string | null;
   duration: number | undefined;
@@ -222,13 +225,25 @@ function parseStreamingResolutionPayload(payload: unknown): {
 } | null {
   const record = asRecord(payload);
   const duelId = asNonEmptyString(record?.duelId);
+  const duelKeyHex = asNonEmptyString(record?.duelKeyHex);
+  const outcome =
+    record?.outcome === "win" || record?.outcome === "draw"
+      ? record.outcome
+      : null;
   const winnerId = asNonEmptyString(record?.winnerId);
   const loserId = asNonEmptyString(record?.loserId);
-  if (!duelId || !winnerId || !loserId) {
+  if (
+    !duelId ||
+    !duelKeyHex ||
+    !outcome ||
+    (outcome === "win" && (!winnerId || !loserId))
+  ) {
     return null;
   }
   return {
     duelId,
+    duelKeyHex,
+    outcome,
     winnerId,
     loserId,
     winnerName: asNonEmptyString(record?.winnerName),
@@ -241,20 +256,31 @@ function parseStreamingResolutionPayload(payload: unknown): {
 
 function parseStreamingAbortPayload(payload: unknown): {
   duelId: string;
-  reason: string | null;
+  duelKeyHex: string;
+  reason: string;
+  agent1Id: string;
+  agent2Id: string;
 } | null {
   const record = asRecord(payload);
   const duelId = asNonEmptyString(record?.duelId);
-  if (!duelId) {
+  const duelKeyHex = asNonEmptyString(record?.duelKeyHex);
+  const reason = asNonEmptyString(record?.reason);
+  const agent1Id = asNonEmptyString(record?.agent1Id);
+  const agent2Id = asNonEmptyString(record?.agent2Id);
+  if (!duelId || !duelKeyHex || !reason || !agent1Id || !agent2Id) {
     return null;
   }
   return {
     duelId,
-    reason: asNonEmptyString(record?.reason),
+    duelKeyHex,
+    reason,
+    agent1Id,
+    agent2Id,
   };
 }
 
 function parseDuelResultPayload(payload: unknown): {
+  duelId: string;
   winnerId: string;
   loserId: string;
   winnerName: string | null;
@@ -262,12 +288,14 @@ function parseDuelResultPayload(payload: unknown): {
   duration: number | undefined;
 } | null {
   const record = asRecord(payload);
+  const duelId = asNonEmptyString(record?.duelId);
   const winnerId = asNonEmptyString(record?.winnerId);
   const loserId = asNonEmptyString(record?.loserId);
-  if (!winnerId || !loserId) {
+  if (!duelId || !winnerId || !loserId) {
     return null;
   }
   return {
+    duelId,
     winnerId,
     loserId,
     winnerName: asNonEmptyString(record?.winnerName),
@@ -518,6 +546,18 @@ export class DuelBettingBridge {
       return;
     }
 
+    const existing = this.activeMarkets.get(data.duelId);
+    if (
+      existing?.source === "streaming" &&
+      existing.agent1Id === data.agent1Id &&
+      existing.agent2Id === data.agent2Id
+    ) {
+      // StreamingDuelScheduler emits this legacy compatibility event directly
+      // after the identity-complete streaming announcement. It must not rewrite
+      // the canonical market key, source, sides, or close time.
+      return;
+    }
+
     await this.createOrSyncMarket({
       duelId: data.duelId,
       duelKeyHex: data.duelKeyHex,
@@ -595,14 +635,21 @@ export class DuelBettingBridge {
 
     this.ensureReconciliationLoop();
 
+    if (data.outcome === "draw") {
+      // The scheduler emits a separate, identity-complete abort frame for a
+      // draw. Only that authoritative frame may cancel the market.
+      return;
+    }
+
     const resolvedMarket = await this.getResolvableStreamingMarket(data.duelId);
     if (!resolvedMarket) {
       return;
     }
 
     await this.resolveMarket(resolvedMarket, {
-      winnerId: data.winnerId,
-      loserId: data.loserId,
+      duelKeyHex: data.duelKeyHex,
+      winnerId: data.winnerId!,
+      loserId: data.loserId!,
       winnerName: data.winnerName || "Unknown",
       loserName: data.loserName || "Unknown",
       duration: data.duration,
@@ -616,7 +663,7 @@ export class DuelBettingBridge {
   ): Promise<DuelMarket | null> {
     const existing = this.activeMarkets.get(duelId);
     if (existing) {
-      return existing;
+      return existing.source === "streaming" ? existing : null;
     }
 
     const scheduler = this.getStreamingDuelSchedulerFn();
@@ -664,9 +711,65 @@ export class DuelBettingBridge {
       return;
     }
 
+    const scheduler = this.getStreamingDuelSchedulerFn();
+    const cycle = scheduler?.getCurrentCycle();
+    const hasCanonicalCycle =
+      cycle?.duelId === market.duelId &&
+      cycle.duelKeyHex === market.duelKeyHex &&
+      cycle.agent1?.characterId === market.agent1Id &&
+      cycle.agent2?.characterId === market.agent2Id;
+    const hasCanonicalTerminalState =
+      data.reason === "draw"
+        ? cycle?.phase === "RESOLUTION" && cycle.outcome === "draw"
+        : cycle?.phase === "ANNOUNCEMENT" ||
+          cycle?.phase === "COUNTDOWN" ||
+          cycle?.phase === "FIGHTING";
+    const hasCanonicalAbort =
+      market.source === "streaming" &&
+      hasCanonicalCycle &&
+      data.duelKeyHex === market.duelKeyHex &&
+      data.agent1Id === market.agent1Id &&
+      data.agent2Id === market.agent2Id &&
+      hasCanonicalTerminalState;
+    if (!hasCanonicalAbort) {
+      Logger.error(
+        "DuelBettingBridge",
+        "Rejected non-canonical streaming market abort",
+        null,
+        {
+          duelId: market.duelId,
+          reason: data.reason,
+          expectedDuelKeyHex: market.duelKeyHex,
+          receivedDuelKeyHex: data.duelKeyHex,
+          expectedAgent1Id: market.agent1Id,
+          expectedAgent2Id: market.agent2Id,
+          receivedAgent1Id: data.agent1Id,
+          receivedAgent2Id: data.agent2Id,
+          authoritativeCycleId: cycle?.cycleId ?? null,
+          authoritativePhase: cycle?.phase ?? null,
+          authoritativeOutcome: cycle?.outcome ?? null,
+        },
+      );
+      this.world.emit("betting:market:abort-rejected", {
+        duelId: market.duelId,
+        reason: "authoritative_abort_mismatch",
+        cancellationReason: data.reason,
+        expectedDuelKeyHex: market.duelKeyHex,
+        receivedDuelKeyHex: data.duelKeyHex,
+        expectedAgent1Id: market.agent1Id,
+        expectedAgent2Id: market.agent2Id,
+        receivedAgent1Id: data.agent1Id,
+        receivedAgent2Id: data.agent2Id,
+        authoritativeCycleId: cycle?.cycleId ?? null,
+        authoritativePhase: cycle?.phase ?? null,
+        authoritativeOutcome: cycle?.outcome ?? null,
+      });
+      return;
+    }
+
     Logger.warn("DuelBettingBridge", "Removing aborted betting market", {
       duelId: data.duelId,
-      reason: data.reason || "streaming abort",
+      reason: data.reason,
     });
     if (market.onChainInitialized) {
       Logger.error(
@@ -676,14 +779,14 @@ export class DuelBettingBridge {
         {
           duelId: data.duelId,
           roundSeedHex: market.roundSeedHex,
-          reason: data.reason || "streaming abort",
+          reason: data.reason,
         },
       );
       this.world.emit("betting:market:orphaned", {
         duelId: data.duelId,
         market,
         roundSeedHex: market.roundSeedHex,
-        reason: data.reason || "streaming abort",
+        reason: data.reason,
         manualInterventionRequired: true,
       });
     }
@@ -802,6 +905,7 @@ export class DuelBettingBridge {
       duelId: params.duelId,
       duelKeyHex: roundSeedHex,
       roundSeedHex,
+      source: params.source,
       agent1Id: params.agent1Id,
       agent2Id: params.agent2Id,
       agent1Name: params.agent1Name || params.agent1Id,
@@ -814,13 +918,54 @@ export class DuelBettingBridge {
       winnerSide: undefined,
     };
 
-    market.duelKeyHex = roundSeedHex;
-    market.roundSeedHex = roundSeedHex;
-    market.agent1Id = params.agent1Id;
-    market.agent2Id = params.agent2Id;
-    market.agent1Name = params.agent1Name || params.agent1Id;
-    market.agent2Name = params.agent2Name || params.agent2Id;
-    market.bettingClosesAt = params.bettingClosesAt;
+    if (
+      existing &&
+      (existing.source !== params.source ||
+        existing.duelKeyHex !== roundSeedHex ||
+        existing.agent1Id !== params.agent1Id ||
+        existing.agent2Id !== params.agent2Id)
+    ) {
+      Logger.error(
+        "DuelBettingBridge",
+        "Rejected betting market identity rewrite",
+        null,
+        {
+          duelId: params.duelId,
+          expectedSource: existing.source,
+          receivedSource: params.source,
+          expectedDuelKeyHex: existing.duelKeyHex,
+          receivedDuelKeyHex: roundSeedHex,
+          expectedAgent1Id: existing.agent1Id,
+          expectedAgent2Id: existing.agent2Id,
+          receivedAgent1Id: params.agent1Id,
+          receivedAgent2Id: params.agent2Id,
+        },
+      );
+      this.world.emit("betting:market:synchronization-rejected", {
+        duelId: params.duelId,
+        reason: "immutable_market_identity_mismatch",
+        expectedSource: existing.source,
+        receivedSource: params.source,
+        expectedDuelKeyHex: existing.duelKeyHex,
+        receivedDuelKeyHex: roundSeedHex,
+        expectedAgent1Id: existing.agent1Id,
+        expectedAgent2Id: existing.agent2Id,
+        receivedAgent1Id: params.agent1Id,
+        receivedAgent2Id: params.agent2Id,
+      });
+      return;
+    }
+
+    if (!existing) {
+      market.duelKeyHex = roundSeedHex;
+      market.roundSeedHex = roundSeedHex;
+      market.source = params.source;
+      market.agent1Id = params.agent1Id;
+      market.agent2Id = params.agent2Id;
+      market.agent1Name = params.agent1Name || params.agent1Id;
+      market.agent2Name = params.agent2Name || params.agent2Id;
+      market.bettingClosesAt = params.bettingClosesAt;
+    }
 
     this.activeMarkets.set(params.duelId, market);
 
@@ -897,6 +1042,7 @@ export class DuelBettingBridge {
   private async resolveMarket(
     market: DuelMarket,
     outcome: {
+      duelKeyHex?: string | null;
       winnerId: string;
       loserId: string;
       winnerName: string;
@@ -908,6 +1054,102 @@ export class DuelBettingBridge {
   ): Promise<void> {
     if (market.status === "resolved" || market.status === "aborted") {
       return;
+    }
+
+    const hasCanonicalParticipants =
+      outcome.winnerId !== outcome.loserId &&
+      ((outcome.winnerId === market.agent1Id &&
+        outcome.loserId === market.agent2Id) ||
+        (outcome.winnerId === market.agent2Id &&
+          outcome.loserId === market.agent1Id));
+    const hasCanonicalDuelKey =
+      outcome.duelKeyHex == null || outcome.duelKeyHex === market.duelKeyHex;
+    if (!hasCanonicalParticipants || !hasCanonicalDuelKey) {
+      const reason = !hasCanonicalDuelKey
+        ? "duel_key_mismatch"
+        : "participant_pair_mismatch";
+      Logger.error(
+        "DuelBettingBridge",
+        "Rejected non-canonical market resolution",
+        null,
+        {
+          duelId: market.duelId,
+          reason,
+          expectedDuelKeyHex: market.duelKeyHex,
+          receivedDuelKeyHex: outcome.duelKeyHex ?? null,
+          expectedAgent1Id: market.agent1Id,
+          expectedAgent2Id: market.agent2Id,
+          receivedWinnerId: outcome.winnerId,
+          receivedLoserId: outcome.loserId,
+        },
+      );
+      this.world.emit("betting:market:resolution-rejected", {
+        duelId: market.duelId,
+        reason,
+        expectedDuelKeyHex: market.duelKeyHex,
+        receivedDuelKeyHex: outcome.duelKeyHex ?? null,
+        expectedAgent1Id: market.agent1Id,
+        expectedAgent2Id: market.agent2Id,
+        receivedWinnerId: outcome.winnerId,
+        receivedLoserId: outcome.loserId,
+      });
+      return;
+    }
+
+    if (market.source === "streaming") {
+      const scheduler = this.getStreamingDuelSchedulerFn();
+      const cycle = scheduler?.getCurrentCycle();
+      const authoritativeReason = !cycle
+        ? "authoritative_cycle_missing"
+        : cycle.duelId !== market.duelId
+          ? "authoritative_duel_mismatch"
+          : cycle.phase !== "RESOLUTION" || cycle.outcome !== "win"
+            ? "authoritative_phase_mismatch"
+            : cycle.duelKeyHex !== market.duelKeyHex
+              ? "authoritative_duel_key_mismatch"
+              : cycle.agent1?.characterId !== market.agent1Id ||
+                  cycle.agent2?.characterId !== market.agent2Id
+                ? "authoritative_participant_pair_mismatch"
+                : cycle.winnerId !== outcome.winnerId ||
+                    cycle.loserId !== outcome.loserId
+                  ? "authoritative_outcome_mismatch"
+                  : null;
+      if (authoritativeReason) {
+        Logger.error(
+          "DuelBettingBridge",
+          "Rejected resolution outside the authoritative streaming terminal state",
+          null,
+          {
+            duelId: market.duelId,
+            reason: authoritativeReason,
+            authoritativeCycleId: cycle?.cycleId ?? null,
+            authoritativeDuelId: cycle?.duelId ?? null,
+            authoritativePhase: cycle?.phase ?? null,
+            authoritativeOutcome: cycle?.outcome ?? null,
+            authoritativeDuelKeyHex: cycle?.duelKeyHex ?? null,
+            authoritativeWinnerId: cycle?.winnerId ?? null,
+            authoritativeLoserId: cycle?.loserId ?? null,
+          },
+        );
+        this.world.emit("betting:market:resolution-rejected", {
+          duelId: market.duelId,
+          reason: authoritativeReason,
+          expectedDuelKeyHex: market.duelKeyHex,
+          receivedDuelKeyHex: outcome.duelKeyHex ?? null,
+          expectedAgent1Id: market.agent1Id,
+          expectedAgent2Id: market.agent2Id,
+          receivedWinnerId: outcome.winnerId,
+          receivedLoserId: outcome.loserId,
+          authoritativeCycleId: cycle?.cycleId ?? null,
+          authoritativeDuelId: cycle?.duelId ?? null,
+          authoritativePhase: cycle?.phase ?? null,
+          authoritativeOutcome: cycle?.outcome ?? null,
+          authoritativeDuelKeyHex: cycle?.duelKeyHex ?? null,
+          authoritativeWinnerId: cycle?.winnerId ?? null,
+          authoritativeLoserId: cycle?.loserId ?? null,
+        });
+        return;
+      }
     }
 
     const winnerSide: "A" | "B" =
@@ -1123,6 +1365,7 @@ export class DuelBettingBridge {
         market.status !== "resolved"
       ) {
         await this.resolveMarket(market, {
+          duelKeyHex: cycle.duelKeyHex,
           winnerId: cycle.winnerId,
           loserId: cycle.loserId,
           winnerName:
@@ -1161,22 +1404,16 @@ export class DuelBettingBridge {
     }
     const winnerId = data.winnerId;
     const loserId = data.loserId;
-
-    // Find the market by matching winner/loser to agents
-    let market: DuelMarket | null = null;
-
-    for (const m of this.activeMarkets.values()) {
-      if (
-        (m.agent1Id === winnerId && m.agent2Id === loserId) ||
-        (m.agent1Id === loserId && m.agent2Id === winnerId)
-      ) {
-        market = m;
-        break;
-      }
-    }
+    const market = this.activeMarkets.get(data.duelId) ?? null;
 
     if (!market) {
       // No market for this duel - might be a non-scheduled duel
+      return;
+    }
+
+    // Streaming markets settle only from the identity-complete streaming
+    // resolution frame or reconciliation against the authoritative cycle.
+    if (market.source === "streaming") {
       return;
     }
 

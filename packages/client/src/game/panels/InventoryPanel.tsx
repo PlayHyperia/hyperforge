@@ -1218,19 +1218,13 @@ export function InventoryPanel({
 
   const handleShiftClick = useCallback(
     (clickedItem: InventorySlotViewItem, slotIndex: number) => {
-      if (world?.network?.dropItem) {
-        world.network.dropItem(
-          clickedItem.itemId,
-          slotIndex,
-          clickedItem.quantity || 1,
-        );
-      } else if (world?.network?.send) {
-        world.network.send("dropItem", {
-          itemId: clickedItem.itemId,
-          slot: slotIndex,
-          quantity: clickedItem.quantity || 1,
-        });
-      }
+      if (!world) return;
+      dispatchInventoryAction("drop", {
+        world,
+        itemId: clickedItem.itemId,
+        slot: slotIndex,
+        quantity: clickedItem.quantity || 1,
+      });
     },
     [world],
   );

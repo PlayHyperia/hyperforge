@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "activationGroupId": "steve-fishing-interactions-v1",
+  "avatarId": "steve",
+  "itemsManifest": {
+    "path": "manifests/items/tools.json",
+    "baselineSha256": "6b0992d6aeabfeb45485abd094d4d5224939f5d37c5ed833d332890bb3a2db73"
+  },
+  "runtimeManifest": {
+    "path": "manifests/duel-presentation-assets.json",
+    "baselineSha256": "fcfa73c0790d55776526df15f63d9c56fc72a30faebe05a87000fd0bf895c796"
+  },
+  "reports": {
+    "motions": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/steve-fishing-interaction-motion-report.json",
+      "sha256": "8b733f174ae0548834553dee83df381eaf1acabcfbb403bf9387ad459220685a"
+    },
+    "fits": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/steve-fishing-interaction-equipment-fit-report.json",
+      "sha256": "064f644cd1aa4271ec94fc8c099d609ae6abfae242a9c851b8eaa72a220145ba"
+    }
+  },
+  "motions": [
+    {
+      "id": "small_fishing_net_release",
+      "destinationPath": "emotes/emote-steve-small-fishing-net-release.glb"
+    },
+    {
+      "id": "fishing_retrieve",
+      "destinationPath": "emotes/emote-steve-fishing-retrieve.glb"
+    },
+    {
+      "id": "lobster_pot_deploy",
+      "destinationPath": "emotes/emote-steve-lobster-pot-deploy.glb"
+    }
+  ],
+  "items": [
+    {
+      "itemId": "fly_fishing_rod",
+      "bodyEmoteKey": "fly_fishing_rod",
+      "equipmentDestinationPath": "models/tools/fishing-interactions/fly-fishing-rod-steve-fitted.glb",
+      "motionId": "existing_fishing_cast",
+      "motion": {
+        "assetUrl": "asset://emotes/emote-steve-fishing-cast.glb",
+        "sha256": "061c247a2e6618daa370bfc759ebabb57ff0ff79c23c9f93dba5dc9c7177ac99",
+        "durationSeconds": 1.933333,
+        "loopSeamExact": true
+      }
+    },
+    {
+      "itemId": "small_fishing_net",
+      "bodyEmoteKey": "small_fishing_net",
+      "equipmentDestinationPath": "models/tools/fishing-interactions/small-fishing-net-steve-fitted.glb",
+      "motionId": "small_fishing_net_release",
+      "retrievalMotionId": "fishing_retrieve",
+      "world": {
+        "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources/small_fishing_net.glb",
+        "sha256": "6855ba8bf48b30a3fc65e26fead6cef51f8fc85a054db540e0633d7c34fa1d8b",
+        "destinationPath": "models/tools/fishing-interactions/small-fishing-net-world.glb"
+      },
+      "review": {
+        "reportPath": "artifacts/duel-launch-avatar-bakeoff/fishing-interaction-review/small-fishing-net-motion-report.json",
+        "reportSha256": "5be32730c8a89d588db6ac7a3eb820009a96a2bad174c48e97e9ee465b056c11",
+        "contactSheetPath": "artifacts/duel-launch-avatar-bakeoff/fishing-interaction-review/small-fishing-net-contact-sheet.png",
+        "contactSheetSha256": "a38ad58106ce01c6c3db45e2f0d642cd97e52d18c390c355faa73c46b638e40c",
+        "sampleCount": 4
+      }
+    },
+    {
+      "itemId": "lobster_pot",
+      "bodyEmoteKey": "lobster_pot",
+      "equipmentDestinationPath": "models/tools/fishing-interactions/lobster-pot-steve-fitted.glb",
+      "motionId": "lobster_pot_deploy",
+      "retrievalMotionId": "fishing_retrieve",
+      "world": {
+        "sourcePath": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/sources/lobster_pot.glb",
+        "sha256": "2c56e8b5ac393a1550ba77f11eacfb37b9bffdc5bf15be091fa1456ed5fef30a",
+        "destinationPath": "models/tools/fishing-interactions/lobster-pot-world.glb"
+      },
+      "review": {
+        "reportPath": "artifacts/duel-launch-avatar-bakeoff/fishing-interaction-review/lobster-pot-motion-report.json",
+        "reportSha256": "501f30b73211245683227a29daee747c78cee6602b12513235411a152233195e",
+        "contactSheetPath": "artifacts/duel-launch-avatar-bakeoff/fishing-interaction-review/lobster-pot-contact-sheet.png",
+        "contactSheetSha256": "1c949343cf0bbb3fc2b99bf6bf1043fe1bb5298a0e3212e481fb3cdc3da12484",
+        "sampleCount": 8
+      }
+    }
+  ]
+}

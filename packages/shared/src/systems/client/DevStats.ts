@@ -21,6 +21,12 @@ import type { TerrainSystem } from "../shared/world/TerrainSystem";
 import type { WaterSystem } from "../shared/world/WaterSystem";
 import { getTreeInstanceStats } from "../shared/world/ProcgenTreeCache";
 import THREE from "../../extras/three/three";
+import { isStreamingLikeViewport } from "../../runtime/clientViewportMode";
+import {
+  classifyStreamResourceCategory,
+  StreamPerformanceTelemetry,
+  type StreamingPerformanceSnapshot,
+} from "./StreamPerformanceTelemetry";
 
 /** Performance sample for rolling averages */
 type FrameSample = {
@@ -44,6 +50,41 @@ type RenderInfo = {
   triangles: number;
   textures: number;
   geometries: number;
+};
+
+type StreamSceneComplexityContributor = {
+  name: string;
+  category: string;
+  type: string;
+  triangles: number;
+  instances: number;
+  visible: boolean;
+};
+
+type StreamSceneComplexitySnapshot = {
+  schemaVersion: 1;
+  capturedAt: number;
+  objectCount: number;
+  visibleObjectCount: number;
+  triangles: number;
+  visibleTriangles: number;
+  categories: Array<{
+    category: string;
+    objectCount: number;
+    visibleObjectCount: number;
+    triangles: number;
+    visibleTriangles: number;
+  }>;
+  topObjects: StreamSceneComplexityContributor[];
+};
+
+type StreamingTelemetryWindow = Window & {
+  __HYPERIA_STREAM_RENDERER_HEALTH__?: {
+    phase?: string | null;
+  } | null;
+  __HYPERIA_STREAM_PERFORMANCE__?: StreamingPerformanceSnapshot | null;
+  __HYPERIA_RESET_STREAM_PERFORMANCE__?: () => boolean;
+  __HYPERIA_GET_STREAM_SCENE_COMPLEXITY__?: () => StreamSceneComplexitySnapshot | null;
 };
 
 /**
@@ -79,6 +120,11 @@ export class DevStats extends System {
   private lastFpsUpdate = 0;
   private currentFps = 0;
   private currentFrameTime = 0;
+  private streamTelemetryEnabled = false;
+  private streamSystemProfilingEnabled = false;
+  private streamTelemetry: StreamPerformanceTelemetry | null = null;
+  private streamResourceTimingObserver: PerformanceObserver | null = null;
+  private lastStreamTelemetryPublish = 0;
 
   // Rolling samples for smooth display
   private frameSamples: FrameSample[] = [];
@@ -96,6 +142,8 @@ export class DevStats extends System {
   // Per-frame render stats (reset each frame for accurate counts)
   private frameDrawCalls = 0;
   private frameTriangles = 0;
+  /** WebGPU exposes cumulative render calls and no renderer.info.reset(). */
+  private previousCumulativeDrawCalls: number | null = null;
 
   // CPU/Render timing
   private renderStartTime = 0;
@@ -124,6 +172,24 @@ export class DevStats extends System {
         window.location.search.includes("devstats=true"));
 
     this.enabled = enableByDefault;
+    this.streamTelemetryEnabled = isStreamingLikeViewport();
+    if (this.streamTelemetryEnabled) {
+      this.streamTelemetry = new StreamPerformanceTelemetry(Date.now());
+      const telemetryWindow = window as StreamingTelemetryWindow;
+      telemetryWindow.__HYPERIA_STREAM_PERFORMANCE__ = null;
+      telemetryWindow.__HYPERIA_RESET_STREAM_PERFORMANCE__ = () =>
+        this.resetStreamingPerformanceTelemetry();
+      telemetryWindow.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__ = () =>
+        this.collectStreamSceneComplexity();
+      this.setupStreamResourceTimingObserver();
+      this.streamSystemProfilingEnabled =
+        new URLSearchParams(window.location.search).get("streamProfile") ===
+        "systems";
+      if (this.streamSystemProfilingEnabled) {
+        this.world.enableSystemTiming();
+      }
+    }
+    this.lastFpsUpdate = performance.now();
 
     if (this.enabled && typeof document !== "undefined") {
       this.createUI();
@@ -632,6 +698,115 @@ export class DevStats extends System {
   }
 
   /**
+   * Produce an on-demand, serializable render-cost inventory for production
+   * stream verification. It is never traversed per frame; the verifier calls
+   * the hook once at teardown so profiling cannot perturb cadence evidence.
+   */
+  private collectStreamSceneComplexity(): StreamSceneComplexitySnapshot | null {
+    const stage = this.world.stage as { scene?: THREE.Scene } | null;
+    const scene = stage?.scene;
+    if (!scene) return null;
+
+    const contributors: StreamSceneComplexityContributor[] = [];
+    const categoryTotals = new Map<
+      string,
+      {
+        category: string;
+        objectCount: number;
+        visibleObjectCount: number;
+        triangles: number;
+        visibleTriangles: number;
+      }
+    >();
+    let objectCount = 0;
+    let visibleObjectCount = 0;
+    let triangles = 0;
+    let visibleTriangles = 0;
+
+    scene.traverse((object: THREE.Object3D) => {
+      const mesh = object as THREE.Mesh | THREE.InstancedMesh;
+      const geometry = mesh.geometry;
+      if (!geometry) return;
+      const elementCount =
+        geometry.index?.count ?? geometry.attributes.position?.count ?? 0;
+      const instances =
+        "isInstancedMesh" in mesh && mesh.isInstancedMesh
+          ? Math.max(0, Math.floor((mesh as THREE.InstancedMesh).count))
+          : 1;
+      const objectTriangles = Math.max(
+        0,
+        Math.floor((elementCount / 3) * instances),
+      );
+      let visible = true;
+      let ancestor: THREE.Object3D | null = object;
+      while (ancestor) {
+        if (ancestor.visible === false) {
+          visible = false;
+          break;
+        }
+        ancestor = ancestor.parent;
+      }
+      const rawCategory =
+        typeof mesh.userData?.type === "string"
+          ? mesh.userData.type
+          : object.name.split("_", 1)[0] || object.type;
+      const category = rawCategory.slice(0, 80);
+      const name = (object.name || "(unnamed)").slice(0, 160);
+      const contributor = {
+        name,
+        category,
+        type: object.type.slice(0, 80),
+        triangles: objectTriangles,
+        instances,
+        visible,
+      };
+      contributors.push(contributor);
+      objectCount += 1;
+      triangles += objectTriangles;
+      if (visible) {
+        visibleObjectCount += 1;
+        visibleTriangles += objectTriangles;
+      }
+      const totals = categoryTotals.get(category) ?? {
+        category,
+        objectCount: 0,
+        visibleObjectCount: 0,
+        triangles: 0,
+        visibleTriangles: 0,
+      };
+      totals.objectCount += 1;
+      totals.triangles += objectTriangles;
+      if (visible) {
+        totals.visibleObjectCount += 1;
+        totals.visibleTriangles += objectTriangles;
+      }
+      categoryTotals.set(category, totals);
+    });
+
+    return {
+      schemaVersion: 1,
+      capturedAt: Date.now(),
+      objectCount,
+      visibleObjectCount,
+      triangles,
+      visibleTriangles,
+      categories: [...categoryTotals.values()].sort(
+        (left, right) =>
+          right.visibleTriangles - left.visibleTriangles ||
+          left.category.localeCompare(right.category),
+      ),
+      topObjects: contributors
+        .sort(
+          (left, right) =>
+            Number(right.visible) - Number(left.visible) ||
+            right.triangles - left.triangles ||
+            left.name.localeCompare(right.name),
+        )
+        .slice(0, 40),
+    };
+  }
+
+  /**
    * Teleport the local player to origin (0, 0, 0)
    * Sends a server command to perform the teleport authoritatively
    */
@@ -728,23 +903,28 @@ export class DevStats extends System {
   }
 
   override postTick(): void {
-    if (!this.enabled) return;
+    if (!this.enabled && !this.streamTelemetryEnabled) return;
 
     const now = performance.now();
-    const frameTime = now - this.tickStartTime;
+    const frameWorkTime = Math.max(0, now - this.tickStartTime);
+    const frameIntervalTime =
+      this.lastFrameTime > 0 ? Math.max(0, now - this.lastFrameTime) : null;
+    const frameTime = frameIntervalTime ?? frameWorkTime;
 
     // Calculate CPU vs render time
     // CPU time = time from tick start until commit phase
     // Render time = time spent in commit phase (render submission)
-    const cpuTime = this.preCommitTime - this.tickStartTime;
-    const renderTime = now - this.preCommitTime;
+    const cpuTime = Math.max(0, this.preCommitTime - this.tickStartTime);
+    const renderTime = Math.max(0, now - this.preCommitTime);
 
     // Store samples for averaging
-    this.cpuTimeSamples.push(cpuTime);
-    this.renderTimeSamples.push(renderTime);
-    if (this.cpuTimeSamples.length > this.maxSamples) {
-      this.cpuTimeSamples.shift();
-      this.renderTimeSamples.shift();
+    if (this.enabled) {
+      this.cpuTimeSamples.push(cpuTime);
+      this.renderTimeSamples.push(renderTime);
+      if (this.cpuTimeSamples.length > this.maxSamples) {
+        this.cpuTimeSamples.shift();
+        this.renderTimeSamples.shift();
+      }
     }
     this.lastCpuTime = cpuTime;
     this.lastRenderTime = renderTime;
@@ -764,18 +944,29 @@ export class DevStats extends System {
     // Capture per-frame render stats and reset for next frame
     this.updatePerFrameRenderStats();
 
-    // Store frame sample
+    // Store the actual inter-frame cadence for the developer UI. CPU and
+    // render-submission work are reported separately above.
     this.currentFrameTime = frameTime;
-    this.frameSamples.push({
-      fps: this.currentFps,
-      frameTime,
-      timestamp: now,
-    });
+    if (this.enabled) {
+      this.frameSamples.push({
+        fps: this.currentFps,
+        frameTime,
+        timestamp: now,
+      });
 
-    // Trim old samples
-    if (this.frameSamples.length > this.maxSamples) {
-      this.frameSamples.shift();
+      // Trim old samples
+      if (this.frameSamples.length > this.maxSamples) {
+        this.frameSamples.shift();
+      }
     }
+
+    this.recordStreamPerformance({
+      now,
+      frameIntervalMs: frameIntervalTime,
+      frameWorkMs: frameWorkTime,
+      cpuMs: cpuTime,
+      renderSubmitMs: renderTime,
+    });
 
     // Update UI at fixed interval
     if (this.visible && now - this.lastUIUpdate >= this.updateInterval) {
@@ -784,6 +975,105 @@ export class DevStats extends System {
     }
 
     this.lastFrameTime = now;
+  }
+
+  private recordStreamPerformance(input: {
+    now: number;
+    frameIntervalMs: number | null;
+    frameWorkMs: number;
+    cpuMs: number;
+    renderSubmitMs: number;
+  }): void {
+    if (!this.streamTelemetryEnabled || !this.streamTelemetry) return;
+
+    const win = window as StreamingTelemetryWindow;
+    const rendererInfo = this.getRendererInfo();
+    const graphics = this.world.graphics;
+    const renderer = graphics?.renderer as
+      { getPixelRatio?: () => number } | undefined;
+    const width = graphics?.width ?? window.innerWidth;
+    const height = graphics?.height ?? window.innerHeight;
+    const devicePixelRatio =
+      renderer?.getPixelRatio?.() ?? window.devicePixelRatio ?? 1;
+
+    this.streamTelemetry.record({
+      phase: win.__HYPERIA_STREAM_RENDERER_HEALTH__?.phase ?? null,
+      frameIntervalMs: input.frameIntervalMs,
+      frameWorkMs: input.frameWorkMs,
+      cpuMs: input.cpuMs,
+      renderSubmitMs: input.renderSubmitMs,
+      drawCalls: rendererInfo?.drawCalls ?? 0,
+      triangles: rendererInfo?.triangles ?? 0,
+      textures: rendererInfo?.textures ?? 0,
+      geometries: rendererInfo?.geometries ?? 0,
+      systemTimings: this.streamSystemProfilingEnabled
+        ? this.world.getSystemTimings()
+        : undefined,
+      observedAt: Date.now(),
+      jsHeap: this.getJsHeapInfo(),
+      viewport: { width, height, devicePixelRatio },
+    });
+
+    if (
+      this.lastStreamTelemetryPublish === 0 ||
+      input.now - this.lastStreamTelemetryPublish >= 1_000
+    ) {
+      win.__HYPERIA_STREAM_PERFORMANCE__ = this.streamTelemetry.snapshot();
+      this.lastStreamTelemetryPublish = input.now;
+    }
+  }
+
+  private setupStreamResourceTimingObserver(): void {
+    if (
+      !this.streamTelemetry ||
+      typeof globalThis.PerformanceObserver === "undefined"
+    ) {
+      return;
+    }
+
+    let observer: PerformanceObserver | null = null;
+    try {
+      observer = new PerformanceObserver((entryList) => {
+        for (const entry of entryList.getEntries()) {
+          if (entry.entryType !== "resource") continue;
+          const resource = entry as PerformanceResourceTiming;
+          const transferBytes = Math.max(0, Math.round(resource.transferSize));
+          const encodedBodyBytes = Math.max(
+            0,
+            Math.round(resource.encodedBodySize),
+          );
+          const decodedBodyBytes = Math.max(
+            0,
+            Math.round(resource.decodedBodySize),
+          );
+          this.streamTelemetry?.recordResource({
+            category: classifyStreamResourceCategory(
+              resource.name,
+              resource.initiatorType,
+            ),
+            durationMs: resource.duration,
+            responseWaitMs: Math.max(
+              0,
+              resource.responseStart - resource.requestStart,
+            ),
+            transferBytes,
+            encodedBodyBytes,
+            decodedBodyBytes,
+            // A non-empty decoded body with no wire bytes is the reliable
+            // Resource Timing signal for a local memory/disk cache response.
+            cacheHit: transferBytes === 0 && decodedBodyBytes > 0,
+          });
+        }
+      });
+      observer.observe({ type: "resource", buffered: true });
+      this.streamTelemetry.enableResourceTimingCollection();
+      this.streamResourceTimingObserver = observer;
+    } catch {
+      // Resource Timing is supplemental. Older browsers may expose the
+      // constructor without accepting buffered resource observation.
+      observer?.disconnect();
+      this.streamResourceTimingObserver = null;
+    }
   }
 
   /**
@@ -805,14 +1095,30 @@ export class DevStats extends System {
     const info = renderer.info;
     if (!info) return;
 
-    // Capture this frame's stats (accumulated since last reset)
-    this.frameDrawCalls = info.render.calls;
-    this.frameTriangles = info.render.triangles;
-
-    // Reset for next frame so values don't accumulate forever
+    const rawDrawCalls = Math.max(0, info.render.calls);
+    const rawTriangles = Math.max(0, info.render.triangles);
+    // WebGL supplies reset(); WebGPU currently does not and its call counter is
+    // process-cumulative. Convert that cumulative counter to a per-frame delta
+    // without changing the per-frame triangle value WebGPU already exposes.
+    let rendererResetWorked = false;
     if (info.reset) {
       info.reset();
+      rendererResetWorked = info.render.calls === 0;
     }
+    if (rendererResetWorked) {
+      this.frameDrawCalls = rawDrawCalls;
+      this.previousCumulativeDrawCalls = null;
+    } else if (this.previousCumulativeDrawCalls === null) {
+      this.frameDrawCalls = 0;
+      this.previousCumulativeDrawCalls = rawDrawCalls;
+    } else {
+      this.frameDrawCalls =
+        rawDrawCalls >= this.previousCumulativeDrawCalls
+          ? rawDrawCalls - this.previousCumulativeDrawCalls
+          : rawDrawCalls;
+      this.previousCumulativeDrawCalls = rawDrawCalls;
+    }
+    this.frameTriangles = rawTriangles;
   }
 
   /**
@@ -1043,6 +1349,14 @@ export class DevStats extends System {
             lateTicks: number;
             maxLateness: number;
             lastTickDuration: number;
+            tickDurations?: {
+              samples: number;
+              average: number;
+              p50: number;
+              p95: number;
+              p99: number;
+              max: number;
+            };
             isHealthy: boolean;
             phaseTimings?: { mobAI: number; mobMove: number; combat: number };
             eventLoopLag?: number;
@@ -1121,6 +1435,14 @@ export class DevStats extends System {
             <span>Tick Duration:</span>
             <span style="color: ${durationColor};">${tickHealth.lastTickDuration}ms / 600ms</span>
           </div>
+          ${
+            tickHealth.tickDurations
+              ? `<div style="display: flex; justify-content: space-between;">
+            <span>Tick p50/p95/p99:</span>
+            <span style="color: #e0e0e0;">${tickHealth.tickDurations.p50}/${tickHealth.tickDurations.p95}/${tickHealth.tickDurations.p99}ms</span>
+          </div>`
+              : ""
+          }
           <div style="display: flex; justify-content: space-between;">
             <span>Late Ticks:</span>
             <span style="color: ${tickHealth.lateTicks > 0 ? "#fbbf24" : "#e0e0e0"};">${tickHealth.lateTicks}</span>
@@ -1298,6 +1620,14 @@ export class DevStats extends System {
           lateTicks: number;
           maxLateness: number;
           lastTickDuration: number;
+          tickDurations?: {
+            samples: number;
+            average: number;
+            p50: number;
+            p95: number;
+            p99: number;
+            max: number;
+          };
           isHealthy: boolean;
           phaseTimings?: { mobAI: number; mobMove: number; combat: number };
           eventLoopLag?: number;
@@ -1316,6 +1646,11 @@ export class DevStats extends System {
       lines.push(
         `Tick #${tickHealth.currentTick}  Duration: ${tickHealth.lastTickDuration}ms/600ms`,
       );
+      if (tickHealth.tickDurations) {
+        lines.push(
+          `Tick p50/p95/p99: ${tickHealth.tickDurations.p50}/${tickHealth.tickDurations.p95}/${tickHealth.tickDurations.p99}ms (${tickHealth.tickDurations.samples} samples)`,
+        );
+      }
       lines.push(
         `Late: ${tickHealth.lateTicks}  Missed: ${tickHealth.missedTicks}  Max Lateness: ${tickHealth.maxLateness}ms`,
       );
@@ -1346,7 +1681,23 @@ export class DevStats extends System {
    * Get memory usage info if available
    */
   private getMemoryInfo(): { usedMB: number; totalMB: number } | null {
-    // Check for performance.memory (Chrome only)
+    const memory = this.getJsHeapInfo();
+    if (memory) {
+      return {
+        usedMB: memory.usedBytes / 1024 / 1024,
+        totalMB: memory.totalBytes / 1024 / 1024,
+      };
+    }
+    return null;
+  }
+
+  private getJsHeapInfo(): {
+    usedBytes: number;
+    totalBytes: number;
+    limitBytes: number;
+  } | null {
+    // performance.memory is Chromium-only, which matches the production
+    // capture browser. Other browsers report a deliberate null snapshot.
     const perf = globalThis.performance as globalThis.Performance & {
       memory?: {
         usedJSHeapSize: number;
@@ -1354,14 +1705,12 @@ export class DevStats extends System {
         jsHeapSizeLimit: number;
       };
     };
-
-    if (perf.memory) {
-      return {
-        usedMB: perf.memory.usedJSHeapSize / 1024 / 1024,
-        totalMB: perf.memory.totalJSHeapSize / 1024 / 1024,
-      };
-    }
-    return null;
+    if (!perf.memory) return null;
+    return {
+      usedBytes: perf.memory.usedJSHeapSize,
+      totalBytes: perf.memory.totalJSHeapSize,
+      limitBytes: perf.memory.jsHeapSizeLimit,
+    };
   }
 
   /**
@@ -1460,8 +1809,7 @@ export class DevStats extends System {
     visibleWaterMeshes: number;
   } | null {
     const waterSystem = this.world.getSystem("water") as
-      | WaterSystem
-      | undefined;
+      WaterSystem | undefined;
     if (!waterSystem) return null;
 
     return {
@@ -1821,6 +2169,28 @@ export class DevStats extends System {
     return this.currentFrameTime;
   }
 
+  getStreamingPerformanceSnapshot(): StreamingPerformanceSnapshot | null {
+    return this.streamTelemetry?.snapshot() ?? null;
+  }
+
+  /**
+   * Begin a fresh, explicitly bounded stream-performance observation window.
+   * Capture verification calls this only after the production scene is fully
+   * admitted so cold asset work cannot be mislabeled as steady-state combat.
+   */
+  private resetStreamingPerformanceTelemetry(): boolean {
+    if (!this.streamTelemetryEnabled || typeof window === "undefined") {
+      return false;
+    }
+    this.streamTelemetry = new StreamPerformanceTelemetry(Date.now());
+    if (this.streamResourceTimingObserver) {
+      this.streamTelemetry.enableResourceTimingCollection();
+    }
+    this.lastStreamTelemetryPublish = 0;
+    (window as StreamingTelemetryWindow).__HYPERIA_STREAM_PERFORMANCE__ = null;
+    return true;
+  }
+
   /**
    * Check if stats are currently visible
    */
@@ -1829,6 +2199,18 @@ export class DevStats extends System {
   }
 
   override destroy(): void {
+    this.streamResourceTimingObserver?.disconnect();
+    this.streamResourceTimingObserver = null;
+    if (this.streamTelemetryEnabled && typeof window !== "undefined") {
+      const telemetryWindow = window as StreamingTelemetryWindow;
+      telemetryWindow.__HYPERIA_STREAM_PERFORMANCE__ = null;
+      delete telemetryWindow.__HYPERIA_RESET_STREAM_PERFORMANCE__;
+      delete telemetryWindow.__HYPERIA_GET_STREAM_SCENE_COMPLEXITY__;
+    }
+    if (this.streamSystemProfilingEnabled) {
+      this.world.disableSystemTiming();
+      this.streamSystemProfilingEnabled = false;
+    }
     if (this.container && this.container.parentElement) {
       this.container.parentElement.removeChild(this.container);
     }

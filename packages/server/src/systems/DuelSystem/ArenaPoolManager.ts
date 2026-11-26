@@ -22,6 +22,10 @@ import {
   type ICollisionMatrix,
   CollisionFlag,
   getDuelArenaConfig,
+  getDuelArenaGradeHeight,
+  DUEL_ARENA_FLOOR_GROUND_OFFSET,
+  DUEL_ARENA_FLOOR_SOLID_OFFSET,
+  PLAYER_ROOT_CLEARANCE,
 } from "@hyperforge/shared";
 
 // ============================================================================
@@ -39,6 +43,11 @@ interface ArenaState {
  */
 function generateArenaConfig(arenaId: number): Arena {
   const config = getDuelArenaConfig();
+  const groundY = getDuelArenaGradeHeight() + DUEL_ARENA_FLOOR_GROUND_OFFSET;
+  const rootY =
+    getDuelArenaGradeHeight() +
+    DUEL_ARENA_FLOOR_SOLID_OFFSET +
+    PLAYER_ROOT_CLEARANCE;
 
   // Calculate row and column based on grid layout
   const row = Math.floor((arenaId - 1) / config.columns);
@@ -58,12 +67,12 @@ function generateArenaConfig(arenaId: number): Arena {
   const bounds: ArenaBounds = {
     min: {
       x: centerX - config.arenaWidth / 2,
-      y: config.baseY - 1,
+      y: groundY - 1,
       z: centerZ - config.arenaLength / 2,
     },
     max: {
       x: centerX + config.arenaWidth / 2,
-      y: config.baseY + 10,
+      y: groundY + 10,
       z: centerZ + config.arenaLength / 2,
     },
   };
@@ -74,18 +83,18 @@ function generateArenaConfig(arenaId: number): Arena {
       ? [
           {
             x: centerX - config.spawnOffset,
-            y: config.baseY,
+            y: rootY,
             z: centerZ,
           },
           {
             x: centerX + config.spawnOffset,
-            y: config.baseY,
+            y: rootY,
             z: centerZ,
           },
         ]
       : [
-          { x: centerX, y: config.baseY, z: centerZ - config.spawnOffset },
-          { x: centerX, y: config.baseY, z: centerZ + config.spawnOffset },
+          { x: centerX, y: rootY, z: centerZ - config.spawnOffset },
+          { x: centerX, y: rootY, z: centerZ + config.spawnOffset },
         ];
 
   return {
@@ -142,6 +151,24 @@ export class ArenaPoolManager {
   }
 
   /**
+   * Reserve one exact arena for a named owner.
+   *
+   * Used for long-lived platform reservations such as the streaming arena.
+   * This deliberately does not replace an existing reservation, even when the
+   * caller presents the same owner ID: duplicate lifecycle ownership is an
+   * initialization error that should remain visible.
+   */
+  reserveSpecificArena(arenaId: number, duelId: string): boolean {
+    const state = this.arenas.get(arenaId);
+    if (!state || state.currentDuelId !== null) return false;
+
+    state.currentDuelId = duelId;
+    state.arena.inUse = true;
+    state.arena.currentDuelId = duelId;
+    return true;
+  }
+
+  /**
    * Release an arena back to the pool
    */
   releaseArena(arenaId: number): boolean {
@@ -154,13 +181,21 @@ export class ArenaPoolManager {
     return true;
   }
 
+  /** Release an arena only when the caller still owns its reservation. */
+  releaseSpecificArena(arenaId: number, duelId: string): boolean {
+    const state = this.arenas.get(arenaId);
+    if (!state || state.currentDuelId !== duelId) return false;
+
+    return this.releaseArena(arenaId);
+  }
+
   /**
    * Release arena by duel ID (when duel ends)
    */
   releaseArenaByDuelId(duelId: string): boolean {
     for (const [arenaId, state] of this.arenas) {
       if (state.currentDuelId === duelId) {
-        return this.releaseArena(arenaId);
+        return this.releaseSpecificArena(arenaId, duelId);
       }
     }
     return false;
@@ -276,6 +311,53 @@ export class ArenaPoolManager {
       for (let z = minZ; z <= maxZ; z++) {
         collision.addFlags(maxX + 1, z, CollisionFlag.BLOCKED);
       }
+    }
+
+    this.assertArenaWallCollision(collision);
+  }
+
+  /**
+   * Fail startup closed if the authoritative collision matrix did not retain
+   * a complete arena perimeter. Visual/PhysX fences are not sufficient for
+   * server-owned agents, whose movement is governed by this tile matrix.
+   */
+  assertArenaWallCollision(collision: ICollisionMatrix): void {
+    const missing: string[] = [];
+    let checkedTiles = 0;
+
+    const checkTile = (arenaId: number, x: number, z: number): void => {
+      checkedTiles++;
+      if (
+        !collision.hasFlags(x, z, CollisionFlag.BLOCKED) &&
+        missing.length < 12
+      ) {
+        missing.push(`arena=${arenaId} tile=(${x},${z})`);
+      }
+    };
+
+    for (const [arenaId, state] of this.arenas) {
+      const bounds = state.arena.bounds;
+      const minX = Math.round(bounds.min.x);
+      const maxX = Math.round(bounds.max.x);
+      const minZ = Math.round(bounds.min.z);
+      const maxZ = Math.round(bounds.max.z);
+
+      for (let x = minX - 1; x <= maxX + 1; x++) {
+        checkTile(arenaId, x, minZ - 1);
+        checkTile(arenaId, x, maxZ + 1);
+      }
+      for (let z = minZ; z <= maxZ; z++) {
+        checkTile(arenaId, minX - 1, z);
+        checkTile(arenaId, maxX + 1, z);
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new Error(
+        `[ArenaPoolManager] Authoritative arena collision audit failed (${missing.length} sampled missing of ${checkedTiles} checked perimeter tiles): ${missing.join(
+          "; ",
+        )}`,
+      );
     }
   }
 }

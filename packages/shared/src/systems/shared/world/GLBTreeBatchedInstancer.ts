@@ -26,12 +26,36 @@ import {
   type TreeMaterialOptions,
 } from "./GPUMaterials";
 import type { Wind } from "./Wind";
-import { getLODDistances, inferLOD1Path, inferLOD2Path } from "./LODConfig";
+import type { TerrainSystem } from "./TerrainSystem";
+import {
+  getLODDistances,
+  inferLOD1Path,
+  inferLOD2Path,
+  projectedTreeBoundsPixels,
+  selectProjectedTreeLod,
+} from "./LODConfig";
 import {
   type DissolveAnim,
   startDissolve as startDissolveAnim,
   tickDissolveAnims,
 } from "./DissolveAnimation";
+import {
+  resolveTreeLodCandidate,
+  shouldStreamVegetationBackgroundLods,
+} from "../../../runtime/clientViewportMode";
+import type {
+  GLBTreeRenderOwnership,
+  TreeInstanceLifetime,
+} from "./GLBTreeInstancer";
+import {
+  assertTreeWindInstanceMatrix,
+  cloneGeometryWithTreeWind,
+  deriveTreeWindDescriptor,
+  TREE_WIND_MAX_DISPLACEMENT,
+  type TreeWindDescriptor,
+  type TreeWindMode,
+  type TreeWindPoolOptions,
+} from "./TreeWind";
 
 const MAX_INSTANCES = 512;
 
@@ -70,6 +94,7 @@ const HL_COLOR_INTENSITY = 1.15;
 
 interface TreeSlot {
   entityId: string;
+  lifetime?: TreeInstanceLifetime;
   position: THREE.Vector3;
   rotation: number;
   scale: number;
@@ -94,7 +119,10 @@ interface BatchedLODPool {
    * sourceGeometries[variantIndex][materialSlot] = original BufferGeometry.
    * Retained so collision proxies can use the actual model shape.
    */
-  sourceGeometries: THREE.BufferGeometry[][];
+  sourceGeometries: (THREE.BufferGeometry[] | null)[];
+  windMode: TreeWindMode;
+  /** Published by the existing primary visibility loop; not a draw-table count. */
+  visibleInstanceCount: number;
 }
 
 interface TreeTypePool {
@@ -107,6 +135,14 @@ interface TreeTypePool {
   yOffset: number;
   modelHeight: number;
   modelRadius: number;
+  /** Union of each exact variant's loaded LODs, before visual wind. */
+  variantBounds: {
+    box: THREE.Box3;
+    centerY: number;
+    sphereRadius: number;
+    maximumLeafMask: number;
+  }[];
+  windMode: TreeWindMode;
 }
 
 const resourceLOD = getLODDistances("tree");
@@ -114,8 +150,60 @@ const resourceLOD = getLODDistances("tree");
 // ---- Module state ----
 let scene: THREE.Scene | null = null;
 let world: World | null = null;
+let poolGeneration = 0;
+let windMode: TreeWindMode = "legacy-leaf-v1";
+let lodCandidate: "projected-v1" | undefined;
+const _projectedBounds = new THREE.Box3();
+const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, TreeTypePool>();
 const entityToTreeType = new Map<string, string>();
+const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
+
+/** Read-only snapshot of an existing owner, including empty/hidden LOD slots.
+ * Never initializes, loads, or updates a pool. Consumers must compare lifetime
+ * generation AND fresh complete membership/handle identities before omission;
+ * generation alone does not track later pool publication. All handles are
+ * borrowed: callers must not dispose or mutate the render resources. Foreign
+ * material replacements refuse the snapshot. */
+export function getGLBTreeBatchedRenderOwnership(
+  expectedWorld: World,
+  expectedScene: THREE.Scene,
+): GLBTreeRenderOwnership<THREE.BatchedMesh> | null {
+  if (!world || !scene || world !== expectedWorld || scene !== expectedScene)
+    return null;
+  const records: Array<
+    GLBTreeRenderOwnership<THREE.BatchedMesh>["records"][number]
+  > = [];
+  for (const [pool, owner] of pools) {
+    const lods = [owner.lod0, owner.lod1, owner.lod2] as const;
+    for (const lod of [0, 1, 2] as const) {
+      const member = lods[lod];
+      if (!member) continue;
+      for (const [materialSlot, mesh] of member.batches.entries()) {
+        const material = mesh.material;
+        if (
+          Array.isArray(material) ||
+          material !== member.materials[materialSlot]
+        )
+          return null;
+        records.push(
+          Object.freeze({
+            pool,
+            lod,
+            materialSlot,
+            mesh,
+            geometry: mesh.geometry,
+            material,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    generation: poolGeneration,
+    records: Object.freeze(records),
+  });
+}
 
 // ---- Geometry extraction ----
 
@@ -140,14 +228,14 @@ function extractAllMeshParts(root: THREE.Object3D): MeshPart[] {
   return parts;
 }
 
-let _fingerprintId = 0;
-
 /**
  * Returns a string key that identifies a material's diffuse texture.
  * Used to match the same material slot across different model variants.
  */
 function getTextureFingerprint(mat: THREE.Material): string {
   const std = mat as THREE.MeshStandardMaterial;
+  // Authored material names survive independently decoded model/LOD textures.
+  if (std.name) return `name:${std.name}`;
   if (std.map?.image) {
     const img = std.map.image as {
       width?: number;
@@ -155,12 +243,11 @@ function getTextureFingerprint(mat: THREE.Material): string {
       src?: string;
       uuid?: string;
     };
-    return `tex:${img.width}x${img.height}:${img.src ?? img.uuid ?? ""}`;
+    return `tex:${img.width}x${img.height}:${img.src ?? img.uuid ?? ""}:${Boolean(std.normalMap)}:${std.alphaTest}:${std.transparent}`;
   }
-  if (std.name) return `name:${std.name}`;
-  // Deterministic fallback — monotonic counter avoids random fingerprints
-  // that would silently prevent variant matching.
-  return `idx:${_fingerprintId++}`;
+  // Unnamed texture-free primitives still need stable self/LOD identity. A
+  // monotonic ID made an identical material fail even against itself.
+  return `plain:${std.type}:${std.color?.getHexString() ?? ""}:${std.roughness}:${std.metalness}:${std.alphaTest}:${std.transparent}:${std.side}`;
 }
 
 /**
@@ -225,9 +312,12 @@ function computeModelBounds(
   return { yOffset: 0, height, radius: Math.max(dx, dz) };
 }
 
-async function loadLODParts(path: string): Promise<MeshPart[] | null> {
+async function loadLODParts(
+  path: string,
+  loadWorld: World,
+): Promise<MeshPart[] | null> {
   try {
-    const { scene: lodScene } = await modelCache.loadModel(path, world!);
+    const { scene: lodScene } = await modelCache.loadModel(path, loadWorld);
     const parts = extractAllMeshParts(lodScene);
     return parts.length > 0 ? parts : null;
   } catch {
@@ -251,74 +341,122 @@ function countGeometry(geo: THREE.BufferGeometry): {
  * variantParts[variant][materialSlot] = { geometry, material }
  * All variants must have the same number of material slots.
  */
+type PreparedTreePart = {
+  geometry: THREE.BufferGeometry;
+  material: DissolveMaterial;
+};
+
 function createBatchedLODPool(
-  variantParts: {
-    geometry: THREE.BufferGeometry;
-    material: DissolveMaterial;
-  }[][],
+  variantParts: (PreparedTreePart[] | null)[],
+  descriptors: readonly TreeWindDescriptor[] | null,
+  mode: TreeWindMode,
 ): BatchedLODPool {
-  const numSlots = variantParts[0].length;
+  const reference = variantParts.find((parts) => parts !== null);
+  if (!reference?.length) throw new Error("No admitted tree variant parts");
+  const numSlots = reference.length;
   const numVariants = variantParts.length;
 
   const batches: THREE.BatchedMesh[] = [];
   const materials: DissolveMaterial[] = [];
   const geometryIds: number[][] = [];
 
-  for (let slot = 0; slot < numSlots; slot++) {
-    const mat = variantParts[0][slot].material;
+  try {
+    for (let slot = 0; slot < numSlots; slot++) {
+      const mat = reference[slot].material;
 
-    let totalVerts = 0;
-    let totalIndices = 0;
-    for (let v = 0; v < numVariants; v++) {
-      const counts = countGeometry(variantParts[v][slot].geometry);
-      totalVerts += counts.vertexCount;
-      totalIndices += counts.indexCount;
+      let totalVerts = 0;
+      let totalIndices = 0;
+      for (let v = 0; v < numVariants; v++) {
+        const parts = variantParts[v];
+        if (!parts) continue;
+        if (parts.length !== numSlots)
+          throw new Error("Tree material slot mismatch");
+        const counts = countGeometry(parts[slot].geometry);
+        totalVerts += counts.vertexCount;
+        totalIndices += counts.indexCount;
+      }
+
+      const bm = new THREE.BatchedMesh(
+        MAX_INSTANCES,
+        totalVerts,
+        totalIndices > 0 ? totalIndices : undefined,
+        mat,
+      );
+      batches.push(bm);
+      bm.frustumCulled = false;
+      bm.perObjectFrustumCulled = false;
+      bm.sortObjects = false;
+      bm.castShadow = true;
+      bm.receiveShadow =
+        (mat as TreeDissolveMaterial).treeLighting.mode ===
+        "scene-pbr-mask-safe-v1";
+      bm.layers.set(1);
+
+      // Preserve source variant ordinals: a missing LOD never shifts another tree.
+      const slotGeoIds: number[] = new Array(numVariants).fill(-1);
+      for (let v = 0; v < numVariants; v++) {
+        const parts = variantParts[v];
+        if (!parts) continue;
+        const source = parts[slot].geometry;
+        if (mode === "connected-v1") {
+          if (!descriptors?.[v])
+            throw new Error("Missing tree wind descriptor");
+          const owned = cloneGeometryWithTreeWind(source, descriptors[v]);
+          try {
+            if (!owned.hasAttribute("normal")) owned.computeVertexNormals();
+            slotGeoIds[v] = bm.addGeometry(owned);
+          } finally {
+            // BatchedMesh copies attributes into its own buffer on insertion.
+            owned.dispose();
+          }
+        } else slotGeoIds[v] = bm.addGeometry(source);
+      }
+
+      // Force-init colors texture so BatchNode sets up vBatchColor varying
+      // before the first shader compilation.
+      const firstGeometry = slotGeoIds.find((id) => id >= 0);
+      if (firstGeometry === undefined) throw new Error("Empty tree batch");
+      const initId = bm.addInstance(firstGeometry);
+      bm.setColorAt(initId, _defaultColor);
+      bm.deleteInstance(initId);
+
+      scene!.add(bm);
+      materials.push(mat);
+      geometryIds.push(slotGeoIds);
     }
 
-    const bm = new THREE.BatchedMesh(
-      MAX_INSTANCES,
-      totalVerts,
-      totalIndices > 0 ? totalIndices : undefined,
-      mat,
-    );
-    bm.frustumCulled = false;
-    bm.perObjectFrustumCulled = false;
-    bm.sortObjects = false;
-    bm.castShadow = true;
-    bm.receiveShadow = false;
-    bm.layers.set(1);
-
-    const slotGeoIds: number[] = [];
+    // Store source geometries per variant for collision proxy use
+    const sourceGeometries: (THREE.BufferGeometry[] | null)[] = [];
     for (let v = 0; v < numVariants; v++) {
-      const geoId = bm.addGeometry(variantParts[v][slot].geometry);
-      slotGeoIds.push(geoId);
+      sourceGeometries.push(variantParts[v]?.map((p) => p.geometry) ?? null);
     }
 
-    // Force-init colors texture so BatchNode sets up vBatchColor varying
-    // before the first shader compilation.
-    const initId = bm.addInstance(slotGeoIds[0]);
-    bm.setColorAt(initId, _defaultColor);
-    bm.deleteInstance(initId);
-
-    scene!.add(bm);
-    batches.push(bm);
-    materials.push(mat);
-    geometryIds.push(slotGeoIds);
+    return {
+      batches,
+      materials,
+      geometryIds,
+      instanceIds: new Map(),
+      sourceGeometries,
+      windMode: mode,
+      visibleInstanceCount: 0,
+    };
+  } catch (error) {
+    for (const batch of batches) {
+      batch.removeFromParent();
+      batch.dispose();
+    }
+    // Materials remain owned by the building transaction until return.
+    throw error;
   }
+}
 
-  // Store source geometries per variant for collision proxy use
-  const sourceGeometries: THREE.BufferGeometry[][] = [];
-  for (let v = 0; v < numVariants; v++) {
-    sourceGeometries.push(variantParts[v].map((p) => p.geometry));
+function disposeBatchedLODPool(pool: BatchedLODPool): void {
+  for (const batch of pool.batches) {
+    batch.removeFromParent();
+    batch.dispose();
   }
-
-  return {
-    batches,
-    materials,
-    geometryIds,
-    instanceIds: new Map(),
-    sourceGeometries,
-  };
+  for (const material of new Set(pool.materials)) material.dispose();
+  pool.sourceGeometries.length = 0;
 }
 
 // ---- Texture helpers ----
@@ -335,8 +473,7 @@ function enableTextureRepeat(mat: DissolveMaterial): void {
   ] as const;
   for (const key of texProps) {
     const tex = (mat as unknown as Record<string, unknown>)[key] as
-      | THREE.Texture
-      | undefined;
+      THREE.Texture | undefined;
     if (tex) {
       tex.wrapS = THREE.RepeatWrapping;
       tex.wrapT = THREE.RepeatWrapping;
@@ -359,7 +496,24 @@ async function ensureTreeTypePool(
   const pending = pendingEnsure.get(treeType);
   if (pending) return pending;
 
+  if (!world || !scene) throw cancelledPoolLoad;
+  const loadWorld = world;
+  const loadScene = scene;
+  const generation = poolGeneration;
+  const mode = windMode;
+  const assertCurrent = () => {
+    if (
+      generation !== poolGeneration ||
+      world !== loadWorld ||
+      scene !== loadScene
+    ) {
+      throw cancelledPoolLoad;
+    }
+  };
+
   const promise = (async (): Promise<TreeTypePool> => {
+    const terrain = loadWorld.getSystem<TerrainSystem>("terrain");
+    const terrainProfile = terrain?.getWorldTerrainProfile();
     const dissolveOpts = {
       fadeStart: GPU_VEG_CONFIG.FADE_START,
       fadeEnd: GPU_VEG_CONFIG.FADE_END,
@@ -373,27 +527,53 @@ async function ensureTreeTypePool(
       const dm = createTreeDissolveMaterial(p.material, {
         ...dissolveOpts,
         batched: true,
+        treeWind: mode,
+        treePalette: terrainProfile
+          ? { terrainProfile, species: treeType }
+          : undefined,
       } as TreeMaterialOptions);
-      dm.side = THREE.DoubleSide;
-      enableTextureRepeat(dm);
-      world!.setupMaterial(dm);
-      return dm;
+      try {
+        dm.side = THREE.DoubleSide;
+        enableTextureRepeat(dm);
+        loadWorld.setupMaterial(dm);
+        return dm;
+      } catch (error) {
+        dm.dispose();
+        throw error;
+      }
     }
 
     // Load all variant LOD0s in parallel
     const lod0Scenes = await Promise.all(
       variantPaths.map(async (vp) => {
-        const { scene: s } = await modelCache.loadModel(vp, world!);
+        const { scene: s } = await modelCache.loadModel(vp, loadWorld);
         return s;
       }),
     );
+    assertCurrent();
 
     // Extract parts per variant
     const allLod0Parts = lod0Scenes.map((s) => extractAllMeshParts(s));
-    if (allLod0Parts[0].length === 0)
+    if (!allLod0Parts[0]?.length)
       throw new Error(`No mesh found in ${variantPaths[0]}`);
 
     const numSlots = allLod0Parts[0].length;
+
+    // Decode before allocating scene-owned batches. No partially published pool
+    // can survive a world teardown while another LOD is still awaiting I/O.
+    const loadBackgroundLods = shouldStreamVegetationBackgroundLods();
+    const lod1Results = loadBackgroundLods
+      ? await Promise.all(
+          variantPaths.map((vp) => loadLODParts(inferLOD1Path(vp), loadWorld)),
+        )
+      : [];
+    assertCurrent();
+    const lod2Results = loadBackgroundLods
+      ? await Promise.all(
+          variantPaths.map((vp) => loadLODParts(inferLOD2Path(vp), loadWorld)),
+        )
+      : [];
+    assertCurrent();
 
     // Build a texture fingerprint for each part in variant 0 to define slot identity
     const refFingerprints = allLod0Parts[0].map((p) =>
@@ -404,110 +584,158 @@ async function ensureTreeTypePool(
     for (let v = 1; v < allLod0Parts.length; v++) {
       const parts = allLod0Parts[v];
       if (parts.length !== numSlots) {
-        console.warn(
+        throw new Error(
           `[GLBTreeBatchedInstancer] Variant ${variantPaths[v]} has ${parts.length} parts, expected ${numSlots}!`,
         );
-        continue;
       }
       const reordered = matchPartsToReference(refFingerprints, parts);
       if (reordered) {
         allLod0Parts[v] = reordered;
       } else {
-        console.warn(
-          `[GLBTreeBatchedInstancer] Could not match parts for ${variantPaths[v]} — using original order`,
+        throw new Error(
+          `[GLBTreeBatchedInstancer] Could not match material slots for ${variantPaths[v]}`,
         );
       }
     }
 
-    // Build materials from first variant (shared for all variants)
-    const sharedMaterials = allLod0Parts[0].map((p) => buildMaterialForPart(p));
-
-    // Build variant parts for LOD0
-    const lod0VariantParts = allLod0Parts.map((parts) =>
-      parts.map((p, slotIdx) => ({
-        geometry: p.geometry,
-        material: sharedMaterials[slotIdx % sharedMaterials.length],
-      })),
-    );
-
-    const lod0Pool = createBatchedLODPool(lod0VariantParts);
-
-    // Compute bounds from first variant
-    const bounds = computeModelBounds(lod0Scenes[0], 1);
-
-    // Load LOD1 variants in parallel
-    let lod1Pool: BatchedLODPool | null = null;
-    const lod1Results = await Promise.all(
-      variantPaths.map((vp) => loadLODParts(inferLOD1Path(vp))),
-    );
-    const validLod1 = lod1Results.filter(
-      (r): r is MeshPart[] => r !== null && r.length === numSlots,
-    );
-    if (validLod1.length > 0) {
-      const lod1Ref = validLod1[0].map((p) =>
+    // Keep exact source variant indices even when a middle LOD is absent or
+    // has incompatible material slots. That actor stays on its own finer LOD.
+    const matchLods = (loaded: (MeshPart[] | null)[]) => {
+      const reference = loaded.find((parts) => parts?.length === numSlots);
+      if (!reference) return variantPaths.map(() => null);
+      const fingerprints = reference.map((p) =>
         getTextureFingerprint(p.material),
       );
-      for (let v = 1; v < validLod1.length; v++) {
-        const matched = matchPartsToReference(lod1Ref, validLod1[v]);
-        if (matched) validLod1[v] = matched;
-      }
-      const lod1Materials = validLod1[0].map((p) => buildMaterialForPart(p));
-      const lod1VariantParts = validLod1.map((parts) =>
-        parts.map((p, slotIdx) => ({
-          geometry: p.geometry,
-          material: lod1Materials[slotIdx],
-        })),
-      );
-      lod1Pool = createBatchedLODPool(lod1VariantParts);
-    }
-
-    // Load LOD2 variants in parallel
-    let lod2Pool: BatchedLODPool | null = null;
-    const lod2Results = await Promise.all(
-      variantPaths.map((vp) => loadLODParts(inferLOD2Path(vp))),
-    );
-    const validLod2 = lod2Results.filter(
-      (r): r is MeshPart[] => r !== null && r.length === numSlots,
-    );
-    if (validLod2.length > 0) {
-      const lod2Ref = validLod2[0].map((p) =>
-        getTextureFingerprint(p.material),
-      );
-      for (let v = 1; v < validLod2.length; v++) {
-        const matched = matchPartsToReference(lod2Ref, validLod2[v]);
-        if (matched) validLod2[v] = matched;
-      }
-      const lod2Materials = validLod2[0].map((p) => buildMaterialForPart(p));
-      const lod2VariantParts = validLod2.map((parts) =>
-        parts.map((p, slotIdx) => ({
-          geometry: p.geometry,
-          material: lod2Materials[slotIdx],
-        })),
-      );
-      lod2Pool = createBatchedLODPool(lod2VariantParts);
-    }
-
-    const pool: TreeTypePool = {
-      treeType,
-      variantPaths,
-      lod0: lod0Pool,
-      lod1: lod1Pool,
-      lod2: lod2Pool,
-      instances: new Map(),
-      yOffset: bounds.yOffset,
-      modelHeight: bounds.height,
-      modelRadius: bounds.radius,
+      return variantPaths.map((_, index) => {
+        const parts = loaded[index];
+        return parts ? matchPartsToReference(fingerprints, parts) : null;
+      });
     };
-    pools.set(treeType, pool);
+    const lod1Parts = matchLods(lod1Results);
+    const lod2Parts = matchLods(lod2Results);
+    const descriptors =
+      mode === "connected-v1"
+        ? allLod0Parts.map((parts) =>
+            deriveTreeWindDescriptor(
+              [...new Set(parts.map((p) => p.geometry))],
+              0,
+            ),
+          )
+        : null;
+    const variantBounds = allLod0Parts.map((parts, index) => {
+      const box = new THREE.Box3();
+      const point = new THREE.Vector3();
+      let maximumLeafMask = 0;
+      for (const part of [
+        ...parts,
+        ...(lod1Parts[index] ?? []),
+        ...(lod2Parts[index] ?? []),
+      ]) {
+        const position = part.geometry.getAttribute("position");
+        if (!position) throw new Error("Tree geometry lacks positions");
+        // Read both packed and interleaved attributes without touching cached
+        // source bounds or materializing another position buffer.
+        for (let vertex = 0; vertex < position.count; vertex++) {
+          point.set(
+            position.getX(vertex),
+            position.getY(vertex),
+            position.getZ(vertex),
+          );
+          box.expandByPoint(point);
+        }
+        if (lodCandidate) {
+          const color = part.geometry.getAttribute("color");
+          // GPUMaterials explicitly uses vec3(0, 1, 0) without vertex colors:
+          // absent COLOR.R means no legacy leaf wind, not a white attribute.
+          if (color) {
+            if (color.count !== position.count || color.itemSize < 3)
+              maximumLeafMask = Infinity;
+            for (let vertex = 0; vertex < color.count; vertex++)
+              maximumLeafMask = Math.max(
+                maximumLeafMask,
+                Math.abs(color.getX(vertex)),
+              );
+          }
+        }
+      }
+      if (
+        box.isEmpty() ||
+        [...box.min.toArray(), ...box.max.toArray()].some(
+          (value) => !Number.isFinite(value),
+        )
+      )
+        throw new Error("Invalid tree variant bounds");
+      return {
+        box,
+        maximumLeafMask,
+        centerY: (box.min.y + box.max.y) * 0.5,
+        sphereRadius: Math.hypot(
+          Math.max(Math.abs(box.min.x), Math.abs(box.max.x)),
+          (box.max.y - box.min.y) * 0.5,
+          Math.max(Math.abs(box.min.z), Math.abs(box.max.z)),
+        ),
+      };
+    });
+    const created: BatchedLODPool[] = [];
+    const unownedMaterials = new Set<DissolveMaterial>();
+    const buildPool = (
+      variants: (MeshPart[] | null)[],
+    ): BatchedLODPool | null => {
+      const reference = variants.find((parts) => parts !== null);
+      if (!reference) return null;
+      const materials: DissolveMaterial[] = [];
+      for (const part of reference) {
+        const material = buildMaterialForPart(part);
+        materials.push(material);
+        unownedMaterials.add(material);
+      }
+      const prepared = variants.map(
+        (parts) =>
+          parts?.map((part, slot) => ({
+            geometry: part.geometry,
+            material: materials[slot],
+          })) ?? null,
+      );
+      const result = createBatchedLODPool(prepared, descriptors, mode);
+      created.push(result);
+      for (const material of materials) unownedMaterials.delete(material);
+      return result;
+    };
+    try {
+      const lod0Pool = buildPool(allLod0Parts);
+      const lod1Pool = buildPool(lod1Parts);
+      const lod2Pool = buildPool(lod2Parts);
+      const bounds = computeModelBounds(lod0Scenes[0], 1);
+      assertCurrent();
 
-    return pool;
+      const pool: TreeTypePool = {
+        treeType,
+        variantPaths,
+        lod0: lod0Pool,
+        lod1: lod1Pool,
+        lod2: lod2Pool,
+        instances: new Map(),
+        yOffset: bounds.yOffset,
+        modelHeight: bounds.height,
+        modelRadius: bounds.radius,
+        variantBounds,
+        windMode: mode,
+      };
+      pools.set(treeType, pool);
+
+      return pool;
+    } catch (error) {
+      for (const pool of created) disposeBatchedLODPool(pool);
+      for (const material of unownedMaterials) material.dispose();
+      throw error;
+    }
   })();
 
   pendingEnsure.set(treeType, promise);
   try {
     return await promise;
   } finally {
-    pendingEnsure.delete(treeType);
+    if (pendingEnsure.get(treeType) === promise) pendingEnsure.delete(treeType);
   }
 }
 
@@ -535,29 +763,37 @@ function addToPool(
   dissolve = 0,
   snowWeight = 0,
 ): void {
+  if (pool.windMode === "connected-v1") assertTreeWindInstanceMatrix(mat);
+  if (pool.instanceIds.size >= MAX_INSTANCES)
+    throw new Error("Tree batch instance capacity reached");
+  if (pool.instanceIds.has(entityId))
+    throw new Error("Duplicate tree batch actor");
   for (let i = 0; i < pool.batches.length; i++) {
-    const numVariants = pool.geometryIds[i].length;
-    const clampedIdx = variantIndex % numVariants;
-    if (pool.geometryIds[i][clampedIdx] === undefined) {
-      console.warn(
-        `[GLBTreeBatchedInstancer] geoId undefined: slot=${i} variant=${clampedIdx} available=${numVariants}, aborting addToPool`,
-      );
-      return;
+    if (
+      pool.geometryIds[i][variantIndex] === undefined ||
+      pool.geometryIds[i][variantIndex] < 0
+    ) {
+      throw new Error(`Tree LOD lacks source variant ${variantIndex}`);
     }
   }
 
-  const ids: number[] = new Array(pool.batches.length);
+  const ids: number[] = [];
   _tmpColor.setRGB(1, snowWeight, 1.0 - dissolve);
-  for (let i = 0; i < pool.batches.length; i++) {
-    const numVariants = pool.geometryIds[i].length;
-    const clampedIdx = variantIndex % numVariants;
-    const geoId = pool.geometryIds[i][clampedIdx];
-    const instId = pool.batches[i].addInstance(geoId);
-    pool.batches[i].setMatrixAt(instId, mat);
-    pool.batches[i].setColorAt(instId, _tmpColor);
-    ids[i] = instId;
+  try {
+    for (let i = 0; i < pool.batches.length; i++) {
+      const geoId = pool.geometryIds[i][variantIndex];
+      const instId = pool.batches[i].addInstance(geoId);
+      ids.push(instId);
+      pool.batches[i].setMatrixAt(instId, mat);
+      pool.batches[i].setColorAt(instId, _tmpColor);
+    }
+    pool.instanceIds.set(entityId, ids);
+    // Newly admitted native slots are visible, even after this frame was prepared.
+    for (const batch of pool.batches) batch.visible = true;
+  } catch (error) {
+    ids.forEach((id, index) => pool.batches[index].deleteInstance(id));
+    throw error;
   }
-  pool.instanceIds.set(entityId, ids);
 }
 
 function removeFromPool(pool: BatchedLODPool, entityId: string): void {
@@ -594,7 +830,102 @@ function applyHighlightColor(
 
 // ---- Public API ----
 
-export function initGLBTreeBatchedInstancer(s: THREE.Scene, w: World): void {
+/** One main-world choice, reused unchanged by reflection/shadow rendering.
+ * This bounds the rest geometry plus a conservative shader wind envelope, not
+ * the dynamic visible silhouette. No renderer callback or secondary camera can
+ * reselect a LOD. Explicit primary preparation supplies the finalized main
+ * camera/parent matrices. Different LOD parents/transforms keep full detail. */
+function selectPoolProjectedLod(
+  pool: TreeTypePool,
+  variant: number,
+  instanceMatrix: THREE.Matrix4,
+  currentLod: 0 | 1 | 2,
+): 0 | 1 {
+  const canvas = world?.graphics?.renderer?.domElement;
+  const camera = world?.camera;
+  const primary = pool.lod0?.batches[0];
+  if (!canvas || !camera || !primary || !pool.lod1?.sourceGeometries[variant])
+    return 0;
+  for (let level = 0; level < 3; level++) {
+    const lod = level === 0 ? pool.lod0 : level === 1 ? pool.lod1 : pool.lod2;
+    if (!lod) continue;
+    for (const batch of lod.batches)
+      if (
+        batch.parent !== primary.parent ||
+        !batch.matrixWorld.equals(primary.matrixWorld)
+      )
+        return 0;
+  }
+  const bounds = pool.variantBounds[variant];
+  if (!Number.isFinite(bounds.maximumLeafMask)) return 0;
+  _projectedBounds.copy(bounds.box).applyMatrix4(instanceMatrix);
+  if (pool.windMode === "connected-v1") {
+    _projectedBounds.expandByScalar(TREE_WIND_MAX_DISPLACEMENT);
+  } else {
+    // r186 applies positionNode after the instance transform, before the batch
+    // model transform. Legacy displacement is abs(y)*.006*leafMask*wind, with
+    // the two sine-wave weights summing to one; original normals/UVs stay intact.
+    const wind = world?.getSystem<Wind>("wind");
+    const material = primary.material as TreeDissolveMaterial;
+    const strength =
+      wind?.uniforms.windStrength.value ??
+      material.treeUniforms.windStrength.value;
+    const direction = wind?.uniforms.windDirection.value;
+    const dx = direction?.x ?? material.treeUniforms.windDirection.value.x;
+    const dz = direction?.z ?? material.treeUniforms.windDirection.value.y;
+    const amplitude =
+      Math.max(
+        Math.abs(_projectedBounds.min.y),
+        Math.abs(_projectedBounds.max.y),
+      ) *
+      0.006 *
+      bounds.maximumLeafMask *
+      Math.abs(strength);
+    if (
+      !Number.isFinite(amplitude) ||
+      !Number.isFinite(dx) ||
+      !Number.isFinite(dz)
+    )
+      return 0;
+    _projectedBounds.min.x -= amplitude * Math.abs(dx);
+    _projectedBounds.max.x += amplitude * Math.abs(dx);
+    _projectedBounds.min.z -= amplitude * Math.abs(dz);
+    _projectedBounds.max.z += amplitude * Math.abs(dz);
+  }
+  return selectProjectedTreeLod(
+    projectedTreeBoundsPixels(
+      _projectedBounds,
+      primary.matrixWorld,
+      camera,
+      canvas.width,
+      canvas.height,
+    ),
+    currentLod,
+  );
+}
+
+export function initGLBTreeBatchedInstancer(
+  s: THREE.Scene,
+  w: World,
+  options: TreeWindPoolOptions & { lodCandidate?: "projected-v1" } = {},
+): void {
+  const nextMode = options.windMode ?? "legacy-leaf-v1";
+  const nextLodCandidate = options.lodCandidate ?? resolveTreeLodCandidate();
+  if (nextMode !== "legacy-leaf-v1" && nextMode !== "connected-v1")
+    throw new Error("Unknown tree wind mode");
+  if (nextLodCandidate !== undefined && nextLodCandidate !== "projected-v1")
+    throw new Error("Unknown tree LOD candidate");
+  if (
+    (nextMode !== windMode ||
+      nextLodCandidate !== lodCandidate ||
+      scene !== s ||
+      world !== w) &&
+    (pools.size > 0 || pendingEnsure.size > 0 || pendingInstances.size > 0)
+  )
+    throw new Error("Tree pool owner or wind mode change requires teardown");
+  poolGeneration++;
+  windMode = nextMode;
+  lodCandidate = nextLodCandidate;
   scene = s;
   world = w;
 }
@@ -604,23 +935,25 @@ export function initGLBTreeBatchedInstancer(s: THREE.Scene, w: World): void {
  * after this to dispose cached proxy geometries that reference sourceGeometries.
  */
 export function destroyGLBTreeBatchedInstancer(): void {
+  poolGeneration++;
   for (const pool of pools.values()) {
     for (const lodPool of [pool.lod0, pool.lod1, pool.lod2]) {
       if (!lodPool) continue;
-      for (const bm of lodPool.batches) {
-        scene?.remove(bm);
-        bm.dispose();
-      }
-      for (const mat of lodPool.materials) mat.dispose();
-      lodPool.sourceGeometries.length = 0;
+      disposeBatchedLODPool(lodPool);
     }
   }
   pools.clear();
   entityToTreeType.clear();
+  pendingInstances.clear();
   pendingEnsure.clear();
   dissolveAnims.clear();
   scene = null;
   world = null;
+  windMode = "legacy-leaf-v1";
+  lodCandidate = undefined;
+  lastUpdateFrame = -1;
+  lastPreparedFrame = -1;
+  highlightedEntityId = null;
 }
 
 export async function addInstance(
@@ -632,19 +965,49 @@ export async function addInstance(
   rotation: number,
   scale: number,
   initialDissolve = 0,
+  lifetime?: TreeInstanceLifetime,
 ): Promise<boolean> {
-  if (!scene || !world) return false;
-
-  if (entityToTreeType.has(entityId)) {
-    removeInstance(entityId);
+  if (!scene || !world || (lifetime && !lifetime.isCurrent())) return false;
+  if (
+    !Number.isInteger(variantIndex) ||
+    variantIndex < 0 ||
+    variantIndex >= variantPaths.length
+  )
+    return false;
+  if (windMode === "connected-v1") {
+    try {
+      assertTreeWindInstanceMatrix(
+        composeInstanceMatrix(position, rotation, scale, 0),
+      );
+    } catch {
+      return false;
+    }
   }
+  const instanceWorld = world;
+  const instanceScene = scene;
+  const generation = poolGeneration;
+
+  const request = { lifetime };
+  pendingInstances.set(entityId, request);
 
   try {
     const pool = await ensureTreeTypePool(treeType, variantPaths);
+    if (
+      pendingInstances.get(entityId) !== request ||
+      world !== instanceWorld ||
+      scene !== instanceScene ||
+      generation !== poolGeneration ||
+      (lifetime && !lifetime.isCurrent())
+    )
+      return false;
 
-    // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
+    const insertionDissolve = lifetime?.getInitialDissolve() ?? initialDissolve;
+
+    // Projected membership is selected only at primary render preparation.
+    // Async insertions remain at full detail until that boundary. The ordinary
+    // distance path still avoids LOD0 pop-in at range.
     let initialLOD: 0 | 1 | 2 = 0;
-    if (world?.camera) {
+    if (!lodCandidate && world?.camera) {
       const cp = world.camera.position;
       const dx = cp.x - position.x;
       const dz = cp.z - position.z;
@@ -655,6 +1018,17 @@ export async function addInstance(
         initialLOD = pool.lod1 ? 1 : 0;
       }
     }
+    initialLOD = selectAvailableLOD(pool, variantIndex, initialLOD);
+    const initialPool =
+      initialLOD === 0 ? pool.lod0 : initialLOD === 1 ? pool.lod1 : pool.lod2;
+    if (
+      !initialPool ||
+      (initialPool.instanceIds.size >= MAX_INSTANCES &&
+        !initialPool.instanceIds.has(entityId))
+    )
+      return false;
+    const mat = composeInstanceMatrix(position, rotation, scale, pool.yOffset);
+    if (pool.windMode === "connected-v1") assertTreeWindInstanceMatrix(mat);
 
     let snowWeight = 0;
     {
@@ -682,6 +1056,7 @@ export async function addInstance(
 
     const slot: TreeSlot = {
       entityId,
+      lifetime,
       position: position.clone(),
       rotation,
       scale,
@@ -691,33 +1066,40 @@ export async function addInstance(
       snowWeight,
     };
 
+    removeInstance(entityId);
+    addToPool(
+      initialPool,
+      entityId,
+      mat,
+      variantIndex,
+      insertionDissolve,
+      snowWeight,
+    );
     pool.instances.set(entityId, slot);
     entityToTreeType.set(entityId, treeType);
 
-    const mat = composeInstanceMatrix(position, rotation, scale, pool.yOffset);
-    const initialPool =
-      initialLOD === 0 ? pool.lod0 : initialLOD === 1 ? pool.lod1 : pool.lod2;
-    if (initialPool)
-      addToPool(
-        initialPool,
-        entityId,
-        mat,
-        variantIndex,
-        initialDissolve,
-        snowWeight,
-      );
-
     return true;
   } catch (error) {
+    if (error === cancelledPoolLoad) return false;
     console.warn(
       `[GLBTreeBatchedInstancer] Failed to add instance ${entityId}:`,
       error,
     );
     return false;
+  } finally {
+    if (pendingInstances.get(entityId) === request)
+      pendingInstances.delete(entityId);
   }
 }
 
-export function removeInstance(entityId: string): void {
+export function removeInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): void {
+  const pending = pendingInstances.get(entityId);
+  if (pending && (!lifetime || pending.lifetime === lifetime)) {
+    pendingInstances.delete(entityId);
+  }
   const treeType = entityToTreeType.get(entityId);
   if (!treeType) return;
 
@@ -725,7 +1107,7 @@ export function removeInstance(entityId: string): void {
   if (!pool) return;
 
   const slot = pool.instances.get(entityId);
-  if (!slot) return;
+  if (!slot || (lifetime && slot.lifetime !== lifetime)) return;
 
   const lodPool = getLodPool(pool, slot);
   if (lodPool) removeFromPool(lodPool, entityId);
@@ -743,8 +1125,27 @@ function getLodPool(pool: TreeTypePool, slot: TreeSlot): BatchedLODPool | null {
       : pool.lod2;
 }
 
-export function hasInstance(entityId: string): boolean {
-  return entityToTreeType.has(entityId);
+function selectAvailableLOD(
+  pool: TreeTypePool,
+  variant: number,
+  requested: 0 | 1 | 2,
+): 0 | 1 | 2 {
+  if (requested === 2 && pool.lod2?.sourceGeometries[variant]) return 2;
+  if (requested >= 1 && pool.lod1?.sourceGeometries[variant]) return 1;
+  if (pool.lod0?.sourceGeometries[variant]) return 0;
+  throw new Error(`Tree has no LOD for source variant ${variant}`);
+}
+
+export function hasInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): boolean {
+  const treeType = entityToTreeType.get(entityId);
+  if (!treeType) return false;
+  return (
+    !lifetime ||
+    pools.get(treeType)?.instances.get(entityId)?.lifetime === lifetime
+  );
 }
 
 export function getModelDimensions(
@@ -754,7 +1155,18 @@ export function getModelDimensions(
   if (!treeType) return null;
   const pool = pools.get(treeType);
   if (!pool) return null;
-  return { height: pool.modelHeight, radius: pool.modelRadius };
+  const slot = pool.instances.get(entityId);
+  const box = slot && pool.variantBounds[slot.variantIndex]?.box;
+  if (!box) return null;
+  return {
+    height: box.max.y - box.min.y,
+    radius: Math.max(
+      Math.abs(box.min.x),
+      Math.abs(box.max.x),
+      Math.abs(box.min.z),
+      Math.abs(box.max.z),
+    ),
+  };
 }
 
 /**
@@ -775,11 +1187,13 @@ export function getProxyGeometry(
   if (!pool) return null;
   const slot = pool.instances.get(entityId);
   if (!slot) return null;
-  const lodPool = pool.lod2 ?? pool.lod1 ?? pool.lod0;
-  if (!lodPool) return null;
-  const vi = slot.variantIndex % lodPool.sourceGeometries.length;
+  const selected = selectAvailableLOD(pool, slot.variantIndex, 2);
+  const lodPool =
+    selected === 2 ? pool.lod2 : selected === 1 ? pool.lod1 : pool.lod0;
+  const geometries = lodPool?.sourceGeometries[slot.variantIndex];
+  if (!geometries) return null;
   return {
-    geometries: lodPool.sourceGeometries[vi],
+    geometries,
     yOffset: pool.yOffset,
   };
 }
@@ -871,15 +1285,9 @@ export function startDissolve(
 }
 
 let lastUpdateFrame = -1;
+let lastPreparedFrame = -1;
 
-export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
-  if (!world) return;
-  if (world.frame === lastUpdateFrame) return;
-  lastUpdateFrame = world.frame;
-
-  const camera = world.camera;
-  if (!camera) return;
-
+function selectTreeLods(camera: THREE.PerspectiveCamera): void {
   const camPos = camera.position;
   const lod1DistSq = resourceLOD.lod1DistanceSq;
   const lod2DistSq = resourceLOD.lod2DistanceSq;
@@ -892,7 +1300,19 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
       const distSq = dx * dx + dz * dz;
 
       let targetLOD: 0 | 1 | 2;
-      if (distSq < lod1DistSq * hysteresisSq) {
+      if (lodCandidate) {
+        targetLOD = selectPoolProjectedLod(
+          pool,
+          slot.variantIndex,
+          composeInstanceMatrix(
+            slot.position,
+            slot.rotation,
+            slot.scale,
+            slot.yOffset,
+          ),
+          slot.currentLOD,
+        );
+      } else if (distSq < lod1DistSq * hysteresisSq) {
         targetLOD = 0;
       } else if (distSq < lod1DistSq) {
         targetLOD = slot.currentLOD === 0 ? 0 : pool.lod1 ? 1 : 0;
@@ -908,7 +1328,18 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
         targetLOD = pool.lod2 ? 2 : pool.lod1 ? 1 : 0;
       }
 
+      targetLOD = selectAvailableLOD(pool, slot.variantIndex, targetLOD);
       if (targetLOD === slot.currentLOD) continue;
+      const newPool =
+        targetLOD === 0 ? pool.lod0 : targetLOD === 1 ? pool.lod1 : pool.lod2;
+      if (!newPool || newPool.instanceIds.size >= MAX_INSTANCES) continue;
+      const mat = composeInstanceMatrix(
+        slot.position,
+        slot.rotation,
+        slot.scale,
+        slot.yOffset,
+      );
+      if (pool.windMode === "connected-v1") assertTreeWindInstanceMatrix(mat);
 
       const oldPool = getLodPool(pool, slot);
       const wasHl = oldPool ? isHighlighted(oldPool, slot.entityId) : false;
@@ -926,36 +1357,27 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
             Math.min(DISSOLVE_MAX, 1.0 - _tmpColor.b),
           );
         }
-        removeFromPool(oldPool, slot.entityId);
       }
 
+      // Admit the destination first. Failure leaves the old visible actor and
+      // ownership intact instead of silently disappearing during an LOD swap.
+      addToPool(
+        newPool,
+        slot.entityId,
+        mat,
+        slot.variantIndex,
+        wasDissolveVal,
+        slot.snowWeight,
+      );
+      if (wasHl) applyHighlightColor(newPool, slot.entityId, true);
+      if (oldPool) removeFromPool(oldPool, slot.entityId);
       slot.currentLOD = targetLOD;
-
-      const newPool = getLodPool(pool, slot);
-      if (newPool) {
-        const mat = composeInstanceMatrix(
-          slot.position,
-          slot.rotation,
-          slot.scale,
-          slot.yOffset,
-        );
-        addToPool(
-          newPool,
-          slot.entityId,
-          mat,
-          slot.variantIndex,
-          wasDissolveVal,
-          slot.snowWeight,
-        );
-        if (wasHl) applyHighlightColor(newPool, slot.entityId, true);
-      }
     }
   }
+}
 
-  // Tick dissolve animations — runs AFTER LOD transitions above so that
-  // applyDissolveValue always finds the entity in its current (post-swap) pool.
-  tickDissolveAnims(dissolveAnims, deltaTime, applyDissolveValue);
-
+function updateTreeVisibility(camera: THREE.PerspectiveCamera): void {
+  const camPos = camera.position;
   // ---- Per-instance frustum + distance culling ----
   // Build camera frustum once for all trees this frame.
   _cullProjScreenMatrix.multiplyMatrices(
@@ -965,6 +1387,8 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
   _cullFrustum.setFromProjectionMatrix(_cullProjScreenMatrix);
 
   for (const pool of pools.values()) {
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool) lodPool.visibleInstanceCount = 0;
     for (const slot of pool.instances.values()) {
       const lodPool = getLodPool(pool, slot);
       if (!lodPool) continue;
@@ -981,26 +1405,77 @@ export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
         // Beyond shader fade end — always invisible.
         visible = false;
       } else {
-        // Frustum sphere test. Center at mid-height so tall canopies aren't culled
-        // while the tree base is still just inside the frustum.
+        // Exact variant union includes every loaded LOD and negative root
+        // geometry; a diagonal canopy must fit, not just its largest axis.
+        const bounds = pool.variantBounds[slot.variantIndex];
         _cullSphere.center.set(
           slot.position.x,
-          slot.position.y + pool.modelHeight * slot.scale * 0.5,
+          slot.position.y + (slot.yOffset + bounds.centerY) * slot.scale,
           slot.position.z,
         );
         _cullSphere.radius =
-          Math.max(pool.modelRadius, pool.modelHeight * 0.5) * slot.scale +
-          TREE_CULL_SPHERE_BUFFER;
+          bounds.sphereRadius * slot.scale +
+          TREE_CULL_SPHERE_BUFFER +
+          (pool.windMode === "connected-v1" ? TREE_WIND_MAX_DISPLACEMENT : 0);
         visible = _cullFrustum.intersectsSphere(_cullSphere);
       }
 
       for (let i = 0; i < lodPool.batches.length; i++) {
         lodPool.batches[i].setVisibleAt(ids[i], visible);
       }
+      if (visible) lodPool.visibleInstanceCount++;
     }
+    // Native counts may be stale while hidden. Publish only this exact slot result.
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool)
+        for (const batch of lodPool.batches)
+          batch.visible = lodPool.visibleInstanceCount > 0;
   }
+}
+
+/** Candidate-only, once-per-world-frame selection from the finalized primary
+ * camera. Call before any renderer submission, never from per-pass callbacks.
+ * Secondary cameras cannot claim preparation or change shared membership. */
+export function prepareGLBTreeBatchedInstancerForRender(
+  camera: THREE.PerspectiveCamera,
+): void {
+  if (
+    !world ||
+    !lodCandidate ||
+    camera !== world.camera ||
+    lastPreparedFrame === world.frame
+  )
+    return;
+  lastPreparedFrame = world.frame;
+  camera.updateWorldMatrix(true, false);
+  for (const pool of pools.values())
+    for (const lodPool of [pool.lod0, pool.lod1, pool.lod2])
+      if (lodPool) {
+        for (const batch of lodPool.batches)
+          batch.updateWorldMatrix(true, false);
+        for (const material of lodPool.materials)
+          material.dissolveUniforms.cameraPos.value.copy(camera.position);
+      }
+  selectTreeLods(camera);
+  updateTreeVisibility(camera);
+}
+
+export function updateGLBTreeBatchedInstancer(deltaTime: number): void {
+  if (!world) return;
+  if (world.frame === lastUpdateFrame) return;
+  lastUpdateFrame = world.frame;
+
+  const camera = world.camera;
+  if (!camera) return;
+
+  // Preserve the ordinary distance path's selection/animation/culling order.
+  // Projected swaps happen later and transfer this frame's updated dissolve.
+  if (!lodCandidate) selectTreeLods(camera);
+  tickDissolveAnims(dissolveAnims, deltaTime, applyDissolveValue);
+  if (!lodCandidate) updateTreeVisibility(camera);
 
   // Update dissolve uniforms
+  const camPos = camera.position;
   const camY = camPos.y;
   const players = world.getPlayers();
   const localPlayer = players && players.length > 0 ? players[0] : null;

@@ -12,6 +12,7 @@
 
 import * as THREE from "three";
 import { SpriteNodeMaterial } from "three/webgpu";
+import type { UniformNode } from "three/webgpu";
 import {
   Fn,
   attribute,
@@ -37,24 +38,24 @@ import type { GrassConfig } from "./types.js";
 import { DEFAULT_GRASS_CONFIG } from "./types.js";
 
 // TSL uniform nodes - these are shader nodes, not plain values
-type TSLUniform<T> = ReturnType<typeof tslUniform<T>> & { value: T };
+type TSLUniform<TNodeType, TValue> = UniformNode<TNodeType, TValue>;
 
 /**
  * Uniform values for TSL grass material (shader node types)
  */
 export interface GrassMaterialUniforms {
-  time: TSLUniform<number>;
-  windStrength: TSLUniform<number>;
-  windSpeed: TSLUniform<number>;
-  gustSpeed: TSLUniform<number>;
-  flutterIntensity: TSLUniform<number>;
-  windDirection: TSLUniform<THREE.Vector3>;
-  bladeHeight: TSLUniform<number>;
-  bladeWidth: TSLUniform<number>;
-  baseColor: TSLUniform<THREE.Color>;
-  tipColor: TSLUniform<THREE.Color>;
-  darkColor: TSLUniform<THREE.Color>;
-  dryColorMix: TSLUniform<number>;
+  time: TSLUniform<"float", number>;
+  windStrength: TSLUniform<"float", number>;
+  windSpeed: TSLUniform<"float", number>;
+  gustSpeed: TSLUniform<"float", number>;
+  flutterIntensity: TSLUniform<"float", number>;
+  windDirection: TSLUniform<"vec3", THREE.Vector3>;
+  bladeHeight: TSLUniform<"float", number>;
+  bladeWidth: TSLUniform<"float", number>;
+  baseColor: TSLUniform<"color", THREE.Color>;
+  tipColor: TSLUniform<"color", THREE.Color>;
+  darkColor: TSLUniform<"color", THREE.Color>;
+  dryColorMix: TSLUniform<"float", number>;
 }
 
 /**
@@ -93,26 +94,26 @@ export function createGrassUniforms(
   const color = { ...DEFAULT_GRASS_CONFIG.color, ...config.color };
 
   return {
-    time: tslUniform(0.0) as TSLUniform<number>,
-    windStrength: tslUniform(wind.strength) as TSLUniform<number>,
-    windSpeed: tslUniform(wind.speed) as TSLUniform<number>,
-    gustSpeed: tslUniform(wind.gustSpeed) as TSLUniform<number>,
-    flutterIntensity: tslUniform(wind.flutterIntensity) as TSLUniform<number>,
+    time: tslUniform(0.0),
+    windStrength: tslUniform(wind.strength),
+    windSpeed: tslUniform(wind.speed),
+    gustSpeed: tslUniform(wind.gustSpeed),
+    flutterIntensity: tslUniform(wind.flutterIntensity),
     windDirection: tslUniform(
       new THREE.Vector3(wind.direction.x, 0, wind.direction.z).normalize(),
-    ) as TSLUniform<THREE.Vector3>,
-    bladeHeight: tslUniform(blade.height) as TSLUniform<number>,
-    bladeWidth: tslUniform(blade.width) as TSLUniform<number>,
+    ),
+    bladeHeight: tslUniform(blade.height),
+    bladeWidth: tslUniform(blade.width),
     baseColor: tslUniform(
       new THREE.Color(color.baseColor.r, color.baseColor.g, color.baseColor.b),
-    ) as TSLUniform<THREE.Color>,
+    ),
     tipColor: tslUniform(
       new THREE.Color(color.tipColor.r, color.tipColor.g, color.tipColor.b),
-    ) as TSLUniform<THREE.Color>,
+    ),
     darkColor: tslUniform(
       new THREE.Color(color.darkColor.r, color.darkColor.g, color.darkColor.b),
-    ) as TSLUniform<THREE.Color>,
-    dryColorMix: tslUniform(color.dryColorMix) as TSLUniform<number>,
+    ),
+    dryColorMix: tslUniform(color.dryColorMix),
   };
 }
 
@@ -141,8 +142,8 @@ export function createGrassMaterial(
   material.alphaTest = 0.1;
 
   // Instance attributes
-  const instancePosition = attribute("instancePosition", "vec4");
-  const instanceVariation = attribute("instanceVariation", "vec4");
+  const instancePosition = attribute<"vec4">("instancePosition", "vec4");
+  const instanceVariation = attribute<"vec4">("instanceVariation", "vec4");
 
   // === UNPACK INSTANCE DATA ===
   const worldPos = instancePosition.xyz;
@@ -325,8 +326,8 @@ export function createGrassCardMaterial(
   material.alphaTest = 0.1;
 
   // Instance attributes for cards
-  const instancePosition = attribute("instancePosition", "vec4");
-  const instanceVariation = attribute("instanceVariation", "vec4");
+  const instancePosition = attribute<"vec4">("instancePosition", "vec4");
+  const instanceVariation = attribute<"vec4">("instanceVariation", "vec4");
 
   // Unpack instance data
   const worldPos = instancePosition.xyz;

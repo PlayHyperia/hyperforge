@@ -25,29 +25,18 @@ export const QUEST_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
  * - "completed": Quest finished, rewards claimed
  */
 export type QuestStatus =
-  | "not_started"
-  | "in_progress"
-  | "ready_to_complete"
-  | "completed";
+  "not_started" | "in_progress" | "ready_to_complete" | "completed";
 
 /** Database-stored status values (ready_to_complete is derived, not stored) */
 export type QuestDbStatus = "not_started" | "in_progress" | "completed";
 
 /** Quest difficulty levels matching classic fantasy MMORPG */
 export type QuestDifficulty =
-  | "novice"
-  | "intermediate"
-  | "experienced"
-  | "master"
-  | "grandmaster";
+  "novice" | "intermediate" | "experienced" | "master" | "grandmaster";
 
 /** Types of quest stage objectives */
 export type QuestStageType =
-  | "dialogue"
-  | "kill"
-  | "gather"
-  | "travel"
-  | "interact";
+  "dialogue" | "kill" | "gather" | "travel" | "interact";
 
 // === Quest Definition Types ===
 
@@ -156,6 +145,70 @@ export interface QuestProgress {
   completedAt?: number;
 }
 
+/** Complete journal snapshot: every required stage is needed for honest progress. */
+export interface QuestSnapshot {
+  id: string;
+  name: string;
+  description: string;
+  status: QuestStatus;
+  difficulty: QuestDifficulty;
+  questPoints: number;
+  startNpc: string;
+  currentStage: string;
+  stageProgress: StageProgress;
+  stages: Array<
+    Pick<QuestStage, "id" | "description" | "type" | "target" | "count">
+  >;
+  /** Current-stage aliases retained for existing list consumers. */
+  stageType?: QuestStageType;
+  stageTarget?: string;
+  stageCount?: number;
+}
+
+export interface QuestListPayload {
+  quests: QuestSnapshot[];
+  questPoints: number;
+}
+
+/** Copy authoritative state so a queued packet cannot change with later progress. */
+export function createQuestSnapshot(
+  definition: QuestDefinition,
+  status: QuestStatus,
+  progress?: QuestProgress,
+): QuestSnapshot {
+  const currentStage = progress?.currentStage ?? definition.stages[0]?.id ?? "";
+  const stage = progress
+    ? definition.stages.find((entry) => entry.id === currentStage)
+    : undefined;
+  return {
+    id: definition.id,
+    name: definition.name,
+    description: definition.description,
+    status,
+    difficulty: definition.difficulty,
+    questPoints: definition.questPoints,
+    startNpc: definition.startNpc,
+    currentStage,
+    stageProgress: { ...progress?.stageProgress },
+    stages: definition.stages.map(
+      ({ id, description, type, target, count }) => ({
+        id,
+        description,
+        type,
+        target,
+        count,
+      }),
+    ),
+    ...(stage
+      ? {
+          stageType: stage.type,
+          stageTarget: stage.target,
+          stageCount: stage.count,
+        }
+      : {}),
+  };
+}
+
 /** Complete quest state for a player (mutable for system use) */
 export interface PlayerQuestState {
   /** Player/character ID */
@@ -257,6 +310,71 @@ export interface QuestValidationResult {
   errors: string[];
 }
 
+const QUEST_REWARD_SKILL_IDS = new Set([
+  "attack",
+  "strength",
+  "defense",
+  "constitution",
+  "ranged",
+  "magic",
+  "prayer",
+  "woodcutting",
+  "mining",
+  "fishing",
+  "firemaking",
+  "cooking",
+  "smithing",
+  "agility",
+  "crafting",
+  "fletching",
+  "runecrafting",
+]);
+
+function validateQuestRewardItems(
+  questId: string,
+  field: string,
+  value: unknown,
+  errors: string[],
+): void {
+  if (!Array.isArray(value)) {
+    errors.push(`${questId}: '${field}' must be an array`);
+    return;
+  }
+  if (value.length > 28) {
+    errors.push(`${questId}: '${field}' exceeds 28 distinct reward entries`);
+    return;
+  }
+  const itemIds = new Set<string>();
+  value.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      errors.push(`${questId}: '${field}[${index}]' must be an object`);
+      return;
+    }
+    const reward = raw as Record<string, unknown>;
+    const itemId = String(reward.itemId ?? "").trim();
+    const quantity = Number(reward.quantity);
+    if (
+      !itemId ||
+      itemId !== reward.itemId ||
+      itemId.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(itemId)
+    ) {
+      errors.push(`${questId}: '${field}[${index}].itemId' is invalid`);
+    } else if (itemIds.has(itemId)) {
+      errors.push(`${questId}: '${field}' repeats item '${itemId}'`);
+    } else {
+      itemIds.add(itemId);
+    }
+    if (
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0 ||
+      quantity > 2_147_483_647
+    ) {
+      errors.push(`${questId}: '${field}[${index}].quantity' is invalid`);
+    }
+  });
+}
+
 /**
  * Validates a quest definition from manifest
  * Checks required fields, stage uniqueness, and type validity
@@ -301,7 +419,11 @@ export function validateQuestDefinition(
   }
 
   // Quest points validation
-  if (typeof def.questPoints !== "number" || def.questPoints < 0) {
+  if (
+    !Number.isSafeInteger(def.questPoints) ||
+    Number(def.questPoints) < 0 ||
+    Number(def.questPoints) > 1_000_000
+  ) {
     errors.push(`${questId}: Invalid 'questPoints' value`);
   }
 
@@ -371,11 +493,56 @@ export function validateQuestDefinition(
     errors.push(`${questId}: Missing 'rewards' object`);
   } else {
     const rewards = def.rewards as Record<string, unknown>;
-    if (typeof rewards.questPoints !== "number") {
-      errors.push(`${questId}: 'rewards.questPoints' must be a number`);
+    if (
+      !Number.isSafeInteger(rewards.questPoints) ||
+      Number(rewards.questPoints) < 0 ||
+      Number(rewards.questPoints) > 1_000_000
+    ) {
+      errors.push(`${questId}: 'rewards.questPoints' must be a safe integer`);
+    } else if (rewards.questPoints !== def.questPoints) {
+      errors.push(
+        `${questId}: 'rewards.questPoints' must match top-level 'questPoints'`,
+      );
     }
-    if (!Array.isArray(rewards.items)) {
-      errors.push(`${questId}: 'rewards.items' must be an array`);
+    validateQuestRewardItems(questId, "rewards.items", rewards.items, errors);
+    if (
+      !rewards.xp ||
+      typeof rewards.xp !== "object" ||
+      Array.isArray(rewards.xp)
+    ) {
+      errors.push(`${questId}: 'rewards.xp' must be an object`);
+    } else {
+      for (const [skill, rawAmount] of Object.entries(
+        rewards.xp as Record<string, unknown>,
+      )) {
+        const amount = Number(rawAmount);
+        if (!QUEST_REWARD_SKILL_IDS.has(skill)) {
+          errors.push(`${questId}: 'rewards.xp.${skill}' is not a skill`);
+        }
+        if (
+          !Number.isSafeInteger(amount) ||
+          amount <= 0 ||
+          amount > 1_000_000
+        ) {
+          errors.push(`${questId}: 'rewards.xp.${skill}' is invalid`);
+        }
+      }
+    }
+  }
+
+  if (def.onStart !== undefined) {
+    if (!def.onStart || typeof def.onStart !== "object") {
+      errors.push(`${questId}: 'onStart' must be an object`);
+    } else {
+      const onStart = def.onStart as Record<string, unknown>;
+      if (onStart.items !== undefined) {
+        validateQuestRewardItems(
+          questId,
+          "onStart.items",
+          onStart.items,
+          errors,
+        );
+      }
     }
   }
 

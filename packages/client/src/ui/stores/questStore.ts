@@ -8,10 +8,20 @@
  */
 
 import { create } from "zustand";
-import type { Quest, QuestState } from "@/game/systems/quest";
+import type { QuestListPayload } from "@hyperforge/shared";
+import {
+  questFromSnapshot,
+  type Quest,
+  type QuestState,
+} from "../../game/systems/quest/questUtils";
 
 /** Quest selection store state and actions */
 export interface QuestSelectionState {
+  /** Latest authoritative journal, independent of which windows are open. */
+  quests: Quest[];
+  questsLoaded: boolean;
+  applyQuestList: (payload: QuestListPayload) => void;
+  resetQuestList: () => void;
   /** The currently selected quest (null if none) */
   selectedQuest: Quest | null;
   /** Set the selected quest */
@@ -31,8 +41,40 @@ export interface QuestSelectionState {
  * and the quest detail panel, which may be in separate windows.
  */
 export const useQuestSelectionStore = create<QuestSelectionState>((set) => ({
+  quests: [],
+  questsLoaded: false,
+  applyQuestList: (payload) =>
+    set((state) => {
+      const quests = payload.quests.map(questFromSnapshot);
+      const selected = quests.find(
+        (quest) => quest.id === state.selectedQuest?.id,
+      );
+      return {
+        quests,
+        questsLoaded: true,
+        selectedQuest: selected
+          ? { ...selected, pinned: state.selectedQuest?.pinned ?? false }
+          : null,
+        questStatuses: new Map(quests.map((quest) => [quest.id, quest.state])),
+      };
+    }),
+  resetQuestList: () =>
+    set({
+      quests: [],
+      questsLoaded: false,
+      selectedQuest: null,
+      questStatuses: new Map(),
+    }),
   selectedQuest: null,
-  setSelectedQuest: (quest) => set({ selectedQuest: quest }),
+  setSelectedQuest: (quest) =>
+    set((state) => ({
+      selectedQuest: quest
+        ? {
+            ...(state.quests.find((entry) => entry.id === quest.id) ?? quest),
+            pinned: quest.pinned,
+          }
+        : null,
+    })),
   clearSelectedQuest: () => set({ selectedQuest: null }),
   questStatuses: new Map(),
   setQuestStatuses: (quests) => {

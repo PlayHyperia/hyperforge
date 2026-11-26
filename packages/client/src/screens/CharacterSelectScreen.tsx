@@ -1404,7 +1404,7 @@ export function CharacterSelectScreen({
           <div className="relative">
             <div className="mx-auto mt-20 md:mt-0 mb-2 w-full max-w-2xl flex items-center justify-center">
               <img
-                src="/images/hyperia_wordmark.png"
+                src="/images/hyperia-wordmark.svg"
                 alt="Hyperia"
                 className="h-20 md:h-36 object-contain"
               />

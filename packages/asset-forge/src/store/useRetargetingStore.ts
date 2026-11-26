@@ -5,10 +5,7 @@ import { immer } from "zustand/middleware/immer";
 
 export type RetargetingStep = "select-models" | "adjust-bones" | "export";
 export type RigType =
-  | "mixamo-human"
-  | "mixamo-quadruped"
-  | "mixamo-bird"
-  | "custom";
+  "mixamo-human" | "mixamo-quadruped" | "mixamo-bird" | "custom";
 
 interface BoneMapping {
   [sourceBoneName: string]: string; // maps to target bone name
@@ -83,6 +80,11 @@ interface RetargetingState {
   getMappedBonesCount: () => number;
 }
 
+interface StoreHook<T> {
+  (): T;
+  <U>(selector: (state: T) => U): U;
+}
+
 const initialState = {
   sourceModelUrl: null,
   sourceModelAssetId: null,
@@ -107,7 +109,7 @@ const initialState = {
   lastError: null,
 };
 
-export const useRetargetingStore = create<RetargetingState>()(
+const retargetingStore = create<RetargetingState>()(
   devtools(
     persist(
       subscribeWithSelector(
@@ -330,6 +332,9 @@ export const useRetargetingStore = create<RetargetingState>()(
     { name: "RetargetingStore" },
   ),
 );
+
+export const useRetargetingStore: StoreHook<RetargetingState> =
+  retargetingStore;
 
 // Convenience selector exports
 export const useCanRetarget = () =>

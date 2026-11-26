@@ -1,4 +1,9 @@
-import { defineConfig, loadEnv } from "vite";
+import {
+  defineConfig,
+  loadEnv,
+  type HotUpdateOptions,
+  type ViteDevServer,
+} from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
@@ -250,24 +255,35 @@ export default defineConfig(({ mode }) => {
         : [
             {
               name: "watch-shared-package",
-              configureServer(server: any) {
+              hotUpdate({ file }: HotUpdateOptions) {
+                // Vite's own worker/module graph must not propagate an early
+                // reload before our final client-file commit notification.
+                if (
+                  [
+                    "framework.client.js",
+                    "framework.js",
+                    "grass-grounding.worker.js",
+                  ].some(
+                    (name) =>
+                      path.resolve(file) ===
+                      path.resolve(__dirname, "../shared/build", name),
+                  )
+                )
+                  return [];
+              },
+              configureServer(server: ViteDevServer) {
                 const sharedBuildPath = path.resolve(
                   __dirname,
                   "../shared/build",
                 );
-                // Watch only shared build artifacts used by the client alias.
-                // Watching the full shared src tree can flood HMR with events and
-                // drive excessive memory growth in long-lived dev sessions.
+                // Shared watch publishes this file last after a successful
+                // staged batch. Ordinary builds already write worker/full
+                // before client. Only this final file owns the reload signal.
                 const sharedClientBuildFile = path.join(
                   sharedBuildPath,
                   "framework.client.js",
                 );
-                const sharedFullBuildFile = path.join(
-                  sharedBuildPath,
-                  "framework.js",
-                );
                 server.watcher.add(sharedClientBuildFile);
-                server.watcher.add(sharedFullBuildFile);
 
                 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
                 let pendingFile = "";
@@ -293,18 +309,14 @@ export default defineConfig(({ mode }) => {
                 };
 
                 const onSharedBuildChange = (file: string) => {
-                  if (!file.includes("packages/shared/build/")) return;
-                  if (!file.endsWith(".js") && !file.endsWith(".mjs")) return;
-                  if (
-                    !file.includes("framework.client") &&
-                    !file.endsWith("framework.js")
-                  )
-                    return;
+                  if (path.resolve(file) !== sharedClientBuildFile) return;
                   scheduleReload(file);
                 };
 
+                server.watcher.on("add", onSharedBuildChange);
                 server.watcher.on("change", onSharedBuildChange);
                 server.httpServer?.once("close", () => {
+                  server.watcher.off("add", onSharedBuildChange);
                   server.watcher.off("change", onSharedBuildChange);
                   if (reloadTimer) {
                     clearTimeout(reloadTimer);
@@ -313,8 +325,8 @@ export default defineConfig(({ mode }) => {
                 });
 
                 console.log(
-                  "[Vite] 👀 Watching shared build artifacts:",
-                  sharedBuildPath,
+                  "[Vite] 👀 Watching shared client commit:",
+                  sharedClientBuildFile,
                 );
               },
             },
@@ -409,6 +421,7 @@ export default defineConfig(({ mode }) => {
       // Secret variables that must NEVER be exposed to client:
       //   - PRIVY_APP_SECRET
       //   - JWT_SECRET
+      //   - JWT_SIGNING_KEYS
       //   - DATABASE_URL
       //   - POSTGRES_PASSWORD
       //   - LIVEKIT_API_SECRET
@@ -473,6 +486,18 @@ export default defineConfig(({ mode }) => {
       open: false,
       host: true,
       hmr: disableSharedWatch ? false : undefined,
+      // Explicit local workaround for OS FSEvents stalls (including fs.watch).
+      // Keep historical defaults unless requested; polling has a CPU/latency cost.
+      ...(mode === "development" && process.env.HYPERIA_VITE_POLLING === "true"
+        ? {
+            watch: {
+              useFsEvents: false,
+              usePolling: true,
+              interval: 1000,
+              binaryInterval: 1000,
+            },
+          }
+        : {}),
       // Do not proxy /env.js: public/env.js provides loopback defaults when the game server
       // is down or restarting; proxying returned 502 and blocked bootstrap. Server still
       // serves GET /env.js at PUBLIC_API_URL for direct use if needed.
@@ -606,6 +631,10 @@ export default defineConfig(({ mode }) => {
           noDiscovery: true,
           include: [
             "three",
+            // Prebundle all runtime entrypoints together so GLTFLoader and
+            // WebGPU share core classes (including Mesh instanceof checks).
+            "three/webgpu",
+            "three/tsl",
             "react",
             "react-dom",
             "react-dom/client",

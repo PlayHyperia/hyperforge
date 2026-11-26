@@ -1,165 +1,351 @@
 name: Deploy to Railway
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - main
       - staging
       - develop
       - dev
       - hackathon
-    paths:
-      - 'packages/shared/**'
-      - 'packages/client/**'
-      - 'packages/server/**'
-      - 'packages/plugin-hyperia/**'
-      - 'package.json'
-      - 'bun.lock'
-      - 'nixpacks.toml'
-      - 'railway.server.json'
-      - 'Dockerfile.server'
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment'
+        description: Deployment environment
         required: true
-        default: 'prod'
+        default: prod
         type: choice
         options:
           - prod
           - dev
       deploy_ref:
-        description: 'Git ref (commit SHA or tag) to deploy/rollback'
+        description: Git ref (commit SHA or tag) to deploy or roll back
         required: false
         type: string
 
-# Railway environment IDs
-# Production: hyperia.gg
-# Development: dev.hyperia.gg (recommended)
+permissions:
+  actions: read
+  contents: read
+  statuses: write
+
+# Serialize both environments so two exact-SHA deployments cannot supersede
+# each other while their terminal statuses are being verified.
+concurrency:
+  group: railway-deployment
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy to Railway (${{ (github.ref_name == 'staging' || github.ref_name == 'develop' || github.ref_name == 'dev' || github.ref_name == 'hackathon' || inputs.environment == 'dev') && 'dev' || 'prod' }})
+  authority:
+    name: Authorize exact CI-tested commit
     runs-on: ubuntu-latest
-    environment: ${{ (github.ref_name == 'staging' || github.ref_name == 'develop' || github.ref_name == 'dev' || github.ref_name == 'hackathon' || inputs.environment == 'dev') && 'development' || 'production' }}
-    env:
-      # Railway identifiers live in repo variables so they can be updated
-      # without another workflow change when the linked service drifts.
-      RAILWAY_PROJECT_ID: e5f5ba11-0380-4d71-aa0b-343d89a58c0d
-      RAILWAY_PRODUCTION_SERVICE_ID: ${{ vars.RAILWAY_PRODUCTION_SERVICE_ID || '330ea18e-b215-4cf9-9fe2-4bb09fc2ec63' }}
-      RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID || '194f3565-ba2f-4c98-87d2-85dfc3a5110b' }}
-      # Development environment (configure these in GitHub repository variables)
-      RAILWAY_DEV_SERVICE_ID: ${{ vars.RAILWAY_DEV_SERVICE_ID || vars.RAILWAY_STAGING_SERVICE_ID || '330ea18e-b215-4cf9-9fe2-4bb09fc2ec63' }}
-      RAILWAY_DEV_ENVIRONMENT_ID: ${{ vars.RAILWAY_DEV_ENVIRONMENT_ID || vars.RAILWAY_STAGING_ENVIRONMENT_ID || '1caead9b-c664-4ab2-aae5-8e9e52753db1' }}
-      # Backward-compatible fallback (legacy staging variable names)
-      RAILWAY_STAGING_SERVICE_ID: ${{ vars.RAILWAY_STAGING_SERVICE_ID }}
-      RAILWAY_STAGING_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+    outputs:
+      sha: ${{ steps.automatic.outputs.sha || steps.manual.outputs.sha }}
+      branch: ${{ steps.automatic.outputs.branch || steps.manual.outputs.branch }}
+      environment: ${{ steps.automatic.outputs.environment || steps.manual.outputs.environment }}
+      ci_run_id: ${{ steps.automatic.outputs.ci_run_id || steps.manual.outputs.ci_run_id }}
+      ci_run_url: ${{ steps.automatic.outputs.ci_run_url || steps.manual.outputs.ci_run_url }}
+      classification: ${{ steps.automatic.outputs.classification || steps.manual.outputs.classification }}
     steps:
-      - name: Checkout code
+      - name: Checkout trusted deployment policy
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: workflow-source/.node-version
+
+      - name: Test deployment policy
+        run: node --test workflow-source/scripts/railway-deployment-policy.test.mjs
+
+      - name: Authorize successful push CI event
+        id: automatic
+        if: github.event_name == 'workflow_run'
+        run: >-
+          node workflow-source/scripts/railway-deployment-policy.mjs
+          authorize-workflow-run "$GITHUB_EVENT_PATH"
+
+      - name: Resolve manual deployment ref
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.deploy_ref || github.sha }}
+          path: deployment-source
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Determine deployment target
+      - name: Read resolved manual SHA
+        id: manual_ref
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: deployment-source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Load exact-SHA CI evidence for manual deployment
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RESOLVED_SHA: ${{ steps.manual_ref.outputs.sha }}
+          CI_RUNS_PATH: ${{ runner.temp }}/railway-ci-runs.json
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPOSITORY/actions/workflows/ci.yml/runs" \
+            --method GET \
+            --field head_sha="$RESOLVED_SHA" \
+            --field event=push \
+            --field per_page=100 \
+            --jq '.workflow_runs[]' \
+            | jq -s '{ workflow_runs: . }' > "$CI_RUNS_PATH"
+
+      - name: Authorize manual exact-SHA deployment
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RESOLVED_SHA: ${{ steps.manual_ref.outputs.sha }}
+          DEPLOYMENT_ENVIRONMENT: ${{ inputs.environment }}
+        run: >-
+          node workflow-source/scripts/railway-deployment-policy.mjs
+          authorize-manual "${{ runner.temp }}/railway-ci-runs.json"
+
+      - name: Record deployment authority
+        env:
+          DEPLOY_SHA: ${{ steps.automatic.outputs.sha || steps.manual.outputs.sha }}
+          DEPLOY_BRANCH: ${{ steps.automatic.outputs.branch || steps.manual.outputs.branch }}
+          DEPLOY_ENVIRONMENT: ${{ steps.automatic.outputs.environment || steps.manual.outputs.environment }}
+          CI_RUN_URL: ${{ steps.automatic.outputs.ci_run_url || steps.manual.outputs.ci_run_url }}
+        run: |
+          {
+            echo '### Railway deployment authority'
+            echo
+            echo "- Exact commit: \`$DEPLOY_SHA\`"
+            echo "- CI branch: \`$DEPLOY_BRANCH\`"
+            echo "- Target: \`$DEPLOY_ENVIRONMENT\`"
+            echo "- Successful push CI: $CI_RUN_URL"
+            echo '- Change policy: every successful CI push deploys (conservative, no path skips)'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  mark_pending:
+    name: Mark exact commit pending
+    needs: authority
+    uses: ./.github/workflows/sync-railway-status.yml
+    with:
+      sha: ${{ needs.authority.outputs.sha }}
+      state: pending
+      description: Railway deployment is queued after exact-SHA CI verification
+      target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  deploy:
+    name: Deploy to Railway (${{ needs.authority.outputs.environment }})
+    needs:
+      - authority
+      - mark_pending
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ needs.authority.outputs.environment == 'dev' && 'development' || 'production' }}
+    env:
+      RAILWAY_PRODUCTION_SERVICE_ID: ${{ vars.RAILWAY_PRODUCTION_SERVICE_ID || '330ea18e-b215-4cf9-9fe2-4bb09fc2ec63' }}
+      RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID || '194f3565-ba2f-4c98-87d2-85dfc3a5110b' }}
+      RAILWAY_DEV_SERVICE_ID: ${{ vars.RAILWAY_DEV_SERVICE_ID || vars.RAILWAY_STAGING_SERVICE_ID || '330ea18e-b215-4cf9-9fe2-4bb09fc2ec63' }}
+      RAILWAY_DEV_ENVIRONMENT_ID: ${{ vars.RAILWAY_DEV_ENVIRONMENT_ID || vars.RAILWAY_STAGING_ENVIRONMENT_ID || '1caead9b-c664-4ab2-aae5-8e9e52753db1' }}
+    steps:
+      - name: Checkout trusted deployment policy
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: workflow-source/.node-version
+
+      - name: Resolve Railway target
         id: target
+        env:
+          DEPLOYMENT_ENVIRONMENT: ${{ needs.authority.outputs.environment }}
         run: |
-          if [ "${{ github.ref_name }}" = "staging" ] || [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "dev" ] || [ "${{ github.ref_name }}" = "hackathon" ] || [ "${{ inputs.environment }}" = "dev" ]; then
-            service_id="${{ env.RAILWAY_DEV_SERVICE_ID }}"
-            environment_id="${{ env.RAILWAY_DEV_ENVIRONMENT_ID }}"
-
-            # Fallback to legacy staging variable names if dev variables are not configured yet
-            if [ -z "$service_id" ]; then
-              service_id="${{ env.RAILWAY_STAGING_SERVICE_ID }}"
-            fi
-            if [ -z "$environment_id" ]; then
-              environment_id="${{ env.RAILWAY_STAGING_ENVIRONMENT_ID }}"
-            fi
-
-            echo "environment=dev" >> $GITHUB_OUTPUT
-            echo "service_id=$service_id" >> $GITHUB_OUTPUT
-            echo "environment_id=$environment_id" >> $GITHUB_OUTPUT
-            echo "🎭 Deploying to DEV (dev.hyperia.gg)"
-          else
-            echo "environment=prod" >> $GITHUB_OUTPUT
-            echo "service_id=${{ env.RAILWAY_PRODUCTION_SERVICE_ID }}" >> $GITHUB_OUTPUT
-            echo "environment_id=${{ env.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}" >> $GITHUB_OUTPUT
-            echo "🚀 Deploying to PROD (hyperia.gg)"
-          fi
-
-      - name: Validate dev configuration
-        if: steps.target.outputs.environment == 'dev'
-        run: |
-          if [ -z "${{ steps.target.outputs.service_id }}" ] || [ -z "${{ steps.target.outputs.environment_id }}" ]; then
-            echo "❌ Development environment not configured!"
-            echo ""
-            echo "To set up dev deployment:"
-            echo "1. Create a new environment in Railway called 'development' (or keep your existing staging env)"
-            echo "2. Add repository variables in GitHub:"
-            echo "   - RAILWAY_DEV_SERVICE_ID"
-            echo "   - RAILWAY_DEV_ENVIRONMENT_ID"
-            echo "   (legacy fallback: RAILWAY_STAGING_SERVICE_ID / RAILWAY_STAGING_ENVIRONMENT_ID)"
-            echo ""
-            echo "Get these IDs from Railway dashboard or API."
-            exit 1
-          fi
-
-      - name: Trigger Railway Deployment
-        id: trigger
-        run: |
-          echo "📦 Triggering deployment to ${{ steps.target.outputs.environment }}..."
-          RESPONSE=$(curl -s -X POST https://backboard.railway.com/graphql/v2 \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
-            -d '{"query":"mutation { serviceInstanceRedeploy(environmentId: \"${{ steps.target.outputs.environment_id }}\", serviceId: \"${{ steps.target.outputs.service_id }}\") }"}')
-          echo "Response: $RESPONSE"
-
-          if echo "$RESPONSE" | grep -q '"serviceInstanceRedeploy":true'; then
-            echo "triggered=true" >> $GITHUB_OUTPUT
-            echo "✅ Deployment triggered successfully"
-          elif echo "$RESPONSE" | grep -q '"Not Authorized"'; then
-            echo "triggered=false" >> $GITHUB_OUTPUT
-            echo "::warning::Railway token is not authorized for the ${{ steps.target.outputs.environment }} deployment target; refresh the token or trigger the deployment manually in Railway."
-            {
-              echo "### Railway deployment skipped"
-              echo ""
-              echo "- Target: \`${{ steps.target.outputs.environment }}\`"
-              echo "- Reason: Railway API returned \`Not Authorized\` for service \`${{ steps.target.outputs.service_id }}\` in environment \`${{ steps.target.outputs.environment_id }}\`."
-              echo "- Action: refresh \`RAILWAY_TOKEN\` access for this Railway project or trigger the deployment manually in Railway."
-              if [ "${{ steps.target.outputs.environment }}" = "prod" ]; then
-                echo "- Production note: the public Railway service may remain stale or unavailable until a manual deployment succeeds."
-              else
-                echo "- Non-production note: Docker validation should be used as the branch gate until credentials are refreshed."
-              fi
-            } >> $GITHUB_STEP_SUMMARY
-            exit 0
-          else
-            echo "triggered=false" >> $GITHUB_OUTPUT
-            echo "❌ Failed to trigger deployment"
-            exit 1
-          fi
-
-      - name: Wait for deployment to start
-        if: steps.trigger.outputs.triggered == 'true'
-        run: sleep 10
-
-      - name: Check deployment status
-        if: steps.trigger.outputs.triggered == 'true'
-        run: |
-          for i in {1..5}; do
-            RESPONSE=$(curl -s -X POST https://backboard.railway.com/graphql/v2 \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
-              -d '{"query":"query { project(id: \"${{ env.RAILWAY_PROJECT_ID }}\") { services { edges { node { name serviceInstances { edges { node { latestDeployment { status } } } } } } } } }"}')
-            STATUS=$(echo "$RESPONSE" | jq -r '.data.project.services.edges[] | select(.node.name=="hyperia") | .node.serviceInstances.edges[0].node.latestDeployment.status')
-            echo "Deployment status: $STATUS"
-            if [ "$STATUS" = "SUCCESS" ]; then
-              echo "✅ Deployment succeeded"
-              exit 0
-            fi
-            if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CRASHED" ]; then
-              echo "❌ Deployment failed with status: $STATUS"
+          set -euo pipefail
+          case "$DEPLOYMENT_ENVIRONMENT" in
+            prod)
+              service_id="$RAILWAY_PRODUCTION_SERVICE_ID"
+              environment_id="$RAILWAY_PRODUCTION_ENVIRONMENT_ID"
+              ;;
+            dev)
+              service_id="$RAILWAY_DEV_SERVICE_ID"
+              environment_id="$RAILWAY_DEV_ENVIRONMENT_ID"
+              ;;
+            *)
+              echo "Unsupported Railway target: $DEPLOYMENT_ENVIRONMENT" >&2
               exit 1
-            fi
-            sleep 30
+              ;;
+          esac
+
+          if [ -z "$service_id" ] || [ -z "$environment_id" ]; then
+            echo "Railway service/environment IDs are not configured" >&2
+            exit 1
+          fi
+          echo "service_id=$service_id" >> "$GITHUB_OUTPUT"
+          echo "environment_id=$environment_id" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger exact-commit Railway deployment
+        id: trigger
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE_ID: ${{ steps.target.outputs.service_id }}
+          ENVIRONMENT_ID: ${{ steps.target.outputs.environment_id }}
+          CI_BRANCH: ${{ needs.authority.outputs.branch }}
+          COMMIT_SHA: ${{ needs.authority.outputs.sha }}
+          BRANCH_RESPONSE_PATH: ${{ runner.temp }}/railway-current-branch.json
+          REQUEST_PATH: ${{ runner.temp }}/railway-deploy-request.json
+          RESPONSE_PATH: ${{ runner.temp }}/railway-deploy-response.json
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = 'workflow_run' ]; then
+            gh api "repos/$REPOSITORY/branches/$CI_BRANCH" > "$BRANCH_RESPONSE_PATH"
+            node workflow-source/scripts/railway-deployment-policy.mjs \
+              verify-current-branch-head "$BRANCH_RESPONSE_PATH"
+          elif [ "$EVENT_NAME" != 'workflow_dispatch' ]; then
+            echo "Unsupported Railway deployment event: $EVENT_NAME" >&2
+            exit 1
+          fi
+
+          jq -n \
+            --arg serviceId "$SERVICE_ID" \
+            --arg environmentId "$ENVIRONMENT_ID" \
+            --arg commitSha "$COMMIT_SHA" \
+            '{
+              query: "mutation serviceInstanceDeployV2($serviceId: String!, $environmentId: String!, $commitSha: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }",
+              variables: {
+                serviceId: $serviceId,
+                environmentId: $environmentId,
+                commitSha: $commitSha
+              }
+            }' > "$REQUEST_PATH"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://backboard.railway.com/graphql/v2 \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $RAILWAY_TOKEN" \
+            --data-binary "@$REQUEST_PATH" \
+            --output "$RESPONSE_PATH"
+
+          node workflow-source/scripts/railway-deployment-policy.mjs \
+            parse-deploy "$RESPONSE_PATH"
+
+      - name: Verify exact Railway deployment reaches success
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          DEPLOYMENT_ID: ${{ steps.trigger.outputs.deployment_id }}
+          REQUEST_PATH: ${{ runner.temp }}/railway-status-request.json
+          RESPONSE_PATH: ${{ runner.temp }}/railway-status-response.json
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg id "$DEPLOYMENT_ID" \
+            '{
+              query: "query deployment($id: String!) { deployment(id: $id) { id status } }",
+              variables: { id: $id }
+            }' > "$REQUEST_PATH"
+
+          for attempt in $(seq 1 40); do
+            curl --fail-with-body --silent --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 2 \
+              --request POST \
+              --url https://backboard.railway.com/graphql/v2 \
+              --header 'Content-Type: application/json' \
+              --header "Authorization: Bearer $RAILWAY_TOKEN" \
+              --data-binary "@$REQUEST_PATH" \
+              --output "$RESPONSE_PATH"
+
+            evaluation="$(node workflow-source/scripts/railway-deployment-policy.mjs \
+              inspect-deployment "$RESPONSE_PATH")"
+            classification="${evaluation%%$'\t'*}"
+            status="${evaluation#*$'\t'}"
+            echo "Railway deployment attempt $attempt/40: $status"
+
+            case "$classification" in
+              success)
+                echo 'Railway deployment succeeded'
+                exit 0
+                ;;
+              failure)
+                echo "Railway deployment failed with status: $status" >&2
+                exit 1
+                ;;
+              pending)
+                if [ "$attempt" -eq 40 ]; then
+                  echo "Railway deployment timed out in pending status: $status" >&2
+                  exit 1
+                fi
+                sleep 15
+                ;;
+              *)
+                echo "Railway deployment policy returned an unknown classification" >&2
+                exit 1
+                ;;
+            esac
           done
-          echo "⏳ Deployment still in progress (will complete in background)"
+
+          echo 'Railway deployment did not reach a terminal state' >&2
+          exit 1
+
+  terminal_policy:
+    name: Resolve terminal commit status
+    needs:
+      - authority
+      - mark_pending
+      - deploy
+    if: always() && needs.authority.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      state: ${{ steps.policy.outputs.state }}
+      description: ${{ steps.policy.outputs.description }}
+    steps:
+      - name: Checkout trusted deployment policy
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: workflow-source/.node-version
+
+      - name: Resolve fail-closed terminal state
+        id: policy
+        env:
+          AUTHORITY_RESULT: ${{ needs.authority.result }}
+          PENDING_RESULT: ${{ needs.mark_pending.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: node workflow-source/scripts/railway-deployment-policy.mjs terminal-status
+
+  mark_terminal:
+    name: Mark exact commit terminal state
+    needs:
+      - authority
+      - mark_pending
+      - deploy
+      - terminal_policy
+    if: always() && needs.authority.result == 'success' && needs.terminal_policy.result == 'success'
+    uses: ./.github/workflows/sync-railway-status.yml
+    with:
+      sha: ${{ needs.authority.outputs.sha }}
+      state: ${{ needs.terminal_policy.outputs.state }}
+      description: ${{ needs.terminal_policy.outputs.description }}
+      target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

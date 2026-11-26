@@ -1,4 +1,5 @@
 import { GAME_API_URL } from "@/lib/api-config";
+import { getApiAuthorizationHeaders } from "@/lib/api-client";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Agent } from "./types";
 import { usePrivy } from "@privy-io/react-auth";
@@ -118,6 +119,7 @@ export const AgentViewport: React.FC<AgentViewportProps> = ({ agent }) => {
           );
           const mappingResponse = await fetch(
             `${GAME_API_URL}/api/agents/mapping/${agent.id}`,
+            { headers: getApiAuthorizationHeaders() },
           );
           if (mappingResponse.ok) {
             const mappingData = await mappingResponse.json();

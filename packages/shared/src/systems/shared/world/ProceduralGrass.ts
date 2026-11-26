@@ -81,7 +81,7 @@ import THREE, {
   Loop,
   attribute,
 } from "../../../extras/three/three";
-import { MeshBasicNodeMaterial } from "three/webgpu";
+import { MeshBasicNodeMaterial, type TextureNode } from "three/webgpu";
 import { System } from "../infrastructure/System";
 import type { World } from "../../../types";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
@@ -358,7 +358,7 @@ const HEIGHTMAP_CONFIG = {
 // ============================================================================
 
 // Heightmap texture node for compute shader
-let heightmapTextureNode: ReturnType<typeof texture> | null = null;
+let heightmapTextureNode: TextureNode<"vec4"> | null = null;
 const uHeightmapMax = uniform(100);
 const uHeightmapWorldSize = uniform(HEIGHTMAP_CONFIG.WORLD_SIZE);
 // Heightmap center position (for streaming heightmap that follows player)
@@ -373,9 +373,7 @@ const uHeightmapCenterZ = uniform(0);
  * Get the grass heightmap texture node.
  * Flowers and other vegetation should use this instead of VegetationSsboUtils.
  */
-export function getGrassHeightmapTextureNode(): ReturnType<
-  typeof texture
-> | null {
+export function getGrassHeightmapTextureNode(): TextureNode<"vec4"> | null {
   return heightmapTextureNode;
 }
 
@@ -479,8 +477,7 @@ exclusionTexture.minFilter = THREE.LinearFilter;
 exclusionTexture.magFilter = THREE.LinearFilter;
 exclusionTexture.needsUpdate = true;
 
-const exclusionTextureNode: ReturnType<typeof texture> =
-  texture(exclusionTexture);
+const exclusionTextureNode: TextureNode<"vec4"> = texture(exclusionTexture);
 const uExclusionWorldSize = uniform(EXCLUSION_WORLD_SIZE);
 const uExclusionCenterX = uniform(0);
 const uExclusionCenterZ = uniform(0);
@@ -495,7 +492,7 @@ const uExclusionCenterZ = uniform(0);
 let useGridBasedExclusion = true;
 
 /** Grid exclusion texture node (set by GrassExclusionGrid) */
-let gridExclusionTextureNode: ReturnType<typeof texture> | null = null;
+let gridExclusionTextureNode: TextureNode<"vec4"> | null = null;
 /** Grid exclusion uniforms */
 const uGridExclusionCenterX = uniform(0);
 const uGridExclusionCenterZ = uniform(0);
@@ -506,7 +503,7 @@ const uGridExclusionWorldSize = uniform(256);
  * Called by GrassExclusionGrid when texture is updated.
  */
 export function setGridExclusionTexture(
-  textureNode: ReturnType<typeof texture> | null,
+  textureNode: TextureNode<"vec4"> | null,
   centerX: number,
   centerZ: number,
   worldSize: number,
@@ -1345,12 +1342,10 @@ export class ProceduralGrassSystem extends System {
   private terrainSystem: TerrainSystemInterface | null = null;
   /** Bound event handlers for cleanup */
   private onTileGeneratedBound:
-    | ((data: { tileX: number; tileZ: number }) => void)
-    | null = null;
+    ((data: { tileX: number; tileZ: number }) => void) | null = null;
   private onRoadsGeneratedBound: (() => void) | null = null;
   private onRoadMaskReadyBound:
-    | ((data: RoadInfluenceTextureData) => void)
-    | null = null;
+    ((data: RoadInfluenceTextureData) => void) | null = null;
   /** Track if initial heightmap has been generated */
   private heightmapInitialized = false;
 
@@ -1416,8 +1411,7 @@ export class ProceduralGrassSystem extends System {
     // Get terrain system for height sampling
     this.terrainSystem =
       (this.world.getSystem("terrain") as unknown as
-        | TerrainSystemInterface
-        | undefined) ?? null;
+        TerrainSystemInterface | undefined) ?? null;
 
     if (!this.useBladeGrass) {
       return;
@@ -2780,8 +2774,7 @@ export class ProceduralGrassSystem extends System {
       "normal",
     ) as THREE.BufferAttribute;
     const clumpUvs = clumpGeometry.getAttribute("uv") as
-      | THREE.BufferAttribute
-      | undefined;
+      THREE.BufferAttribute | undefined;
     const clumpIndex = clumpGeometry.getIndex();
 
     const clumpVertexCount = clumpPositions.count;
@@ -3063,8 +3056,7 @@ export class ProceduralGrassSystem extends System {
 
     // Player position for grass centering (3rd person: follow player, not camera)
     const players = this.world.getPlayers?.() as
-      | { node?: { position?: THREE.Vector3 } }[]
-      | undefined;
+      { node?: { position?: THREE.Vector3 } }[] | undefined;
     const player = players?.[0];
     const playerPos = player?.node?.position ?? cameraPos;
 

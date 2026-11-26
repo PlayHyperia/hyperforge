@@ -108,7 +108,12 @@ interface HandRiggingState {
   canExport: () => boolean;
 }
 
-export const useHandRiggingStore = create<HandRiggingState>()(
+interface StoreHook<T> {
+  (): T;
+  <U>(selector: (state: T) => U): U;
+}
+
+const handRiggingStore = create<HandRiggingState>()(
   devtools(
     persist(
       subscribeWithSelector(
@@ -373,3 +378,6 @@ export const useHandRiggingStore = create<HandRiggingState>()(
     },
   ),
 );
+
+export const useHandRiggingStore: StoreHook<HandRiggingState> =
+  handRiggingStore;

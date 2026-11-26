@@ -11,7 +11,10 @@ function generateProcgenAliases(): Array<{
   find: string;
   replacement: string;
 }> {
-  const procgenPkgPath = path.resolve(__dirname, "../procgen/package.json");
+  const procgenPkgPath = path.resolve(
+    import.meta.dirname,
+    "../procgen/package.json",
+  );
   const aliases: Array<{ find: string; replacement: string }> = [];
 
   try {
@@ -41,7 +44,11 @@ function generateProcgenAliases(): Array<{
           : `@hyperforge/procgen${exportPath.slice(1)}`;
 
       // Convert relative import to absolute path
-      const absolutePath = path.resolve(__dirname, "../procgen", importPath);
+      const absolutePath = path.resolve(
+        import.meta.dirname,
+        "../procgen",
+        importPath,
+      );
 
       aliases.push({
         find: packagePath,
@@ -57,7 +64,10 @@ function generateProcgenAliases(): Array<{
     return [
       {
         find: "@hyperforge/procgen",
-        replacement: path.resolve(__dirname, "../procgen/dist/index.js"),
+        replacement: path.resolve(
+          import.meta.dirname,
+          "../procgen/dist/index.js",
+        ),
       },
     ];
   }
@@ -92,7 +102,7 @@ export default defineConfig({
       // Local src alias
       {
         find: "@",
-        replacement: path.resolve(__dirname, "./src"),
+        replacement: path.resolve(import.meta.dirname, "./src"),
       },
     ],
   },

@@ -8,6 +8,10 @@
 import type { DeathState } from "../../../types/entities";
 import type { DeathLocationData } from "../../../types/core/core";
 import type { TransactionContext } from "../../../types/death";
+import type {
+  GroundItemDeathCommitReceipt,
+  GroundItemDeathCommitRequest,
+} from "../../../types/network/database";
 
 export interface PlayerSystemLike {
   players?: Map<string, { position?: { x: number; y: number; z: number } }>;
@@ -17,11 +21,36 @@ export interface DatabaseSystemLike {
   executeInTransaction: (
     fn: (tx: TransactionContext) => Promise<void>,
   ) => Promise<void>;
+  commitSafeAreaDeathOperationAsync?: (request: {
+    operationId: string;
+    playerId: string;
+    deathTimestamp: number;
+    position: { x: number; y: number; z: number };
+    killedBy: string;
+  }) => Promise<{
+    operationId: string;
+    replayed: boolean;
+    dropped: Array<{ itemId: string; quantity: number }>;
+    kept: Array<{ itemId: string; quantity: number }>;
+  }>;
+  commitSafeAreaDeathKeptReturnAsync?: (request: {
+    playerId: string;
+    deathOperationId: string;
+  }) => Promise<{
+    operationId: string;
+    replayed: boolean;
+    returned: Array<{ itemId: string; quantity: number }>;
+  }>;
+  commitGroundItemDeathOperationAsync?: (
+    request: GroundItemDeathCommitRequest,
+  ) => Promise<GroundItemDeathCommitReceipt>;
 }
 
 export interface EquipmentSystemLike {
   getPlayerEquipment: (playerId: string) => EquipmentData | null;
   clearEquipmentImmediate?: (playerId: string) => Promise<void>;
+  /** Strictly replace live slots with the persisted equipment snapshot. */
+  reloadFromDatabase?: (playerId: string) => Promise<void>;
   /** Atomic clear-and-return for death system */
   clearEquipmentAndReturn?: (
     playerId: string,

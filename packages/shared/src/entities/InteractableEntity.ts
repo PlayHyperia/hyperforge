@@ -425,6 +425,28 @@ export abstract class InteractableEntity extends Entity {
   public getInteractionRange(): number {
     return this.interactionRange;
   }
+  /**
+   * Return the exact rectangular tile footprint used by interaction checks.
+   * Server-side autonomous navigation uses this public, derived view instead
+   * of reconstructing collision dimensions from display metadata.
+   */
+  public getInteractionFootprint(): { width: number; depth: number } {
+    const occupiedTiles = this.getOccupiedTiles();
+    if (occupiedTiles.length === 0) return { width: 1, depth: 1 };
+
+    let minX = occupiedTiles[0].x;
+    let maxX = occupiedTiles[0].x;
+    let minZ = occupiedTiles[0].z;
+    let maxZ = occupiedTiles[0].z;
+    for (let index = 1; index < occupiedTiles.length; index++) {
+      const tile = occupiedTiles[index];
+      minX = Math.min(minX, tile.x);
+      maxX = Math.max(maxX, tile.x);
+      minZ = Math.min(minZ, tile.z);
+      maxZ = Math.max(maxZ, tile.z);
+    }
+    return { width: maxX - minX + 1, depth: maxZ - minZ + 1 };
+  }
   public getUsesRemaining(): number {
     return this.usesRemaining;
   }

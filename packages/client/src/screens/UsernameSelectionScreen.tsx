@@ -136,7 +136,7 @@ export function UsernameSelectionScreen({
           <div className="relative">
             <div className="mx-auto mb-8 w-full flex items-center justify-center">
               <img
-                src="/images/hyperia_wordmark.png"
+                src="/images/hyperia-wordmark.svg"
                 alt="Hyperia"
                 className="h-20 md:h-32 object-contain"
               />

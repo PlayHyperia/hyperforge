@@ -18,6 +18,7 @@ import {
   texture,
   positionWorld,
   normalWorld,
+  normalWorldGeometry,
   screenUV,
   cameraPosition,
   attribute,
@@ -44,13 +45,146 @@ import {
   normalize,
   Fn,
   output,
-  type ShaderNode,
 } from "../../../extras/three/three";
+import type { Node, UniformNode } from "three/webgpu";
 import { getRoadInfluenceTextureState } from "./RoadInfluenceMask";
 import { getLamppostLightTextureState } from "./LamppostLightMask";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
 import { FOG_NEAR_SQ, FOG_FAR_SQ, fogRenderTarget } from "./FogConfig";
 import { SUN_LIGHT, SUN_SHADE } from "./LightingConfig";
+import {
+  CompactTerrainTextureSet,
+  createCompactTerrainLayers,
+  createCompactTerrainLayerFactory,
+  createCompactTerrainNormalLayerFactory,
+  createCompactTerrainAppearanceLayerFactory,
+  type CompactTerrainRockArAxisPolicy,
+  createCompactDirtRawAppearance,
+  createCompactDirtProjections,
+  createCompactRockAppearanceRequired,
+  createCompactGrassAppearanceRequired,
+  createCompactDirtAppearanceRequired,
+  type CompactTerrainLayer,
+  type CompactTerrainNormalLayer,
+  type CompactTerrainAppearanceLayer,
+  type CompactDirtProjection,
+  type CompactRockProjection,
+  type CompactRockSampling,
+  type CompactGroundSampling,
+  type CompactTerrainTextureEncoding,
+  type CompactTerrainTextureMatrix,
+  type CompactTerrainTextureFiltering,
+  type CompactTerrainBankEvaluation,
+  type CompactSurfaceBlend,
+  type CompactPondBlend,
+  type CompactCoastBlend,
+  type CompactTerrainDiagnosticOutputs,
+  blendCompactTerrainLayers,
+  blendCompactTerrainNormalLayers,
+  blendCompactTerrainAppearanceLayers,
+  createCompactTerrainDiagnosticOutputs,
+  createCompactHabitatSoilNode,
+  createCompactTerrainLayerWeights,
+  createCompactWornTurfWeights,
+  createCompactPlantingSoil,
+  createCompactHavenGroundWeights,
+  createCompactPondSurfaceWeights,
+  createCompactPondMargin,
+  applyCompactPondMarginGrass,
+  createCompactPondBankComposition,
+  applyCompactPondBankGrass,
+  createCompactPondBankSediment,
+  createCompactPondRockContact,
+  createCompactPondContactSoil,
+  applyCompactPondWetness,
+  applyCompactPondRockSoil,
+  applyCompactPondBankMaterials,
+  applyCompactPondBankNormalMaterials,
+  applyCompactPondBankAppearanceMaterials,
+  applyCompactMeadowTint,
+  applyCompactFineGrassSubstrateContrast,
+  applyCompactGrassColorGrade,
+  applyCompactBankVergeGrassTint,
+  createCompactBankVergeLocality,
+  createCompactBankVergeWear,
+  createCompactCoastWeights,
+  createCompactCoastCavityPondClearance,
+  createCompactCoastDistribution,
+  createCompactCoastalGroundCover,
+  applyCompactCoastRock,
+  applyCompactCoastNormalRock,
+  applyCompactCoastAppearanceRock,
+  createCompactTerrainMacroWeights,
+} from "./CompactTerrainMaterial";
+import {
+  CompactTerrainDirtSurfacePage,
+  type CompactTerrainDirtSurfaceCache,
+} from "./CompactTerrainDirtSurfacePage";
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import {
+  createCompactTerrainColorOperations,
+  COMPACT_TERRAIN_COMPOSITION,
+  type CompactTerrainPond,
+  type CompactPondBankField,
+  type CompactTerrainBankVerge,
+  type CompactTerrainPlantingLobe,
+  type CompactTerrainHavenGround,
+  type CompactGrassColorGrade,
+  type CompactGrassColorGradeDescriptor,
+} from "./CompactTerrainPalette";
+import type { CompactHabitatField } from "./CompactHabitatComposition";
+import { createTerrainNoiseSampler } from "./TerrainNoiseSampler";
+
+/** Configured material graph attribution, not rendered-pixel or timing proof. */
+export type CompactHavenGroundMaterialReceipt = Readonly<{
+  schemaVersion: 1;
+  mode: "authored-haven-ground-v2";
+  descriptor: CompactTerrainHavenGround;
+  sourceGrass: true;
+  wholePbrBlend: true;
+  talusSegments: number;
+  wearSegments: number;
+  talusRockFraction: number;
+  talusSlopeStart: number;
+  talusSlopeEnd: number;
+  grassEligibilityChanged: false;
+}>;
+
+/** Borrowed nodes from the live material, before dynamic lighting and fog.
+ * Screen filtering and normal-strength distance still depend on the render
+ * camera. This is a graph boundary, not a claim that its outputs are static.
+ * Consumers own any derived materials/targets, never these source resources.
+ */
+export type CompactTerrainPreLightingSurface = Readonly<{
+  albedo: Node<"vec3">;
+  roughness: Node<"float">;
+  ao: Node<"float">;
+  normalView: Node<"vec3">;
+  /** Keep live in beauty rendering; do not bake lamps/night lighting. */
+  lightingMultiplier: Node<"vec3">;
+}>;
+
+export type CompactTerrainNormalSurface = Readonly<{
+  ao: Node<"float">;
+  normalView: Node<"vec3">;
+  weights?: Node<"vec4">;
+}>;
+
+/** Uniform-flow inputs prepared before an appearance resolver's spatial branch.
+ * The original callback must be invoked inside that branch, not precomputed.
+ * This graph interface grants no cache validity, filtering or GPU ownership.
+ */
+export type CompactTerrainAppearanceResolver = (
+  context: Readonly<{
+    worldPosition: Node<"vec3">;
+    worldDx: Node<"vec3">;
+    worldDy: Node<"vec3">;
+    weights: Node<"vec4">;
+  }>,
+  createOriginal: (
+    rockArAxisPolicy?: CompactTerrainRockArAxisPolicy,
+  ) => Node<"vec4">,
+) => Node<"vec4">;
 
 export const TERRAIN_SHADER_CONSTANTS = {
   TRIPLANAR_SCALE: 0.5,
@@ -79,25 +213,34 @@ export const TERRAIN_SHADE = {
   FRESNEL_INTENSITY: 0.2,
 };
 
+/** One terrain/grass palette per runtime material owner, never shared across worlds. */
+export class TerrainShadeUniforms {
+  readonly tint = uniform(new THREE.Color(...TERRAIN_SHADE.TINT_COLOR));
+  readonly strength = uniform(TERRAIN_SHADE.STRENGTH);
+}
+
 /**
  * Shared TSL anime shading: half-lambert cool tint + fresnel rim highlight.
  * Used by both terrain and grass so the shading stays in sync.
  */
 export function applyAnimeShade(
-  baseColor: any,
-  normal: any,
-  sunDirNode: any,
-): any {
+  baseColor: Node<"vec3">,
+  normal: Node<"vec3">,
+  sunDirNode: Node<"vec3">,
+  palette?: TerrainShadeUniforms,
+): Node<"vec3"> {
   const sDir = normalize(vec3(sunDirNode));
   const NdotL = dot(normal, sDir);
   const halfLambert = add(mul(NdotL, float(0.5)), float(0.5));
   const shadeFactor = sub(float(1.0), halfLambert);
-  const coolTint = vec3(...TERRAIN_SHADE.TINT_COLOR);
+  const coolTint = palette
+    ? palette.tint.rgb
+    : vec3(...TERRAIN_SHADE.TINT_COLOR);
   const tintedBase = mul(baseColor, coolTint);
   const shaded = mix(
     baseColor,
     tintedBase,
-    mul(shadeFactor, float(TERRAIN_SHADE.STRENGTH)),
+    mul(shadeFactor, palette?.strength ?? float(TERRAIN_SHADE.STRENGTH)),
   );
 
   const viewDir = normalize(sub(positionWorld, cameraPosition));
@@ -269,15 +412,15 @@ const WATER_EDGE = vec3(0.08, 0.06, 0.04);
  * cliff/dirt/shoreline boundaries instead of clean smoothstep bands.
  */
 export function computeTerrainBaseColor(
-  height: any,
-  slope: any,
-  noiseVal: any,
-  noiseVal2: any,
-  distortNoise: any,
-  variationNoise: any,
-  forestWeight?: any,
-  canyonWeight?: any,
-) {
+  height: Node<"float">,
+  slope: Node<"float">,
+  noiseVal: Node<"float">,
+  noiseVal2: Node<"float">,
+  distortNoise: Node<"float">,
+  variationNoise: Node<"float">,
+  forestWeight?: Node<"float">,
+  canyonWeight?: Node<"float">,
+): Node<"vec3"> {
   const fW = forestWeight ?? float(0.0);
   const dW = canyonWeight ?? float(0.0);
   const tW = sub(float(1.0), add(fW, dW));
@@ -306,7 +449,7 @@ export function computeTerrainBaseColor(
   const tundraGrass = mix(TUNDRA_GRASS, TUNDRA_GRASS_DARK, grassVariation);
   const forestGrass = mix(FOREST_GRASS, FOREST_GRASS_DARK, grassVariation);
   const canyonGrass = mix(CANYON_SAND, CANYON_SAND_DARK, grassVariation);
-  let c: ShaderNode = add(
+  let c: Node<"vec3"> = add(
     add(mul(tundraGrass, tW), mul(forestGrass, fW)),
     mul(canyonGrass, dW),
   );
@@ -349,7 +492,7 @@ export function computeTerrainBaseColor(
   const tundraCliff = mix(TUNDRA_CLIFF, TUNDRA_CLIFF_DARK, cliffVariation);
   const forestCliff = mix(FOREST_CLIFF, FOREST_CLIFF_DARK, cliffVariation);
   const canyonCliff = mix(CANYON_CLIFF, CANYON_CLIFF_DARK, cliffVariation);
-  let cliffColor: any = add(
+  let cliffColor: Node<"vec3"> = add(
     add(mul(tundraCliff, tW), mul(forestCliff, fW)),
     mul(canyonCliff, dW),
   );
@@ -416,7 +559,8 @@ export function computeTerrainBaseColor(
 
 // Cached noise texture - generated once, reused everywhere
 let cachedNoiseTexture: THREE.DataTexture | null = null;
-const NOISE_SIZE = 256; // Texture resolution
+let cachedNoiseTextureSeed: number | null = null;
+const terrainNoiseSampler = createTerrainNoiseSampler();
 
 // Simple Perlin-like noise implementation
 function fade(t: number): number {
@@ -554,35 +698,19 @@ function seamlessFbm(
  */
 export function generateNoiseTexture(seed: number = 12345): THREE.DataTexture {
   if (cachedNoiseTexture) return cachedNoiseTexture;
-
-  const perm = createPermutation(seed);
-  const data = new Uint8Array(NOISE_SIZE * NOISE_SIZE * 4);
-
-  for (let y = 0; y < NOISE_SIZE; y++) {
-    for (let x = 0; x < NOISE_SIZE; x++) {
-      // Normalize to 0-1 range
-      const nx = x / NOISE_SIZE;
-      const ny = y / NOISE_SIZE;
-
-      // Use seamless noise that tiles perfectly
-      const noise = seamlessFbm(nx, ny, perm, 4);
-
-      // Normalize from [-1, 1] to [0, 1]
-      const value = (noise + 1) * 0.5;
-      const byte = Math.floor(Math.max(0, Math.min(255, value * 255)));
-
-      const idx = (y * NOISE_SIZE + x) * 4;
-      data[idx] = byte; // R
-      data[idx + 1] = byte; // G
-      data[idx + 2] = byte; // B
-      data[idx + 3] = 255; // A
-    }
-  }
+  // Preserve the first-texture seed/cache contract, including custom-seed utility
+  // textures. Runtime terrain/grass use the default field in both CPU and worker;
+  // a custom utility texture must not change that field or imply worker parity.
+  const textureSampler =
+    seed === terrainNoiseSampler.seed
+      ? terrainNoiseSampler
+      : createTerrainNoiseSampler(seed);
+  const data = textureSampler.copyRGBA();
 
   const tex = new THREE.DataTexture(
     data,
-    NOISE_SIZE,
-    NOISE_SIZE,
+    terrainNoiseSampler.size,
+    terrainNoiseSampler.size,
     THREE.RGBAFormat,
   );
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -592,6 +720,7 @@ export function generateNoiseTexture(seed: number = 12345): THREE.DataTexture {
   tex.needsUpdate = true;
 
   cachedNoiseTexture = tex;
+  cachedNoiseTextureSeed = seed;
   console.log("[TerrainShader] Generated seamless Perlin noise texture");
   return tex;
 }
@@ -607,8 +736,9 @@ export function getNoiseTexture(): THREE.DataTexture | null {
 let cachedPerm: number[] | null = null;
 
 /**
- * Sample noise at world position (for CPU-side grass placement)
- * Returns 0-1 value matching EXACTLY what the shader samples from the texture
+ * Legacy analytic noise helper, retaining its first-call seed semantics.
+ * It does not model byte quantization, bilinear filtering, or GPU mip selection.
+ * Runtime terrain colour / grass placement use sampleNoiseCPU instead.
  */
 export function sampleNoiseAtPosition(
   worldX: number,
@@ -824,41 +954,14 @@ function blendBiome(
   };
 }
 
-function sampleNoiseCPU(worldX: number, worldZ: number, scale: number): number {
-  const tex = cachedNoiseTexture;
-  if (tex?.image?.data) {
-    const data = tex.image.data as Uint8Array;
-    const u = worldX * scale;
-    const v = worldZ * scale;
-    // Bilinear sample matching GPU's LinearFilter + RepeatWrapping
-    const px = (((u % 1) + 1) % 1) * NOISE_SIZE - 0.5;
-    const py = (((v % 1) + 1) % 1) * NOISE_SIZE - 0.5;
-    const x0 = Math.floor(px);
-    const y0 = Math.floor(py);
-    const fx = px - x0;
-    const fy = py - y0;
-    const ix0 = ((x0 % NOISE_SIZE) + NOISE_SIZE) % NOISE_SIZE;
-    const iy0 = ((y0 % NOISE_SIZE) + NOISE_SIZE) % NOISE_SIZE;
-    const ix1 = (ix0 + 1) % NOISE_SIZE;
-    const iy1 = (iy0 + 1) % NOISE_SIZE;
-    const v00 = data[(iy0 * NOISE_SIZE + ix0) * 4] / 255;
-    const v10 = data[(iy0 * NOISE_SIZE + ix1) * 4] / 255;
-    const v01 = data[(iy1 * NOISE_SIZE + ix0) * 4] / 255;
-    const v11 = data[(iy1 * NOISE_SIZE + ix1) * 4] / 255;
-    return (
-      v00 * (1 - fx) * (1 - fy) +
-      v10 * fx * (1 - fy) +
-      v01 * (1 - fx) * fy +
-      v11 * fx * fy
-    );
-  }
-  // Fallback: direct computation if texture not yet generated
-  if (!cachedPerm) cachedPerm = createPermutation(12345);
-  const u = worldX * scale;
-  const v = worldZ * scale;
-  const wu = u - Math.floor(u);
-  const wv = v - Math.floor(v);
-  return (seamlessFbm(wu, wv, cachedPerm, 4) + 1) * 0.5;
+export function sampleNoiseCPU(
+  worldX: number,
+  worldZ: number,
+  scale: number,
+): number {
+  // Base-level bilinear sampling, independent of texture lifecycle. GPU terrain
+  // still uses its existing implicit mip selection at minified distances.
+  return terrainNoiseSampler.sample(worldX, worldZ, scale);
 }
 
 /**
@@ -1031,16 +1134,73 @@ export function computeTerrainColorCPU(
  */
 export const MAX_VERTEX_LIGHTS = 8;
 
+/**
+ * Interim roughness art controls, not measured material properties. Texture
+ * color is not a height field: do not derive geometry or normals from it.
+ */
+export const TERRAIN_SURFACE_DETAIL = {
+  GRASS_ROUGHNESS: 0.94,
+  DIRT_ROUGHNESS: 0.87,
+  CLIFF_ROUGHNESS: 0.82,
+  DETAIL_VARIATION: 0.06,
+  MIN_ROUGHNESS: 0.78,
+  MAX_ROUGHNESS: 0.99,
+  DETAIL_FULL_DISTANCE: 55,
+  DETAIL_END_DISTANCE: 110,
+} as const;
+
+/** Pure arithmetic TSL graph; all texture samples are supplied by the owner. */
+export function createTerrainSurfaceRoughnessNode(
+  strength: Node<"float">,
+  distanceSquared: Node<"float">,
+  dirtWeight: Node<"float">,
+  cliffWeight: Node<"float">,
+  textureDetail: Node<"float">,
+): Node<"float"> {
+  const controls = TERRAIN_SURFACE_DETAIL;
+  const dryGround = mix(
+    float(controls.GRASS_ROUGHNESS),
+    float(controls.DIRT_ROUGHNESS),
+    clamp(dirtWeight, 0, 1),
+  );
+  const surface = mix(
+    dryGround,
+    float(controls.CLIFF_ROUGHNESS),
+    clamp(cliffWeight, 0, 1),
+  );
+  const nearDetail = sub(
+    float(1),
+    smoothstep(
+      float(controls.DETAIL_FULL_DISTANCE ** 2),
+      float(controls.DETAIL_END_DISTANCE ** 2),
+      distanceSquared,
+    ),
+  );
+  const variation = mul(
+    mul(sub(clamp(textureDetail, 0, 1), float(0.5)), nearDetail),
+    float(controls.DETAIL_VARIATION),
+  );
+  const candidate = clamp(
+    add(surface, variation),
+    controls.MIN_ROUGHNESS,
+    controls.MAX_ROUGHNESS,
+  );
+  return mix(float(1), candidate, clamp(strength, 0, 1));
+}
+
 export type TerrainUniforms = {
-  sunPosition: { value: THREE.Vector3 };
-  sunDirection: { value: THREE.Vector3 };
-  time: { value: number };
-  fogEnabled: { value: number }; // 1.0 = fog enabled, 0.0 = fog disabled (for minimap)
-  dayIntensity: { value: number }; // 0 = night, 1 = day
+  shade: TerrainShadeUniforms;
+  sunPosition: UniformNode<"vec3", THREE.Vector3>;
+  sunDirection: UniformNode<"vec3", THREE.Vector3>;
+  time: UniformNode<"float", number>;
+  fogEnabled: UniformNode<"float", number>; // 1.0 = fog enabled, 0.0 = fog disabled (for minimap)
+  dayIntensity: UniformNode<"float", number>; // 0 = night, 1 = day
+  /** Opt-in roughness detail candidate; zero preserves the original matte surface. */
+  surfaceDetailStrength: UniformNode<"float", number>;
   // Vertex lighting uniforms (lampposts, etc.)
-  vertexLightPositions: { value: THREE.Vector3 }[]; // Array of 8 light positions
-  vertexLightColors: { value: THREE.Vector3 }[]; // Array of 8 light colors
-  vertexLightParams: { value: THREE.Vector2 }[]; // Array of 8 (intensity, range) pairs
+  vertexLightPositions: UniformNode<"vec3", THREE.Vector3>[]; // Array of 8 light positions
+  vertexLightColors: UniformNode<"vec3", THREE.Vector3>[]; // Array of 8 light colors
+  vertexLightParams: UniformNode<"vec2", THREE.Vector2>[]; // Array of 8 (intensity, range) pairs
 };
 
 /**
@@ -1084,37 +1244,268 @@ export function updateTerrainVertexLights(
  * Stylized terrain material with biome texture sampling
  * Grass/dirt textures use top-down projection; cliff textures use triplanar mapping
  */
-export function createTerrainMaterial(): THREE.Material & {
+export function createTerrainMaterial(
+  shade = new TerrainShadeUniforms(),
+  options: {
+    compactPbr?: boolean;
+    compactGrassColorGrade?: CompactGrassColorGrade;
+    compactDirtProjection?: CompactDirtProjection;
+    compactRockProjection?: CompactRockProjection;
+    compactRockSampling?: CompactRockSampling;
+    compactGroundSampling?: CompactGroundSampling;
+    compactTerrainTextureEncoding?: CompactTerrainTextureEncoding;
+    compactTerrainTextureMatrix?: CompactTerrainTextureMatrix;
+    compactTerrainTextureFiltering?: CompactTerrainTextureFiltering;
+    compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
+    compactDirtSurfaceCache?: CompactTerrainDirtSurfaceCache;
+    compactTextureRenderer?: THREE.WebGPURenderer;
+    compactSurfaceBlend?: CompactSurfaceBlend;
+    compactPondBlend?: CompactPondBlend;
+    compactCoastBlend?: CompactCoastBlend;
+    compactPond?: CompactTerrainPond | null;
+    compactPondBankField?: CompactPondBankField;
+    pondServiceGround?: CompactTerrainBankVerge;
+    compactPlantingLobes?: readonly CompactTerrainPlantingLobe[];
+    compactProfile?: WorldTerrainProfile;
+    compactHabitat?: CompactHabitatField | null;
+  } = {},
+): THREE.Material & {
   terrainUniforms: TerrainUniforms;
+  compactTerrainSurface?: CompactTerrainTextureSet;
+  compactDirtSurfacePage?: CompactTerrainDirtSurfacePage;
+  compactRockSampling?: CompactRockSampling;
+  compactGroundSampling?: CompactGroundSampling;
+  compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
+  compactPondBlend?: CompactPondBlend;
+  compactCoastBlend?: CompactCoastBlend;
+  compactPondBankField?: CompactPondBankField;
+  getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
+  getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
+  getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
+  createCompactTerrainResolvedAppearance(
+    resolver: CompactTerrainAppearanceResolver,
+  ): Readonly<CompactTerrainAppearanceLayer> | null;
+  compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
+  compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
+  compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
+  compactHabitatMaterial?: CompactHabitatField;
+  compactPondMaterial?: {
+    profile: CompactTerrainPond;
+    parameters: UniformNode<"vec4", THREE.Vector4>;
+  };
 } {
+  if (cachedNoiseTexture && cachedNoiseTextureSeed !== terrainNoiseSampler.seed)
+    throw new Error("Runtime terrain requires the default terrain noise seed");
+  const grassColorOperations = createCompactTerrainColorOperations();
+  const grassColorGrade = grassColorOperations.grassColorGrade(
+    options.compactGrassColorGrade,
+  );
+  const compactSurfaceBlend = options.compactSurfaceBlend;
+  if (grassColorGrade && !options.compactPbr)
+    throw new Error("Grass color grade requires the compact PBR material");
+  if (options.compactDirtProjection !== undefined && !options.compactPbr)
+    throw new Error("Dirt projection requires the compact PBR material");
+  if (options.compactRockProjection !== undefined && !options.compactPbr)
+    throw new Error("Rock projection requires the compact PBR material");
+  if (options.compactSurfaceBlend !== undefined && !options.compactPbr)
+    throw new Error("Surface blending requires the compact PBR material");
+  if (
+    options.compactTerrainTextureEncoding !== undefined &&
+    !options.compactPbr
+  )
+    throw new Error(
+      "Terrain texture encoding requires the compact PBR material",
+    );
+  if (options.compactTerrainTextureMatrix !== undefined) {
+    if (options.compactTerrainTextureMatrix !== "identity-v1")
+      throw new Error("Invalid compact terrain texture matrix mode");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain texture matrix requires the compact PBR material",
+      );
+  }
+  if (options.compactTerrainTextureFiltering !== undefined) {
+    if (options.compactTerrainTextureFiltering !== "balanced8-v1")
+      throw new Error("Invalid compact terrain texture filtering mode");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain texture filtering requires the compact PBR material",
+      );
+  }
+  if (
+    options.compactDirtSurfaceCache !== undefined &&
+    (options.compactDirtSurfaceCache !== "dirt-page-v1" ||
+      !options.compactPbr ||
+      options.compactDirtProjection !== "stochastic-v1")
+  )
+    throw new Error(
+      "Dirt surface caching requires the explicit stochastic compact PBR candidate",
+    );
+  if (options.compactTerrainBankEvaluation !== undefined) {
+    if (options.compactTerrainBankEvaluation !== "regional-v1")
+      throw new Error("Invalid compact terrain bank evaluation");
+    if (!options.compactPbr)
+      throw new Error(
+        "Terrain bank evaluation requires the compact PBR material",
+      );
+  }
+  if (options.compactGroundSampling !== undefined) {
+    if (options.compactGroundSampling !== "exact-zero-v1")
+      throw new Error("Invalid compact ground sampling");
+    if (options.compactRockSampling !== "exact-zero-v1")
+      throw new Error(
+        "Exact-zero ground sampling requires exact-zero rock sampling",
+      );
+  }
+  if (options.compactRockSampling !== undefined) {
+    if (options.compactRockSampling !== "exact-zero-v1")
+      throw new Error("Invalid compact rock sampling");
+    if (
+      !options.compactPbr ||
+      options.compactDirtProjection !== "stochastic-v1" ||
+      options.compactRockProjection !== "stochastic-v1" ||
+      options.compactSurfaceBlend !== "height-v1" ||
+      options.compactPondBlend !== "composition-v1" ||
+      options.compactCoastBlend === "cavity-v1"
+    )
+      throw new Error(
+        "Exact-zero rock sampling requires stochastic ground/rock, height pond composition and no coast cavity",
+      );
+  }
+  if (options.compactPondBlend !== undefined) {
+    if (
+      options.compactPondBlend !== "relief-v1" &&
+      options.compactPondBlend !== "relief-contact-v1" &&
+      options.compactPondBlend !== "shore-contact-v1" &&
+      options.compactPondBlend !== "composition-v1"
+    )
+      throw new Error("Invalid compact pond blend");
+    if (!options.compactPbr)
+      throw new Error("Pond blending requires the compact PBR material");
+    if (options.compactSurfaceBlend !== "height-v1")
+      throw new Error("Pond blending requires height-v1 surface blending");
+  }
+  if (options.compactCoastBlend !== undefined) {
+    grassColorOperations.coastBlend(options.compactCoastBlend);
+    if (!options.compactPbr)
+      throw new Error("Coast blending requires the compact PBR material");
+    if (options.compactSurfaceBlend !== "height-v1")
+      throw new Error("Coast blending requires height-v1 surface blending");
+  }
+  const plantingLobes = options.compactPbr
+    ? createCompactTerrainColorOperations().validatePlantingLobes(
+        options.compactPlantingLobes,
+      )
+    : [];
+  const pondServiceGround = grassColorOperations.captureGroundVerge(
+    options,
+    "pondServiceGround",
+  );
+  const macroField =
+    options.compactPbr && options.compactProfile
+      ? createCompactTerrainColorOperations().macroField(
+          options.compactProfile,
+          options.compactCoastBlend,
+          options.compactPondBlend,
+          options.compactPondBankField,
+          pondServiceGround,
+        )
+      : null;
+  if (pondServiceGround && (!macroField || !grassColorGrade))
+    throw new Error(
+      "Pond service ground requires the graded compact terrain material",
+    );
+  if (options.compactTerrainBankEvaluation && !macroField?.pondBankField)
+    throw new Error(
+      "Terrain bank evaluation requires an admitted pond bank field",
+    );
+  if (options.compactCoastBlend !== undefined && !macroField?.coastalMeadow)
+    throw new Error("Coast blending requires an admitted coastal macro domain");
+  if (
+    options.compactHabitat &&
+    (!options.compactPbr || !macroField?.havenGround)
+  )
+    throw new Error("Habitat composition requires the full Haven PBR material");
+  const compactPond = options.compactPbr
+    ? createCompactTerrainColorOperations().validatePond(
+        options.compactPond ?? null,
+      )
+    : null;
+  if (options.compactPondBlend !== undefined && !compactPond)
+    throw new Error("Pond blending requires an admitted compact pond");
+  if (options.compactPondBlend === "composition-v1") {
+    const field = macroField?.pondBankField;
+    if (
+      !field ||
+      !compactPond ||
+      (["id", "centerX", "centerZ", "radius", "surfaceY"] as const).some(
+        (key) => field.pond[key] !== compactPond[key],
+      )
+    )
+      throw new Error("Pond composition requires its matching bound water");
+  } else if (options.compactPondBankField !== undefined) {
+    throw new Error("Pond bank field requires composition-v1");
+  }
+  if (
+    options.compactPondBlend === "shore-contact-v1" &&
+    !macroField?.pondDistribution
+  )
+    throw new Error(
+      "Shore contact requires an admitted compact pond distribution",
+    );
+  const pondParameters = compactPond
+    ? uniform(
+        new THREE.Vector4(
+          compactPond.centerX,
+          compactPond.centerZ,
+          compactPond.radius,
+          compactPond.surfaceY,
+        ),
+      ).setGroup(THREE.TSL.renderGroup)
+    : null;
   // Ensure noise texture is generated (still used for dirt patch variation)
   const noiseTex = generateNoiseTexture();
 
-  const sunPositionUniform = uniform(vec3(100, 100, 100));
-  const sunDirectionUniform = uniform(vec3(...SUN_LIGHT.DEFAULT_DIRECTION));
-  const timeUniform = uniform(float(0));
-  const noiseScale = uniform(float(TERRAIN_SHADER_CONSTANTS.NOISE_SCALE));
+  const sunPositionUniform = uniform(new THREE.Vector3(100, 100, 100));
+  const sunDirectionUniform = uniform(
+    new THREE.Vector3(...SUN_LIGHT.DEFAULT_DIRECTION),
+  );
+  const timeUniform = uniform(0);
+  // These owner-wide values stay constant within a render call. Share their
+  // binding across chunks, but refresh for each primary/reflection render.
+  const surfaceDetailStrength = uniform(0).setGroup(THREE.TSL.renderGroup);
+  const noiseScale = uniform(TERRAIN_SHADER_CONSTANTS.NOISE_SCALE).setGroup(
+    THREE.TSL.renderGroup,
+  );
 
   // Sky-color fog: uses the shared render target texture (updated in-place by SkySystem)
   const fogTexNode = texture(fogRenderTarget.texture, screenUV);
-  const fogEnabledUniform = uniform(float(1.0));
+  const fogEnabledUniform = uniform(1.0).setGroup(THREE.TSL.renderGroup);
 
   // ============================================================================
   // VERTEX LIGHTING UNIFORMS (for lampposts, torches, etc.)
   // ============================================================================
   // Create arrays of uniforms for each light
-  const vertexLightPositionUniforms: ReturnType<typeof uniform>[] = [];
-  const vertexLightColorUniforms: ReturnType<typeof uniform>[] = [];
-  const vertexLightParamUniforms: ReturnType<typeof uniform>[] = []; // (intensity, range)
+  const vertexLightPositionUniforms: UniformNode<"vec3", THREE.Vector3>[] = [];
+  const vertexLightColorUniforms: UniformNode<"vec3", THREE.Vector3>[] = [];
+  const vertexLightParamUniforms: UniformNode<"vec2", THREE.Vector2>[] = []; // (intensity, range)
 
   for (let i = 0; i < MAX_VERTEX_LIGHTS; i++) {
-    vertexLightPositionUniforms.push(uniform(vec3(0, 0, 0)));
-    vertexLightColorUniforms.push(uniform(vec3(1, 0.9, 0.6))); // Warm lamplight default
-    vertexLightParamUniforms.push(uniform(vec2(0, 15))); // intensity=0 (off), range=15m
+    vertexLightPositionUniforms.push(
+      uniform(new THREE.Vector3(0, 0, 0)).setGroup(THREE.TSL.renderGroup),
+    );
+    vertexLightColorUniforms.push(
+      uniform(new THREE.Vector3(1, 0.9, 0.6)).setGroup(THREE.TSL.renderGroup),
+    ); // Warm lamplight default
+    vertexLightParamUniforms.push(
+      uniform(new THREE.Vector2(0, 15)).setGroup(THREE.TSL.renderGroup),
+    ); // intensity=0 (off), range=15m
   }
 
   const worldPos = positionWorld;
-  const worldNormal = normalWorld;
+  // Material detail must never feed back into ecological slope, layer weights,
+  // or the shared grass macro-shade. Only PBR light response uses normalNode.
+  const worldNormal = options.compactPbr ? normalWorldGeometry : normalWorld;
   const height = worldPos.y;
   const slope = sub(float(1.0), abs(worldNormal.y));
 
@@ -1124,10 +1515,142 @@ export function createTerrainMaterial(): THREE.Material & {
 
   const toCamera = sub(worldPos, cameraPosition);
   const distSq = dot(toCamera, toCamera);
+  const compactTextures = options.compactPbr
+    ? new CompactTerrainTextureSet(
+        getCdnUrl(),
+        options.compactDirtProjection,
+        options.compactSurfaceBlend,
+        options.compactRockProjection,
+        grassColorGrade && options.compactSurfaceBlend === "height-v1"
+          ? "frequency-v1"
+          : undefined,
+        options.compactTerrainTextureEncoding,
+        options.compactTextureRenderer,
+        options.compactTerrainTextureMatrix,
+        options.compactTerrainTextureFiltering,
+      )
+    : null;
 
   // Sample Perlin noise
   const noiseUV = mul(vec2(worldPos.x, worldPos.z), noiseScale);
   const noiseValue = texture(noiseTex, noiseUV).r;
+  // A single explicitly prepared page. No automatic bake, streaming pool or
+  // default selection: an unprepared/invalid page uses the original shader.
+  const compactDirtSurfacePage =
+    compactTextures && options.compactDirtSurfaceCache
+      ? new CompactTerrainDirtSurfacePage(compactTextures, (worldXZ, dx, dy) =>
+          createCompactDirtRawAppearance(
+            compactTextures,
+            createCompactDirtProjections(worldXZ, dx, dy),
+          ),
+        )
+      : undefined;
+  const macroSurface = createCompactTerrainMacroWeights(
+    vec2(worldPos.x, worldPos.z),
+    noiseValue,
+    macroField,
+  );
+  const compactLayerFactory =
+    compactTextures && options.compactRockSampling
+      ? createCompactTerrainLayerFactory(
+          compactTextures,
+          distSq,
+          noiseValue,
+          compactDirtSurfacePage,
+        )
+      : null;
+  const preparedGround = options.compactGroundSampling
+    ? compactLayerFactory!.prepareGround()
+    : null;
+  const groundPlaceholder = (height: Node<"float">): CompactTerrainLayer => ({
+    albedo: vec3(0),
+    roughness: float(1),
+    ao: float(1),
+    worldNormal: normalWorldGeometry,
+    height,
+  });
+  const compactLayers: ReturnType<typeof createCompactTerrainLayers> | null =
+    compactTextures
+      ? compactLayerFactory
+        ? {
+            ...(preparedGround
+              ? {
+                  grass: groundPlaceholder(preparedGround.heights.grass),
+                  dirt: groundPlaceholder(preparedGround.heights.dirt),
+                }
+              : compactLayerFactory.createGround()),
+            // No rock samples before final coverage is known. The resolver
+            // below replaces this finite construction-only value; raw rock AO
+            // stays absent so it cannot accidentally enter coverage weights.
+            rock: {
+              albedo: vec3(0),
+              roughness: float(1),
+              ao: float(1),
+              worldNormal: normalWorldGeometry,
+            },
+          }
+        : createCompactTerrainLayers(
+            compactTextures,
+            distSq,
+            noiseValue,
+            compactDirtSurfacePage,
+          )
+      : null;
+  const bankVergeLocality = macroField?.bankVerge
+    ? createCompactBankVergeLocality(worldPos, macroField)
+    : undefined;
+  let meadowNoise: Node<"float"> | undefined;
+  if (compactLayers && (!macroField?.havenGround || macroField.coastalMeadow)) {
+    // One extra sample of the existing noise texture; no new texture allocation.
+    // The candidate reuses this sample for tint and physical-layer wear;
+    // grass support and placement remain independent of both.
+    const meadowSample = texture(
+      noiseTex,
+      mul(
+        vec2(worldPos.x, worldPos.z),
+        float(COMPACT_TERRAIN_COMPOSITION.meadowNoiseScale),
+      ),
+    ).r;
+    meadowNoise = macroField?.coastalMeadow
+      ? meadowSample.toVar("compactMeadowNoise")
+      : meadowSample;
+  }
+  // Reuse the identical grade order after either unconditional sampling or
+  // deferred appearance resolution. None of these grades owns coverage.
+  const gradeCompactGrass = <T extends CompactTerrainAppearanceLayer>(
+    layer: T,
+    inputs = {
+      meadowNoise,
+      macroDry: macroSurface.dry,
+      locality: bankVergeLocality,
+    },
+  ): T => {
+    let grass = applyCompactFineGrassSubstrateContrast(
+      layer,
+      grassColorGrade,
+      compactSurfaceBlend,
+    );
+    if (inputs.meadowNoise)
+      grass = applyCompactMeadowTint(
+        grass,
+        inputs.meadowNoise,
+        inputs.macroDry,
+        macroField?.coastalMeadow
+          ? COMPACT_TERRAIN_COMPOSITION.coastalMeadowTintStrength
+          : 1,
+        grassColorGrade,
+      );
+    grass = applyCompactGrassColorGrade(grass, grassColorGrade);
+    return applyCompactBankVergeGrassTint(
+      grass,
+      grassColorGrade,
+      worldPos,
+      macroField,
+      inputs.locality,
+    );
+  };
+  if (compactLayers && !preparedGround)
+    compactLayers.grass = gradeCompactGrass(compactLayers.grass);
   const noiseValue2 = add(
     mul(sin(mul(noiseValue, float(6.28))), float(0.3)),
     float(0.5),
@@ -1158,8 +1681,8 @@ export function createTerrainMaterial(): THREE.Material & {
   );
 
   // Biome weight attributes (computed per-vertex by QuadChunkWorker)
-  const biomeForestW = attribute("biomeForestWeight", "float");
-  const biomeCanyonW = attribute("biomeCanyonWeight", "float");
+  const biomeForestW = attribute<"float">("biomeForestWeight", "float");
+  const biomeCanyonW = attribute<"float">("biomeCanyonWeight", "float");
   const fW = biomeForestW;
   const dW = biomeCanyonW;
   const tW = sub(float(1.0), add(fW, dW));
@@ -1171,15 +1694,20 @@ export function createTerrainMaterial(): THREE.Material & {
     return createTerrainBiomeTex(`${texBase}/${cfg.file}`, ...cfg.fallback);
   };
 
-  const tGrass = loadBiomeTex("grass");
-  const tDirt = loadBiomeTex("dirt");
-  const tCliff = loadBiomeTex("cliff");
-  const tDesertGrass = loadBiomeTex("desertGrass");
-  const tDesertDirt = loadBiomeTex("desertDirt");
-  const tDesertCliff = loadBiomeTex("desertCliff");
-  const tSnowGrass = loadBiomeTex("snowGrass");
-  const tSnowDirt = loadBiomeTex("snowDirt");
-  const tSnowCliff = loadBiomeTex("snowCliff");
+  // Compile-time material choice: compact never loads or binds old biome maps.
+  const legacyTextures = compactLayers
+    ? null
+    : {
+        grass: loadBiomeTex("grass"),
+        dirt: loadBiomeTex("dirt"),
+        cliff: loadBiomeTex("cliff"),
+        desertGrass: loadBiomeTex("desertGrass"),
+        desertDirt: loadBiomeTex("desertDirt"),
+        desertCliff: loadBiomeTex("desertCliff"),
+        snowGrass: loadBiomeTex("snowGrass"),
+        snowDirt: loadBiomeTex("snowDirt"),
+        snowCliff: loadBiomeTex("snowCliff"),
+      };
 
   // UV projections — dual-scale blend to break visible texture tiling.
   // Sample at primary scale and a non-harmonic secondary scale (×0.27),
@@ -1209,12 +1737,20 @@ export function createTerrainMaterial(): THREE.Material & {
   // Flat textures — blend two scales per biome texture
   const dualFlat = (t: THREE.Texture) =>
     mix(texture(t, uvFlat).rgb, texture(t, uvFlat2).rgb, tileBlend);
-  const sGrass = dualFlat(tGrass);
-  const sDirt = dualFlat(tDirt);
-  const sDesertGrass = dualFlat(tDesertGrass);
-  const sDesertDirt = dualFlat(tDesertDirt);
-  const sSnowGrass = dualFlat(tSnowGrass);
-  const sSnowDirt = dualFlat(tSnowDirt);
+  const sGrass = compactLayers?.grass.albedo ?? dualFlat(legacyTextures!.grass);
+  const sDirt = compactLayers?.dirt.albedo ?? dualFlat(legacyTextures!.dirt);
+  const sDesertGrass = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.desertGrass);
+  const sDesertDirt = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.desertDirt);
+  const sSnowGrass = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.snowGrass);
+  const sSnowDirt = compactLayers
+    ? vec3(0)
+    : dualFlat(legacyTextures!.snowDirt);
 
   // Cliff textures — triplanar with dual-scale blend
   const triCliff = (t: THREE.Texture) => {
@@ -1228,9 +1764,13 @@ export function createTerrainMaterial(): THREE.Material & {
     );
     return mix(s1, s2, tileBlend);
   };
-  const sCliff = triCliff(tCliff);
-  const sDesertCliff = triCliff(tDesertCliff);
-  const sSnowCliff = triCliff(tSnowCliff);
+  const sCliff = compactLayers?.rock.albedo ?? triCliff(legacyTextures!.cliff);
+  const sDesertCliff = compactLayers
+    ? vec3(0)
+    : triCliff(legacyTextures!.desertCliff);
+  const sSnowCliff = compactLayers
+    ? vec3(0)
+    : triCliff(legacyTextures!.snowCliff);
 
   const TEX_DARKEN = float(0.65);
 
@@ -1262,7 +1802,7 @@ export function createTerrainMaterial(): THREE.Material & {
     mul(sDesertGrass, TEX_DARKEN),
     grassVar,
   );
-  let baseColor: ShaderNode = add(
+  let baseColor: Node<"vec3"> = add(
     add(mul(tundraGrassC, tW), mul(forestGrassC, fW)),
     mul(canyonGrassC, dW),
   );
@@ -1309,7 +1849,7 @@ export function createTerrainMaterial(): THREE.Material & {
     mul(sDesertCliff, TEX_DARKEN),
     cliffVar,
   );
-  let cliffColor: any = add(
+  let cliffColor: Node<"vec3"> = add(
     add(mul(tundraCliffC, tW), mul(forestCliffC, fW)),
     mul(canyonCliffC, dW),
   );
@@ -1323,20 +1863,42 @@ export function createTerrainMaterial(): THREE.Material & {
     noiseValue,
   );
   const flatnessFactor = smoothstep(float(0.3), float(0.05), dSlope);
-  baseColor = mix(baseColor, dirtColor, mul(dirtPatchFactor, flatnessFactor));
+  const dirtPatchWeight = mul(dirtPatchFactor, flatnessFactor);
+  baseColor = mix(baseColor, dirtColor, dirtPatchWeight);
 
   // Dirt on moderate slopes (bell curve, using distorted slope)
   const dirtSlopeFactor = mul(
     smoothstep(float(0.15), float(0.4), dSlope),
     smoothstep(float(0.6), float(0.3), dSlope),
   );
-  baseColor = mix(baseColor, dirtColor, mul(dirtSlopeFactor, float(0.6)));
+  const dirtSlopeWeight = mul(dirtSlopeFactor, float(0.6));
+  baseColor = mix(baseColor, dirtColor, dirtSlopeWeight);
 
   // Cliff on steep slopes (using distorted slope)
-  baseColor = mix(
-    baseColor,
-    cliffColor,
-    smoothstep(float(0.3), float(0.55), dSlope),
+  const cliffWeight = smoothstep(float(0.3), float(0.55), dSlope);
+  baseColor = mix(baseColor, cliffColor, cliffWeight);
+
+  // Reuse the same existing texture nodes and layer weights. This adjusts PBR
+  // roughness only, never paints light into albedo or adds texture assets.
+  const dirtWeight = sub(
+    float(1),
+    mul(sub(float(1), dirtPatchWeight), sub(float(1), dirtSlopeWeight)),
+  );
+  const surfaceSample = mix(
+    mix(sGrass, sDirt, dirtWeight),
+    sCliff,
+    cliffWeight,
+  );
+  const surfaceTextureDetail = add(
+    dot(surfaceSample, vec3(0.2126, 0.7152, 0.0722)),
+    mul(sub(fineNoise, float(0.5)), float(0.2)),
+  );
+  const surfaceRoughness = createTerrainSurfaceRoughnessNode(
+    surfaceDetailStrength,
+    distSq,
+    dirtWeight,
+    cliffWeight,
+    surfaceTextureDetail,
   );
 
   // Sand near water (flat areas, stronger in canyon — using distorted height)
@@ -1375,7 +1937,7 @@ export function createTerrainMaterial(): THREE.Material & {
 
   // === RIVER BED / BANK COLORING ===
   // riverProximity: 1.0 = in channel (muddy brown), smoothstep to 0.0 at bank edge
-  const riverProx = attribute("riverProximity", "float");
+  const riverProx = attribute<"float">("riverProximity", "float");
   const riverbedColor = vec3(0.32, 0.22, 0.12); // dark muddy brown
   const riverBankColor = vec3(0.45, 0.35, 0.22); // sandy bank brown
   // In channel (proximity > 0.7): full riverbed, bank zone: blend sandy brown → natural
@@ -1396,7 +1958,7 @@ export function createTerrainMaterial(): THREE.Material & {
   );
 
   // === ROAD OVERLAY ===
-  const roadInfluenceAttr = attribute("roadInfluence", "float");
+  const roadInfluenceAttr = attribute<"float">("roadInfluence", "float");
   const roadMaskState = getRoadInfluenceTextureState();
   const roadHalfWorld = roadMaskState.uWorldSize.mul(0.5);
   const roadUvX = worldPos.x
@@ -1436,15 +1998,350 @@ export function createTerrainMaterial(): THREE.Material & {
   const roadCenterDarken = mul(roadInfluence, float(0.08));
   const compactedRoadColor = sub(roadDetailColor, vec3(roadCenterDarken));
 
-  const baseWithRoads = mix(variedColor, compactedRoadColor, roadInfluence);
+  const pondMargin =
+    macroField?.pondDistribution && pondParameters && meadowNoise
+      ? createCompactPondMargin({
+          x: worldPos.x,
+          z: worldPos.z,
+          height: worldPos.y,
+          slope,
+          meadowNoise,
+          distortNoise,
+          roadInfluence: roadInfluenceRaw,
+          pond: {
+            centerX: pondParameters.x,
+            centerZ: pondParameters.y,
+            radius: pondParameters.z,
+            surfaceY: pondParameters.w,
+          },
+          field: macroField,
+        })
+      : undefined;
+  if (compactLayers && pondMargin && !preparedGround)
+    compactLayers.grass = applyCompactPondMarginGrass(
+      compactLayers.grass,
+      pondMargin,
+    );
+  const pondBankComposition = macroField?.pondBankField
+    ? createCompactPondBankComposition(
+        {
+          x: worldPos.x,
+          z: worldPos.z,
+          height: worldPos.y,
+          slope,
+          distortNoise,
+          roadInfluence: roadInfluenceRaw,
+          field: macroField.pondBankField,
+        },
+        options.compactTerrainBankEvaluation,
+      )
+    : undefined;
+  if (compactLayers && pondBankComposition && !preparedGround)
+    compactLayers.grass = applyCompactPondBankGrass(
+      compactLayers.grass,
+      pondBankComposition,
+    );
+  const pondSurface = pondParameters
+    ? createCompactPondSurfaceWeights(
+        worldPos,
+        distortNoise,
+        pondParameters,
+        macroField?.pondDistribution,
+        pondMargin,
+      )
+    : { soil: float(0), wetness: float(0), domain: null, cliffSoil: undefined };
+  const legacyPondSoil = pondSurface.cliffSoil ?? pondSurface.soil;
+  const coastSurface =
+    compactLayers && macroField
+      ? createCompactCoastWeights(
+          worldPos,
+          noiseValue,
+          distortNoise,
+          macroSurface.westRock,
+          slope,
+          macroField,
+        )
+      : null;
+  const coastRockSurface = coastSurface
+    ? {
+        ...coastSurface,
+        soil: applyCompactPondRockSoil(coastSurface.soil, pondBankComposition),
+      }
+    : null;
+  const coastalGround =
+    compactLayers && macroField?.coastalMeadow && coastSurface
+      ? {
+          coverage: createCompactCoastalGroundCover(
+            worldPos.y,
+            noiseValue,
+            distortNoise,
+            macroField,
+          )
+            .mul(float(1).sub(legacyPondSoil))
+            .toVar("compactCoastalGroundCover"),
+          // Only this coastal soil contribution is wet. Full roads/ponds
+          // keep their own final material priority; no extra map sampling.
+          layer: applyCompactCoastRock(
+            compactLayers.dirt,
+            compactLayers.dirt,
+            coastSurface,
+          ),
+        }
+      : undefined;
+  if (compactLayers && pondBankComposition && !compactLayerFactory) {
+    const bankMaterials = applyCompactPondBankMaterials(
+      compactLayers.dirt,
+      compactLayers.rock,
+      pondBankComposition,
+    );
+    compactLayers.dirt = bankMaterials.soil;
+    compactLayers.rock = bankMaterials.rock;
+  }
+  if (compactLayers && coastRockSurface && !compactLayerFactory) {
+    compactLayers.rock = applyCompactCoastRock(
+      compactLayers.rock,
+      compactLayers.dirt,
+      coastRockSurface,
+    );
+  }
+  const resolveCompactAppearance = compactLayerFactory
+    ? (
+        weights: Node<"vec4">,
+        layers: ReturnType<typeof createCompactTerrainLayers>,
+      ): ReturnType<typeof createCompactTerrainLayers> & {
+        coastalGround?: CompactTerrainLayer;
+      } => {
+        const required = createCompactRockAppearanceRequired(
+          weights,
+          pondBankComposition?.mineralAppearance ?? float(0),
+        );
+        const ground = preparedGround?.resolve({
+          grassRequired: createCompactGrassAppearanceRequired(weights),
+          // Raw dirt also reaches rock through bank silt and coastal soil.
+          // Keep those dependencies even when direct dirt coverage is zero.
+          dirtRequired: createCompactDirtAppearanceRequired(
+            weights,
+            pondBankComposition?.siltAppearance ?? float(0),
+            coastRockSurface?.soil ?? float(0),
+          ),
+        });
+        const resolved: ReturnType<typeof createCompactTerrainLayers> & {
+          coastalGround?: CompactTerrainLayer;
+        } = {
+          ...layers,
+          ...ground,
+          rock: compactLayerFactory.createRock(required),
+        };
+        if (ground) {
+          resolved.grass = gradeCompactGrass(resolved.grass);
+          if (pondMargin)
+            resolved.grass = applyCompactPondMarginGrass(
+              resolved.grass,
+              pondMargin,
+            );
+          if (pondBankComposition)
+            resolved.grass = applyCompactPondBankGrass(
+              resolved.grass,
+              pondBankComposition,
+            );
+          // Coastal ground uses raw dirt, before bank mineral/silt grading.
+          // Return it explicitly; final coverage remains height-only.
+          if (coastalGround && coastSurface)
+            resolved.coastalGround = applyCompactCoastRock(
+              ground.dirt,
+              ground.dirt,
+              coastSurface,
+            );
+        }
+        // Resolve raw sources first, then preserve the bank/coast grade order.
+        if (pondBankComposition) {
+          const bankMaterials = applyCompactPondBankMaterials(
+            resolved.dirt,
+            resolved.rock,
+            pondBankComposition,
+          );
+          resolved.dirt = bankMaterials.soil;
+          resolved.rock = bankMaterials.rock;
+        }
+        if (coastRockSurface)
+          resolved.rock = applyCompactCoastRock(
+            resolved.rock,
+            resolved.dirt,
+            coastRockSurface,
+          );
+        return resolved;
+      }
+    : undefined;
+  const compactWeights = compactLayers
+    ? createCompactTerrainLayerWeights(
+        noiseValue,
+        slope,
+        roadInfluenceRaw,
+        distortNoise,
+        pondSurface,
+        macroSurface,
+        createCompactPlantingSoil(worldPos, distortNoise, plantingLobes),
+      )
+    : null;
+  const pondContactSoil =
+    options.compactPondBlend === "relief-contact-v1" ||
+    options.compactPondBlend === "shore-contact-v1" ||
+    options.compactPondBlend === "composition-v1"
+      ? createCompactPondContactSoil(worldPos, distortNoise, macroField)
+      : undefined;
+  const wornTurf =
+    compactWeights && macroField?.coastalMeadow && meadowNoise
+      ? createCompactWornTurfWeights({
+          bankVergeLocality,
+          worldPosition: worldPos,
+          meadowNoise,
+          distortNoise,
+          geometricSlope: slope,
+          rawRoadInfluence: roadInfluenceRaw,
+          road: compactWeights.road,
+          pondSoil: legacyPondSoil,
+          coastalCoverage: coastalGround?.coverage ?? float(0),
+          field: macroField,
+          pondContactSoil,
+        })
+      : undefined;
+  // Capture these shared scalar graph inputs in the original argument order.
+  // The optional normal-only graph reuses them, never re-reads mutable options
+  // or borrows the full material's packed layer/coverage graph.
+  const compactBlendInputs =
+    compactLayers && compactWeights
+      ? {
+          dirt: compactWeights.dirt,
+          cliff: compactWeights.cliff,
+          road: wornTurf?.road ?? compactWeights.road,
+          havenGround: macroField?.havenGround
+            ? createCompactHavenGroundWeights(
+                vec2(worldPos.x, worldPos.z),
+                macroField.havenGround,
+                legacyPondSoil,
+                slope,
+              )
+            : undefined,
+          habitatSoil: options.compactHabitat
+            ? createCompactHabitatSoilNode(
+                worldPos.x,
+                worldPos.z,
+                options.compactHabitat,
+              ).toVar("compactHabitatSoil")
+            : undefined,
+          coastalGround,
+          wornTurfSoil:
+            grassColorGrade &&
+            macroField?.coastalMeadow &&
+            (macroField.bankVerge || macroField.pondServiceGround)
+              ? mix(
+                  wornTurf?.soil ?? float(0),
+                  float(1),
+                  createCompactBankVergeWear(
+                    worldPos,
+                    macroField,
+                    bankVergeLocality,
+                  ),
+                ).toVar("compactTurfAndBankSoil")
+              : wornTurf?.soil,
+          pondSediment:
+            options.compactSurfaceBlend === "height-v1" && pondSurface.domain
+              ? createCompactPondBankSediment(pondSurface.domain, slope)
+              : undefined,
+          pondReliefSoil:
+            options.compactPondBlend === "relief-v1" ||
+            options.compactPondBlend === "relief-contact-v1" ||
+            options.compactPondBlend === "shore-contact-v1" ||
+            options.compactPondBlend === "composition-v1"
+              ? legacyPondSoil
+              : undefined,
+          pondRockContact:
+            options.compactPondBlend === "relief-contact-v1" ||
+            options.compactPondBlend === "shore-contact-v1" ||
+            options.compactPondBlend === "composition-v1"
+              ? createCompactPondRockContact({
+                  world: worldPos,
+                  distortNoise,
+                  field: macroField,
+                  pondSoil: legacyPondSoil,
+                  geometricCliff: compactWeights.geometricCliff,
+                  road: wornTurf?.road ?? compactWeights.road,
+                  pondContactSoil,
+                })
+              : undefined,
+          coastDetail:
+            options.compactCoastBlend === "detail-v1" && coastSurface
+              ? {
+                  coverage: coastSurface.coverage,
+                  pondRegion: pondSurface.domain?.region ?? float(0),
+                }
+              : undefined,
+          coastDistribution:
+            options.compactCoastBlend === "distribution-v1"
+              ? createCompactCoastDistribution({
+                  x: worldPos.x,
+                  z: worldPos.z,
+                  height: worldPos.y,
+                  slope,
+                  noiseValue,
+                  meadowNoise: meadowNoise ?? noiseValue,
+                  road: wornTurf?.road ?? compactWeights.road,
+                  pond: pondParameters
+                    ? {
+                        centerX: pondParameters.x,
+                        centerZ: pondParameters.y,
+                        radius: pondParameters.z,
+                      }
+                    : null,
+                  field: macroField,
+                })
+              : undefined,
+          coastCavity:
+            options.compactCoastBlend === "cavity-v1" && coastSurface
+              ? {
+                  coverage: coastSurface.coverage,
+                  pondClearance: createCompactCoastCavityPondClearance(
+                    worldPos,
+                    pondParameters,
+                  ),
+                }
+              : undefined,
+          pondBankComposition,
+        }
+      : null;
+  const compactBaseSurface =
+    compactLayers && compactBlendInputs
+      ? blendCompactTerrainLayers(
+          compactLayers,
+          compactBlendInputs.dirt,
+          compactBlendInputs.cliff,
+          compactBlendInputs.road,
+          compactBlendInputs.havenGround,
+          compactBlendInputs.habitatSoil,
+          compactBlendInputs.coastalGround,
+          compactBlendInputs.wornTurfSoil,
+          compactBlendInputs.pondSediment,
+          compactBlendInputs.pondReliefSoil,
+          compactBlendInputs.pondRockContact,
+          compactBlendInputs.coastDetail,
+          compactBlendInputs.coastDistribution,
+          compactBlendInputs.coastCavity,
+          compactBlendInputs.pondBankComposition,
+          resolveCompactAppearance,
+        )
+      : null;
+  const compactSurface = compactBaseSurface
+    ? applyCompactPondWetness(compactBaseSurface, pondSurface.wetness)
+    : null;
+  const baseWithRoads = compactSurface
+    ? mul(compactSurface.albedo, compactWeights!.variation)
+    : mix(variedColor, compactedRoadColor, roadInfluence);
 
-  // Half-lambert cool tint + fresnel rim — tints the ALBEDO before PBR.
-  // PBR then adds a single Lambert N·L + shadow on top.
-  const animeBase = applyAnimeShade(
-    baseWithRoads,
-    worldNormal,
-    sunDirectionUniform,
-  );
+  // Compact PBR keeps authored albedo independent of the sun/view direction.
+  // Preserve the legacy half-Lambert tint and Fresnel rim for other worlds.
+  const surfaceAlbedo = options.compactPbr
+    ? baseWithRoads
+    : applyAnimeShade(baseWithRoads, worldNormal, sunDirectionUniform, shade);
 
   // ============================================================================
   // VERTEX LIGHTING (lampposts, torches, etc.)
@@ -1454,10 +2351,10 @@ export function createTerrainMaterial(): THREE.Material & {
   // Helper to calculate single light contribution
   // Returns additive light color contribution
   const calculateLightContribution = (
-    lightPos: ReturnType<typeof uniform>,
-    lightColor: ReturnType<typeof uniform>,
-    lightParams: ReturnType<typeof uniform>, // x=intensity, y=range
-  ) => {
+    lightPos: UniformNode<"vec3", THREE.Vector3>,
+    lightColor: UniformNode<"vec3", THREE.Vector3>,
+    lightParams: UniformNode<"vec2", THREE.Vector2>, // x=intensity, y=range
+  ): Node<"vec3"> => {
     // Vector from world position to light
     const toLightVec = sub(lightPos, worldPos);
     const distToLight = add(
@@ -1482,7 +2379,7 @@ export function createTerrainMaterial(): THREE.Material & {
   // Accumulate light contributions from all 8 lights
   // Start with zero (no extra light)
   // Use ShaderNode type to allow reassignment from add() operations
-  let lightAccum: ShaderNode = vec3(0, 0, 0);
+  let lightAccum: Node<"vec3"> = vec3(0, 0, 0);
 
   // Unroll loop for all 8 lights (TSL doesn't support dynamic loops well)
   lightAccum = add(
@@ -1582,7 +2479,8 @@ export function createTerrainMaterial(): THREE.Material & {
 
   // Apply vertex lighting additively (multiply base by (1 + lightAccum))
   // This brightens terrain near lights without washing out colors
-  const litTerrain = mul(animeBase, add(vec3(1, 1, 1), lightAccum));
+  const lightingMultiplier = add(vec3(1, 1, 1), lightAccum);
+  const litTerrain = mul(surfaceAlbedo, lightingMultiplier);
 
   // === DISTANCE FOG (smoothstep with squared distances — avoids per-fragment sqrt) ===
   const baseFogFactor = smoothstep(
@@ -1600,6 +2498,11 @@ export function createTerrainMaterial(): THREE.Material & {
   const material = new MeshStandardNodeMaterial();
   material.colorNode = litTerrain;
   material.roughness = 1.0;
+  material.roughnessNode = compactSurface?.roughness ?? surfaceRoughness;
+  if (compactSurface) {
+    material.normalNode = compactSurface.normal;
+    material.aoNode = compactSurface.ao;
+  }
   material.metalness = 0.0;
   material.side = THREE.FrontSide;
   material.fog = false;
@@ -1609,25 +2512,496 @@ export function createTerrainMaterial(): THREE.Material & {
   })();
 
   const terrainUniforms: TerrainUniforms = {
+    shade,
     sunPosition: sunPositionUniform,
-    sunDirection: sunDirectionUniform as unknown as { value: THREE.Vector3 },
+    sunDirection: sunDirectionUniform,
     time: timeUniform,
     fogEnabled: fogEnabledUniform,
-    dayIntensity: dayIntensityUniform as unknown as { value: number },
+    dayIntensity: dayIntensityUniform,
+    surfaceDetailStrength,
     // Vertex lighting arrays
-    vertexLightPositions: vertexLightPositionUniforms.map(
-      (u) => u as unknown as { value: THREE.Vector3 },
-    ),
-    vertexLightColors: vertexLightColorUniforms.map(
-      (u) => u as unknown as { value: THREE.Vector3 },
-    ),
-    vertexLightParams: vertexLightParamUniforms.map(
-      (u) => u as unknown as { value: THREE.Vector2 },
-    ),
+    vertexLightPositions: vertexLightPositionUniforms,
+    vertexLightColors: vertexLightColorUniforms,
+    vertexLightParams: vertexLightParamUniforms,
   };
   const result = material as typeof material & {
     terrainUniforms: TerrainUniforms;
+    compactTerrainSurface?: CompactTerrainTextureSet;
+    compactDirtSurfacePage?: CompactTerrainDirtSurfacePage;
+    compactRockSampling?: CompactRockSampling;
+    compactGroundSampling?: CompactGroundSampling;
+    compactTerrainBankEvaluation?: CompactTerrainBankEvaluation;
+    compactPondBlend?: CompactPondBlend;
+    compactCoastBlend?: CompactCoastBlend;
+    compactPondBankField?: CompactPondBankField;
+    getCompactTerrainDiagnosticOutputs(): CompactTerrainDiagnosticOutputs | null;
+    getCompactTerrainPreLightingSurface(): CompactTerrainPreLightingSurface | null;
+    getCompactTerrainNormalSurface(): CompactTerrainNormalSurface | null;
+    createCompactTerrainResolvedAppearance(
+      resolver: CompactTerrainAppearanceResolver,
+    ): Readonly<CompactTerrainAppearanceLayer> | null;
+    compactGrassColorGrade?: CompactGrassColorGradeDescriptor;
+    compactPlantingMaterial?: readonly CompactTerrainPlantingLobe[];
+    compactHavenGroundMaterial?: CompactHavenGroundMaterialReceipt;
+    compactHabitatMaterial?: CompactHabitatField;
+    compactPondMaterial?: {
+      profile: CompactTerrainPond;
+      parameters: UniformNode<"vec4", THREE.Vector4>;
+    };
   };
   result.terrainUniforms = terrainUniforms;
+  if (compactDirtSurfacePage)
+    Object.defineProperty(result, "compactDirtSurfacePage", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: compactDirtSurfacePage,
+    });
+  if (options.compactTerrainBankEvaluation !== undefined)
+    Object.defineProperty(result, "compactTerrainBankEvaluation", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactTerrainBankEvaluation,
+    });
+  if (options.compactGroundSampling !== undefined)
+    Object.defineProperty(result, "compactGroundSampling", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactGroundSampling,
+    });
+  if (options.compactRockSampling !== undefined)
+    Object.defineProperty(result, "compactRockSampling", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactRockSampling,
+    });
+  if (macroField?.pondBankField)
+    Object.defineProperty(result, "compactPondBankField", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: macroField.pondBankField,
+    });
+  if (options.compactPondBlend !== undefined)
+    Object.defineProperty(result, "compactPondBlend", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactPondBlend,
+    });
+  if (options.compactCoastBlend !== undefined)
+    Object.defineProperty(result, "compactCoastBlend", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactCoastBlend,
+    });
+  let diagnosticOutputs: CompactTerrainDiagnosticOutputs | null = null;
+  let diagnosticDisposed = false;
+  let preLightingSurface: CompactTerrainPreLightingSurface | null = null;
+  let normalSurface: CompactTerrainNormalSurface | null = null;
+  const normalRecipe = compactTextures
+    ? Object.freeze({
+        deferredRock: compactLayerFactory !== null,
+        deferredGround: preparedGround !== null,
+        dirtProjection: compactTextures.dirtProjection,
+        rockProjection: compactTextures.rockProjection,
+        surfaceBlend: compactTextures.surfaceBlend,
+        grassSubstrate: compactTextures.grassSubstrate,
+        textureEncoding: compactTextures.textureEncoding,
+        textureMatrix: compactTextures.textureMatrix,
+      })
+    : null;
+  // Explicit graph request only. No material-node replacement, renderer work,
+  // texture loading or proof of texture readiness/static cacheability. Distance,
+  // derivatives, world uniforms and view-normal conversion remain live owners.
+  const ownsCompactRecipe = () =>
+    !diagnosticDisposed &&
+    compactTextures !== null &&
+    compactBlendInputs !== null &&
+    normalRecipe !== null &&
+    result.compactTerrainSurface === compactTextures &&
+    compactTextures.dirtProjection === normalRecipe.dirtProjection &&
+    compactTextures.rockProjection === normalRecipe.rockProjection &&
+    compactTextures.surfaceBlend === normalRecipe.surfaceBlend &&
+    compactTextures.grassSubstrate === normalRecipe.grassSubstrate &&
+    compactTextures.textureEncoding === normalRecipe.textureEncoding &&
+    compactTextures.textureMatrix === normalRecipe.textureMatrix;
+  result.getCompactTerrainNormalSurface = () => {
+    if (
+      !ownsCompactRecipe() ||
+      !compactTextures ||
+      !compactBlendInputs ||
+      !normalRecipe
+    )
+      return null;
+    if (normalSurface) return normalSurface;
+    const factory = createCompactTerrainNormalLayerFactory(
+      compactTextures,
+      distSq,
+      noiseValue,
+    );
+    // Match the original unconditional ordering and raw cavity-AO ownership.
+    const rawRock = normalRecipe.deferredRock ? null : factory.createRock();
+    const prepared = normalRecipe.deferredGround
+      ? factory.prepareGround()
+      : null;
+    const placeholder = (height: Node<"float">): CompactTerrainNormalLayer => ({
+      height,
+      ao: float(1),
+      worldNormal: normalWorldGeometry,
+    });
+    type NormalLayers = Record<
+      "grass" | "dirt" | "rock",
+      CompactTerrainNormalLayer
+    >;
+    const layers: NormalLayers = {
+      ...(prepared
+        ? {
+            grass: placeholder(prepared.heights.grass),
+            dirt: placeholder(prepared.heights.dirt),
+          }
+        : factory.createGround()),
+      rock: rawRock
+        ? {
+            ...rawRock,
+            rawRockAo: rawRock.rawRockAo!.toVar("compactRawRockAo"),
+          }
+        : { ao: float(1), worldNormal: normalWorldGeometry },
+    };
+    // The coastal ground contribution owns RAW dirt, before bank grading.
+    const coastal =
+      compactBlendInputs.coastalGround && coastSurface
+        ? {
+            coverage: compactBlendInputs.coastalGround.coverage,
+            layer: applyCompactCoastNormalRock(
+              layers.dirt,
+              layers.dirt,
+              coastSurface,
+            ),
+          }
+        : undefined;
+    const gradeBankAndCoast = (resolved: NormalLayers) => {
+      if (pondBankComposition) {
+        const bank = applyCompactPondBankNormalMaterials(
+          resolved.dirt,
+          resolved.rock,
+          pondBankComposition,
+        );
+        resolved.dirt = bank.soil;
+        resolved.rock = bank.rock;
+      }
+      if (coastRockSurface)
+        resolved.rock = applyCompactCoastNormalRock(
+          resolved.rock,
+          resolved.dirt,
+          coastRockSurface,
+        );
+    };
+    if (!normalRecipe.deferredRock) gradeBankAndCoast(layers);
+    const resolveNormals = normalRecipe.deferredRock
+      ? (
+          weights: Node<"vec4">,
+          initial: NormalLayers,
+        ): NormalLayers & { coastalGround?: CompactTerrainNormalLayer } => {
+          const required = createCompactRockAppearanceRequired(
+            weights,
+            pondBankComposition?.mineralAppearance ?? float(0),
+          );
+          const ground = prepared?.resolve({
+            grassRequired: createCompactGrassAppearanceRequired(weights),
+            dirtRequired: createCompactDirtAppearanceRequired(
+              weights,
+              pondBankComposition?.siltAppearance ?? float(0),
+              coastRockSurface?.soil ?? float(0),
+            ),
+          });
+          const resolved: NormalLayers & {
+            coastalGround?: CompactTerrainNormalLayer;
+          } = {
+            ...initial,
+            ...ground,
+            rock: factory.createRock(required),
+          };
+          if (ground && coastal && coastSurface)
+            resolved.coastalGround = applyCompactCoastNormalRock(
+              ground.dirt,
+              ground.dirt,
+              coastSurface,
+            );
+          // Coverage is already complete when this resolver executes. These mixes
+          // preserve the original normal-context fences and never feed weights.
+          gradeBankAndCoast(resolved);
+          return resolved;
+        }
+      : undefined;
+    const surface = blendCompactTerrainNormalLayers(
+      layers,
+      compactBlendInputs.dirt,
+      compactBlendInputs.cliff,
+      compactBlendInputs.road,
+      compactBlendInputs.havenGround,
+      compactBlendInputs.habitatSoil,
+      coastal,
+      compactBlendInputs.wornTurfSoil,
+      compactBlendInputs.pondSediment,
+      compactBlendInputs.pondReliefSoil,
+      compactBlendInputs.pondRockContact,
+      compactBlendInputs.coastDetail,
+      compactBlendInputs.coastDistribution,
+      compactBlendInputs.coastCavity,
+      compactBlendInputs.pondBankComposition,
+      resolveNormals,
+    );
+    normalSurface = Object.freeze({
+      ao: surface.ao,
+      normalView: surface.normal,
+      ...(surface.weights ? { weights: surface.weights } : {}),
+    });
+    return normalSurface;
+  };
+  result.createCompactTerrainResolvedAppearance = (resolver) => {
+    if (
+      !ownsCompactRecipe() ||
+      !compactTextures ||
+      !normalRecipe ||
+      !compactWeights ||
+      compactDirtSurfacePage ||
+      typeof resolver !== "function"
+    )
+      return null;
+    const live = result.getCompactTerrainNormalSurface();
+    // The ordered non-height compositor has no equivalent final weight vector.
+    // Keep its original graph instead of replacing it with a different blend.
+    if (!live?.weights) return null;
+    const packed = Fn(() => {
+      if (!ownsCompactRecipe())
+        throw new Error(
+          "Terrain appearance resolver source is no longer owned",
+        );
+      // These scalar expressions can contain implicit noise/road sampling.
+      // Materialize every dependency BEFORE any resolver-owned spatial branch.
+      const world = positionWorld.toVar("compactAppearanceWorld");
+      // Explicit assignments keep these operations in this uniform stack even
+      // when only the fallback consumes them. A pure toVar may be deferred to
+      // its first use inside Else by the node builder.
+      const dx = vec3(0).toVar("compactAppearanceWorldDx");
+      const dy = vec3(0).toVar("compactAppearanceWorldDy");
+      dx.assign(positionWorld.dFdx());
+      dy.assign(positionWorld.dFdy());
+      const weights = live.weights!.toVar("compactAppearanceWeights");
+      const pattern = noiseValue.toVar("compactAppearancePatternNoise");
+      const variation = compactWeights.variation.toVar(
+        "compactAppearanceVariation",
+      );
+      const wetness = pondSurface.wetness.toVar("compactAppearancePondWetness");
+      const grading = {
+        meadowNoise: meadowNoise?.toVar("compactAppearanceMeadowNoise"),
+        macroDry: macroSurface.dry.toVar("compactAppearanceMacroDry"),
+        locality: bankVergeLocality?.toVar("compactAppearanceBankLocality"),
+      };
+      const margin = pondMargin
+        ? {
+            ...pondMargin,
+            shade: pondMargin.shade.toVar("compactAppearanceMarginShade"),
+          }
+        : undefined;
+      const bank = pondBankComposition
+        ? {
+            ...pondBankComposition,
+            grassShade: pondBankComposition.grassShade.toVar(
+              "compactAppearanceBankShade",
+            ),
+            mineralAppearance: pondBankComposition.mineralAppearance?.toVar(
+              "compactAppearanceMineral",
+            ),
+            siltAppearance: pondBankComposition.siltAppearance?.toVar(
+              "compactAppearanceSilt",
+            ),
+          }
+        : undefined;
+      const coast = coastSurface
+        ? {
+            soil: coastSurface.soil.toVar("compactAppearanceCoastSoil"),
+            wetness: coastSurface.wetness.toVar(
+              "compactAppearanceCoastWetness",
+            ),
+          }
+        : null;
+      const coastRock =
+        coastRockSurface && coast
+          ? {
+              soil: coastRockSurface.soil.toVar(
+                "compactAppearanceCoastRockSoil",
+              ),
+              wetness: coast.wetness,
+            }
+          : null;
+      const createOriginal = (
+        rockArAxisPolicy?: CompactTerrainRockArAxisPolicy,
+      ): Node<"vec4"> => {
+        if (!ownsCompactRecipe())
+          throw new Error(
+            "Terrain appearance fallback source is no longer owned",
+          );
+        // Build here, not when this callback is created. A prebuilt packed graph
+        // can hoist all source reads out of the caller's Else in Three's TSL.
+        const factory = createCompactTerrainAppearanceLayerFactory(
+          compactTextures,
+          pattern,
+          { dx, dy },
+          rockArAxisPolicy,
+        );
+        const ground = factory.createGround(
+          normalRecipe.deferredGround
+            ? {
+                grassRequired: createCompactGrassAppearanceRequired(weights),
+                dirtRequired: createCompactDirtAppearanceRequired(
+                  weights,
+                  bank?.siltAppearance ?? float(0),
+                  coastRock?.soil ?? float(0),
+                ),
+              }
+            : undefined,
+        );
+        let grass = gradeCompactGrass(ground.grass, grading);
+        if (margin) grass = applyCompactPondMarginGrass(grass, margin);
+        if (bank) grass = applyCompactPondBankGrass(grass, bank);
+        let dirt = ground.dirt;
+        let rock = factory.createRock(
+          normalRecipe.deferredRock
+            ? createCompactRockAppearanceRequired(
+                weights,
+                bank?.mineralAppearance ?? float(0),
+              )
+            : undefined,
+        );
+        // Coastal ground borrows RAW dirt before mineral/silt grading. Rock
+        // then borrows the bank-graded soil, exactly as the original material.
+        const coastal =
+          coastalGround && coast
+            ? applyCompactCoastAppearanceRock(dirt, dirt, coast)
+            : undefined;
+        if (bank) {
+          const graded = applyCompactPondBankAppearanceMaterials(
+            dirt,
+            rock,
+            bank,
+          );
+          dirt = graded.soil;
+          rock = graded.rock;
+        }
+        if (coastRock)
+          rock = applyCompactCoastAppearanceRock(rock, dirt, coastRock);
+        const surface = applyCompactPondWetness(
+          blendCompactTerrainAppearanceLayers(
+            { grass, dirt, rock },
+            weights,
+            coastal,
+          ),
+          wetness,
+        );
+        return vec4(surface.albedo.mul(variation), surface.roughness);
+      };
+      return resolver(
+        Object.freeze({
+          worldPosition: world,
+          worldDx: dx,
+          worldDy: dy,
+          weights,
+        }),
+        createOriginal,
+      );
+    })()
+      .context({ uniformFlow: false })
+      .toVar("compactResolvedAppearance");
+    return Object.freeze({ albedo: packed.rgb, roughness: packed.a });
+  };
+  result.getCompactTerrainPreLightingSurface = () => {
+    if (diagnosticDisposed || !compactSurface) return null;
+    preLightingSurface ??= Object.freeze({
+      albedo: surfaceAlbedo,
+      roughness: compactSurface.roughness,
+      ao: compactSurface.ao,
+      normalView: compactSurface.normal,
+      lightingMultiplier,
+    });
+    return preLightingSurface;
+  };
+  result.getCompactTerrainDiagnosticOutputs = () => {
+    if (diagnosticDisposed || !compactBaseSurface?.weights || !compactWeights)
+      return null;
+    diagnosticOutputs ??= createCompactTerrainDiagnosticOutputs({
+      weights: compactBaseSurface.weights,
+      pondSoil: pondSurface.soil,
+      pondWetness: pondSurface.wetness,
+      geometricCliff: compactWeights.geometricCliff,
+      effectiveCliff: compactWeights.cliff,
+      coastSoil: coastRockSurface?.soil ?? float(0),
+      rockAppearanceRequired: createCompactRockAppearanceRequired(
+        compactBaseSurface.weights,
+        pondBankComposition?.mineralAppearance ?? float(0),
+      ),
+      rockAxisWeights: (() => {
+        const weights = normalWorldGeometry.abs().pow(vec3(4));
+        return weights.div(weights.x.add(weights.y).add(weights.z).max(1e-12));
+      })(),
+    });
+    return diagnosticOutputs;
+  };
+  material.addEventListener("dispose", () => {
+    diagnosticDisposed = true;
+    diagnosticOutputs = null;
+    preLightingSurface = null;
+    normalSurface = null;
+  });
+  if (grassColorGrade)
+    Object.defineProperty(result, "compactGrassColorGrade", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: grassColorOperations.getGrassColorGrade(grassColorGrade),
+    });
+  if (options.compactHabitat) {
+    Object.defineProperty(result, "compactHabitatMaterial", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: options.compactHabitat,
+    });
+  }
+  if (plantingLobes.length) result.compactPlantingMaterial = plantingLobes;
+  if (macroField?.havenGround)
+    Object.defineProperty(result, "compactHavenGroundMaterial", {
+      enumerable: true,
+      value: Object.freeze({
+        schemaVersion: 1,
+        mode: "authored-haven-ground-v2",
+        descriptor: macroField.havenGround,
+        sourceGrass: true,
+        wholePbrBlend: true,
+        talusSegments: macroField.havenGround.talus.length,
+        wearSegments: macroField.havenGround.wear.length,
+        talusRockFraction: COMPACT_TERRAIN_COMPOSITION.havenTalusRockFraction,
+        talusSlopeStart: COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeStart,
+        talusSlopeEnd: COMPACT_TERRAIN_COMPOSITION.havenTalusSlopeEnd,
+        grassEligibilityChanged: false,
+      } satisfies CompactHavenGroundMaterialReceipt),
+    });
+  if (compactPond && pondParameters)
+    result.compactPondMaterial = {
+      profile: compactPond,
+      parameters: pondParameters,
+    };
+  if (compactTextures) {
+    result.compactTerrainSurface = compactTextures;
+    material.addEventListener("dispose", () => {
+      compactDirtSurfacePage?.dispose();
+      compactTextures.dispose();
+    });
+  }
   return result;
 }

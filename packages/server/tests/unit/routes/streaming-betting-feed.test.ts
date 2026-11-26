@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect } from "vitest";
 import {
   buildBettingFeedDedupKey,
@@ -6,6 +9,8 @@ import {
 } from "../../../src/routes/streaming-betting-feed.js";
 import type { BettingFeedFrame } from "../../../src/routes/streaming-betting-feed.js";
 import type { StreamingDuelCycle } from "../../../src/systems/StreamingDuelScheduler/types.js";
+import { serializeBettingFeedSchemaV3ContractFixture } from "../../../scripts/generate-betting-feed-schema-v3-fixtures.js";
+import { deriveBettingRendererHealth } from "../../../src/routes/streaming-betting-health.js";
 
 function createCycle(
   overrides: Partial<StreamingDuelCycle> = {},
@@ -54,6 +59,9 @@ function createCycle(
     },
     duelId: "duel-1",
     duelKeyHex: "0xabcdef",
+    competitiveSnapshotVersion: null,
+    competitiveSnapshotDigest: null,
+    competitiveSnapshot: null,
     arenaId: null,
     betOpenTime: 1_000,
     betCloseTime: 2_000,
@@ -66,6 +74,7 @@ function createCycle(
     },
     winnerId: null,
     loserId: null,
+    outcome: null,
     winReason: null,
     seed: null,
     replayHash: null,
@@ -100,6 +109,110 @@ function createFrame(seq: number): BettingFeedFrame {
 }
 
 describe("streaming-betting-feed", () => {
+  it("retains frame-local health derivation without changing material deduplication", () => {
+    const cycle = createCycle();
+    const health = deriveBettingRendererHealth(cycle, {
+      nowMs: 10_000,
+      captureStats: { clientConnected: true, ffmpegRunning: true },
+    });
+    const payload = buildBettingFeedPayload({
+      sourceEpoch: 9_999,
+      seq: 1,
+      emittedAt: 10_000,
+      cycle,
+      rendererHealth: health,
+    });
+    expect(
+      JSON.parse(JSON.stringify(payload)).rendererHealth.derivation,
+    ).toEqual(health.derivation);
+    const refreshed = {
+      ...payload,
+      seq: 2,
+      emittedAt: 11_000,
+      rendererHealth: deriveBettingRendererHealth(cycle, {
+        nowMs: 11_000,
+        captureStats: { clientConnected: true, ffmpegRunning: true },
+      }),
+    };
+    expect(buildBettingFeedDedupKey(refreshed)).toBe(
+      buildBettingFeedDedupKey(payload),
+    );
+    expect(
+      buildBettingFeedDedupKey({
+        ...refreshed,
+        rendererHealth: {
+          ...refreshed.rendererHealth,
+          ready: false,
+          degradedReason: "capture_process_exited",
+        },
+      }),
+    ).not.toBe(buildBettingFeedDedupKey(payload));
+    expect(payload.rendererHealth?.derivation?.evaluatedAtMs).toBe(
+      payload.emittedAt,
+    );
+    expect(refreshed.rendererHealth.derivation?.evaluatedAtMs).toBe(
+      refreshed.emittedAt,
+    );
+  });
+
+  it("keeps the checked-in Hyperbet schema-v3 contract fixture aligned with the production producer", () => {
+    const fixturePath = fileURLToPath(
+      new URL(
+        "../../fixtures/hyperbet/betting-feed-schema-v3.json",
+        import.meta.url,
+      ),
+    );
+
+    expect(readFileSync(fixturePath, "utf8")).toBe(
+      serializeBettingFeedSchemaV3ContractFixture(),
+    );
+  });
+
+  it("publishes the exact frozen strategy without private planning fields", () => {
+    const fixture = JSON.parse(
+      serializeBettingFeedSchemaV3ContractFixture(),
+    ) as {
+      cases: Array<{
+        name: string;
+        payload: {
+          agent1: { strategySummary: Record<string, unknown> | null } | null;
+        };
+      }>;
+    };
+    const announcement = fixture.cases.find(
+      (entry) => entry.name === "announcement",
+    );
+    const strategySummary = announcement?.payload.agent1?.strategySummary;
+
+    expect(strategySummary).toEqual({
+      schemaVersion: 1,
+      approach: "balanced",
+      tacticalMacro: "pressure",
+      attackStyle: "aggressive",
+      prayer: "superhuman_strength",
+      preferredCombatRole: null,
+      foodThreshold: 40,
+      switchDefensiveAt: 30,
+      source: "deterministic",
+      policyVersion: "fixture-policy-v1",
+    });
+    expect(Object.keys(strategySummary ?? {}).sort()).toEqual([
+      "approach",
+      "attackStyle",
+      "foodThreshold",
+      "policyVersion",
+      "prayer",
+      "preferredCombatRole",
+      "schemaVersion",
+      "source",
+      "switchDefensiveAt",
+      "tacticalMacro",
+    ]);
+    expect(strategySummary).not.toHaveProperty("reasoning");
+    expect(strategySummary).not.toHaveProperty("agentPolicyFingerprint");
+    expect(strategySummary).not.toHaveProperty("modelProvider");
+  });
+
   it("builds betting payloads with stable schema and phase version data", () => {
     const payload = buildBettingFeedPayload({
       sourceEpoch: 42,
@@ -119,7 +232,7 @@ describe("streaming-betting-feed", () => {
     });
 
     expect(payload).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 3,
       sourceEpoch: 42,
       seq: 7,
       emittedAt: 123_456,
@@ -133,7 +246,11 @@ describe("streaming-betting-feed", () => {
       duelEndTime: null,
       winnerId: "agent-b",
       winnerName: "Agent B",
+      outcome: null,
+      cancellationReason: null,
       winReason: "damage_advantage",
+      seed: null,
+      replayHash: null,
       arenaPositions: {
         agent1: [10, 11, 12],
         agent2: [20, 21, 22],
@@ -147,6 +264,32 @@ describe("streaming-betting-feed", () => {
 
     expect(payload.agent1?.id).toBe("agent-a");
     expect(payload.agent2?.hp).toBe(20);
+  });
+
+  it("builds a durable cancelled terminal payload from the captured cycle", () => {
+    const payload = buildBettingFeedPayload({
+      sourceEpoch: 42,
+      seq: 8,
+      emittedAt: 123_456,
+      cycle: createCycle({ phase: "FIGHTING" }),
+      terminal: {
+        outcome: "cancelled",
+        cancellationReason: "combat_engagement_failed",
+        duelEndTime: 123_456,
+      },
+    });
+
+    expect(payload).toMatchObject({
+      schemaVersion: 3,
+      duelId: "duel-1",
+      duelKey: "0xabcdef",
+      phase: "FIGHTING",
+      duelEndTime: 123_456,
+      winnerId: null,
+      winnerName: null,
+      outcome: "cancelled",
+      cancellationReason: "combat_engagement_failed",
+    });
   });
 
   it("selects replay, bootstrap, and reset delivery modes deterministically", () => {
@@ -188,7 +331,7 @@ describe("streaming-betting-feed", () => {
     });
   });
 
-  it("deduplicates independently of emittedAt and renderer health timestamps", () => {
+  it("deduplicates independently of transport sequence and timestamps", () => {
     const basePayload = buildBettingFeedPayload({
       sourceEpoch: 42,
       seq: 7,
@@ -202,6 +345,7 @@ describe("streaming-betting-feed", () => {
     });
     const laterPayload = {
       ...basePayload,
+      seq: 8,
       emittedAt: 999_999,
       rendererHealth: basePayload.rendererHealth
         ? {

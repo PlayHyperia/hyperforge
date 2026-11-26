@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "activationId": "steve-bronze-2h-duel-controlled-v1",
+  "avatarId": "steve",
+  "itemId": "bronze_2h_sword",
+  "equipment": {
+    "sourcePath": "packages/server/world/assets/models/swords/2h-swords/candidates/2h-sword-bronze-semantic-grip-candidate.glb",
+    "sourceAssetPath": "models/swords/2h-swords/candidates/2h-sword-bronze-semantic-grip-candidate.glb",
+    "sha256": "fc62c1a9d255dae213da35e8b041a01976b2d7210f5fa4ae5ddf10a523ab7b64",
+    "destinationPath": "models/swords/2h-swords/2h-sword-bronze-steve-fitted.glb",
+    "assetUrl": "asset://models/swords/2h-swords/2h-sword-bronze-steve-fitted.glb"
+  },
+  "motions": [
+    {
+      "id": "idle",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/emote-2h-idle-steve-controlled-guard-candidate.glb",
+      "sourceAssetPath": "emotes/candidates/emote-2h-idle-steve-controlled-guard-candidate.glb",
+      "sha256": "bd9ff3298c771f5a00bf88f5a086b5594869ca7fdf48d926cc5b4ec66ac4f317",
+      "destinationPath": "emotes/emote-2h-duel-idle-steve.glb",
+      "assetUrl": "asset://emotes/emote-2h-duel-idle-steve.glb",
+      "playbackSpeed": 1,
+      "loop": true
+    },
+    {
+      "id": "walk",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/emote-2h-walk-steve-controlled-guard-candidate.glb",
+      "sourceAssetPath": "emotes/candidates/emote-2h-walk-steve-controlled-guard-candidate.glb",
+      "sha256": "0bd36843d45eb6697f05e3948fee004773c731a7c92956c918457096fc8b6327",
+      "destinationPath": "emotes/emote-2h-duel-walk-steve.glb",
+      "assetUrl": "asset://emotes/emote-2h-duel-walk-steve.glb?s=1.3",
+      "playbackSpeed": 1.3,
+      "loop": true
+    },
+    {
+      "id": "run",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/emote-2h-run-steve-controlled-guard-candidate.glb",
+      "sourceAssetPath": "emotes/candidates/emote-2h-run-steve-controlled-guard-candidate.glb",
+      "sha256": "70de1f48bea4aef5342b82dca147e76154803a8e19bf1daed3cb8aa7a8284ed9",
+      "destinationPath": "emotes/emote-2h-duel-run-steve.glb",
+      "assetUrl": "asset://emotes/emote-2h-duel-run-steve.glb?s=1.4",
+      "playbackSpeed": 1.4,
+      "loop": true
+    },
+    {
+      "id": "slash",
+      "sourcePath": "packages/server/world/assets/emotes/candidates/emote-2h-planted-cut-steve-controlled-45-candidate.glb",
+      "sourceAssetPath": "emotes/candidates/emote-2h-planted-cut-steve-controlled-45-candidate.glb",
+      "sha256": "acf53282b40045016332713e4306a2f0edbdd45806e6a0281abeadb35337f125",
+      "destinationPath": "emotes/emote-2h-duel-slash-steve.glb",
+      "assetUrl": "asset://emotes/emote-2h-duel-slash-steve.glb?l=0",
+      "playbackSpeed": 1,
+      "loop": false
+    }
+  ],
+  "evidence": {
+    "locomotionReport": {
+      "path": "artifacts/duel-launch-avatar-bakeoff/two-hand-locomotion-candidate-report.json",
+      "sha256": "9708bea0be7ec3de8245baa33f3124191f2445f8e4fc2460436c4175f3bb6fae"
+    },
+    "attackReport": {
+      "path": "artifacts/duel-avatar-candidates/two-hand-torso-cut-candidate-report.json",
+      "sha256": "0b0521d2bd8e4bb6031e1fbc893696b669b5199172ddd1bfb21adc3c73ab8684"
+    },
+    "transitionReport": {
+      "path": "artifacts/duel-avatar-candidates/two-hand-planted-transition-report.json",
+      "sha256": "56d67d201d6ad5b7cc2899026b65c8a005d37989e5fa21adcf542eeccdf2ef94"
+    },
+    "geometricReview": {
+      "reportPath": "artifacts/duel-avatar-candidates/two-hand-planted-cut-controlled-45-review-report.json",
+      "reportSha256": "4e444b54afdf02b2d5e3c20c88d4054d930a4f451f61f05e654f4b5878c33d7a",
+      "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-planted-cut-controlled-45-review.png",
+      "contactSheetSha256": "5917de6d50cb2860a9d66ee992a66d569ea664856b6ea2ffa152e2a54b0f8e93"
+    },
+    "webGPUReviews": [
+      {
+        "id": "full-resolution",
+        "avatarAsset": "avatars/duel-candidates/duel-steve.vrm",
+        "avatarSha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback-report.json",
+        "reportSha256": "d81a72b58bca24fd1a935f5eceb14445a06301ab35aab55e7692116538a8ee2f",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback.webm",
+        "videoSha256": "d7a81d60f43c23d779ea41c420f818b6f84977afe756254ba35f1addeae666d0",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-candidate-webgpu-exact-angle.png",
+        "contactSheetSha256": "bfba53e31c6aa2a2b99358ec6a7b58ea355425bb70297139a42ba52ddb33b685"
+      },
+      {
+        "id": "lod1",
+        "avatarAsset": "avatars/duel-candidates/duel-steve_lod1.vrm",
+        "avatarSha256": "027fa999b68d5945b9fa474badff44d61ee88f535b23c9974222dc8fa783647f",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback-lod1-report.json",
+        "reportSha256": "53ea41a3b939c7c34ad32cff9703f6b59b78d3883cf6738035107ff1bca0a302",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback-lod1.webm",
+        "videoSha256": "04e8c39e11ed5c0092d77403a0dcfdd94ba4bf6dca843d39d5db9e78d7d3fec5",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-candidate-webgpu-exact-angle-lod1.png",
+        "contactSheetSha256": "10652edaa419b5ec8b8a1414aa264ea0f582ac6ea67d225b97501c281982225f"
+      },
+      {
+        "id": "lod2",
+        "avatarAsset": "avatars/duel-candidates/duel-steve_lod2.vrm",
+        "avatarSha256": "57befb2ee1d84b516544ec8a306bb8619adb88185d8d12248eb9aeb751f148a3",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback-lod2-report.json",
+        "reportSha256": "75dd6494c17d6965bb5dc20fa9c12d95d7e006c550b5abe8d7a9ff69e0548416",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-candidate-playback-lod2.webm",
+        "videoSha256": "997ec7e7e7c7d7a5cc33f646907e2d19ba4abb8e2f1c4c3fb72741397ad3b9e9",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-candidate-webgpu-exact-angle-lod2.png",
+        "contactSheetSha256": "41def0b165c3f412b523ba34de276039eaacee642b8d05a2a9b19006823fe8a6"
+      }
+    ],
+    "runtimeWebGPUReviews": [
+      {
+        "id": "full-resolution",
+        "avatarAsset": "avatars/duel-candidates/duel-steve.vrm",
+        "avatarSha256": "879d9d47f4616333fefaaa7c5d71247f31a4f309d6b99931f4cca540d9963207",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback-report.json",
+        "reportSha256": "8eab366a1e803b621f5c74e4fdee73deb3b181bd62090a8db959e0c79498aa31",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback.webm",
+        "videoSha256": "eb576e013173a4314fadbd56cfd27830dae364ecfbacc825d9c8c6ec365405e3",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-runtime-webgpu-exact-angle.png",
+        "contactSheetSha256": "ad455560f9d939cbcb9144976d2c642e6d5e3784c48b94e6a14a3ffa780b9b30"
+      },
+      {
+        "id": "lod1",
+        "avatarAsset": "avatars/duel-candidates/duel-steve_lod1.vrm",
+        "avatarSha256": "027fa999b68d5945b9fa474badff44d61ee88f535b23c9974222dc8fa783647f",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback-lod1-report.json",
+        "reportSha256": "3e3edccbda306a4d22ba1a06f855ceff0db0bd1edb3e758b25aef855aefd4e8a",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback-lod1.webm",
+        "videoSha256": "8026838df3a6c7f78c0d4e54dbbbda37b6d80238113154a8d9b594fcd471c4a7",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-runtime-webgpu-exact-angle-lod1.png",
+        "contactSheetSha256": "a43b5d187f9170d86e63056302750c7b8117b77ebd56a365f5985370e60b1f4c"
+      },
+      {
+        "id": "lod2",
+        "avatarAsset": "avatars/duel-candidates/duel-steve_lod2.vrm",
+        "avatarSha256": "57befb2ee1d84b516544ec8a306bb8619adb88185d8d12248eb9aeb751f148a3",
+        "reportPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback-lod2-report.json",
+        "reportSha256": "932dec3614363013bf4bf5c9a44e3e850ff699627d726655f64c478b36e15816",
+        "videoPath": "artifacts/duel-avatar-candidates/two-hand-runtime-playback-lod2.webm",
+        "videoSha256": "3fb7f64b12e4b7faab1895254716cf1ba78a1c1fbfc0aa243ebb16dd18273f70",
+        "contactSheetPath": "artifacts/duel-avatar-candidates/two-hand-runtime-webgpu-exact-angle-lod2.png",
+        "contactSheetSha256": "16e01350a559bf4da1b9121f927476f1d7ae3d350b3251c893ce649dea41fe6a"
+      }
+    ]
+  }
+}

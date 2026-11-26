@@ -16,6 +16,7 @@ import { EventBus } from "../../infrastructure/EventBus";
 import { EventType } from "../../../../types/events";
 import type { World } from "../../../../types/index";
 import { processingDataProvider } from "../../../../data/ProcessingDataProvider";
+import type { AtomicProcessingActionReceipt } from "../../character/InventorySystem";
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
@@ -50,6 +51,45 @@ function createMockWorld(
 ) {
   const eventBus = new EventBus();
   const inventory = options.inventory || [];
+  const commitProcessingActionAtomic = vi.fn(
+    async (
+      playerId: string,
+      operationId: string,
+      input: {
+        skill: "crafting";
+        xpAmount: number;
+        inputs: Array<{ itemId: string; quantity: number }>;
+        requiredItems: Array<{ itemId: string; quantity: number }>;
+        consumables: Array<{ itemId: string; usesPerItem: number }>;
+        outputs: Array<{ itemId: string; quantity: number }>;
+      },
+    ): Promise<AtomicProcessingActionReceipt> => ({
+      ok: true,
+      committed: true,
+      liveInventoryApplied: true,
+      playerId,
+      operationId,
+      replayed: false,
+      skill: "crafting",
+      xpAmount: input.xpAmount,
+      inputs: input.inputs,
+      requiredItems: input.requiredItems,
+      consumables: input.consumables,
+      consumableStates: input.consumables.map((consumable) => ({
+        ...consumable,
+        remainingUses: consumable.usesPerItem - 1,
+        consumedQuantity: 0,
+      })),
+      outputs: input.outputs.map((output) => ({
+        ...output,
+        stackable: false,
+      })),
+      awardedXp: input.xpAmount,
+      operationCommittedXp: input.xpAmount,
+      currentXp: input.xpAmount,
+      currentLevel: 1,
+    }),
+  );
 
   const world = {
     isServer: true,
@@ -59,19 +99,20 @@ function createMockWorld(
     on: vi.fn(),
     off: vi.fn(),
     emit: vi.fn(),
-    getSystem: vi.fn(() => undefined),
-    getPlayer: vi.fn((id: string) => {
-      if (!options.skills) return undefined;
-      return {
-        id,
-        skills: options.skills,
-      };
-    }),
+    getSystem: vi.fn((name: string) =>
+      name === "inventory" ? { commitProcessingActionAtomic } : undefined,
+    ),
+    getPlayer: vi.fn((id: string) => ({
+      id,
+      position: { x: 1, y: 0, z: 1 },
+      data: {},
+      skills: options.skills,
+    })),
     getInventory: vi.fn(() => inventory),
     network: { send: vi.fn() },
   };
 
-  return { world, eventBus };
+  return { world, eventBus, commitProcessingActionAtomic };
 }
 
 function emitEvent(
@@ -82,12 +123,18 @@ function emitEvent(
   eventBus.emitEvent(type, data, "test");
 }
 
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────
 
 describe("CraftingSystem", () => {
   let system: CraftingSystem;
   let eventBus: EventBus;
   let mockWorld: ReturnType<typeof createMockWorld>["world"];
+  let commitProcessingActionAtomic: ReturnType<typeof vi.fn>;
 
   // Track emitted events
   const emittedEvents: Array<{ type: string; data: unknown }> = [];
@@ -112,6 +159,7 @@ describe("CraftingSystem", () => {
     const mock = createMockWorld(options);
     mockWorld = mock.world;
     eventBus = mock.eventBus;
+    commitProcessingActionAtomic = mock.commitProcessingActionAtomic;
     system = new CraftingSystem(mockWorld as unknown as World);
     await system.init();
 
@@ -357,6 +405,36 @@ describe("CraftingSystem", () => {
       const starts = findEmitted(EventType.CRAFTING_START);
       expect(starts.length).toBe(1);
     });
+
+    it("normalizes a non-finite internal quantity to one action", async () => {
+      const recipe = processingDataProvider.getCraftingRecipe("leather_gloves");
+      if (!recipe) return;
+
+      await setupSystem({
+        inventory: [
+          createItem("needle", 1),
+          createItem("thread", 1),
+          createItem("leather", 5),
+        ],
+        skills: { crafting: { level: 99, xp: 0 } },
+        currentTick: 100,
+      });
+
+      emitEvent(eventBus, EventType.PROCESSING_CRAFTING_REQUEST, {
+        playerId: "player1",
+        recipeId: "leather_gloves",
+        quantity: Number.NaN,
+      });
+      mockWorld.currentTick = 100 + recipe.ticks;
+      system.update(0);
+      await flushPromises();
+      mockWorld.currentTick++;
+      system.update(0);
+
+      expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+      expect(findEmitted(EventType.CRAFTING_COMPLETE)).toHaveLength(1);
+      expect(system.isPlayerCrafting("player1")).toBe(false);
+    });
   });
 
   // ─── completeCraft + update loop ──────────────────────────────────
@@ -387,20 +465,27 @@ describe("CraftingSystem", () => {
       // Advance tick past completion
       mockWorld.currentTick = 100 + recipe.ticks;
       system.update(0);
+      await flushPromises();
+      mockWorld.currentTick++;
+      system.update(0);
 
-      // Should have emitted material removal, item added, XP gained
+      // Durable custody owns inventory mutation; only committed XP/result events
+      // are emitted by CraftingSystem.
       const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBe(1);
-      const xpGained = findEmitted(EventType.SKILLS_XP_GAINED);
+      expect(itemsAdded.length).toBe(0);
+      expect(findEmitted(EventType.INVENTORY_ITEM_REMOVED)).toHaveLength(0);
+      const xpGained = findEmitted(EventType.SKILLS_PROGRESS_COMMITTED);
       expect(xpGained.length).toBe(1);
-      expect((xpGained[0].data as { amount: number }).amount).toBe(recipe.xp);
+      expect((xpGained[0].data as { awardedXp: number }).awardedXp).toBe(
+        recipe.xp,
+      );
 
       // For quantity 1, session should complete
       const completes = findEmitted(EventType.CRAFTING_COMPLETE);
       expect(completes.length).toBe(1);
     });
 
-    it("generates unique item IDs across crafts", async () => {
+    it("uses a unique durable operation identity for each craft", async () => {
       const recipe = processingDataProvider.getCraftingRecipe("sapphire");
       if (!recipe) return;
 
@@ -416,21 +501,22 @@ describe("CraftingSystem", () => {
         quantity: 3,
       });
 
-      // Complete 3 crafts
+      // Complete 3 durable crafts
       for (let i = 0; i < 3; i++) {
-        mockWorld.currentTick = 100 + recipe.ticks * (i + 1);
+        mockWorld.currentTick += recipe.ticks;
+        system.update(0);
+        await flushPromises();
+        mockWorld.currentTick++;
         system.update(0);
       }
 
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      const ids = itemsAdded.map(
-        (e) => (e.data as { item: { id: string } }).item.id,
+      const ids = commitProcessingActionAtomic.mock.calls.map(
+        (call) => call[1] as string,
       );
-      // All IDs should be unique
+      expect(ids).toHaveLength(3);
       expect(new Set(ids).size).toBe(ids.length);
-      // IDs should use the craft_ prefix with counter
       for (const id of ids) {
-        expect(id).toMatch(/^craft_/);
+        expect(id).toMatch(/^crafting-action:/);
       }
     });
   });
@@ -640,8 +726,8 @@ describe("CraftingSystem", () => {
       system.update(0);
 
       // Should only process once
-      const itemsAdded = findEmitted(EventType.INVENTORY_ITEM_ADDED);
-      expect(itemsAdded.length).toBe(1);
+      expect(commitProcessingActionAtomic).toHaveBeenCalledOnce();
+      expect(findEmitted(EventType.INVENTORY_ITEM_ADDED)).toHaveLength(0);
     });
 
     it("does nothing on client", async () => {

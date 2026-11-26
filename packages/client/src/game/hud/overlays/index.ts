@@ -9,4 +9,5 @@
 
 export { Disconnected } from "./DisconnectedOverlay";
 export { KickedOverlay } from "./KickedOverlay";
+export { WorldEntryRecoveryOverlay } from "./WorldEntryRecoveryOverlay";
 export { DeathScreen, type DeathScreenData } from "./DeathScreen";

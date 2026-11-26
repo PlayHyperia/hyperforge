@@ -25,6 +25,7 @@ import {
   COMBAT_CONSTANTS,
   INPUT_LIMITS,
   DeathState,
+  generateGroundItemDropOperationId,
 } from "@hyperforge/shared";
 import { getTradingSystem } from "./trade/helpers";
 import {
@@ -36,6 +37,7 @@ import {
 } from "../services/InputValidation";
 import { sql } from "drizzle-orm";
 import * as schema from "../../../database/schema";
+import { runInPostgresTransaction } from "../../../database/postgres-transaction";
 import { getDatabase } from "./common/helpers";
 import {
   getPickupRateLimiter,
@@ -211,8 +213,7 @@ export function handlePickupItem(
 
   // Block item pickup during active duels (COUNTDOWN/FIGHTING/FINISHED)
   const duelSystemPickup = world.getSystem("duel") as
-    | { isPlayerInActiveDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInActiveDuel?: (id: string) => boolean } | undefined;
   if (duelSystemPickup?.isPlayerInActiveDuel?.(playerEntity.id)) {
     return; // Silently ignore - player shouldn't be near ground items in arena
   }
@@ -287,52 +288,82 @@ export function handleDropItem(
 
   const payload = data as Record<string, unknown>;
 
-  // Idempotency check - prevent duplicate drop requests
-  const idempotencyKey = getIdempotencyService().generateKey(
-    playerEntity.id,
-    "drop",
-    { itemId: payload.itemId, slot: payload.slot },
-  );
-  if (!getIdempotencyService().checkAndMark(idempotencyKey)) {
-    // Duplicate request within 5 second window - silently ignore
-    return;
-  }
-
   // Validate itemId
   if (!isValidItemId(payload.itemId)) {
     console.warn("[Inventory] handleDropItem: invalid itemId");
     return;
   }
 
-  // Validate and clamp quantity
+  // Reject malformed quantities. Silent clamping can turn a zero/overflowing
+  // request into a different destructive action than the caller authorized.
   let quantity = 1;
   if (payload.quantity !== undefined) {
     if (
       typeof payload.quantity !== "number" ||
-      !Number.isInteger(payload.quantity)
+      !Number.isSafeInteger(payload.quantity) ||
+      payload.quantity <= 0 ||
+      payload.quantity > INPUT_LIMITS.MAX_QUANTITY
     ) {
-      console.warn("[Inventory] handleDropItem: invalid quantity type");
+      console.warn("[Inventory] handleDropItem: invalid quantity");
       return;
     }
-    quantity = Math.max(
-      1,
-      Math.min(payload.quantity, INPUT_LIMITS.MAX_QUANTITY),
-    );
+    quantity = payload.quantity;
   }
 
-  // Validate slot if provided
-  const slot =
-    typeof payload.slot === "number" &&
-    Number.isInteger(payload.slot) &&
-    payload.slot >= 0 &&
-    payload.slot < INPUT_LIMITS.MAX_INVENTORY_SLOTS
-      ? payload.slot
-      : undefined;
+  // A malformed supplied slot must not degrade into an aggregate debit.
+  let slot: number | undefined;
+  if (payload.slot !== undefined) {
+    if (
+      typeof payload.slot !== "number" ||
+      !Number.isSafeInteger(payload.slot) ||
+      payload.slot < 0 ||
+      payload.slot >= INPUT_LIMITS.MAX_INVENTORY_SLOTS
+    ) {
+      console.warn("[Inventory] handleDropItem: invalid slot");
+      return;
+    }
+    slot = payload.slot;
+  }
+
+  const suppliedOperationId =
+    payload.operationId === undefined
+      ? undefined
+      : typeof payload.operationId === "string"
+        ? payload.operationId.trim()
+        : "";
+  if (
+    suppliedOperationId !== undefined &&
+    !/^ground-item-drop:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      suppliedOperationId,
+    )
+  ) {
+    console.warn("[Inventory] handleDropItem: invalid operationId");
+    return;
+  }
+  let operationId: string;
+  try {
+    operationId = suppliedOperationId ?? generateGroundItemDropOperationId();
+  } catch {
+    console.warn("[Inventory] handleDropItem: secure identity unavailable");
+    return;
+  }
+
+  // Mark only a fully validated request. Modern clients bind retries to one
+  // durable operation; the legacy key retains the prior short dedup window.
+  if (!suppliedOperationId) {
+    const idempotencyKey = getIdempotencyService().generateKey(
+      playerEntity.id,
+      "drop",
+      { itemId: payload.itemId, quantity, slot },
+    );
+    if (!getIdempotencyService().checkAndMark(idempotencyKey)) {
+      return;
+    }
+  }
 
   // Block ALL drops during duel (can't drop any items while in duel)
   const duelSystem = world.getSystem("duel") as
-    | { isPlayerInDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInDuel?: (id: string) => boolean } | undefined;
   if (duelSystem?.isPlayerInDuel?.(playerEntity.id)) {
     console.warn("[Inventory] handleDropItem: player is in duel");
     return;
@@ -343,12 +374,13 @@ export function handleDropItem(
     itemId: payload.itemId,
     quantity,
     slot,
+    operationId,
   });
 
   auditLog(
     "DROP",
     playerEntity.id,
-    { itemId: payload.itemId, quantity, slot },
+    { itemId: payload.itemId, quantity, slot, operationId },
     true,
   );
 }
@@ -453,8 +485,7 @@ export function handleEquipItem(
 
   // Block equip while dead (classic MMORPG: can't change gear while dead)
   const entityDataEquip = playerEntity.data as
-    | { deathState?: DeathState }
-    | undefined;
+    { deathState?: DeathState } | undefined;
   if (
     entityDataEquip?.deathState === DeathState.DYING ||
     entityDataEquip?.deathState === DeathState.DEAD
@@ -636,8 +667,7 @@ export function handleUnequipItem(
 
   // Block unequip during active duels (classic MMORPG: can't change gear mid-duel)
   const duelSystemUnequip = world.getSystem("duel") as
-    | { isPlayerInActiveDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInActiveDuel?: (id: string) => boolean } | undefined;
   if (duelSystemUnequip?.isPlayerInActiveDuel?.(playerEntity.id)) {
     sendInventoryError(
       socket,
@@ -660,8 +690,7 @@ export function handleUnequipItem(
 
   // Block unequip while dead (classic MMORPG: can't change gear while dead)
   const entityDataUnequip = playerEntity.data as
-    | { deathState?: DeathState }
-    | undefined;
+    { deathState?: DeathState } | undefined;
   if (
     entityDataUnequip?.deathState === DeathState.DYING ||
     entityDataUnequip?.deathState === DeathState.DEAD
@@ -747,8 +776,7 @@ export function handleMoveItem(
 
   // Check if either slot contains a staked item (can't move staked items)
   const duelSystem = world.getSystem("duel") as
-    | { getStakedSlots?: (id: string) => Set<number> }
-    | undefined;
+    { getStakedSlots?: (id: string) => Set<number> } | undefined;
   const stakedSlots = duelSystem?.getStakedSlots?.(playerEntity.id);
   if (stakedSlots?.has(payload.fromSlot as number)) {
     sendInventoryError(socket, "move", "That item is staked in a duel.");
@@ -840,8 +868,7 @@ export async function handleCoinPouchWithdraw(
 
   // Block coin pouch withdrawal during duels
   const duelSystemCoins = world.getSystem("duel") as
-    | { isPlayerInDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInDuel?: (id: string) => boolean } | undefined;
   if (duelSystemCoins?.isPlayerInDuel?.(playerId)) {
     sendInventoryError(
       socket,
@@ -890,7 +917,7 @@ export async function handleCoinPouchWithdraw(
   }
 
   try {
-    await db.drizzle.transaction(async (tx) => {
+    await runInPostgresTransaction(db.pool, async (tx) => {
       // Lock character row first (consistent lock order)
       const charResult = await tx.execute(
         sql`SELECT coins FROM characters WHERE id = ${playerId} FOR UPDATE`,
@@ -912,8 +939,7 @@ export async function handleCoinPouchWithdraw(
             FOR UPDATE`,
       );
       const existingStack = invResult.rows[0] as
-        | { slotIndex: number; quantity: number }
-        | undefined;
+        { slotIndex: number; quantity: number } | undefined;
 
       if (existingStack) {
         // Add to existing stack (check overflow)
@@ -1107,8 +1133,7 @@ export async function handleXpLampUse(
 
   // Block XP lamp usage during duels
   const duelSystemLamp = world.getSystem("duel") as
-    | { isPlayerInDuel?: (id: string) => boolean }
-    | undefined;
+    { isPlayerInDuel?: (id: string) => boolean } | undefined;
   if (duelSystemLamp?.isPlayerInDuel?.(playerEntity.id)) {
     sendInventoryError(socket, "xpLampUse", "You can't do that during a duel.");
     return;

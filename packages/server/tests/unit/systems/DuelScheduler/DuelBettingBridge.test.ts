@@ -11,6 +11,7 @@ function createMockWorld() {
 }
 
 type DuelBettingBridgeTestHarness = DuelBettingBridge & {
+  handleDuelScheduled(payload: unknown): Promise<void>;
   handleStreamingAnnouncement(payload: unknown): Promise<void>;
   handleStreamingFightStart(payload: unknown): Promise<void>;
   handleStreamingResolution(payload: unknown): Promise<void>;
@@ -58,6 +59,7 @@ function makeCycle(overrides: Partial<Record<string, unknown>> = {}) {
     duelEndTime: null,
     winnerId: null,
     loserId: null,
+    outcome: null,
     winReason: null,
     seed: null,
     replayHash: null,
@@ -119,6 +121,42 @@ describe("DuelBettingBridge streaming reconciliation", () => {
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         }),
       }),
+    );
+  });
+
+  it("treats the exact legacy schedule echo as a no-op for a streaming market", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+
+    await bridgeHarness.handleDuelScheduled({
+      duelId: "duel-123",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
+      agent1Name: "Agent A",
+      agent2Name: "Agent B",
+      startTime: 2_000,
+    });
+
+    expect(bridge.getMarket("duel-123")).toEqual(
+      expect.objectContaining({
+        source: "streaming",
+        duelKeyHex: canonicalDuelKey,
+        agent1Id: "agent-a",
+        agent2Id: "agent-b",
+        bettingClosesAt: 2_000,
+      }),
+    );
+    expect(world.emit).not.toHaveBeenCalledWith(
+      "betting:market:synchronization-rejected",
+      expect.anything(),
     );
   });
 
@@ -222,10 +260,21 @@ describe("DuelBettingBridge streaming reconciliation", () => {
       }),
     );
 
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+
     await bridgeHarness.handleStreamingResolution({
       duelId: "duel-123",
       duelKeyHex:
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      outcome: "win",
       duelEndTime: 9_000,
       winnerId: "agent-a",
       loserId: "agent-b",
@@ -252,6 +301,71 @@ describe("DuelBettingBridge streaming reconciliation", () => {
     );
   });
 
+  it("requires the exact authoritative terminal cycle before streaming settlement", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const resolution = {
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      outcome: "win",
+      winnerId: "agent-a",
+      loserId: "agent-b",
+      winnerName: "Agent A",
+      loserName: "Agent B",
+    };
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+
+    await bridgeHarness.handleStreamingResolution(resolution);
+    scheduler = {
+      getCurrentCycle: () => makeCycle({ phase: "FIGHTING" }),
+    };
+    await bridgeHarness.handleStreamingResolution(resolution);
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          winnerId: "agent-b",
+          loserId: "agent-a",
+        }),
+    };
+    await bridgeHarness.handleStreamingResolution(resolution);
+
+    expect(bridge.getMarket("duel-123")?.status).toBe("betting");
+    expect(bridge.getMarketHistory()).toHaveLength(0);
+    for (const reason of [
+      "authoritative_cycle_missing",
+      "authoritative_phase_mismatch",
+      "authoritative_outcome_mismatch",
+    ]) {
+      expect(world.emit).toHaveBeenCalledWith(
+        "betting:market:resolution-rejected",
+        expect.objectContaining({ duelId: "duel-123", reason }),
+      );
+    }
+
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+    await bridgeHarness.handleStreamingResolution(resolution);
+
+    expect(bridge.getMarket("duel-123")).toBeNull();
+    expect(bridge.getMarketHistory()).toHaveLength(1);
+  });
+
   it("reconciles a missing market from the live streaming scheduler", async () => {
     const cycle = makeCycle();
     scheduler = {
@@ -271,6 +385,7 @@ describe("DuelBettingBridge streaming reconciliation", () => {
     expect(bridge.getMarket("duel-123")?.status).toBe("locked");
 
     cycle.phase = "RESOLUTION";
+    cycle.outcome = "win";
     cycle.winnerId = "agent-a";
     cycle.loserId = "agent-b";
     cycle.winnerName = "Agent A";
@@ -281,6 +396,140 @@ describe("DuelBettingBridge streaming reconciliation", () => {
     await bridgeHarness.reconcileLiveCycle();
     await vi.advanceTimersByTimeAsync(15_000);
 
+    expect(bridge.getMarket("duel-123")).toBeNull();
+    expect(bridge.getMarketHistory()).toHaveLength(1);
+  });
+
+  it("rejects streaming settlement when the duel key or participant pair drifts", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+
+    await bridgeHarness.handleStreamingResolution({
+      duelId: "duel-123",
+      duelKeyHex:
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      outcome: "win",
+      winnerId: "agent-a",
+      loserId: "agent-b",
+    });
+    await bridgeHarness.handleStreamingResolution({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      outcome: "win",
+      winnerId: "agent-outsider",
+      loserId: "agent-a",
+    });
+    await bridgeHarness.handleStreamingResolution({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      outcome: "win",
+      winnerId: "agent-a",
+      loserId: "agent-a",
+    });
+
+    expect(bridge.getMarket("duel-123")?.status).toBe("betting");
+    expect(bridge.getMarketHistory()).toHaveLength(0);
+    expect(world.emit).toHaveBeenCalledWith(
+      "betting:market:resolution-rejected",
+      expect.objectContaining({
+        duelId: "duel-123",
+        reason: "duel_key_mismatch",
+      }),
+    );
+    expect(world.emit).toHaveBeenCalledWith(
+      "betting:market:resolution-rejected",
+      expect.objectContaining({
+        duelId: "duel-123",
+        reason: "participant_pair_mismatch",
+      }),
+    );
+  });
+
+  it("keeps randomized illegal lifecycle outcomes from settling a market", async () => {
+    vi.spyOn(Logger, "error").mockImplementation(() => {});
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+
+    let state = 0x5eed1234;
+    const nextRandom = (): number => {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+      return state / 0x1_0000_0000;
+    };
+    const nonterminalPhases = [
+      "IDLE",
+      "ANNOUNCEMENT",
+      "COUNTDOWN",
+      "FIGHTING",
+      "CORRUPT",
+      null,
+    ] as const;
+
+    for (let index = 0; index < 512; index += 1) {
+      const phase =
+        nonterminalPhases[Math.floor(nextRandom() * nonterminalPhases.length)];
+      scheduler = {
+        getCurrentCycle: () =>
+          makeCycle({
+            phase,
+            duelKeyHex: canonicalDuelKey,
+            winnerId: "agent-outsider",
+            loserId: "agent-a",
+          }),
+      };
+      await bridgeHarness.reconcileLiveCycle();
+      await bridgeHarness.handleStreamingResolution({
+        duelId: "duel-123",
+        duelKeyHex: canonicalDuelKey,
+        outcome: "win",
+        winnerId: "agent-a",
+        loserId: "agent-b",
+      });
+      expect(bridge.getMarket("duel-123")).not.toBeNull();
+      expect(bridge.getMarketHistory()).toHaveLength(0);
+    }
+
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          duelKeyHex:
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+    await bridgeHarness.reconcileLiveCycle();
+    expect(bridge.getMarket("duel-123")).not.toBeNull();
+    expect(bridge.getMarketHistory()).toHaveLength(0);
+
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          duelKeyHex: canonicalDuelKey,
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+    await bridgeHarness.reconcileLiveCycle();
     expect(bridge.getMarket("duel-123")).toBeNull();
     expect(bridge.getMarketHistory()).toHaveLength(1);
   });
@@ -299,6 +548,7 @@ describe("DuelBettingBridge streaming reconciliation", () => {
     await bridgeHarness.reconcileLiveCycle();
 
     cycle.phase = "RESOLUTION";
+    cycle.outcome = "win";
     cycle.winnerId = "agent-a";
     cycle.loserId = "agent-b";
     cycle.winnerName = "Agent A";
@@ -342,9 +592,17 @@ describe("DuelBettingBridge streaming reconciliation", () => {
       betCloseTime: 2_000,
     });
 
+    scheduler = {
+      getCurrentCycle: () => makeCycle(),
+    };
+
     await bridgeHarness.handleStreamingAbort({
       duelId: "duel-123",
+      duelKeyHex:
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       reason: "manual_abort",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
     });
 
     expect(bridge.getMarket("duel-123")).toBeNull();
@@ -405,6 +663,16 @@ describe("DuelBettingBridge streaming reconciliation", () => {
     };
     bridgeHarness.solanaOperator = solanaOperator;
 
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+
     await bridgeHarness.handleStreamingAnnouncement({
       duelId: "duel-123",
       duelKeyHex:
@@ -419,6 +687,7 @@ describe("DuelBettingBridge streaming reconciliation", () => {
       duelId: "duel-123",
       duelKeyHex:
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      outcome: "win",
       duelEndTime: 9_000,
       winnerId: "agent-a",
       loserId: "agent-b",
@@ -474,6 +743,60 @@ describe("DuelBettingBridge streaming reconciliation", () => {
   });
 
   it("awaits duel-result resolution instead of fire-and-forgetting it", async () => {
+    await bridgeHarness.createOrSyncMarket({
+      duelId: "duel-123",
+      duelKeyHex:
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
+      agent1Name: "Agent A",
+      agent2Name: "Agent B",
+      bettingClosesAt: 2_000,
+      source: "legacy",
+    });
+
+    const resolveMarket = vi
+      .spyOn(bridgeHarness, "resolveMarket")
+      .mockRejectedValueOnce(new Error("boom"));
+
+    await expect(
+      bridgeHarness.handleDuelResult({
+        duelId: "duel-123",
+        winnerId: "agent-a",
+        loserId: "agent-b",
+      }),
+    ).rejects.toThrow("boom");
+
+    resolveMarket.mockRestore();
+  });
+
+  it("resolves a legacy market by exact duel ID instead of participant ambiguity", async () => {
+    for (const duelId of ["duel-123", "duel-456"]) {
+      await bridgeHarness.createOrSyncMarket({
+        duelId,
+        agent1Id: "agent-a",
+        agent2Id: "agent-b",
+        agent1Name: "Agent A",
+        agent2Name: "Agent B",
+        bettingClosesAt: 2_000,
+        source: "legacy",
+      });
+    }
+
+    await bridgeHarness.handleDuelResult({
+      duelId: "duel-456",
+      winnerId: "agent-a",
+      loserId: "agent-b",
+    });
+
+    expect(bridge.getMarket("duel-123")).not.toBeNull();
+    expect(bridge.getMarket("duel-456")).toBeNull();
+    expect(bridge.getMarketHistory()).toEqual([
+      expect.objectContaining({ duelId: "duel-456", winnerId: "agent-a" }),
+    ]);
+  });
+
+  it("does not let generic duel completion bypass streaming authority", async () => {
     await bridgeHarness.handleStreamingAnnouncement({
       duelId: "duel-123",
       duelKeyHex:
@@ -484,18 +807,156 @@ describe("DuelBettingBridge streaming reconciliation", () => {
       betCloseTime: 2_000,
     });
 
-    const resolveMarket = vi
-      .spyOn(bridgeHarness, "resolveMarket")
-      .mockRejectedValueOnce(new Error("boom"));
+    await bridgeHarness.handleDuelResult({
+      duelId: "duel-123",
+      winnerId: "agent-a",
+      loserId: "agent-b",
+    });
 
-    await expect(
-      bridgeHarness.handleDuelResult({
-        winnerId: "agent-a",
-        loserId: "agent-b",
+    expect(bridge.getMarket("duel-123")?.status).toBe("betting");
+    expect(bridge.getMarketHistory()).toHaveLength(0);
+  });
+
+  it("rejects duplicate market events that attempt to rewrite immutable identity", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex:
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      agent1: { id: "agent-b", name: "Agent B" },
+      agent2: { id: "agent-a", name: "Agent A" },
+      betOpenTime: 1_000,
+      betCloseTime: 99_000,
+    });
+
+    expect(bridge.getMarket("duel-123")).toEqual(
+      expect.objectContaining({
+        duelKeyHex: canonicalDuelKey,
+        agent1Id: "agent-a",
+        agent2Id: "agent-b",
+        bettingClosesAt: 2_000,
       }),
-    ).rejects.toThrow("boom");
+    );
+    expect(world.emit).toHaveBeenCalledWith(
+      "betting:market:synchronization-rejected",
+      expect.objectContaining({
+        duelId: "duel-123",
+        reason: "immutable_market_identity_mismatch",
+      }),
+    );
+  });
 
-    resolveMarket.mockRestore();
+  it("rejects non-canonical aborts and never overwrites a winner terminal state", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "win",
+          winnerId: "agent-a",
+          loserId: "agent-b",
+        }),
+    };
+
+    await bridgeHarness.handleStreamingAbort({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      reason: "watchdog_resolution_timeout",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
+    });
+
+    expect(bridge.getMarket("duel-123")).not.toBeNull();
+    expect(bridge.getMarketHistory()).toHaveLength(0);
+    expect(world.emit).toHaveBeenCalledWith(
+      "betting:market:abort-rejected",
+      expect.objectContaining({
+        duelId: "duel-123",
+        reason: "authoritative_abort_mismatch",
+      }),
+    );
+
+    await bridgeHarness.handleStreamingResolution({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      outcome: "win",
+      winnerId: "agent-a",
+      loserId: "agent-b",
+    });
+    await bridgeHarness.handleStreamingAbort({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      reason: "draw",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
+    });
+
+    expect(bridge.getMarketHistory()).toEqual([
+      expect.objectContaining({ status: "resolved", winnerId: "agent-a" }),
+    ]);
+  });
+
+  it("requires the identity-complete draw abort frame before cancelling a market", async () => {
+    const canonicalDuelKey =
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await bridgeHarness.handleStreamingAnnouncement({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      agent1: { id: "agent-a", name: "Agent A" },
+      agent2: { id: "agent-b", name: "Agent B" },
+      betOpenTime: 1_000,
+      betCloseTime: 2_000,
+    });
+    scheduler = {
+      getCurrentCycle: () =>
+        makeCycle({
+          phase: "RESOLUTION",
+          outcome: "draw",
+          winnerId: null,
+          loserId: null,
+        }),
+    };
+
+    await bridgeHarness.handleStreamingResolution({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      outcome: "draw",
+      winnerId: null,
+      loserId: null,
+    });
+    expect(bridge.getMarket("duel-123")).not.toBeNull();
+
+    await bridgeHarness.handleStreamingAbort({
+      duelId: "duel-123",
+      duelKeyHex: canonicalDuelKey,
+      reason: "draw",
+      agent1Id: "agent-a",
+      agent2Id: "agent-b",
+    });
+
+    expect(bridge.getMarket("duel-123")).toBeNull();
+    expect(bridge.getMarketHistory()).toEqual([
+      expect.objectContaining({ status: "aborted" }),
+    ]);
   });
 
   it("ignores malformed duel-result payloads instead of resolving a market", async () => {

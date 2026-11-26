@@ -478,7 +478,8 @@ export class ClientInput extends SystemBase {
       get(target, prop) {
         if (typeof prop === "symbol") return undefined;
         if (prop === "release") return target.release;
-        if (prop in target.api) return target.api[prop];
+        if (prop in target.api)
+          return target.api[prop as keyof typeof target.api];
         if (prop in entries) return entries[prop];
         if (buttons.has(prop)) {
           entries[prop] = createButton();

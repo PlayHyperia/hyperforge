@@ -25,6 +25,7 @@
  */
 
 import * as THREE from "../../../extras/three/three";
+import type { Node, UniformNode } from "three/webgpu";
 import {
   attribute,
   uniform,
@@ -50,7 +51,6 @@ import {
   time,
   positionLocal,
 } from "../../../extras/three/three";
-import type { ShaderNode } from "../../../extras/three/three";
 
 // =============================================================================
 // POOL SIZES
@@ -146,8 +146,8 @@ export class GlowParticleManager {
   private pools = new Map<MotionType, PoolLayer>();
   private emitters = new Map<string, EmitterRecord>();
 
-  private uCameraRight: { value: THREE.Vector3 };
-  private uCameraUp: { value: THREE.Vector3 };
+  private uCameraRight: UniformNode<"vec3", THREE.Vector3>;
+  private uCameraUp: UniformNode<"vec3", THREE.Vector3>;
   private readonly _tmpRight = new THREE.Vector3();
   private readonly _tmpUp = new THREE.Vector3();
   private readonly _tmpFwd = new THREE.Vector3();
@@ -155,10 +155,8 @@ export class GlowParticleManager {
   constructor(scene: THREE.Scene) {
     this.scene = scene;
 
-    const uRight = uniform(new THREE.Vector3(1, 0, 0));
-    const uUp = uniform(new THREE.Vector3(0, 1, 0));
-    this.uCameraRight = uRight as unknown as { value: THREE.Vector3 };
-    this.uCameraUp = uUp as unknown as { value: THREE.Vector3 };
+    this.uCameraRight = uniform(new THREE.Vector3(1, 0, 0));
+    this.uCameraUp = uniform(new THREE.Vector3(0, 1, 0));
 
     this.pools.set("pillar", this.createPool("pillar", MAX_PILLAR));
     this.pools.set("wisp", this.createPool("wisp", MAX_WISP));
@@ -851,20 +849,20 @@ export class GlowParticleManager {
     material.side = THREE.DoubleSide;
 
     // Per-instance attributes
-    const aEmitterPos = attribute("emitterPos", "vec3");
-    const aAgeLifetime = attribute("ageLifetime", "vec2");
+    const aEmitterPos = attribute<"vec3">("emitterPos", "vec3");
+    const aAgeLifetime = attribute<"vec2">("ageLifetime", "vec2");
     const age = aAgeLifetime.x;
     const lifetime = aAgeLifetime.y;
     const t = div(age, lifetime);
 
-    const aSpawnOffset = attribute("spawnOffset", "vec3");
-    const aDynamics = attribute("dynamics", "vec4");
-    const aColorSharpness = attribute("colorSharpness", "vec4");
+    const aSpawnOffset = attribute<"vec3">("spawnOffset", "vec3");
+    const aDynamics = attribute<"vec4">("dynamics", "vec4");
+    const aColorSharpness = attribute<"vec4">("colorSharpness", "vec4");
 
     const baseScale = aDynamics.x;
 
-    const camRight = this.uCameraRight as unknown as ReturnType<typeof uniform>;
-    const camUp = this.uCameraUp as unknown as ReturnType<typeof uniform>;
+    const camRight = this.uCameraRight;
+    const camUp = this.uCameraUp;
 
     // Global pulse: 0.85 + sin(time * 2.0) * 0.15
     // Original: 0.85 + Math.sin(Date.now() * 0.002) * 0.15
@@ -873,10 +871,10 @@ export class GlowParticleManager {
       mul(sin(mul(time, float(2.0))), float(0.15)),
     );
 
-    let particleCenter: ShaderNode;
-    let scaleX: ShaderNode;
-    let scaleY: ShaderNode;
-    let opacity: ShaderNode;
+    let particleCenter: Node<"vec3">;
+    let scaleX: Node<"float">;
+    let scaleY: Node<"float">;
+    let opacity: Node<"float">;
 
     if (motion === "pillar") {
       // ---------------------------------------------------------------
@@ -1106,10 +1104,10 @@ export class GlowParticleManager {
     // Matches WaterParticleManager pattern exactly
     // -----------------------------------------------------------------
     const localXY = positionLocal.xy;
-    const billboardOffset = add(
-      mul(mul(localXY.x, scaleX), camRight),
-      mul(mul(localXY.y, scaleY), camUp),
-    );
+    const billboardOffset = camRight
+      .mul(localXY.x)
+      .mul(scaleX)
+      .add(camUp.mul(localXY.y).mul(scaleY));
     material.positionNode = add(particleCenter, billboardOffset);
 
     // -----------------------------------------------------------------
@@ -1129,10 +1127,10 @@ export class GlowParticleManager {
       // ---- FIRE FRAGMENT: soft falloff + noise for additive blending merge ----
 
       // Smooth value noise via bilinear interpolation of hash lattice
-      const hash2d = (p: ShaderNode) =>
+      const hash2d = (p: Node<"vec2">) =>
         fract(mul(sin(dot(p, vec2(127.1, 311.7))), float(43758.5453)));
 
-      const valueNoise = (p: ShaderNode) => {
+      const valueNoise = (p: Node<"vec2">) => {
         const i = vec2(tslFloor(p.x), tslFloor(p.y));
         const f = vec2(fract(p.x), fract(p.y));
         const u = mul(mul(f, f), sub(vec2(3.0, 3.0), mul(f, float(2.0))));

@@ -88,6 +88,8 @@ export class PlayerEntity extends CombatantEntity {
   public readonly playerId: string;
   public readonly playerName: string;
   public readonly hyperiaPlayerId: string;
+  public readonly isAgent: boolean;
+  public readonly isEmbeddedAgent: boolean;
 
   // Player-specific properties for internal use
   private combatStyle: string;
@@ -333,6 +335,19 @@ export class PlayerEntity extends CombatantEntity {
         autoRetaliateValue;
     }
 
+    // PlayerEntity converts its input into a CombatantConfig before calling
+    // Entity, so extension fields would otherwise be dropped. Keep AI identity
+    // on both the instance and serialized data; terrain streaming, networking,
+    // and scheduler discovery all rely on these authoritative markers.
+    this.isAgent = playerData.isAgent === true;
+    this.isEmbeddedAgent = playerData.isEmbeddedAgent === true;
+    if (playerData.isAgent !== undefined) {
+      this.data.isAgent = playerData.isAgent;
+    }
+    if (playerData.isEmbeddedAgent !== undefined) {
+      this.data.isEmbeddedAgent = playerData.isEmbeddedAgent;
+    }
+
     // Initialize player-specific properties
     this.playerId = playerData.playerId || data.id;
     this.playerName = playerData.playerName || data.name || "Unknown";
@@ -438,15 +453,16 @@ export class PlayerEntity extends CombatantEntity {
       Number.isFinite(constitutionLevel) && constitutionLevel > 0
         ? constitutionLevel
         : 10;
-    // Always use constitution level for health, ignore config.properties.health if it's the default 100
-    // Only use config health if it's already set to constitution level (from server)
+    // Constitution owns the maximum pool, while a finite positive persisted
+    // value owns the current pool. Requiring current === max here silently
+    // healed every partially damaged player during entity hydration.
     const configHealth = this.config.properties?.health?.current;
     const currentHealth =
       Number.isFinite(configHealth) &&
       configHealth !== undefined &&
-      configHealth === maxHealth
-        ? configHealth
-        : maxHealth; // Always default to maxHealth (constitution level)
+      configHealth > 0
+        ? Math.min(configHealth, maxHealth)
+        : maxHealth;
 
     if (healthComponent && healthComponent.data) {
       healthComponent.data.regenerationRate = 1.0; // HP per second regen out of combat

@@ -13,6 +13,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { DataManager } from "../../../../data/DataManager";
+import { ALL_WORLD_AREAS } from "../../../../data/world-areas";
 import { ResourceSystem } from "../ResourceSystem";
 import type { ResourceDrop } from "../../../../types/core/core";
 // Import module functions directly for testing
@@ -47,6 +49,82 @@ describe("ResourceSystem", () => {
   beforeEach(() => {
     mockWorld = createMockWorld();
     system = new ResourceSystem(mockWorld as never);
+  });
+
+  it("retries a deferred fishing area from terrain bake readiness even when walkable probes have zero flags", () => {
+    const area = {
+      id: "launch_pond",
+      bounds: { minX: -10, maxX: 10, minZ: -10, maxZ: 10 },
+    };
+    const hasBakedWalkabilityAt = vi
+      .fn<(x: number, z: number) => boolean>()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    const spawnDynamicFishingSpots = vi.fn();
+    const internals = system as unknown as {
+      terrainSystem: { hasBakedWalkabilityAt: typeof hasBakedWalkabilityAt };
+      pendingFishingAreas: Map<string, typeof area>;
+      spawnDynamicFishingSpots: typeof spawnDynamicFishingSpots;
+    };
+    internals.terrainSystem = { hasBakedWalkabilityAt };
+    internals.pendingFishingAreas.set(area.id, area);
+    internals.spawnDynamicFishingSpots = spawnDynamicFishingSpots;
+
+    system.processGatheringTick(10);
+    expect(spawnDynamicFishingSpots).not.toHaveBeenCalled();
+
+    system.processGatheringTick(20);
+    expect(spawnDynamicFishingSpots).toHaveBeenCalledWith(area.id, area);
+  });
+
+  it("stages the authored launch fishing spot on the visible pond surface before dynamic ecology", async () => {
+    await DataManager.getInstance().initialize();
+    const registerTerrainResources = vi.fn().mockResolvedValue(undefined);
+    const spawnDynamicFishingSpots = vi.fn();
+    const internals = system as unknown as {
+      terrainSystem: {
+        getHeightAt(x: number, z: number): number;
+        getWaterBodyRegistry(): {
+          getWaterSurfaceAt(x: number, z: number): number;
+        };
+      };
+      initializeWorldAreaResources(): Promise<void>;
+      registerTerrainResources: typeof registerTerrainResources;
+      spawnDynamicFishingSpots: typeof spawnDynamicFishingSpots;
+    };
+    internals.terrainSystem = {
+      getHeightAt: () => 7,
+      getWaterBodyRegistry: () => ({ getWaterSurfaceAt: () => 28.2 }),
+    };
+    internals.registerTerrainResources = registerTerrainResources;
+    internals.spawnDynamicFishingSpots = spawnDynamicFishingSpots;
+
+    await internals.initializeWorldAreaResources();
+
+    const spawnPoints = registerTerrainResources.mock.calls.flatMap(
+      ([input]) => input.spawnPoints,
+    ) as Array<{
+      position: { x: number; y: number; z: number };
+      type: string;
+      subType?: string;
+    }>;
+    const authoredFishing = Object.values(ALL_WORLD_AREAS)
+      .flatMap((area) => area.resources)
+      .find((resource) => resource.resourceId === "fishing_spot_net");
+    expect(authoredFishing).toBeDefined();
+    expect(spawnPoints).toContainEqual({
+      position: {
+        x: authoredFishing!.position.x,
+        y: 28.2,
+        z: authoredFishing!.position.z,
+      },
+      type: "fish",
+      subType: "net",
+    });
+    expect(spawnDynamicFishingSpots).toHaveBeenCalledWith(
+      "haven_pond",
+      ALL_WORLD_AREAS.haven_pond,
+    );
   });
 
   // ===== DROP ROLLING TESTS =====

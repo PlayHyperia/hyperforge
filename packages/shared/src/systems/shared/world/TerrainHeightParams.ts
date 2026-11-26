@@ -1,16 +1,18 @@
 /**
  * Single source of truth for terrain height generation parameters.
  *
- * Both TerrainSystem (main thread) and TerrainWorker (web worker) consume
- * these values. Changing a constant here automatically updates both.
- *
- * The worker receives these as injected values in its inline code string
- * (see TerrainWorker.ts → buildWorkerHeightCode()). TerrainSystem imports
- * them directly as TypeScript constants.
+ * CPU and inline workers share algorithm constants and consume explicit terrain
+ * profiles for island/height/water shape. Worker source is assembled at module
+ * load, so profile values must come from each request, never baked-in defaults.
  */
 
 import { BiomeType, DEFAULT_BIOME } from "./TerrainBiomeTypes";
 import { TERRAIN_CONSTANTS } from "../../../constants/GameConstants";
+import type { WorldTerrainProfile } from "./WorldTerrainProfile";
+import {
+  createCompactIslandLandform,
+  buildCompactIslandLandformJS,
+} from "./CompactIslandLandform";
 import {
   smoothstep,
   mapRangeSmooth,
@@ -109,6 +111,7 @@ export const BASE_OFFSET = 22;
 export const FEATURE_SCALE = 1.4;
 
 const NOISE_COORD_SCALE = 55 / 2450;
+const compactIslandLandform = createCompactIslandLandform();
 
 // ---------------------------------------------------------------------------
 // Per-biome config defaults
@@ -453,9 +456,19 @@ export function computeBaseHeight(
   sharedNoise: TerrainNoiseAdapter,
   biomeNoiseSets: Record<string, BiomeNoiseSet>,
   biomeWeights: Record<string, number>,
+  profile: WorldTerrainProfile,
 ): number {
   // ── 1. Blend per-biome heights ──────────────────────────────────────
-  const coordScale = NOISE_COORD_SCALE * FEATURE_SCALE;
+  if (
+    profile.algorithm === "compact-island-sculpt-v1" ||
+    profile.algorithm === "compact-island-sculpt-v2" ||
+    profile.algorithm === "compact-island-sculpt-v3" ||
+    profile.algorithm === "compact-island-sculpt-v4" ||
+    profile.algorithm === "compact-island-sculpt-v5"
+  ) {
+    return compactIslandLandform.height(worldX, worldZ, sharedNoise, profile);
+  }
+  const coordScale = NOISE_COORD_SCALE * profile.height.featureScale;
   let height = 0;
   for (const key of Object.keys(biomeWeights)) {
     const w = biomeWeights[key];
@@ -467,9 +480,34 @@ export function computeBaseHeight(
     height += result.y * w;
   }
 
-  // ── 2. Coastline noise → island mask ────────────────────────────────
-  const distFromCenter = Math.sqrt(worldX * worldX + worldZ * worldZ);
-  const angle = Math.atan2(worldZ, worldX);
+  const islandMask = computeIslandMask(worldX, worldZ, sharedNoise, profile);
+  height *= islandMask;
+  height *= profile.height.terrainScale;
+  height += profile.height.baseOffset * islandMask;
+  return islandMask === 0 ? profile.water.oceanFloorHeight : height;
+}
+
+/** The same mask used by the height field and ocean/water classification. */
+export function computeIslandMask(
+  worldX: number,
+  worldZ: number,
+  sharedNoise: TerrainNoiseAdapter,
+  profile: WorldTerrainProfile,
+): number {
+  if (
+    profile.algorithm === "compact-island-sculpt-v1" ||
+    profile.algorithm === "compact-island-sculpt-v2" ||
+    profile.algorithm === "compact-island-sculpt-v3" ||
+    profile.algorithm === "compact-island-sculpt-v4" ||
+    profile.algorithm === "compact-island-sculpt-v5"
+  ) {
+    return compactIslandLandform.mask(worldX, worldZ, sharedNoise, profile);
+  }
+  const island = profile.island;
+  const x = worldX - island.centerX;
+  const z = worldZ - island.centerZ;
+  const distFromCenter = Math.sqrt(x * x + z * z);
+  const angle = Math.atan2(z, x);
   const cnx = Math.cos(angle) * COASTLINE_CIRCLE_SAMPLE_RADIUS;
   const cnz = Math.sin(angle) * COASTLINE_CIRCLE_SAMPLE_RADIUS;
 
@@ -491,31 +529,28 @@ export function computeBaseHeight(
     cnx * COAST_SMALL.freqMultiplier,
     cnz * COAST_SMALL.freqMultiplier,
   );
-  const coastVar =
-    cst1 * COAST_LARGE.weight +
-    cst2 * COAST_MEDIUM.weight +
-    cst3 * COAST_SMALL.weight;
-  const effectiveRadius = ISLAND_RADIUS * (1 + coastVar);
+  const coastVar = Math.max(
+    -island.maxCoastVariation,
+    Math.min(
+      island.maxCoastVariation,
+      cst1 * COAST_LARGE.weight +
+        cst2 * COAST_MEDIUM.weight +
+        cst3 * COAST_SMALL.weight,
+    ),
+  );
+  const effectiveRadius = island.radius * (1 + coastVar);
 
   let islandMask = 1.0;
-  if (distFromCenter > effectiveRadius - ISLAND_FALLOFF) {
-    const edgeDist = distFromCenter - (effectiveRadius - ISLAND_FALLOFF);
-    const t = Math.min(1.0, edgeDist / ISLAND_FALLOFF);
-    islandMask = 1.0 - Math.pow(t, BEACH_PROFILE_POWER);
+  if (distFromCenter > effectiveRadius - island.falloff) {
+    const edgeDist = distFromCenter - (effectiveRadius - island.falloff);
+    const t = Math.min(1.0, edgeDist / island.falloff);
+    islandMask = 1.0 - Math.pow(t, island.beachProfilePower);
   }
-  if (distFromCenter > effectiveRadius + ISLAND_DEEP_OCEAN_BUFFER) {
+  if (distFromCenter > effectiveRadius + island.deepOceanBuffer) {
     islandMask = 0;
   }
 
-  height *= islandMask;
-  height *= TERRAIN_SCALE;
-  height += BASE_OFFSET * islandMask;
-
-  if (islandMask === 0) {
-    height = OCEAN_FLOOR_HEIGHT;
-  }
-
-  return height;
+  return islandMask;
 }
 
 export interface ShorelineConfig {
@@ -638,17 +673,18 @@ const BIOME_CONFIGS_JS = `
  * JS source — worker mirror of computeBaseHeight() and per-biome height functions.
  * MUST stay in sync with the TS functions above.
  *
- * Expects in worker scope: noise, biomeNoiseSets, BIOME_CONFIGS, BT_DEFAULT,
- * computeBiomeWeightsByPosition, applyLandscapeFeatures, landscapeFeatures.
+ * Expects in worker scope: config.TERRAIN_PROFILE, noise, biomeNoiseSets,
+ * BT_DEFAULT and computeBiomeWeightsByPosition.
  */
 export function buildGetBaseHeightAtJS(): string {
   return `
   ${BIOME_CONFIGS_JS}
+  var compactIslandLandform = ${buildCompactIslandLandformJS()};
 
   var NOISE_COORD_SCALE = ${NOISE_COORD_SCALE};
-  var TERRAIN_SCALE_VAL = ${TERRAIN_SCALE};
-  var BASE_OFFSET_VAL = ${BASE_OFFSET};
-  var FEATURE_SCALE_VAL = ${FEATURE_SCALE};
+  var TERRAIN_SCALE_VAL = config.TERRAIN_PROFILE.height.terrainScale;
+  var BASE_OFFSET_VAL = config.TERRAIN_PROFILE.height.baseOffset;
+  var FEATURE_SCALE_VAL = config.TERRAIN_PROFILE.height.featureScale;
 
   function _smoothstep(x, edge0, edge1) {
     var t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
@@ -706,6 +742,9 @@ export function buildGetBaseHeightAtJS(): string {
   }
 
   function getBaseHeightAt(worldX, worldZ, biomeWeights) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5"))) {
+      return compactIslandLandform.height(worldX, worldZ, noise, config.TERRAIN_PROFILE);
+    }
     var bw = biomeWeights || computeBiomeWeightsByPosition(worldX, worldZ);
     var coordScale = NOISE_COORD_SCALE * FEATURE_SCALE_VAL;
     var height = 0;
@@ -719,31 +758,41 @@ export function buildGetBaseHeightAtJS(): string {
       height += result.y * w;
     }
 
-    var distFromCenter = Math.sqrt(worldX * worldX + worldZ * worldZ);
-    var angle = Math.atan2(worldZ, worldX);
+    var islandMask = getIslandMask(worldX, worldZ);
+    height *= islandMask;
+    height *= TERRAIN_SCALE_VAL;
+    height += BASE_OFFSET_VAL * islandMask;
+    if (islandMask === 0) { height = config.TERRAIN_PROFILE.water.oceanFloorHeight; }
+    return height;
+  }
+
+  function getIslandMask(worldX, worldZ) {
+    if (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v1" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v2" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v3" || (config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v4" || config.TERRAIN_PROFILE.algorithm === "compact-island-sculpt-v5"))) {
+      return compactIslandLandform.mask(worldX, worldZ, noise, config.TERRAIN_PROFILE);
+    }
+    var island = config.TERRAIN_PROFILE.island;
+    var x = worldX - island.centerX;
+    var z = worldZ - island.centerZ;
+    var distFromCenter = Math.sqrt(x * x + z * z);
+    var angle = Math.atan2(z, x);
     var cnx = Math.cos(angle) * ${COASTLINE_CIRCLE_SAMPLE_RADIUS};
     var cnz = Math.sin(angle) * ${COASTLINE_CIRCLE_SAMPLE_RADIUS};
     var cst1 = noise.fractal2D(cnx, cnz, ${COAST_LARGE.octaves}, ${COAST_LARGE.persistence}, ${COAST_LARGE.lacunarity});
     var cst2 = noise.fractal2D(cnx * ${COAST_MEDIUM.freqMultiplier}, cnz * ${COAST_MEDIUM.freqMultiplier}, ${COAST_MEDIUM.octaves}, ${COAST_MEDIUM.persistence}, ${COAST_MEDIUM.lacunarity});
     var cst3 = noise.simplex2D(cnx * ${COAST_SMALL.freqMultiplier}, cnz * ${COAST_SMALL.freqMultiplier});
-    var coastVar = cst1 * ${COAST_LARGE.weight} + cst2 * ${COAST_MEDIUM.weight} + cst3 * ${COAST_SMALL.weight};
-    var effectiveRadius = ${ISLAND_RADIUS} * (1 + coastVar);
+    var coastVar = Math.max(-island.maxCoastVariation, Math.min(island.maxCoastVariation, cst1 * ${COAST_LARGE.weight} + cst2 * ${COAST_MEDIUM.weight} + cst3 * ${COAST_SMALL.weight}));
+    var effectiveRadius = island.radius * (1 + coastVar);
 
     var islandMask = 1.0;
-    if (distFromCenter > effectiveRadius - ${ISLAND_FALLOFF}) {
-      var edgeDist = distFromCenter - (effectiveRadius - ${ISLAND_FALLOFF});
-      var t = Math.min(1.0, edgeDist / ${ISLAND_FALLOFF});
-      islandMask = 1.0 - Math.pow(t, ${BEACH_PROFILE_POWER});
+    if (distFromCenter > effectiveRadius - island.falloff) {
+      var edgeDist = distFromCenter - (effectiveRadius - island.falloff);
+      var t = Math.min(1.0, edgeDist / island.falloff);
+      islandMask = 1.0 - Math.pow(t, island.beachProfilePower);
     }
-    if (distFromCenter > effectiveRadius + ${ISLAND_DEEP_OCEAN_BUFFER}) {
+    if (distFromCenter > effectiveRadius + island.deepOceanBuffer) {
       islandMask = 0;
     }
 
-    height *= islandMask;
-    height *= TERRAIN_SCALE_VAL;
-    height += BASE_OFFSET_VAL * islandMask;
-
-    if (islandMask === 0) { height = ${OCEAN_FLOOR_HEIGHT}; }
-    return height;
+    return islandMask;
   }`;
 }

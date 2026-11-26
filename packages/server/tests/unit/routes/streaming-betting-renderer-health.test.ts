@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { StreamPerformanceTelemetry } from "@hyperforge/shared";
 import {
   deriveBettingRendererHealth,
   loadExternalRtmpStatusSnapshot,
@@ -78,6 +79,7 @@ describe("deriveBettingRendererHealth", () => {
   let tempDir: string | null = null;
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (tempDir) {
       rmSync(tempDir, { recursive: true, force: true });
       tempDir = null;
@@ -87,6 +89,20 @@ describe("deriveBettingRendererHealth", () => {
   it("loads external RTMP snapshots asynchronously for cache refresh", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "betting-renderer-health-"));
     const statusFile = join(tempDir, "status.json");
+    const telemetry = new StreamPerformanceTelemetry(1_000);
+    telemetry.record({
+      phase: "FIGHTING",
+      frameIntervalMs: 16.7,
+      frameWorkMs: 8,
+      cpuMs: 6,
+      renderSubmitMs: 2,
+      drawCalls: 100,
+      triangles: 10_000,
+      textures: 20,
+      geometries: 30,
+      viewport: { width: 1_280, height: 720, devicePixelRatio: 1 },
+    });
+    const rendererPerformance = telemetry.snapshot(2_000);
     writeFileSync(
       statusFile,
       JSON.stringify({
@@ -97,17 +113,102 @@ describe("deriveBettingRendererHealth", () => {
           ready: true,
           degradedReason: null,
           updatedAt: Date.now() - 1_000,
+          injected: "strip-me",
+        },
+        captureHealth: {
+          mode: "cdp",
+          targetFps: 30,
+          measuredFps: 29,
+          receivedFrames: 900,
+          droppedFrames: 0,
+          acknowledgementPacing: true,
+          injected: "strip-me",
+        },
+        rendererPerformance: {
+          ...rendererPerformance,
+          injected: "strip-me",
+        },
+        injected: "strip-me",
+      }),
+    );
+
+    const snapshot = await loadExternalRtmpStatusSnapshot(statusFile, 15_000);
+    expect(snapshot).toMatchObject({
+      rendererHealth: {
+        ready: true,
+      },
+      captureHealth: {
+        mode: "cdp",
+        targetFps: 30,
+        measuredFps: 29,
+        receivedFrames: 900,
+        droppedFrames: 0,
+        acknowledgementPacing: true,
+      },
+      rendererPerformance,
+    });
+    expect(snapshot).not.toHaveProperty("injected");
+    expect(snapshot?.rendererHealth).not.toHaveProperty("injected");
+    expect(snapshot?.captureHealth).not.toHaveProperty("injected");
+    expect(snapshot?.rendererPerformance).not.toHaveProperty("injected");
+  });
+
+  it("treats an absent external status file as a quiet startup state", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "betting-renderer-health-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const snapshot = await loadExternalRtmpStatusSnapshot(
+      join(tempDir, "not-created-yet.json"),
+      15_000,
+    );
+
+    expect(snapshot).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed external capture telemetry", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "betting-renderer-health-"));
+    const statusFile = join(tempDir, "status.json");
+    writeFileSync(
+      statusFile,
+      JSON.stringify({
+        destinations: [],
+        stats: {},
+        updatedAt: Date.now(),
+        captureHealth: {
+          mode: "cdp",
+          targetFps: 1_000,
+          measuredFps: 999,
         },
       }),
     );
 
-    await expect(
-      loadExternalRtmpStatusSnapshot(statusFile, 15_000),
-    ).resolves.toMatchObject({
-      rendererHealth: {
-        ready: true,
-      },
-    });
+    const snapshot = await loadExternalRtmpStatusSnapshot(statusFile, 15_000);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.captureHealth).toBeUndefined();
+  });
+
+  it("drops malformed renderer performance from an otherwise valid status", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "betting-renderer-health-"));
+    const statusFile = join(tempDir, "status.json");
+    writeFileSync(
+      statusFile,
+      JSON.stringify({
+        destinations: [],
+        stats: {},
+        updatedAt: Date.now(),
+        rendererPerformance: {
+          schemaVersion: 1,
+          sessionStartedAt: 1_000,
+          updatedAt: 2_000,
+          uptimeMs: 999,
+        },
+      }),
+    );
+
+    const snapshot = await loadExternalRtmpStatusSnapshot(statusFile, 15_000);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.rendererPerformance).toBeUndefined();
   });
 
   it("returns guardrail failures for invalid live duel agent state", () => {
@@ -153,6 +254,30 @@ describe("deriveBettingRendererHealth", () => {
     expect(health).toMatchObject({
       ready: false,
       degradedReason: "loading_overlay_active",
+    });
+  });
+
+  it("does not let ready renderer telemetry mask an inactive external capture pipeline", () => {
+    const health = deriveBettingRendererHealth(createCycle(), {
+      externalStatusSnapshot: {
+        destinations: [],
+        stats: {
+          clientConnected: true,
+          ffmpegRunning: false,
+        },
+        updatedAt: Date.now() - 100,
+        rendererHealth: {
+          ready: true,
+          degradedReason: null,
+          updatedAt: Date.now() - 100,
+        },
+      },
+      externalStatusMaxAgeMs: 15_000,
+    });
+
+    expect(health).toMatchObject({
+      ready: false,
+      degradedReason: "capture_pipeline_inactive",
     });
   });
 

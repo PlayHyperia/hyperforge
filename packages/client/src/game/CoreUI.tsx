@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useThemeStore } from "@/ui";
 
-import type { ControlAction, EventMap } from "@hyperforge/shared";
+import type {
+  ClientNetwork,
+  ControlAction,
+  EntryRetryState,
+  EventMap,
+} from "@hyperforge/shared";
 import {
   buttons,
   cls,
@@ -16,6 +21,16 @@ import { ChatProvider } from "./chat/ChatContext";
 import { EntityContextMenu } from "./hud/EntityContextMenu";
 import { HandIcon, MouseLeftIcon, MouseRightIcon, MouseWheelIcon } from "@/ui";
 import { LoadingScreen } from "../screens/LoadingScreen";
+import {
+  LoadingReadinessWarning,
+  MEADOW_PREPARATION_BLOCKED_MESSAGE,
+} from "../screens/LoadingReadinessWarning";
+import {
+  readWorldEntryReadiness,
+  WorldEntryPresentationGate,
+  type WorldEntryReadiness,
+  type WorldEntryPresentationPhase,
+} from "./WorldEntryReadiness";
 import { InterfaceManager } from "./interface/InterfaceManager";
 import { StatusBars } from "./hud/StatusBars";
 import { XPProgressOrb } from "./hud/XPProgressOrb";
@@ -23,7 +38,12 @@ import { LevelUpNotification } from "./hud/level-up";
 import { EscapeMenu } from "./hud/EscapeMenu";
 import { ConnectionIndicator } from "./hud/ConnectionIndicator";
 import { NotificationContainer } from "@/ui/components";
-import { Disconnected, KickedOverlay, DeathScreen } from "./hud/overlays";
+import {
+  Disconnected,
+  KickedOverlay,
+  DeathScreen,
+  WorldEntryRecoveryOverlay,
+} from "./hud/overlays";
 import {
   COLORS,
   spacing,
@@ -36,407 +56,328 @@ import {
 // Type for icon components
 type IconComponent = React.ComponentType<{ size?: number | string }>;
 
-export function CoreUI({ world }: { world: ClientWorld }) {
+export function CoreUI({
+  world,
+  worldInitialized,
+}: {
+  world: ClientWorld;
+  worldInitialized: boolean;
+}) {
   return (
     <PlayerDataProvider world={world}>
-      <CoreUIContent world={world} />
+      <CoreUIContent world={world} initializationComplete={worldInitialized} />
     </PlayerDataProvider>
   );
 }
 
-function CoreUIContent({ world }: { world: ClientWorld }) {
+function CoreUIContent({
+  world,
+  initializationComplete,
+}: {
+  world: ClientWorld;
+  initializationComplete: boolean;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const readyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const loadingOverlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const terrainPollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const entryStateRef = useRef<{
+    world: ClientWorld;
+    interrupted: boolean;
+    kicked: string | null;
+    selectedCharacterId: string | null;
+    selecting: boolean;
+  } | null>(null);
   const [ready, setReady] = useState(false);
   const [loadingOverlayVisible, setLoadingOverlayVisible] = useState(true);
   const [loadingComplete, setLoadingComplete] = useState(false);
-  // Track system and asset progress separately to gate presentation on assets
   const [systemsComplete, setSystemsComplete] = useState(false);
   const [assetsProgress, setAssetsProgress] = useState(0);
   const [readinessError, setReadinessError] = useState<string | null>(null);
-  const [terrainTimedOut, setTerrainTimedOut] = useState(false);
-
-  // Check if this is spectator mode (from embedded config)
-  const isSpectatorMode = (() => {
-    const config = window.__HYPERIA_CONFIG__;
-    return config?.mode === "spectator";
-  })();
-
-  // Presentation gating flags
-  const [playerReady, setPlayerReady] = useState(() =>
-    isSpectatorMode
-      ? false
-      : Boolean(
-          (world.entities.player as { avatar?: unknown } | undefined)?.avatar,
-        ),
+  const [meadowBlocked, setMeadowBlocked] = useState(false);
+  const [preparationStage, setPreparationStage] = useState(
+    "Initializing world...",
   );
-  const [physReady, setPhysReady] = useState(() =>
-    Boolean(
-      (
-        world.physics as { isInitialized?: () => boolean } | undefined
-      )?.isInitialized?.(),
-    ),
-  );
-  const [terrainReady, setTerrainReady] = useState(false);
-  const [player, setPlayer] = useState(() => world.entities.player);
-  const [targetAvatarLoaded, setTargetAvatarLoaded] = useState(false);
+  const [readiness, setReadiness] = useState<WorldEntryReadiness | null>(null);
+  const [visualReadinessSampled, setVisualReadinessSampled] = useState(false);
+  const [presentationPhase, setPresentationPhase] =
+    useState<WorldEntryPresentationPhase>("loading");
   const [uiVisible, setUIVisible] = useState(true);
   const [disconnected, setDisconnected] = useState(false);
   const [kicked, setKicked] = useState<string | null>(null);
+  const [entryRetry, setEntryRetry] = useState<EntryRetryState | null>(
+    () => (world.network as ClientNetwork).entryRetryState ?? null,
+  );
   const [characterFlowActive, setCharacterFlowActive] = useState(false);
   const [deathScreen, setDeathScreen] = useState<{
     message: string;
     killedBy: string;
     respawnTime: number;
   } | null>(null);
-
+  const isSpectatorMode = window.__HYPERIA_CONFIG__?.mode === "spectator";
   const playerStats = usePlayerStatsContext();
-  const livePlayerReady =
-    playerReady ||
-    (!isSpectatorMode &&
-      Boolean(
-        (world.entities.player as { avatar?: unknown } | undefined)?.avatar,
-      ));
-  const livePhysReady =
-    physReady ||
-    Boolean(
-      (
-        world.physics as { isInitialized?: () => boolean } | undefined
-      )?.isInitialized?.(),
-    );
-  const liveTerrainReady =
-    terrainReady ||
-    terrainTimedOut ||
-    Boolean(
-      (
-        world.getSystem?.("terrain") as { isReady?: () => boolean } | undefined
-      )?.isReady?.(),
-    );
 
   useEffect(() => {
-    // Get the target entity ID for spectators
-    const getSpectatorTargetId = () => {
-      const config = window.__HYPERIA_CONFIG__;
-      return config?.followEntity || config?.characterId;
+    if (!entryStateRef.current || entryStateRef.current.world !== world) {
+      entryStateRef.current = {
+        world,
+        interrupted: false,
+        kicked: null,
+        selectedCharacterId: null,
+        selecting: Boolean((world.network as ClientNetwork)?.lastCharacterList),
+      };
+    }
+    const entry = entryStateRef.current;
+    const gate = new WorldEntryPresentationGate();
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let interrupted = entry.interrupted;
+    let entryKicked = entry.kicked !== null;
+    let selectedCharacterId = entry.selectedCharacterId;
+    let selecting = entry.selecting;
+    let previous: WorldEntryReadiness | null = null;
+    let startedAt = performance.now();
+    let reportedReadError: unknown = null;
+    setReady(false);
+    setLoadingOverlayVisible(true);
+    setReadinessError(null);
+    setMeadowBlocked(false);
+    setDisconnected(entry.interrupted);
+    setKicked(entry.kicked);
+
+    const sample = () => {
+      if (disposed) return;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      const now = performance.now();
+      try {
+        setEntryRetry((world.network as ClientNetwork).entryRetryState ?? null);
+        const config = window.__HYPERIA_CONFIG__;
+        const inspectVisuals = gate.phase !== "committed";
+        const snapshot = readWorldEntryReadiness(world, {
+          initializationComplete,
+          spectator: isSpectatorMode,
+          spectatorTargetId:
+            config?.followEntity || config?.characterId || null,
+          selectedCharacterId,
+          selecting,
+          interrupted,
+          kicked: entryKicked,
+          includeVisualReadiness: inspectVisuals,
+        });
+        if (
+          previous &&
+          (snapshot.owner !== previous.owner ||
+            snapshot.connection !== previous.connection ||
+            snapshot.targetId !== previous.targetId)
+        )
+          startedAt = now;
+        const sameSnapshot =
+          previous !== null &&
+          previous.owner === snapshot.owner &&
+          previous.connection === snapshot.connection &&
+          previous.targetId === snapshot.targetId &&
+          previous.ownershipReady === snapshot.ownershipReady &&
+          previous.ready === snapshot.ready &&
+          previous.playerReady === snapshot.playerReady &&
+          previous.physReady === snapshot.physReady &&
+          previous.terrainReady === snapshot.terrainReady &&
+          previous.blockedChunks === snapshot.blockedChunks &&
+          previous.selecting === snapshot.selecting &&
+          previous.recovering === snapshot.recovering;
+        previous = snapshot;
+        // An acknowledgement is not admission. A current attached owner may
+        // complete auto-entry even when no CHARACTER_SELECTED event was sent.
+        selecting = snapshot.selecting;
+        entry.selecting = selecting;
+        setCharacterFlowActive(selecting);
+        // The cheap post-entry owner poll must not rerender the HUD at 4Hz.
+        if (!sameSnapshot) setReadiness(snapshot);
+        setVisualReadinessSampled(inspectVisuals);
+        const phase = gate.advance(snapshot, now);
+        setPresentationPhase(phase);
+        const fading = phase === "fading" || phase === "committed";
+        setReady(fading);
+        setLoadingOverlayVisible(phase !== "committed");
+        const blocked = snapshot.blockedChunks > 0 && !snapshot.terrainReady;
+        const warningAllowed =
+          phase !== "committed" &&
+          !selecting &&
+          !snapshot.recovering &&
+          !interrupted &&
+          !entryKicked;
+        setMeadowBlocked(warningAllowed && blocked);
+        const stage = !initializationComplete
+          ? "Initializing world..."
+          : !snapshot.ownershipReady
+            ? "Waiting for your character..."
+            : !snapshot.playerReady
+              ? "Preparing your avatar..."
+              : !snapshot.physReady
+                ? "Preparing physics..."
+                : blocked
+                  ? `Preparing meadow — ${snapshot.blockedChunks} required chunks stopped`
+                  : "Preparing the surrounding world...";
+        setPreparationStage(stage);
+        setReadinessError(
+          !warningAllowed
+            ? null
+            : blocked
+              ? MEADOW_PREPARATION_BLOCKED_MESSAGE
+              : now - startedAt >= 20_000
+                ? "World preparation is not complete. Readiness is still being checked. Reload the page to start a new attempt."
+                : null,
+        );
+        reportedReadError = null;
+      } catch (error) {
+        // Read failures never authorize presentation or restart grounding jobs.
+        if (error !== reportedReadError)
+          console.error("[CoreUI] Readiness check failed:", error);
+        reportedReadError = error;
+        gate.reset();
+        setReady(false);
+        setLoadingOverlayVisible(true);
+        setReadiness(null);
+        setVisualReadinessSampled(false);
+        setPresentationPhase("loading");
+        setMeadowBlocked(false);
+        setReadinessError(
+          selecting || interrupted || entryKicked
+            ? null
+            : "World readiness could not be verified. Readiness will be checked again; you can also reload.",
+        );
+      }
+      if (!disposed)
+        timer = setTimeout(sample, gate.nextDelay(performance.now()));
     };
 
-    // Create handlers with proper types
-    const handleReady = () => {
-      // A READY signal indicates a major subsystem finished; mark loading as potentially complete
-      setReadinessError(null);
-      setLoadingComplete(true);
-    };
-
+    // Progress is descriptive only; it cannot bypass current visual readiness.
+    const handleReady = () => setLoadingComplete(true);
     const handleLoadingProgress = (data: unknown) => {
-      const progressData = data as {
+      const progress = data as {
         progress: number;
         stage?: string;
         total?: number;
-        current?: number;
       };
-      // Prefer system-stage events when present
-      if (progressData.stage) {
-        if (progressData.progress >= 100) {
-          setSystemsComplete(true);
-        }
-      } else if (typeof progressData.total === "number") {
-        setAssetsProgress(progressData.progress);
-      }
+      if (progress.stage) {
+        if (progress.progress >= 100) setSystemsComplete(true);
+      } else if (typeof progress.total === "number")
+        setAssetsProgress(progress.progress);
     };
-
-    const handlePlayerSpawned = () => {
-      // Only handle for non-spectators (spectators don't spawn local players)
-      if (!isSpectatorMode) {
-        const playerEntity = world.entities?.player;
-        if (playerEntity) {
-          setPlayer(playerEntity);
-          if ((playerEntity as { avatar?: unknown }).avatar) {
-            setPlayerReady(true);
-          }
-        }
-      }
-    };
-
-    const handleAvatarComplete = (data: {
-      playerId: string;
-      success: boolean;
-    }) => {
-      if (isSpectatorMode) {
-        // For spectators: check if this is the entity we're following
-        const targetId = getSpectatorTargetId();
-        if (data.playerId === targetId && data.success) {
-          setTargetAvatarLoaded(true);
-        }
-      } else {
-        const localPlayer = world.entities?.player as
-          | { id?: string; avatar?: unknown }
-          | undefined;
-        if (
-          data.success &&
-          localPlayer?.id &&
-          data.playerId === localPlayer.id
-        ) {
-          setPlayer(localPlayer as typeof world.entities.player);
-          setPlayerReady(true);
-        }
-      }
-    };
-
-    const handleUIToggle = (data: { visible: boolean }) => {
+    const handleUIToggle = (data: { visible: boolean }) =>
       setUIVisible(data.visible);
-    };
-
     const handleUIKick = (data: { playerId: string; reason: string }) => {
-      setKicked(data.reason || "Kicked from server");
+      entryKicked = true;
+      entry.kicked = data.reason || "Kicked from server";
+      setKicked(entry.kicked);
+      sample();
     };
-    const handleDisconnected = () => setDisconnected(true);
+    const handleDisconnected = () => {
+      interrupted = true;
+      entry.interrupted = true;
+      setDisconnected(true);
+      sample();
+    };
+    const handleReconnected = () => {
+      interrupted = false;
+      entry.interrupted = false;
+      setDisconnected(false);
+      // The reader still requires the current registered owner/open transport.
+      sample();
+    };
+    const handleCharacterList = () => {
+      selecting = true;
+      selectedCharacterId = null;
+      entry.selecting = true;
+      entry.selectedCharacterId = null;
+      sample();
+    };
+    const handleCharacterSelected = (data: { characterId: string | null }) => {
+      selectedCharacterId = data.characterId;
+      entry.selectedCharacterId = data.characterId;
+      sample();
+    };
     const handleDeathScreen = (...args: unknown[]) => {
-      const data = args[0] as {
-        message: string;
-        killedBy: string;
-        respawnTime: number;
-      };
-      setDeathScreen(data);
+      setDeathScreen(
+        args[0] as { message: string; killedBy: string; respawnTime: number },
+      );
     };
-    const handleDeathScreenClose = () => {
-      setDeathScreen(null);
-    };
+    const handleDeathScreenClose = () => setDeathScreen(null);
 
-    // Add listeners
     world.on(EventType.READY, handleReady);
     world.on(EventType.ASSETS_LOADING_PROGRESS, handleLoadingProgress);
-    world.on(EventType.PLAYER_SPAWNED, handlePlayerSpawned);
-    world.on(EventType.AVATAR_LOAD_COMPLETE, handleAvatarComplete);
-    // Physics system emits a non-enum event on ready
-    const handlePhysicsReady = () => setPhysReady(true);
-    world.on("physics:ready", handlePhysicsReady);
+    world.on(EventType.PLAYER_SPAWNED, sample);
+    world.on(EventType.AVATAR_LOAD_COMPLETE, sample);
+    world.on("physics:ready", sample);
     world.on(EventType.UI_TOGGLE, handleUIToggle);
     world.on(EventType.UI_KICK, handleUIKick);
     world.on(EventType.NETWORK_DISCONNECTED, handleDisconnected);
+    world.on(EventType.NETWORK_RECONNECTED, handleReconnected);
+    // ClientNetwork currently emits these legacy names; retain enum listeners
+    // for existing callers without changing the network protocol here.
+    world.on("NETWORK_DISCONNECTED", handleDisconnected);
+    world.on("NETWORK_RECONNECTED", handleReconnected);
+    world.on(EventType.ENTRY_RETRY_CHANGED, sample);
+    world.on(EventType.CHARACTER_LIST, handleCharacterList);
+    world.on(EventType.CHARACTER_SELECTED, handleCharacterSelected);
     world.on(EventType.UI_DEATH_SCREEN, handleDeathScreen);
     world.on(EventType.UI_DEATH_SCREEN_CLOSE, handleDeathScreenClose);
-    // Character selection flow (server-flagged)
-    // Define named handlers for proper cleanup (anonymous functions don't work with off())
-    const handleCharacterList = (): void => setCharacterFlowActive(true);
-    const handleCharacterSelected = (): void => setCharacterFlowActive(false);
-    world.on("character:list", handleCharacterList);
-    world.on("character:selected", handleCharacterSelected);
-    // If the packet arrived before UI mounted, consult network cache
-    const network = world.network as { lastCharacterList?: unknown[] };
-    if (network.lastCharacterList) setCharacterFlowActive(true);
-
-    if (
-      (
-        world.physics as { isInitialized?: () => boolean } | undefined
-      )?.isInitialized?.()
-    ) {
-      setPhysReady(true);
-    }
-
-    const playerEntity = world.entities?.player;
-    if (playerEntity) {
-      setPlayer(playerEntity);
-      if (!isSpectatorMode && (playerEntity as { avatar?: unknown }).avatar) {
-        setPlayerReady(true);
-      }
-    }
-
+    sample();
     return () => {
-      if (terrainPollTimeoutRef.current) {
-        clearTimeout(terrainPollTimeoutRef.current);
-        terrainPollTimeoutRef.current = null;
-      }
-      // Clean up the ready timeout if it exists
-      if (readyTimeoutRef.current) {
-        clearTimeout(readyTimeoutRef.current);
-        readyTimeoutRef.current = null;
-      }
-      if (loadingOverlayTimeoutRef.current) {
-        clearTimeout(loadingOverlayTimeoutRef.current);
-        loadingOverlayTimeoutRef.current = null;
-      }
+      disposed = true;
+      gate.dispose();
+      if (timer !== null) clearTimeout(timer);
       world.off(EventType.READY, handleReady);
       world.off(EventType.ASSETS_LOADING_PROGRESS, handleLoadingProgress);
-      world.off(EventType.PLAYER_SPAWNED, handlePlayerSpawned);
-      world.off(EventType.AVATAR_LOAD_COMPLETE, handleAvatarComplete);
-      world.off("physics:ready", handlePhysicsReady);
+      world.off(EventType.PLAYER_SPAWNED, sample);
+      world.off(EventType.AVATAR_LOAD_COMPLETE, sample);
+      world.off("physics:ready", sample);
       world.off(EventType.UI_TOGGLE, handleUIToggle);
       world.off(EventType.UI_KICK, handleUIKick);
       world.off(EventType.NETWORK_DISCONNECTED, handleDisconnected);
+      world.off(EventType.NETWORK_RECONNECTED, handleReconnected);
+      world.off("NETWORK_DISCONNECTED", handleDisconnected);
+      world.off("NETWORK_RECONNECTED", handleReconnected);
+      world.off(EventType.ENTRY_RETRY_CHANGED, sample);
+      world.off(EventType.CHARACTER_LIST, handleCharacterList);
+      world.off(EventType.CHARACTER_SELECTED, handleCharacterSelected);
       world.off(EventType.UI_DEATH_SCREEN, handleDeathScreen);
       world.off(EventType.UI_DEATH_SCREEN_CLOSE, handleDeathScreenClose);
-      world.off("character:list", handleCharacterList);
-      world.off("character:selected", handleCharacterSelected);
     };
-  }, [world, isSpectatorMode]);
+  }, [world, initializationComplete, isSpectatorMode]);
 
-  // Poll terrain readiness until ready
-  useEffect(() => {
-    if (terrainPollTimeoutRef.current) {
-      clearTimeout(terrainPollTimeoutRef.current);
-      terrainPollTimeoutRef.current = null;
-    }
-
-    setTerrainReady(false);
-    setTerrainTimedOut(false);
-    setReadinessError(null);
-
-    const isTerrainReady = (): boolean => {
-      const terrain = world.getSystem?.("terrain") as
-        | { isReady?: () => boolean }
-        | undefined;
-      if (!terrain?.isReady) return false;
-
-      if (isSpectatorMode) {
-        return terrain.isReady();
-      }
-
-      const player = world.entities?.player as
-        | { position?: { x: number; z: number } }
-        | undefined;
-      if (!player?.position) return false;
-
-      return terrain.isReady();
-    };
-
-    const updateTerrainReady = () => {
-      if (!isTerrainReady()) return false;
-      setTerrainReady(true);
-      return true;
-    };
-
-    if (!updateTerrainReady()) {
-      const startTime = performance.now();
-      const checkTerrainReady = () => {
-        if (updateTerrainReady()) return;
-
-        if (performance.now() - startTime >= 20000) {
-          if (isSpectatorMode) {
-            setReadinessError(
-              "Timed out waiting for terrain to initialize. Refresh to retry.",
-            );
-            return;
-          }
-
-          console.warn(
-            "[CoreUI] Terrain readiness timeout after 20s; continuing startup for player mode",
-          );
-          setTerrainTimedOut(true);
-          setTerrainReady(true);
-          return;
-        }
-
-        terrainPollTimeoutRef.current = setTimeout(checkTerrainReady, 250);
-      };
-
-      terrainPollTimeoutRef.current = setTimeout(checkTerrainReady, 250);
-    }
-
-    return () => {
-      if (terrainPollTimeoutRef.current) {
-        clearTimeout(terrainPollTimeoutRef.current);
-        terrainPollTimeoutRef.current = null;
-      }
-    };
-  }, [world, isSpectatorMode]);
-
-  // For spectators: set playerReady when target avatar AND terrain are loaded
-  // This mimics the normal player flow: wait for avatar + terrain before presenting
-  useEffect(() => {
-    if (isSpectatorMode && targetAvatarLoaded && terrainReady && !playerReady) {
-      setPlayerReady(true);
-    }
-  }, [isSpectatorMode, targetAvatarLoaded, terrainReady, playerReady]);
-
-  // Start the 300ms delay once all presentable conditions are met
-  useEffect(() => {
-    // Show game once player's avatar is ready and physics system is initialized
-    // For spectators: also require terrain and target avatar to be ready
-    const canPresent =
-      livePlayerReady &&
-      livePhysReady &&
-      liveTerrainReady &&
-      (loadingComplete || systemsComplete || assetsProgress >= 100);
-    if (canPresent) {
-      // Clear any existing timeout
-      if (readyTimeoutRef.current) {
-        clearTimeout(readyTimeoutRef.current);
-      }
-
-      // Add 0.3 second delay to allow users to see the full loading bar at 100%
-      readyTimeoutRef.current = setTimeout(() => {
-        setReady(true);
-        readyTimeoutRef.current = null;
-      }, 300);
-    }
-
-    return () => {
-      // Clean up timeout on unmount or when dependencies change
-      if (readyTimeoutRef.current) {
-        clearTimeout(readyTimeoutRef.current);
-        readyTimeoutRef.current = null;
-      }
-    };
-  }, [
-    livePlayerReady,
-    livePhysReady,
-    liveTerrainReady,
-    loadingComplete,
-    systemsComplete,
-    assetsProgress,
-  ]);
-
-  useEffect(() => {
-    if (!ready) {
-      setLoadingOverlayVisible(true);
-      if (loadingOverlayTimeoutRef.current) {
-        clearTimeout(loadingOverlayTimeoutRef.current);
-        loadingOverlayTimeoutRef.current = null;
-      }
-      return;
-    }
-
-    loadingOverlayTimeoutRef.current = setTimeout(() => {
-      setLoadingOverlayVisible(false);
-      loadingOverlayTimeoutRef.current = null;
-    }, 220);
-
-    return () => {
-      if (loadingOverlayTimeoutRef.current) {
-        clearTimeout(loadingOverlayTimeoutRef.current);
-        loadingOverlayTimeoutRef.current = null;
-      }
-    };
-  }, [ready]);
-
-  // Expose loading state for debugging and analytics
   useEffect(() => {
     const loadingState = {
       ready,
       loadingComplete,
       systemsComplete,
       assetsProgress,
-      playerReady: livePlayerReady,
-      physReady: livePhysReady,
-      terrainReady: liveTerrainReady,
-      terrainTimedOut,
-      playerId: player?.id || null,
+      initializationComplete,
+      presentationPhase,
+      visualReadinessSampled,
+      playerReady: visualReadinessSampled
+        ? (readiness?.playerReady ?? false)
+        : null,
+      physReady: readiness?.physReady ?? false,
+      terrainReady: visualReadinessSampled
+        ? (readiness?.terrainReady ?? false)
+        : null,
+      blockedChunks: visualReadinessSampled
+        ? (readiness?.blockedChunks ?? 0)
+        : null,
+      terrainTimedOut: false,
+      playerId: world.entities.player?.id || null,
     };
     (
       window as Window & { __HYPERIA_LOADING__?: typeof loadingState }
     ).__HYPERIA_LOADING__ = loadingState;
   }, [
+    world,
     ready,
     loadingComplete,
     systemsComplete,
     assetsProgress,
-    livePlayerReady,
-    livePhysReady,
-    liveTerrainReady,
-    terrainTimedOut,
-    player,
+    initializationComplete,
+    readiness,
+    presentationPhase,
+    visualReadinessSampled,
   ]);
 
   return (
@@ -466,31 +407,44 @@ function CoreUIContent({ world }: { world: ClientWorld }) {
           <div id="core-ui-portal" />
         </div>
         {/* Non-scaled overlays - full screen elements */}
-        {loadingOverlayVisible &&
-          (readinessError ? (
-            <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-20">
-              <div className="text-center text-[#f2d08a] px-8">
-                <p className="text-2xl mb-3">Unable to enter world</p>
-                <p className="max-w-md mb-4">{readinessError}</p>
-                <button
-                  type="button"
-                  className="px-4 py-2 rounded bg-[#f2d08a] text-black font-bold"
-                  onClick={() => window.location.reload()}
-                >
-                  Reload
-                </button>
-              </div>
-            </div>
-          ) : (
+        {loadingOverlayVisible && (
+          <div
+            className="absolute inset-0 bg-black z-20"
+            style={{
+              opacity: ready ? 0 : 1,
+              transition: ready ? "opacity 220ms linear" : "none",
+              pointerEvents: ready ? "none" : "auto",
+            }}
+          >
             <LoadingScreen
               world={world}
               message={
-                characterFlowActive ? "Entering world..." : "Loading world..."
+                characterFlowActive ? "Entering world..." : preparationStage
               }
               fadingOut={ready}
             />
-          ))}
+            {readinessError && (
+              <LoadingReadinessWarning
+                blocked={meadowBlocked}
+                stage={preparationStage}
+                message={readinessError}
+                onReload={() => window.location.reload()}
+              />
+            )}
+          </div>
+        )}
         {kicked && <KickedOverlay code={kicked} />}
+        {!kicked && entryRetry && (
+          <WorldEntryRecoveryOverlay
+            state={entryRetry}
+            onRetry={() => {
+              const network = world.network as ClientNetwork;
+              network.retryEnterWorld();
+              setEntryRetry(network.entryRetryState);
+            }}
+            onReload={() => window.location.reload()}
+          />
+        )}
         {deathScreen && <DeathScreen data={deathScreen} world={world} />}
       </main>
     </ChatProvider>

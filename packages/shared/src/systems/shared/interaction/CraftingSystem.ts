@@ -20,22 +20,56 @@ import {
 } from "../../../constants/SmithingConstants";
 import { processingDataProvider } from "../../../data/ProcessingDataProvider";
 import type { CraftingRecipeData } from "../../../data/ProcessingDataProvider";
-import { EventType } from "../../../types/events";
-import { Skill } from "../character/SkillsSystem";
+import {
+  EventType,
+  getProcessingRequestOperationId,
+} from "../../../types/events";
 import { Logger } from "../../../utils/Logger";
+import { uuid } from "../../../utils";
 import { SystemBase } from "../infrastructure/SystemBase";
 import type { World } from "../../../types/index";
+import type {
+  AtomicProcessingActionReceipt,
+  InventorySystem,
+} from "../character/InventorySystem";
+import {
+  canPlayerPerformPreparationAction,
+  canPlayerUseProcessingStation,
+} from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active crafting session for a player */
 interface CraftingSession {
   playerId: string;
   recipeId: string; // Output item ID (e.g., "leather_body")
+  station: string;
+  stationId: string | null;
   quantity: number;
   crafted: number;
   /** Tick when current craft action completes (tick-based timing) */
   completionTick: number;
-  /** Remaining uses for each consumable before it needs to be consumed from inventory */
-  consumableUses: Map<string, number>;
+  requestId?: string;
+}
+
+interface CraftingInteractionSession {
+  triggerType: "needle" | "chisel" | "furnace";
+  stationId: string | null;
+  allowedRecipeIds: Set<string>;
+}
+
+interface PendingCraftingAction {
+  operationId: string;
+  playerId: string;
+  recipeId: string;
+  retryCount: number;
+  retryAtTick: number;
+  state: "in_flight" | "retry_wait" | "settled";
+  receipt: AtomicProcessingActionReceipt | null;
+  stopAfterCommit: boolean;
 }
 
 /** Pre-built inventory state to avoid redundant scans */
@@ -44,8 +78,16 @@ interface InventoryState {
   itemIds: Set<string>;
 }
 
-export class CraftingSystem extends SystemBase {
+export class CraftingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, CraftingSession>();
+  private readonly interactionSessions = new Map<
+    string,
+    CraftingInteractionSession
+  >();
+  private readonly pendingActions = new Map<string, PendingCraftingAction>();
   private readonly playerSkills = new Map<
     string,
     Record<string, { level: number; xp: number }>
@@ -53,9 +95,7 @@ export class CraftingSystem extends SystemBase {
 
   /** Track last processed tick to ensure once-per-tick processing */
   private lastProcessedTick = -1;
-
-  /** Monotonic counter for unique crafted item IDs (avoids Date.now collisions) */
-  private craftCounter = 0;
+  private destroyed = false;
 
   /** Reusable array for update loop to avoid allocating per tick */
   private readonly completedPlayerIds: string[] = [];
@@ -93,7 +133,12 @@ export class CraftingSystem extends SystemBase {
     // Listen for crafting request (player selected item to craft)
     this.subscribe(
       EventType.PROCESSING_CRAFTING_REQUEST,
-      (data: { playerId: string; recipeId: string; quantity: number }) => {
+      (data: {
+        playerId: string;
+        recipeId: string;
+        quantity: number;
+        requestId?: string;
+      }) => {
         this.startCrafting(data);
       },
     );
@@ -114,21 +159,18 @@ export class CraftingSystem extends SystemBase {
       playerId: string;
       targetPosition: { x: number; y: number; z: number };
     }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
-      if (this.activeSessions.has(data.playerId)) {
-        this.cancelCrafting(data.playerId);
-      }
+      this.interactionSessions.delete(data.playerId);
+      this.cancelCrafting(data.playerId);
     });
 
     // Cancel crafting on combat start
     this.subscribe(
       EventType.COMBAT_STARTED,
       (data: { attackerId: string; targetId: string }) => {
-        if (this.activeSessions.has(data.attackerId)) {
-          this.cancelCrafting(data.attackerId);
-        }
-        if (this.activeSessions.has(data.targetId)) {
-          this.cancelCrafting(data.targetId);
-        }
+        this.interactionSessions.delete(data.attackerId);
+        this.interactionSessions.delete(data.targetId);
+        this.cancelCrafting(data.attackerId);
+        this.cancelCrafting(data.targetId);
       },
     );
 
@@ -136,6 +178,7 @@ export class CraftingSystem extends SystemBase {
     this.subscribe(
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => {
+        this.interactionSessions.delete(data.playerId);
         this.cancelCrafting(data.playerId);
         this.playerSkills.delete(data.playerId); // Memory cleanup
       },
@@ -151,7 +194,31 @@ export class CraftingSystem extends SystemBase {
     stationId?: string;
     inputItemId?: string;
   }): void {
-    const { playerId, triggerType, inputItemId } = data;
+    const { playerId, inputItemId } = data;
+    const triggerType = data.triggerType as "needle" | "chisel" | "furnace";
+
+    if (
+      !["needle", "chisel", "furnace"].includes(triggerType) ||
+      !canPlayerPerformPreparationAction(this.world, playerId)
+    ) {
+      this.interactionSessions.delete(playerId);
+      return;
+    }
+
+    const stationId =
+      triggerType === "furnace" ? String(data.stationId ?? "") : null;
+    if (
+      triggerType === "furnace" &&
+      !this.canPlayerUseCraftingFurnace(playerId, stationId ?? "")
+    ) {
+      this.interactionSessions.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "You must be next to that furnace to craft jewelry.",
+        type: "error",
+      });
+      return;
+    }
 
     // Check if already crafting
     if (this.activeSessions.has(playerId)) {
@@ -207,6 +274,7 @@ export class CraftingSystem extends SystemBase {
     }
 
     if (filteredRecipes.length === 0) {
+      this.interactionSessions.delete(playerId);
       this.emitTypedEvent(EventType.UI_MESSAGE, {
         playerId,
         message: "There are no crafting recipes available.",
@@ -240,6 +308,12 @@ export class CraftingSystem extends SystemBase {
       };
     });
 
+    this.interactionSessions.set(playerId, {
+      triggerType,
+      stationId,
+      allowedRecipeIds: new Set(filteredRecipes.map((recipe) => recipe.output)),
+    });
+
     // Emit event with available recipes for UI to display
     this.emitTypedEvent(EventType.CRAFTING_INTERFACE_OPEN, {
       playerId,
@@ -255,8 +329,28 @@ export class CraftingSystem extends SystemBase {
     playerId: string;
     recipeId: string;
     quantity: number;
+    requestId?: string;
   }): void {
-    const { playerId, recipeId, quantity } = data;
+    const { playerId, recipeId, quantity, requestId } = data;
+    if (requestId && quantity !== 1) {
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "invalid_request",
+      );
+      return;
+    }
+    if (!canPlayerPerformPreparationAction(this.world, playerId)) {
+      this.interactionSessions.delete(playerId);
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "not_authorized",
+      );
+      return;
+    }
     // Check if already crafting
     if (this.activeSessions.has(playerId)) {
       this.emitTypedEvent(EventType.UI_MESSAGE, {
@@ -264,6 +358,13 @@ export class CraftingSystem extends SystemBase {
         message: "You are already crafting.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "busy",
+        true,
+      );
       return;
     }
 
@@ -275,6 +376,36 @@ export class CraftingSystem extends SystemBase {
         message: "Invalid crafting recipe.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "invalid_request",
+      );
+      return;
+    }
+
+    const interaction = this.interactionSessions.get(playerId);
+    if (
+      recipe.station === "furnace" &&
+      (!interaction ||
+        interaction.triggerType !== "furnace" ||
+        !interaction.stationId ||
+        !interaction.allowedRecipeIds.has(recipeId) ||
+        !this.canPlayerUseCraftingFurnace(playerId, interaction.stationId))
+    ) {
+      this.interactionSessions.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "Use a nearby furnace before selecting jewelry to craft.",
+        type: "error",
+      });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "not_authorized",
+      );
       return;
     }
 
@@ -286,6 +417,12 @@ export class CraftingSystem extends SystemBase {
         message: `You need level ${recipe.level} Crafting to make that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -297,6 +434,12 @@ export class CraftingSystem extends SystemBase {
         message: "You have no items.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "resources_unavailable",
+      );
       return;
     }
 
@@ -308,6 +451,12 @@ export class CraftingSystem extends SystemBase {
         message: `You need a ${toolNames} to craft that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -318,6 +467,12 @@ export class CraftingSystem extends SystemBase {
         message: "You don't have the required materials.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "resources_unavailable",
+      );
       return;
     }
 
@@ -328,31 +483,47 @@ export class CraftingSystem extends SystemBase {
         message: "You need thread to craft that.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "crafting",
+        "resources_unavailable",
+      );
       return;
-    }
-
-    // Initialize consumable uses tracking
-    // Each consumable has N uses before being consumed (e.g., thread = 5 uses)
-    const consumableUses = new Map<string, number>();
-    for (const consumable of recipe.consumables) {
-      consumableUses.set(consumable.item, consumable.uses);
     }
 
     // Get current tick for tick-based timing
     const currentTick = this.world.currentTick ?? 0;
+    const normalizedQuantity = Number.isFinite(quantity)
+      ? Math.floor(Math.max(1, Math.min(quantity, 10_000)))
+      : 1;
 
     // Create session with tick-based completion
     const session: CraftingSession = {
       playerId,
       recipeId,
-      quantity: Math.max(1, quantity),
+      station: recipe.station,
+      stationId:
+        recipe.station === "furnace" ? (interaction?.stationId ?? null) : null,
+      quantity: normalizedQuantity,
       crafted: 0,
       completionTick: currentTick + recipe.ticks,
-      consumableUses,
+      requestId,
     };
 
     this.activeSessions.set(playerId, session);
-
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "crafting",
+      targetEntityId: session.stationId,
+    });
+    this.reportProcessingRequestProgress(
+      playerId,
+      requestId,
+      "crafting",
+      "accepted",
+      true,
+    );
     // Show start message
     const itemName = recipe.name || recipe.output.replace(/_/g, " ");
     this.emitTypedEvent(EventType.UI_MESSAGE, {
@@ -375,6 +546,16 @@ export class CraftingSystem extends SystemBase {
   private scheduleNextCraft(playerId: string): void {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
+
+    if (
+      session.station === "furnace" &&
+      (!session.stationId ||
+        !this.canPlayerUseCraftingFurnace(playerId, session.stationId))
+    ) {
+      this.interactionSessions.delete(playerId);
+      this.completeCrafting(playerId);
+      return;
+    }
 
     // Check if we've reached the target quantity
     if (session.crafted >= session.quantity) {
@@ -417,28 +598,14 @@ export class CraftingSystem extends SystemBase {
       return;
     }
 
-    // Check if consumable uses are depleted and need a new consumable
-    for (const consumable of recipe.consumables) {
-      const remaining = session.consumableUses.get(consumable.item) || 0;
-      if (remaining <= 0) {
-        // Need to consume a new thread/consumable from inventory
-        if (!this.hasRequiredConsumables(invState, recipe)) {
-          this.emitTypedEvent(EventType.UI_MESSAGE, {
-            playerId,
-            message: "You have run out of thread.",
-            type: "info",
-          });
-          this.completeCrafting(playerId);
-          return;
-        }
-        // Consume 1 from inventory and reset uses
-        this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-          playerId,
-          itemId: consumable.item,
-          quantity: 1,
-        });
-        session.consumableUses.set(consumable.item, consumable.uses);
-      }
+    if (!this.hasRequiredConsumables(invState, recipe)) {
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "You have run out of recipe consumables.",
+        type: "info",
+      });
+      this.completeCrafting(playerId);
+      return;
     }
 
     // Set completion tick for next craft action
@@ -453,79 +620,208 @@ export class CraftingSystem extends SystemBase {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
 
+    if (this.pendingActions.has(playerId)) return;
+
+    if (
+      session.station === "furnace" &&
+      (!session.stationId ||
+        !this.canPlayerUseCraftingFurnace(playerId, session.stationId))
+    ) {
+      this.interactionSessions.delete(playerId);
+      this.completeCrafting(playerId);
+      return;
+    }
+
     const recipe = processingDataProvider.getCraftingRecipe(session.recipeId);
     if (!recipe) {
       this.completeCrafting(playerId);
       return;
     }
 
-    // Play crafting animation (classic MMORPG-style)
-    this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-      entityId: playerId,
-      animation: "crafting",
-      loop: false,
-    });
-
-    // Consume input materials
-    for (const input of recipe.inputs) {
-      this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-        playerId,
-        itemId: input.item,
-        quantity: input.amount,
-      });
-    }
-
-    // Decrement consumable uses
-    for (const consumable of recipe.consumables) {
-      const remaining = session.consumableUses.get(consumable.item) || 0;
-      session.consumableUses.set(consumable.item, Math.max(0, remaining - 1));
-    }
-
-    // Add crafted item to inventory
-    // Note: Input removal, output addition, and XP grant are processed synchronously
-    // in the same tick. A crash between events would require SIGKILL mid-function,
-    // which is acceptable loss for a single craft action.
-    this.emitTypedEvent(EventType.INVENTORY_ITEM_ADDED, {
-      playerId,
-      item: {
-        id: `craft_${playerId}_${++this.craftCounter}_${Date.now()}`,
-        itemId: recipe.output,
-        quantity: 1,
-        slot: -1,
-        metadata: null,
-      },
-    });
-
-    // Grant XP
-    this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-      playerId,
-      skill: Skill.CRAFTING,
-      amount: recipe.xp,
-    });
-
-    session.crafted++;
-
-    // Audit log for economic tracking
-    Logger.system("CraftingSystem", "craft_complete", {
+    const pending: PendingCraftingAction = {
+      operationId:
+        getProcessingRequestOperationId("crafting", session.requestId) ??
+        `crafting-action:${uuid()}${uuid()}`,
       playerId,
       recipeId: session.recipeId,
-      output: recipe.output,
-      inputsConsumed: recipe.inputs.map((i) => `${i.amount}x${i.item}`),
-      xpAwarded: recipe.xp,
-      crafted: session.crafted,
-      batchTotal: session.quantity,
-    });
+      retryCount: 0,
+      retryAtTick: 0,
+      state: "in_flight",
+      receipt: null,
+      stopAfterCommit: false,
+    };
+    this.pendingActions.set(playerId, pending);
+    this.launchCraftingCommit(pending, recipe);
+  }
 
-    // Success message (classic MMORPG style - shows item name)
-    const itemName = recipe.name || recipe.output.replace(/_/g, " ");
-    this.emitTypedEvent(EventType.UI_MESSAGE, {
-      playerId,
-      message: `You craft a ${itemName}.`,
-      type: "success",
-    });
+  private launchCraftingCommit(
+    pending: PendingCraftingAction,
+    recipe: CraftingRecipeData,
+  ): void {
+    const inventory = this.world.getSystem("inventory") as
+      InventorySystem | undefined;
+    if (!inventory?.commitProcessingActionAtomic) {
+      pending.retryCount++;
+      pending.retryAtTick =
+        (this.world.currentTick ?? 0) +
+        Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+      pending.state = "retry_wait";
+      return;
+    }
+    pending.state = "in_flight";
+    void inventory
+      .commitProcessingActionAtomic(pending.playerId, pending.operationId, {
+        skill: "crafting",
+        xpAmount: recipe.xp,
+        inputs: recipe.inputs.map((input) => ({
+          itemId: input.item,
+          quantity: input.amount,
+        })),
+        requiredItems: recipe.tools.map((itemId) => ({
+          itemId,
+          quantity: 1,
+        })),
+        consumables: recipe.consumables.map((consumable) => ({
+          itemId: consumable.item,
+          usesPerItem: consumable.uses,
+        })),
+        outputs: [{ itemId: recipe.output, quantity: 1 }],
+      })
+      .then((receipt) => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.receipt = receipt;
+        pending.state = "settled";
+      })
+      .catch(() => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.retryCount++;
+        pending.retryAtTick =
+          (this.world.currentTick ?? 0) +
+          Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+        pending.state = "retry_wait";
+      });
+  }
 
-    // Schedule next craft action
-    this.scheduleNextCraft(playerId);
+  private processPendingActions(currentTick: number): void {
+    for (const pending of this.pendingActions.values()) {
+      const recipe = processingDataProvider.getCraftingRecipe(pending.recipeId);
+      if (!recipe) {
+        this.pendingActions.delete(pending.playerId);
+        this.completeCrafting(pending.playerId);
+        continue;
+      }
+      if (
+        pending.state === "retry_wait" &&
+        currentTick >= pending.retryAtTick
+      ) {
+        this.launchCraftingCommit(pending, recipe);
+        continue;
+      }
+      if (pending.state !== "settled" || !pending.receipt) continue;
+
+      const receipt = pending.receipt;
+      if (!receipt.ok) {
+        if (receipt.retryable) {
+          pending.retryCount++;
+          pending.retryAtTick =
+            currentTick + Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+          pending.receipt = null;
+          pending.state = "retry_wait";
+          continue;
+        }
+        this.pendingActions.delete(pending.playerId);
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            receipt.reason === "inventory_full"
+              ? "Your inventory is too full to hold the crafted item."
+              : receipt.reason === "insufficient_items"
+                ? "You have run out of required materials, tools, or consumables."
+                : "That crafting action could not be validated.",
+          type: "warning",
+        });
+        const session = this.activeSessions.get(pending.playerId);
+        this.rejectProcessingRequest(
+          pending.playerId,
+          session?.requestId,
+          "crafting",
+          receipt.reason === "inventory_full"
+            ? "capacity_unavailable"
+            : receipt.reason === "insufficient_items"
+              ? "resources_unavailable"
+              : "persistence_rejected",
+        );
+        this.completeCrafting(pending.playerId);
+        continue;
+      }
+
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
+      this.pendingActions.delete(pending.playerId);
+      const session = this.activeSessions.get(pending.playerId);
+      if (!session || session.recipeId !== pending.recipeId) continue;
+
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "crafting",
+          loop: false,
+        });
+      }
+      session.crafted++;
+      Logger.system("CraftingSystem", "craft_complete", {
+        playerId: pending.playerId,
+        recipeId: session.recipeId,
+        operationId: pending.operationId,
+        output: recipe.output,
+        inputsConsumed: recipe.inputs.map(
+          (input) => `${input.amount}x${input.item}`,
+        ),
+        consumableStates: receipt.consumableStates,
+        xpAwarded: receipt.awardedXp,
+        crafted: session.crafted,
+        batchTotal: session.quantity,
+      });
+      const itemName = recipe.name || recipe.output.replace(/_/g, " ");
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message: `You craft a ${itemName}.`,
+          type: "success",
+        });
+      }
+      if (!receipt.liveInventoryApplied) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            "Your crafted item is safely recorded, but the live inventory view needs to resynchronize.",
+          type: "warning",
+        });
+      }
+      if (pending.stopAfterCommit) this.completeCrafting(pending.playerId);
+      else this.scheduleNextCraft(pending.playerId);
+    }
   }
 
   /**
@@ -536,16 +832,19 @@ export class CraftingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "crafting");
 
     const recipe = processingDataProvider.getCraftingRecipe(session.recipeId);
 
     // Emit completion event
+    this.finishProcessingRequest(session.requestId);
     this.emitTypedEvent(EventType.CRAFTING_COMPLETE, {
       playerId,
       recipeId: session.recipeId,
       outputItemId: recipe?.output || session.recipeId,
       totalCrafted: session.crafted,
       totalXp: session.crafted * (recipe?.xp || 0),
+      ...(session.requestId ? { requestId: session.requestId } : {}),
     });
   }
 
@@ -553,6 +852,12 @@ export class CraftingSystem extends SystemBase {
    * Cancel crafting for a player
    */
   private cancelCrafting(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "crafting");
+    const pending = this.pendingActions.get(playerId);
+    if (pending) {
+      pending.stopAfterCommit = true;
+      return;
+    }
     const session = this.activeSessions.get(playerId);
     if (session) {
       this.completeCrafting(playerId);
@@ -637,6 +942,67 @@ export class CraftingSystem extends SystemBase {
     return this.activeSessions.has(playerId);
   }
 
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.interactionSessions.delete(playerId);
+    this.cancelCrafting(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) &&
+      !this.interactionSessions.has(playerId) &&
+      !this.pendingActions.has(playerId)
+    );
+  }
+
+  canPlayerUseCraftingFurnace(playerId: string, furnaceId: string): boolean {
+    return canPlayerUseProcessingStation(
+      this.world,
+      playerId,
+      furnaceId,
+      "furnace",
+    );
+  }
+
+  canPlayerUseActiveCraftingFurnace(playerId: string): boolean {
+    const session = this.interactionSessions.get(playerId);
+    return (
+      session?.triggerType === "furnace" &&
+      !!session.stationId &&
+      this.canPlayerUseCraftingFurnace(playerId, session.stationId)
+    );
+  }
+
+  getRecipeStation(recipeId: string): "none" | "furnace" | null {
+    const recipe = processingDataProvider.getCraftingRecipe(recipeId);
+    if (!recipe) return null;
+    return recipe.station === "furnace" ? "furnace" : "none";
+  }
+
+  getCraftingCustodyStats(): {
+    activeSessions: number;
+    pendingActions: number;
+    inFlight: number;
+    retryWaiting: number;
+    maxRetryCount: number;
+  } {
+    let inFlight = 0;
+    let retryWaiting = 0;
+    let maxRetryCount = 0;
+    for (const pending of this.pendingActions.values()) {
+      if (pending.state === "in_flight") inFlight++;
+      if (pending.state === "retry_wait") retryWaiting++;
+      maxRetryCount = Math.max(maxRetryCount, pending.retryCount);
+    }
+    return {
+      activeSessions: this.activeSessions.size,
+      pendingActions: this.pendingActions.size,
+      inFlight,
+      retryWaiting,
+      maxRetryCount,
+    };
+  }
+
   /**
    * Update method - processes tick-based crafting sessions.
    * Called each frame, but only processes once per game tick.
@@ -653,10 +1019,25 @@ export class CraftingSystem extends SystemBase {
     }
     this.lastProcessedTick = currentTick;
 
+    for (const session of this.activeSessions.values()) {
+      const pending = this.pendingActions.get(session.playerId);
+      this.reportProcessingRequestProgress(
+        session.playerId,
+        session.requestId,
+        "crafting",
+        pending?.state === "retry_wait" ? "reconciling" : "working",
+      );
+    }
+
+    this.processPendingActions(currentTick);
+
     // Collect completed session IDs first, then process (avoids Map snapshot allocation)
     this.completedPlayerIds.length = 0;
     for (const [playerId, session] of this.activeSessions) {
-      if (currentTick >= session.completionTick) {
+      if (
+        !this.pendingActions.has(playerId) &&
+        currentTick >= session.completionTick
+      ) {
         this.completedPlayerIds.push(playerId);
       }
     }
@@ -666,11 +1047,14 @@ export class CraftingSystem extends SystemBase {
   }
 
   destroy(): void {
+    this.destroyed = true;
     // Complete all active sessions
     for (const playerId of this.activeSessions.keys()) {
       this.completeCrafting(playerId);
     }
     this.activeSessions.clear();
+    this.interactionSessions.clear();
+    this.pendingActions.clear();
     this.playerSkills.clear(); // Memory cleanup
   }
 }

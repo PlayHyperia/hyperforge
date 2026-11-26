@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "layoutId": "compact-pond-northern-habitat-v1",
+  "sorrel": {
+    "file": "pond_sorrel.glb",
+    "radius": 0.539,
+    "sourceSha256": "2f887028b517ad2e6ea3c75665dc4790c59a0ae66ea41ff6185e5b5375777d22",
+    "source": "https://polyhaven.com/a/shrub_sorrel_01",
+    "license": "CC0-1.0",
+    "licenseUrl": "https://polyhaven.com/license",
+    "author": "Rico Cilliers",
+    "triangles": 1629
+  },
+  "replacements": [
+    {
+      "index": 5,
+      "model": "fern",
+      "bearing": 238,
+      "tangent": -0.55,
+      "bankOffset": 1.25,
+      "scale": 1.05,
+      "yaw": 17
+    },
+    {
+      "index": 6,
+      "model": "fern",
+      "bearing": 242,
+      "tangent": -0.1,
+      "bankOffset": 2.05,
+      "scale": 0.95,
+      "yaw": 125
+    },
+    {
+      "index": 7,
+      "model": "fern",
+      "bearing": 249,
+      "tangent": -0.35,
+      "bankOffset": 1.1,
+      "scale": 1.1,
+      "yaw": 240
+    },
+    {
+      "index": 8,
+      "model": "fern",
+      "bearing": 251,
+      "tangent": 0.45,
+      "bankOffset": 1.65,
+      "scale": 0.9,
+      "yaw": 73
+    },
+    {
+      "index": 9,
+      "model": "bush",
+      "bearing": 238,
+      "tangent": -0.2,
+      "bankOffset": 2.3,
+      "scale": 0.38,
+      "yaw": 27
+    },
+    {
+      "index": 10,
+      "model": "reed",
+      "bearing": 249,
+      "tangent": -0.65,
+      "bankOffset": 0.14,
+      "scale": 1.15,
+      "yaw": 27
+    },
+    {
+      "index": 11,
+      "model": "reed",
+      "bearing": 249,
+      "tangent": -0.3,
+      "bankOffset": 0.65,
+      "scale": 1,
+      "yaw": 121
+    },
+    {
+      "index": 12,
+      "model": "reed",
+      "bearing": 249,
+      "tangent": 0.05,
+      "bankOffset": 0.28,
+      "scale": 1.2,
+      "yaw": 232
+    },
+    {
+      "index": 13,
+      "model": "reed",
+      "bearing": 249,
+      "tangent": 0.55,
+      "bankOffset": 0.92,
+      "scale": 1.05,
+      "yaw": 67
+    },
+    {
+      "index": 14,
+      "model": "reed",
+      "bearing": 249,
+      "tangent": 0.7,
+      "bankOffset": 0.36,
+      "scale": 0.95,
+      "yaw": 178
+    },
+    {
+      "index": 18,
+      "model": "fern",
+      "bearing": 270,
+      "tangent": -0.6,
+      "bankOffset": 1.1,
+      "scale": 0.95,
+      "yaw": 112
+    },
+    {
+      "index": 19,
+      "model": "fern",
+      "bearing": 273,
+      "tangent": 0.35,
+      "bankOffset": 1.75,
+      "scale": 0.8,
+      "yaw": 267
+    },
+    {
+      "index": 20,
+      "model": "bush",
+      "bearing": 272,
+      "tangent": 0.15,
+      "bankOffset": 2.2,
+      "scale": 0.4,
+      "yaw": 211
+    },
+    {
+      "index": 21,
+      "model": "reed",
+      "bearing": 272,
+      "tangent": -0.55,
+      "bankOffset": 0.18,
+      "scale": 1,
+      "yaw": 300
+    },
+    {
+      "index": 22,
+      "model": "reed",
+      "bearing": 272,
+      "tangent": 0.1,
+      "bankOffset": 0.62,
+      "scale": 1.12,
+      "yaw": 57
+    },
+    {
+      "index": 23,
+      "model": "reed",
+      "bearing": 272,
+      "tangent": 0.6,
+      "bankOffset": 0.28,
+      "scale": 0.85,
+      "yaw": 213
+    }
+  ],
+  "additions": [
+    {
+      "model": "reed",
+      "bearing": 249,
+      "tangent": -0.7,
+      "bankOffset": 1.15,
+      "scale": 1.08,
+      "yaw": 198
+    },
+    {
+      "model": "reed",
+      "bearing": 249,
+      "tangent": 0.1,
+      "bankOffset": 1.35,
+      "scale": 1.18,
+      "yaw": 14
+    },
+    {
+      "model": "reed",
+      "bearing": 272,
+      "tangent": -0.65,
+      "bankOffset": 0.88,
+      "scale": 1.08,
+      "yaw": 141
+    },
+    {
+      "model": "reed",
+      "bearing": 272,
+      "tangent": 0.45,
+      "bankOffset": 1.16,
+      "scale": 0.92,
+      "yaw": 247
+    },
+    {
+      "model": "sorrel",
+      "bearing": 238,
+      "tangent": -0.2,
+      "bankOffset": 0.75,
+      "scale": 0.85,
+      "yaw": 44
+    },
+    {
+      "model": "sorrel",
+      "bearing": 245,
+      "tangent": 0.05,
+      "bankOffset": 1.25,
+      "scale": 1,
+      "yaw": 176
+    },
+    {
+      "model": "sorrel",
+      "bearing": 268,
+      "tangent": -0.25,
+      "bankOffset": 0.78,
+      "scale": 0.92,
+      "yaw": 291
+    },
+    {
+      "model": "sorrel",
+      "bearing": 276,
+      "tangent": 0.2,
+      "bankOffset": 1.08,
+      "scale": 0.8,
+      "yaw": 97
+    }
+  ]
+}

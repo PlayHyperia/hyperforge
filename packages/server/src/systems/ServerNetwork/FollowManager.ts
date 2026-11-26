@@ -144,7 +144,6 @@ export class FollowManager {
    * is either the last tile they stepped on; which is a single step even if
    * the target is running"
    *
-   * @see https://rune-server.org/threads/help-with-player-dancing-spinning-when-following-each-other.706121/
    */
   processTick(tickNumber?: number): void {
     // Track current tick for startFollowing delay

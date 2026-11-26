@@ -21,12 +21,16 @@ export const BOW_TIERS: Readonly<Record<string, number>> = Object.freeze({
   oak_shortbow: 5,
   willow_shortbow: 20,
   maple_shortbow: 30,
+  yew_shortbow: 40,
+  magic_shortbow: 50,
 
   // Longbows (same tier as their shortbow counterpart)
   longbow: 1,
   oak_longbow: 5,
   willow_longbow: 20,
   maple_longbow: 30,
+  yew_longbow: 40,
+  magic_longbow: 50,
 });
 
 /**
@@ -69,5 +73,12 @@ export const ARROW_DATA: Readonly<Record<string, Readonly<ArrowData>>> =
       rangedStrength: 31,
       requiredRangedLevel: 30,
       requiredBowTier: 30,
+    }),
+    rune_arrow: Object.freeze({
+      id: "rune_arrow",
+      name: "Rune arrow",
+      rangedStrength: 49,
+      requiredRangedLevel: 40,
+      requiredBowTier: 40,
     }),
   });

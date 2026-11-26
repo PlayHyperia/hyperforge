@@ -2,9 +2,10 @@
  * FishingSpotVisualStrategy — glow indicator + particle registration + pulse animation.
  */
 
-import THREE from "../../../extras/three/three";
+import THREE, { float, smoothstep, uv } from "../../../extras/three/three";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 import type { ParticleSystem } from "../../../systems/shared/presentation/ParticleSystem";
+import type { TerrainSystem } from "../../../systems/shared/world/TerrainSystem";
 import type {
   ResourceVisualContext,
   ResourceVisualStrategy,
@@ -58,8 +59,9 @@ export function disposeFishingSpotTextures(): void {
 }
 
 export class FishingSpotVisualStrategy implements ResourceVisualStrategy {
-  private glowMesh?: THREE.Mesh;
+  private glowMesh?: THREE.Mesh<THREE.CircleGeometry, MeshBasicNodeMaterial>;
   private registeredWithPM = false;
+  private subtleDisturbance = false;
 
   async createVisual(ctx: ResourceVisualContext): Promise<void> {
     this.createGlowIndicator(ctx);
@@ -105,8 +107,9 @@ export class FishingSpotVisualStrategy implements ResourceVisualStrategy {
       const now = Date.now();
       const slow = Math.sin(now * 0.0015) * 0.04;
       const fast = Math.sin(now * 0.004 + 1.3) * 0.02;
-      (this.glowMesh.material as THREE.MeshBasicMaterial).opacity =
-        0.18 + slow + fast;
+      this.glowMesh.material.opacity = this.subtleDisturbance
+        ? 0.07 + slow * 0.375 + fast * 0.25
+        : 0.18 + slow + fast;
     }
   }
 
@@ -119,7 +122,7 @@ export class FishingSpotVisualStrategy implements ResourceVisualStrategy {
 
     if (this.glowMesh) {
       this.glowMesh.geometry.dispose();
-      (this.glowMesh.material as THREE.Material).dispose();
+      this.glowMesh.material.dispose();
       ctx.node.remove(this.glowMesh);
       this.glowMesh = undefined;
     }
@@ -128,12 +131,30 @@ export class FishingSpotVisualStrategy implements ResourceVisualStrategy {
   // ---- helpers ----
 
   private createGlowIndicator(ctx: ResourceVisualContext): void {
+    const profile = ctx.world
+      .getSystem<TerrainSystem>("terrain")
+      ?.getWorldTerrainProfile();
+    this.subtleDisturbance =
+      profile?.id === "compact-duel-island-v6" && !!profile.southernMeadow;
     const geometry = new THREE.CircleGeometry(0.6, 16);
     const material = new MeshBasicNodeMaterial();
-    material.color = new THREE.Color(0x4488ff);
+    material.color = new THREE.Color(
+      this.subtleDisturbance ? 0x92aaa7 : 0x4488ff,
+    );
     material.transparent = true;
-    material.opacity = 0.3;
+    material.opacity = this.subtleDisturbance ? 0.07 : 0.3;
     material.side = THREE.DoubleSide;
+    if (this.subtleDisturbance) {
+      // The real water-particle owner already supplies animated ripple rings.
+      // Keep only a soft, faint disturbance here; its unchanged geometry still
+      // provides the full interaction target even where visual alpha is zero.
+      const radius = uv().sub(0.5).mul(2).length();
+      material.opacityNode = float(1)
+        .sub(smoothstep(float(0.12), float(1), radius))
+        .pow(1.5)
+        .mul(THREE.TSL.materialOpacity);
+      material.depthWrite = false;
+    }
 
     this.glowMesh = new THREE.Mesh(geometry, material);
     this.glowMesh.rotation.x = -Math.PI / 2;

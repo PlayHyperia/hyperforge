@@ -1,0 +1,916 @@
+import { createHash } from "node:crypto";
+import { Worker } from "node:worker_threads";
+import { openSync, readSync, closeSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import THREE from "../../../../extras/three/three";
+import { World } from "../../../../core/World";
+import { DataManager } from "../../../../data/DataManager";
+import * as arenaGrading from "../../../../data/arena-grading";
+import { getDuelArenaConfig } from "../../../../data/duel-manifest";
+import { inferLOD1Path, inferLOD2Path } from "../LODConfig";
+import { TerrainSystem } from "../TerrainSystem";
+import { RoadNetworkSystem } from "../RoadNetworkSystem";
+import {
+  SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+  type WorldTerrainProfile,
+} from "../WorldTerrainProfile";
+import { EntityManager } from "../../entities/EntityManager";
+import { ResourceSystem } from "../../entities/ResourceSystem";
+import { ResourceEntity } from "../../../../entities/world/ResourceEntity";
+import { TerrainQuadTree } from "../TerrainQuadTree";
+import {
+  GrassVisualManager,
+  COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+} from "../GrassVisualManager";
+import {
+  GRASS_WORKER_CODE,
+  type GrassWorkerInput,
+  type GrassWorkerOutput,
+} from "../../../../utils/workers/GrassWorker";
+import {
+  createCompactIslandPaths,
+  compactPathIntersectsBounds,
+  compactPathSegmentDistance,
+} from "../CompactIslandPaths";
+import {
+  COMPACT_PREPARATION_LODGE,
+  getCompactPreparationLodgeFootprint,
+} from "../CompactPreparationLodge";
+
+const CAPSULES = [
+  ["bank-apron", 346, 319, 350, 319.5, 4],
+  ["bank-clerk-approach", 350, 319.5, 354, 321, 3],
+  ["bank-shopkeeper-approach", 346, 319, 342.5, 322, 2.5],
+  ["workshop-apron", 334.75, 334.75, 339, 334.25, 3.5],
+  ["workshop-supplier-approach", 336.5, 333, 337.5, 331.5, 2.5],
+] as const;
+const CURRENT_CLEARING_CORES = [
+  [1.8, 1.6],
+  [1.1, 1.45],
+  [0.9, 1.3],
+  [1.2, 1.65],
+  [0.9, 1.3],
+] as const;
+const HISTORICAL_CORE_WIDTHS = [
+  1.8,
+  1.8,
+  1.5,
+  1.5,
+  2.2,
+  2.2,
+  ...CAPSULES.map((capsule) => capsule[5]),
+];
+class CpuServerWorld extends World {
+  override get isServer() {
+    return true;
+  }
+}
+async function fixture(historicalProfile?: WorldTerrainProfile) {
+  const world = new CpuServerWorld();
+  const manager = world.register(
+    "entity-manager",
+    EntityManager,
+  ) as EntityManager;
+  const terrain = world.register("terrain", TerrainSystem) as TerrainSystem;
+  const roads = world.register("roads", RoadNetworkSystem) as RoadNetworkSystem;
+  const resources = world.register(
+    "resource",
+    ResourceSystem,
+  ) as ResourceSystem;
+  if (historicalProfile) {
+    // Capture normal admitted configuration first, then isolate this historical
+    // world's height sampler before grades/roads/worker inputs are initialized.
+    // DataManager and every ordinary fixture retain the actual current world.
+    terrain.getWorldTerrainProfile();
+    terrain["activeTerrainProfile"] = historicalProfile;
+  }
+  await terrain.init();
+  terrain["loadWaterBodiesFromManifest"]();
+  terrain["loadFlatZonesFromManifest"]();
+  await roads.init();
+  await roads.start();
+  return { world, terrain, roads, manager, resources };
+}
+function digest(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function segments(roads: ReturnType<RoadNetworkSystem["getRoads"]>) {
+  return roads.flatMap((road) =>
+    road.path.slice(1).map((end, i) => ({
+      startX: road.path[i].x,
+      startZ: road.path[i].z,
+      endX: end.x,
+      endZ: end.z,
+      width: road.width,
+      ...(road.blendWidth === undefined ? {} : { blendWidth: road.blendWidth }),
+      ...(road.maxInfluence === undefined
+        ? {}
+        : { maxInfluence: road.maxInfluence }),
+    })),
+  );
+}
+
+// Declared POSITION bounds, including actual glTF node transforms, not alpha
+// silhouettes or native rendered/wind bounds. A radial envelope covers any yaw.
+function modelRadius(asset: string): number {
+  expect(asset).toMatch(
+    /^asset:\/\/models\/trees\/(?:[a-z0-9_]+\/)?[a-z0-9_]+\.glb$/,
+  );
+  const path = fileURLToPath(
+    new URL(
+      `../../../../../../server/world/assets/${asset.slice(8)}`,
+      import.meta.url,
+    ),
+  );
+  const fd = openSync(path, "r");
+  let doc: {
+    scene?: number;
+    scenes: { nodes: number[] }[];
+    nodes: {
+      mesh?: number;
+      children?: number[];
+      matrix?: number[];
+      translation?: number[];
+      rotation?: number[];
+      scale?: number[];
+    }[];
+    meshes: { primitives: { attributes: { POSITION: number } }[] }[];
+    accessors: { min: number[]; max: number[] }[];
+  };
+  try {
+    const header = Buffer.alloc(20);
+    expect(readSync(fd, header, 0, 20, 0)).toBe(20);
+    expect(header.readUInt32LE(0)).toBe(0x46546c67);
+    expect(header.readUInt32LE(16)).toBe(0x4e4f534a);
+    const size = header.readUInt32LE(12);
+    expect(size).toBeLessThan(2 * 1024 * 1024);
+    const bytes = Buffer.alloc(size);
+    expect(readSync(fd, bytes, 0, size, 20)).toBe(size);
+    doc = JSON.parse(bytes.toString("utf8"));
+  } finally {
+    closeSync(fd);
+  }
+  const bounds = new THREE.Box3();
+  function visit(index: number, parent: THREE.Matrix4) {
+    const node = doc.nodes[index];
+    const local = node.matrix
+      ? new THREE.Matrix4().fromArray(node.matrix)
+      : new THREE.Matrix4().compose(
+          new THREE.Vector3().fromArray(node.translation ?? [0, 0, 0]),
+          new THREE.Quaternion().fromArray(node.rotation ?? [0, 0, 0, 1]),
+          new THREE.Vector3().fromArray(node.scale ?? [1, 1, 1]),
+        );
+    const transform = parent.clone().multiply(local);
+    if (node.mesh !== undefined)
+      for (const primitive of doc.meshes[node.mesh].primitives) {
+        const position = doc.accessors[primitive.attributes.POSITION];
+        bounds.union(
+          new THREE.Box3(
+            new THREE.Vector3().fromArray(position.min),
+            new THREE.Vector3().fromArray(position.max),
+          ).applyMatrix4(transform),
+        );
+      }
+    for (const child of node.children ?? []) visit(child, transform);
+  }
+  for (const node of doc.scenes[doc.scene ?? 0].nodes)
+    visit(node, new THREE.Matrix4());
+  expect(bounds.isEmpty()).toBe(false);
+  return Math.hypot(
+    Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x)),
+    Math.max(Math.abs(bounds.min.z), Math.abs(bounds.max.z)),
+  );
+}
+
+describe("five surface-only service clearings, actual CPU owners (not native visual proof)", () => {
+  it("retains deterministic circulation and exact bank-court capsule endpoints/outer support with narrower current cores", async () => {
+    const f = await fixture();
+    try {
+      const paths = createCompactIslandPaths(
+        DataManager.getWorldTerrainProfile(),
+        DataManager.getInstance().getAllWorldAreas(),
+        getDuelArenaConfig(),
+        f.terrain.getHeightAt.bind(f.terrain),
+      );
+      // The old hash remains a negative migration oracle: the new route must
+      // go around the bank lodge, not silently reuse the obstructed old route.
+      expect(digest(paths.slice(0, 6))).not.toBe(
+        "5586fa7d23825c111fa469282ffbbfcb45934c8375cf17de655ff33d955fb6d4",
+      );
+      expect(
+        createCompactIslandPaths(
+          DataManager.getWorldTerrainProfile(),
+          DataManager.getInstance().getAllWorldAreas(),
+          getDuelArenaConfig(),
+          f.terrain.getHeightAt.bind(f.terrain),
+        ),
+      ).toEqual(paths);
+      const main = paths.find((p) => p.id === "compact-path-bank-lobby")!;
+      expect(paths).toHaveLength(14);
+      expect(
+        paths.filter((p) => p.id.startsWith("compact-wear-")),
+      ).toHaveLength(3);
+      const clearings = paths.filter((p) =>
+        p.id.startsWith("compact-clearing-"),
+      );
+      expect(clearings).toHaveLength(5);
+      expect(main.path[0]).toMatchObject({ x: 348, z: 321 });
+      expect(main.path.at(-1)).toMatchObject({ x: 385, z: 365.65 });
+      expect(main.path.some((p) => p.x < 342 && p.z > 325)).toBe(true);
+      expect(
+        clearings.map((path) => [
+          path.id.slice("compact-clearing-".length),
+          path.path[0].x,
+          path.path[0].z,
+          path.path.at(-1)!.x,
+          path.path.at(-1)!.z,
+        ]),
+      ).toEqual(CAPSULES.map((capsule) => capsule.slice(0, 5)));
+      expect(clearings.map((path) => [path.width, path.blendWidth])).toEqual(
+        CURRENT_CLEARING_CORES,
+      );
+      for (const [index, path] of clearings.entries()) {
+        // Retain the exact original outer capsules for all dry-floor/tree
+        // safety checks below; only their paint plateaus and feathers change.
+        expect(path.width / 2 + path.blendWidth!).toBe(
+          CAPSULES[index][5] / 2 + 0.5,
+        );
+        expect(Object.hasOwn(path, "maxInfluence")).toBe(false);
+      }
+      process.stdout.write(
+        "Clearing segments/points/length " +
+          JSON.stringify(
+            clearings.map((p) => [
+              p.id,
+              p.path.length - 1,
+              p.path.length,
+              p.length,
+            ]),
+          ) +
+          "\n",
+      );
+    } finally {
+      f.world.destroy();
+    }
+  });
+
+  it("rejects missing, duplicate, nonfinite or unsafe admitted service anchors without mutating their manifest", async () => {
+    const f = await fixture();
+    try {
+      const original = DataManager.getInstance().getAllWorldAreas();
+      const before = JSON.stringify(original);
+      for (const mode of [
+        "missing",
+        "duplicate",
+        "infinite",
+        "nan",
+        "water",
+        "floor",
+      ] as const) {
+        const areas = structuredClone(original);
+        const npcs = areas.central_haven.npcs!;
+        const clerk = npcs.find((n) => n.id === "bank_clerk")!;
+        if (mode === "missing") npcs.splice(npcs.indexOf(clerk), 1);
+        if (mode === "duplicate") npcs.push(structuredClone(clerk));
+        if (mode === "infinite") clerk.position.x = Infinity;
+        if (mode === "nan") clerk.position.z = NaN;
+        if (mode === "water") Object.assign(clerk.position, { x: 345, z: 302 });
+        if (mode === "floor") Object.assign(clerk.position, { x: 387, z: 376 });
+        expect(
+          () =>
+            createCompactIslandPaths(
+              DataManager.getWorldTerrainProfile(),
+              areas,
+              getDuelArenaConfig(),
+              f.terrain.getHeightAt.bind(f.terrain),
+            ),
+          mode,
+        ).toThrow();
+      }
+      expect(JSON.stringify(original)).toBe(before);
+    } finally {
+      f.world.destroy();
+    }
+  });
+
+  it("keeps the complete padded footprints dry and clears the pond bank, floors, lodge and all 48 actual resource models", async () => {
+    const f = await fixture();
+    try {
+      await f.resources.init();
+      await f.terrain.start();
+      await Promise.all([...f.resources["terrainResourceTails"].values()]);
+      await f.resources["initializeWorldAreaResources"]();
+      const trees = f.resources
+        .getAllResources()
+        .filter((r) => r.type === "tree");
+      expect(trees).toHaveLength(48);
+      expect(new Set(trees.map((tree) => tree.id)).size).toBe(48);
+      expect(
+        DataManager.getWorldConfig()?.compactResourceGroves?.layoutId,
+      ).toBe("compact-functional-groves-v2");
+      const areas = DataManager.getInstance().getAllWorldAreas();
+      const floors = arenaGrading.createDuelArenaFloorZones(
+        getDuelArenaConfig(),
+        arenaGrading.getDuelArenaGradeHeight(areas),
+      );
+      const radii = new Map<string, number>();
+      const actualTrees = trees.map((tree) => {
+        const e = f.manager.getEntity(tree.id);
+        expect(e).toBeInstanceOf(ResourceEntity);
+        if (!(e instanceof ResourceEntity))
+          throw new Error("Actual tree missing");
+        const variants = e.config.modelVariants ?? [e.config.model!];
+        const asset = variants[e["hashString"](e.id) % variants.length];
+        if (!radii.has(asset))
+          radii.set(
+            asset,
+            Math.max(
+              ...[asset, inferLOD1Path(asset), inferLOD2Path(asset)].map(
+                modelRadius,
+              ),
+            ),
+          );
+        return {
+          id: e.id,
+          x: e.position.x,
+          z: e.position.z,
+          radius: radii.get(asset)! * (e.config.modelScale ?? 1),
+        };
+      });
+      const paths = f.roads.getRoads();
+      expect(paths).toHaveLength(14);
+      const allSegments = paths.flatMap((road) =>
+        segments([road]).map((segment) => ({ pathId: road.id, ...segment })),
+      );
+      expect(new Set(allSegments.map((s) => s.pathId)).size).toBe(14);
+      expect(segments(paths)).toEqual(f.roads.getRoadSegmentsForGPU());
+      for (const road of paths) {
+        const rows = allSegments.filter((s) => s.pathId === road.id);
+        for (const row of rows) {
+          expect(row.blendWidth).toBe(road.blendWidth);
+          expect(row.maxInfluence).toBe(road.maxInfluence);
+          expect(Object.hasOwn(row, "blendWidth")).toBe(
+            road.blendWidth !== undefined,
+          );
+          expect(Object.hasOwn(row, "maxInfluence")).toBe(
+            road.maxInfluence !== undefined,
+          );
+        }
+      }
+      const lodge = getCompactPreparationLodgeFootprint(
+        COMPACT_PREPARATION_LODGE,
+        false,
+      );
+      const keepOuts = [
+        ...floors.map((floor) => ({
+          id: floor.id,
+          minX: floor.centerX - floor.width / 2,
+          maxX: floor.centerX + floor.width / 2,
+          minZ: floor.centerZ - floor.depth / 2,
+          maxZ: floor.centerZ + floor.depth / 2,
+        })),
+        { id: "current-lodge", ...lodge },
+        {
+          id: "historical-lodge-sentinel",
+          minX: 393.502,
+          maxX: 402.498,
+          minZ: 365.55,
+          maxZ: 376.55,
+        },
+      ];
+      // Additive current-path coverage, including all low-peak shoulders. The
+      // unchanged five-capsule checks below retain their stronger 11m pond-bank,
+      // .5m tree and slope oracles. The pond approach intentionally enters that
+      // 11m bank, but every path's full width+blend must still stay actually dry.
+      const supportSamples = new Set<string>();
+      let minAllPathTreeMargin = Infinity,
+        minAllPathDryMargin = Infinity;
+      for (const segment of allSegments) {
+        const a = { x: segment.startX, z: segment.startZ },
+          b = { x: segment.endX, z: segment.endZ },
+          radius = segment.width / 2 + (segment.blendWidth ?? 0.5);
+        // Test the complete segment against conservatively padded keep-outs,
+        // not every corner of its outward-rounded sampling AABB. Those corners
+        // can lie well outside the actual width+blend capsule near the lodge.
+        for (const bounds of keepOuts)
+          expect(
+            compactPathIntersectsBounds(a, b, bounds, radius),
+            `${segment.pathId}/${bounds.id}: ${JSON.stringify({ a, b, radius })}`,
+          ).toBe(false);
+        for (const tree of actualTrees) {
+          const margin =
+            compactPathSegmentDistance(tree, a, b) - radius - tree.radius;
+          expect(margin, segment.pathId + "/" + tree.id).toBeGreaterThan(0);
+          minAllPathTreeMargin = Math.min(minAllPathTreeMargin, margin);
+        }
+        // Global .125m lattice, rounded outwards, conservatively covers each
+        // complete segment AABB and avoids re-evaluating overlapping road cells.
+        for (
+          let ix = Math.floor((Math.min(a.x, b.x) - radius) * 8);
+          ix <= Math.ceil((Math.max(a.x, b.x) + radius) * 8);
+          ix++
+        )
+          for (
+            let iz = Math.floor((Math.min(a.z, b.z) - radius) * 8);
+            iz <= Math.ceil((Math.max(a.z, b.z) + radius) * 8);
+            iz++
+          ) {
+            const key = `${ix}:${iz}`;
+            if (supportSamples.has(key)) continue;
+            supportSamples.add(key);
+            const x = ix / 8,
+              z = iz / 8,
+              y = f.terrain.getResourceGroundHeight(x, z),
+              water = f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z);
+            expect(Number.isFinite(y)).toBe(true);
+            expect(y, segment.pathId).toBeGreaterThan(water + 0.1);
+            minAllPathDryMargin = Math.min(minAllPathDryMargin, y - water);
+          }
+      }
+      process.stdout.write(
+        "All14 current paths full width+blend CPU support " +
+          JSON.stringify({
+            paths: paths.length,
+            segments: allSegments.length,
+            samples: supportSamples.size,
+            minAllPathTreeMargin,
+            minAllPathDryMargin,
+          }) +
+          "\n",
+      );
+      let samples = 0,
+        minDryMargin = Infinity,
+        maxSlope = 0,
+        minTreeMargin = Infinity;
+      for (const [, ax, az, bx, bz, width] of CAPSULES) {
+        const a = { x: ax, z: az },
+          b = { x: bx, z: bz },
+          radius = width / 2 + 0.5;
+        for (const tree of actualTrees) {
+          const margin =
+            compactPathSegmentDistance(tree, a, b) - radius - tree.radius;
+          expect(margin, tree.id).toBeGreaterThan(0.5);
+          minTreeMargin = Math.min(minTreeMargin, margin);
+        }
+        expect(
+          compactPathSegmentDistance({ x: 343, z: 302 }, a, b) - radius,
+        ).toBeGreaterThan(11);
+        // Entire analytical capsule at 0.125m spacing, plus an expanded AABB.
+        // The AABB is conservative (also covers rounded-cap corners outside paint).
+        for (
+          let x = Math.min(ax, bx) - radius;
+          x <= Math.max(ax, bx) + radius + 1e-8;
+          x += 0.125
+        )
+          for (
+            let z = Math.min(az, bz) - radius;
+            z <= Math.max(az, bz) + radius + 1e-8;
+            z += 0.125
+          ) {
+            const y = f.terrain.getResourceGroundHeight(x, z);
+            expect(Number.isFinite(y)).toBe(true);
+            const water = f.terrain
+              .getWaterBodyRegistry()
+              .getWaterSurfaceAt(x, z);
+            expect(y).toBeGreaterThan(water + 0.1);
+            minDryMargin = Math.min(minDryMargin, y - water);
+            const dx =
+              (f.terrain.getResourceGroundHeight(x + 0.1, z) -
+                f.terrain.getResourceGroundHeight(x - 0.1, z)) /
+              0.2;
+            const dz =
+              (f.terrain.getResourceGroundHeight(x, z + 0.1) -
+                f.terrain.getResourceGroundHeight(x, z - 0.1)) /
+              0.2;
+            maxSlope = Math.max(maxSlope, Math.hypot(dx, dz));
+            for (const floor of floors)
+              expect(
+                Math.abs(x - floor.centerX) <= floor.width / 2 &&
+                  Math.abs(z - floor.centerZ) <= floor.depth / 2,
+              ).toBe(false);
+            expect(
+              x >= 393.502 && x <= 402.498 && z >= 365.55 && z <= 376.55,
+            ).toBe(false);
+            samples++;
+          }
+      }
+      expect(maxSlope).toBeLessThan(0.1);
+      process.stdout.write(
+        "Service clearing conservative AABB CPU samples " +
+          JSON.stringify({
+            samples,
+            minDryMargin,
+            maxSlope,
+            minTreeMargin,
+            modelCount: radii.size,
+          }) +
+          "\n",
+      );
+      const bounds = f.roads["calculateRoadMaskBounds"](
+        f.roads.getRoadSegmentsForGPU(),
+      );
+      const mask = f.roads.generateRoadInfluenceTexture(
+        256,
+        bounds.worldSize,
+        0.5,
+        bounds.centerX,
+        bounds.centerZ,
+      )!;
+      const pixel = bounds.worldSize / 256;
+      let minMaskTreeMargin = Infinity,
+        minClearingMaskBankMargin = Infinity,
+        nonzero = 0;
+      for (let iz = 0; iz < 256; iz++)
+        for (let ix = 0; ix < 256; ix++) {
+          if (mask.data[iz * 256 + ix] === 0) continue;
+          const x = ix * pixel - bounds.worldSize / 2 + bounds.centerX;
+          const z = iz * pixel - bounds.worldSize / 2 + bounds.centerZ;
+          // Full nonzero texel influence under actual index/N producer + linear
+          // sampler centers, not just the mask texel's nominal world coordinate.
+          const minX = x - 0.5 * pixel,
+            maxX = x + 1.5 * pixel;
+          const minZ = z - 0.5 * pixel,
+            maxZ = z + 1.5 * pixel;
+          for (const bounds of keepOuts)
+            expect(
+              minX <= bounds.maxX &&
+                maxX >= bounds.minX &&
+                minZ <= bounds.maxZ &&
+                maxZ >= bounds.minZ,
+              `Full nonzero mask support must avoid ${bounds.id}: ${JSON.stringify({ minX, maxX, minZ, maxZ })}`,
+            ).toBe(false);
+          for (const tree of actualTrees) {
+            const margin =
+              Math.hypot(
+                Math.max(minX - tree.x, 0, tree.x - maxX),
+                Math.max(minZ - tree.z, 0, tree.z - maxZ),
+              ) - tree.radius;
+            expect(margin, tree.id).toBeGreaterThan(0);
+            minMaskTreeMargin = Math.min(minMaskTreeMargin, margin);
+          }
+          if (
+            CAPSULES.some(
+              ([, ax, az, bx, bz, width]) =>
+                compactPathSegmentDistance(
+                  { x, z },
+                  { x: ax, z: az },
+                  { x: bx, z: bz },
+                ) <
+                width / 2 + 0.5,
+            )
+          ) {
+            const margin =
+              Math.hypot(
+                Math.max(minX - 343, 0, 343 - maxX),
+                Math.max(minZ - 302, 0, 302 - maxZ),
+              ) - 11;
+            expect(margin).toBeGreaterThan(0);
+            minClearingMaskBankMargin = Math.min(
+              minClearingMaskBankMargin,
+              margin,
+            );
+          }
+          for (const sx of [minX, maxX])
+            for (const sz of [minZ, maxZ]) {
+              const y = f.terrain.getResourceGroundHeight(sx, sz);
+              expect(Number.isFinite(y)).toBe(true);
+              expect(y).toBeGreaterThan(
+                f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(sx, sz) +
+                  0.1,
+              );
+            }
+          nonzero++;
+        }
+      process.stdout.write(
+        "Complete actual 256 bilinear mask envelope " +
+          JSON.stringify({
+            nonzero,
+            minMaskTreeMargin,
+            minClearingMaskBankMargin,
+          }) +
+          "\n",
+      );
+    } finally {
+      f.world.destroy();
+    }
+  });
+
+  it("records the pre-shoulder sculpted plaza's mask rephase and complete six-leaf native-worker census without changing RNG", async () => {
+    const f = await fixture(SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE);
+    // Historical clearings were qualified while the broad plaza excluded grass.
+    // They also used the pre-Haven-shoulder broken ridge. Retain both parts of
+    // that oracle; current plaza grounding and the admitted shoulder have their
+    // own integration coverage, without rewriting this historical RNG census.
+    // This was already a mixed fixture: RoadNetworkSystem.start reads the v6
+    // DataManager profile, while isolated terrain uses the declared pre-shoulder
+    // SCULPTED profile (v6 identity, compact-island-sculpt-v5 algorithm). The
+    // original eleven v6 centerlines and their sampling arithmetic are unchanged.
+    // Restore their explicit historical widths and absent optional fields below;
+    // switching to v4 path routing or retaining the new feathers would change
+    // this oracle rather than preserve it. Current all14 safety is separate.
+    f.terrain["landscapeGrassSurface"].exclusionPolygons = [];
+    f.terrain.unregisterFlatZone("central_haven_lodge_grass_clearance");
+    const plaza = f.terrain["flatZones"].get("central_haven_plaza")!;
+    f.terrain.registerFlatZone({ ...plaza, excludeGrass: undefined });
+    const grade = f.terrain["flatZones"].get("duel_arena_campus_grade")!;
+    f.terrain.registerFlatZone({ ...grade, excludeGrass: undefined });
+    const tree = new TerrainQuadTree({
+      minSize: 100,
+      maxDepth: 4,
+      resolution: 16,
+    });
+    const worker = new Worker(
+      `const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(message,transfers)=>parentPort.postMessage(message,transfers)};${GRASS_WORKER_CODE}\nparentPort.on('message',data=>self.onmessage({data}));`,
+      { eval: true, env: {} },
+    );
+    let owner: GrassVisualManager | undefined;
+    async function run(input: GrassWorkerInput): Promise<GrassWorkerOutput> {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () => finish(new Error("Actual worker deadline")),
+          10000,
+        );
+        const onMessage = (message: {
+          error?: string;
+          result?: GrassWorkerOutput;
+        }) => {
+          if (message.error) finish(new Error(message.error));
+          else if (message.result) {
+            finish();
+            resolve(message.result);
+          }
+        };
+        function finish(error?: Error) {
+          clearTimeout(timer);
+          worker.off("message", onMessage);
+          worker.off("error", finish);
+          if (error) reject(error);
+        }
+        worker.once("message", onMessage);
+        worker.once("error", finish);
+        worker.postMessage(input);
+      });
+    }
+    try {
+      const generated = f.roads.getRoads();
+      expect(generated).toHaveLength(14);
+      expect(generated.slice(11).map((road) => road.id)).toEqual([
+        "compact-wear-workshop-south",
+        "compact-wear-workshop-west",
+        "compact-wear-supplier-north",
+      ]);
+      const current = generated.slice(0, 11).map((road, index) => {
+        const historical = { ...road, width: HISTORICAL_CORE_WIDTHS[index] };
+        delete historical.blendWidth;
+        delete historical.maxInfluence;
+        return historical;
+      });
+      expect(current).toHaveLength(11);
+      expect(current.map((road) => road.id)).toEqual([
+        "compact-path-pond-bank",
+        "compact-path-bank-workshop",
+        "compact-path-bank-range",
+        "compact-path-bank-altar",
+        "compact-path-bank-lobby",
+        "compact-path-lobby-arena",
+        ...CAPSULES.map(([name]) => `compact-clearing-${name}`),
+      ]);
+      expect(current.some((road) => road.id.startsWith("compact-wear-"))).toBe(
+        false,
+      );
+      for (const road of current) {
+        expect(Object.hasOwn(road, "blendWidth")).toBe(false);
+        expect(Object.hasOwn(road, "maxInfluence")).toBe(false);
+      }
+      expect(current.map((road) => road.width)).toEqual(HISTORICAL_CORE_WIDTHS);
+      generated.splice(0, generated.length, ...current);
+      // Real tile-cache consumers must see the same isolated eleven roads as
+      // the direct GPU/mask export; stale partial wear must not leak into replay.
+      f.roads["buildTileCache"]();
+      const oldSegments = segments(current.slice(0, 6));
+      const currentSegments = f.roads.getRoadSegmentsForGPU();
+      const oldBounds = f.roads["calculateRoadMaskBounds"](oldSegments);
+      const newBounds = f.roads["calculateRoadMaskBounds"](currentSegments);
+      expect(f.roads["calculateRoadMaskTextureSize"](newBounds.worldSize)).toBe(
+        256,
+      );
+      expect(newBounds.worldSize).toBe(oldBounds.worldSize);
+      expect(oldBounds).toEqual({
+        worldSize: 85.5,
+        centerX: 360.85,
+        centerZ: 351.5,
+      });
+      expect(newBounds).toEqual({
+        worldSize: 85.5,
+        centerX: 359.55,
+        centerZ: 351.5,
+      });
+      const currentMask = f.roads.generateRoadInfluenceTexture(
+        256,
+        newBounds.worldSize,
+        0.5,
+        newBounds.centerX,
+        newBounds.centerZ,
+      )!;
+      let baselineMask: typeof currentMask;
+      try {
+        // Actual producer, with exactly the immutable original six roads.
+        // No terrain/grass input, seed, sampler or baked-mask kernel replacement.
+        f.roads.getRoads().splice(6);
+        baselineMask = f.roads.generateRoadInfluenceTexture(
+          256,
+          oldBounds.worldSize,
+          0.5,
+          oldBounds.centerX,
+          oldBounds.centerZ,
+        )!;
+      } finally {
+        f.roads.getRoads().splice(0, f.roads.getRoads().length, ...current);
+      }
+      function linear(
+        mask: typeof currentMask,
+        bounds: typeof oldBounds,
+        x: number,
+        z: number,
+      ) {
+        const tx =
+          ((x - bounds.centerX + bounds.worldSize / 2) / bounds.worldSize) *
+            256 -
+          0.5;
+        const tz =
+          ((z - bounds.centerZ + bounds.worldSize / 2) / bounds.worldSize) *
+            256 -
+          0.5;
+        const ix = Math.floor(tx),
+          iz = Math.floor(tz),
+          fx = tx - ix,
+          fz = tz - iz;
+        const sample = (sx: number, sz: number) =>
+          mask.data[
+            Math.max(0, Math.min(255, sz)) * 256 +
+              Math.max(0, Math.min(255, sx))
+          ];
+        return (
+          (sample(ix, iz) * (1 - fx) + sample(ix + 1, iz) * fx) * (1 - fz) +
+          (sample(ix, iz + 1) * (1 - fx) + sample(ix + 1, iz + 1) * fx) * fz
+        );
+      }
+      let unchangedRoadSamples = 0,
+        maxOldRoadMaskDelta = 0;
+      for (const segment of oldSegments) {
+        const length = Math.hypot(
+          segment.endX - segment.startX,
+          segment.endZ - segment.startZ,
+        );
+        if (!length) continue;
+        for (const fraction of [0, 0.25, 0.5, 0.75, 1])
+          for (const side of [-1, 1])
+            for (const edge of [
+              0,
+              segment.width / 2,
+              segment.width / 2 + 0.25,
+              segment.width / 2 + 0.5,
+            ]) {
+              const x =
+                segment.startX +
+                (segment.endX - segment.startX) * fraction -
+                ((side * (segment.endZ - segment.startZ)) / length) * edge;
+              const z =
+                segment.startZ +
+                (segment.endZ - segment.startZ) * fraction +
+                ((side * (segment.endX - segment.startX)) / length) * edge;
+              // Outside every new capsule AND its conservative two-texel halo:
+              // changes here are mask phase, not newly painted clearing influence.
+              if (
+                CAPSULES.some(
+                  ([, ax, az, bx, bz, width]) =>
+                    compactPathSegmentDistance(
+                      { x, z },
+                      { x: ax, z: az },
+                      { x: bx, z: bz },
+                    ) <=
+                    width / 2 + 0.5 + (2 * newBounds.worldSize) / 256,
+                )
+              )
+                continue;
+              maxOldRoadMaskDelta = Math.max(
+                maxOldRoadMaskDelta,
+                Math.abs(
+                  linear(currentMask, newBounds, x, z) -
+                    linear(baselineMask, oldBounds, x, z),
+                ),
+              );
+              unchangedRoadSamples++;
+            }
+      }
+      expect(unchangedRoadSamples).toBeGreaterThan(5000);
+      expect(maxOldRoadMaskDelta).toBeGreaterThan(0);
+      process.stdout.write(
+        "Original-road bilinear rephase samples (not native pixels) " +
+          JSON.stringify({ unchangedRoadSamples, maxOldRoadMaskDelta }) +
+          "\n",
+      );
+      process.stdout.write(
+        "Service clearing mask phase (same 256 allocation) " +
+          JSON.stringify({
+            oldBounds,
+            newBounds,
+            oldSegments: oldSegments.length,
+            newSegments: currentSegments.length,
+          }) +
+          "\n",
+      );
+      const setup = f.terrain["buildGrassWorkerSetup"]();
+      expect(setup.terrainConfig.TERRAIN_PROFILE).toEqual(
+        SCULPTED_COMPACT_WORLD_TERRAIN_PROFILE,
+      );
+      expect(setup.terrainConfig.TERRAIN_PROFILE.havenShoulder).toBeUndefined();
+      // Input production requires no retained mesh; no ticket is dispatched here.
+      owner = new GrassVisualManager(
+        setup.terrainConfig.TERRAIN_PROFILE_IDENTITY,
+        new THREE.Group(),
+        () => null,
+        f.terrain.getResourceGroundHeight.bind(f.terrain),
+        setup.terrainConfig.WATER_THRESHOLD,
+        (x, z) => f.roads.getRoadInfluenceAt(x, z),
+        (x, z) => f.terrain.isGrassExcludedAt(x, z),
+        (x, z, eligibility) =>
+          f.terrain.getTerrainColorAt(x, z, true, eligibility),
+        setup,
+        COMPACT_ISLAND_GRASS_VISUAL_PROFILE,
+        undefined,
+        (x, z) => f.terrain.getWaterBodyRegistry().getWaterSurfaceAt(x, z),
+      );
+      owner.setPlayerPosition(385, 374);
+      const oldKeys = new Set(oldSegments.map(digest));
+      const receipts = [];
+      for (const [x, z] of [
+        [450, 350],
+        [250, 350],
+        [350, 350],
+        [350, 450],
+        [450, 450],
+        [350, 250],
+      ]) {
+        const node = tree.createNode(null, null, 100, x, z, 4);
+        const input = owner["createWorkerInput"](node, `clearing_${x}_${z}`, 1);
+        const baseline = {
+          ...input,
+          roadSegments: input.roadSegments.filter((s) =>
+            oldKeys.has(digest(s)),
+          ),
+        };
+        if (x === 350 && z === 450) {
+          // The cell with the older census drift has no road input at all.
+          expect(input.roadSegments).toHaveLength(0);
+          expect(baseline.roadSegments).toHaveLength(0);
+        }
+        const [before, after] = [await run(baseline), await run(input)];
+        expect(after.count).toBe(before.count);
+        for (const key of [
+          "offsets",
+          "rotScaleHash",
+          "grassTints",
+          "groundNormals",
+          "groundColors",
+        ] as const)
+          expect(after[key], `${x},${z}/${key}`).toEqual(before[key]);
+        receipts.push([
+          x,
+          z,
+          before.count,
+          after.count,
+          baseline.roadSegments.length,
+          input.roadSegments.length,
+        ]);
+      }
+      // Preserve the older recorded census, whose three-clump drift predates
+      // this road change; its original input difference is not yet established.
+      // natural-paths-head-worker-replay01.json independently captured identical
+      // actual inputs through all23 HEAD shared dependencies and current code:
+      // all12 results/counts and all5 buffers match exactly, including529 here.
+      // HEAD216d12fd emitted worker SHA256:
+      // a9dd260123147ce773abb779c8267c4cb10f8ca53d5c52be08f8931840acf567.
+      // The external evidence is not a runtime/Git dependency of this test.
+      const olderRecordedCensus = [271, 495, 139, 532, 493, 343];
+      const currentCensus = receipts.map((r) => r[3]);
+      expect(currentCensus).toEqual([271, 495, 139, 529, 493, 343]);
+      process.stdout.write(
+        "Historical/current pre-wear census (older drift cause unproven) " +
+          JSON.stringify({ olderRecordedCensus, currentCensus }) +
+          "\n",
+      );
+      process.stdout.write(
+        "Service clearing actual native-worker before/after (not GPU cost) " +
+          JSON.stringify(receipts) +
+          "\n",
+      );
+    } finally {
+      owner?.destroy();
+      await worker.terminate();
+      tree.dispose();
+      f.world.destroy();
+    }
+  }, 20000);
+});

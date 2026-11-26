@@ -183,7 +183,7 @@ export function PrivyAuthProvider({ children }: PrivyAuthProviderProps) {
         appearance: {
           theme: "dark",
           accentColor: "#d4af37",
-          logo: "/images/logo.png",
+          logo: "/images/hyperia-wordmark.svg",
           walletChainType: "ethereum-and-solana",
           walletList: [
             // Solana wallets (prioritized for Saga/Seeker)

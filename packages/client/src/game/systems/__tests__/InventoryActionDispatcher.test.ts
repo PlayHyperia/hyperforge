@@ -27,6 +27,7 @@ interface MockWorld {
   network: {
     send: ReturnType<typeof vi.fn>;
     dropItem?: ReturnType<typeof vi.fn>;
+    applyOptimisticRemoval?: ReturnType<typeof vi.fn>;
   } | null;
   chat: {
     add: ReturnType<typeof vi.fn>;
@@ -48,7 +49,12 @@ function createMockWorld(overrides: Partial<MockWorld> = {}): MockWorld {
     emit: vi.fn(),
     network: {
       send: vi.fn(),
-      dropItem: vi.fn(),
+      dropItem: vi
+        .fn()
+        .mockReturnValue(
+          "ground-item-drop:11111111-1111-4111-8111-111111111111",
+        ),
+      applyOptimisticRemoval: vi.fn(),
     },
     chat: {
       add: vi.fn(),
@@ -182,10 +188,11 @@ describe("InventoryActionDispatcher", () => {
       );
     });
 
-    it("falls back to network.send when dropItem not available", () => {
+    it("fails closed instead of sending an identity-free fallback", () => {
       const worldWithoutDropItem = createMockWorld({
         network: {
           send: vi.fn(),
+          applyOptimisticRemoval: vi.fn(),
         },
       });
 
@@ -196,15 +203,33 @@ describe("InventoryActionDispatcher", () => {
         quantity: 10,
       });
 
-      expect(result.success).toBe(true);
-      expect(worldWithoutDropItem.network?.send).toHaveBeenCalledWith(
-        "dropItem",
-        {
-          itemId: "logs",
-          slot: 5,
-          quantity: 10,
-        },
-      );
+      expect(result).toEqual({
+        success: false,
+        message: "Authoritative item dropping is unavailable",
+      });
+      expect(worldWithoutDropItem.network?.send).not.toHaveBeenCalled();
+      expect(
+        worldWithoutDropItem.network?.applyOptimisticRemoval,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("does not apply an optimistic removal when identity creation fails", () => {
+      mockWorld.network?.dropItem?.mockImplementation(() => {
+        throw new Error("secure identity unavailable");
+      });
+
+      const result = dispatchInventoryAction("drop", {
+        world: asWorld(mockWorld),
+        itemId: "logs",
+        slot: 5,
+        quantity: 10,
+      });
+
+      expect(result).toEqual({
+        success: false,
+        message: "Could not create an authoritative drop operation",
+      });
+      expect(mockWorld.network?.applyOptimisticRemoval).not.toHaveBeenCalled();
     });
 
     it("defaults quantity to 1", () => {

@@ -1,0 +1,163 @@
+{
+  "report": "/Users/lucid/Documents/hyperia/asset-studio/game-test-integration/rock-outcrops-native03/report.json",
+  "reportSha256": "7a12ef233707d288965ae8fdb7af95d3d4538f4701e29efc1c9114ac2ecb91d0",
+  "nativeRenderStudyPassed": true,
+  "productionApproved": false,
+  "sourcePins": 679,
+  "archives": 600,
+  "archiveBytes": 62213276,
+  "images": [
+    {
+      "file": "baseline-world.png",
+      "sha256": "f6f50012ede8c689292518910828ac788eb6ce12bdfed04dd56135df40742ce9",
+      "bytes": 593286
+    },
+    {
+      "file": "baseline-world-UNDER-OVERLAY-DIAGNOSTIC.png",
+      "sha256": "8ded1e263d54b2e0b1fc9661782b83e412aa574d8a59f159bd1d2ceef8a21404",
+      "bytes": 595414
+    },
+    {
+      "file": "baseline-kit-0-front.png",
+      "sha256": "ec690d6d4b0efcc4bed137edd3b2c0d0c39d1459697f61d3482e0b3b2db30681",
+      "bytes": 401447
+    },
+    {
+      "file": "baseline-kit-0-front-UNDER-OVERLAY-DIAGNOSTIC.png",
+      "sha256": "f032353d92acf82095aa17ccff79a0c15c5c64733dbb833de2ee072ca5dc5799",
+      "bytes": 401645
+    },
+    {
+      "file": "baseline-kit-1-front.png",
+      "sha256": "190feaf4b732e63e349777d5c69e4338c041257eae2e3ee7bfc9cb791fd9cbca",
+      "bytes": 436866
+    },
+    {
+      "file": "baseline-kit-1-front-UNDER-OVERLAY-DIAGNOSTIC.png",
+      "sha256": "f5f9f40bddfa84d1a0dd17f4cfd5e9b2b404ffc04dfeb59f6a96691c6b48ac6d",
+      "bytes": 433976
+    },
+    {
+      "file": "planting-meadow-close.png",
+      "sha256": "59fd4857af60b0ebb884dcc0559d9ad8f5f5b3f1afeb6e5c7df7aa3b435c584c",
+      "bytes": 1269957
+    },
+    {
+      "file": "planting-bank.png",
+      "sha256": "3170305518287db0a7f53771c4f4fcbfe89a1195d0f8cbb2cf6cc9c9174dcbb1",
+      "bytes": 1246008
+    },
+    {
+      "file": "planting-anvil.png",
+      "sha256": "d5c88389a850628b53e32814e0acb04ef8c6c88d56bef047bd3a69bd90a214e5",
+      "bytes": 1327826
+    },
+    {
+      "file": "planting-campus-link.png",
+      "sha256": "bb6f6e1588a8279e6e3c60f82d8b6e2f2f074c1681fa2245bc5a72b29bc0f18a",
+      "bytes": 1053582
+    },
+    {
+      "file": "planting-west-ridge.png",
+      "sha256": "70fb9c08efc1a93dd6696ee928094acddb1c8a45baf5f2b7e9cd69365763f3e4",
+      "bytes": 852060
+    },
+    {
+      "file": "planting-bay-horizon.png",
+      "sha256": "c2e33149d2e2f5bd0b9f1f6078c30318c4eeb633aa13125e1e430223be55dd06",
+      "bytes": 720396
+    },
+    {
+      "file": "planting-smithy-front.png",
+      "sha256": "5b32527eaccda371fd715792a3fdb919683a5c4aa59e3c055b4e911bcda55a1d",
+      "bytes": 1077011
+    },
+    {
+      "file": "planting-smithy-west.png",
+      "sha256": "4b28bc0c2c0038859ba7306eed2076f6e6b6c0bf620a65869f82f652c9aeac96",
+      "bytes": 1073115
+    },
+    {
+      "file": "outcrops-before.png",
+      "sha256": "a9ad01ca5e2af19136c990c35de2af8f25281f799d23a86c5480eb975012a71b",
+      "bytes": 1286799
+    },
+    {
+      "file": "outcrops-after.png",
+      "sha256": "6deca19a529fefcf2fffa33b9a864e3f6c1236ded3cef0fcadbf70cafdfa9100",
+      "bytes": 1301569
+    }
+  ],
+  "delivery": [
+    {
+      "path": "/game-assets/rocks/compact-outcrops-v1/rock-moss-set.glb",
+      "status": 200,
+      "sha256": "62c8c753c57b7108f79c98ee0f1bbb2497c27e3fe55a15979765fa02da184c55",
+      "bytes": 2993320,
+      "matchesPrelaunchPin": true
+    }
+  ],
+  "lodCases": [
+    {
+      "view": "meadow-close",
+      "levels": [0, 0, 0, 0, 0, 0],
+      "mainDraws": 3,
+      "mainTriangles": 47856
+    },
+    {
+      "view": "campus-link",
+      "levels": [2, 2, 2, 2, 2, 2],
+      "mainDraws": 3,
+      "mainTriangles": 3000
+    },
+    {
+      "view": "meadow-close",
+      "levels": [0, 0, 0, 0, 0, 1],
+      "mainDraws": 4,
+      "mainTriangles": 41928
+    }
+  ],
+  "contactQueries": 7108,
+  "elapsedNaturalPhase": 0.00666666666666671,
+  "remainingContentErrors": {
+    "policy": "Only this exact previously retained canonical dagger fit-metadata error is allowed in an asset diagnostic. It remains a production-readiness blocker; no console errors are discarded.",
+    "totalErrors": 19,
+    "knownCanonicalMissingFitMetadata": {
+      "exactMessage": "[EquipmentVisual] ❌ Invalid fitted streaming model for bronze_dagger (weapon): missing_fit_metadata",
+      "indexes": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+      "productionReadinessBlocker": true
+    },
+    "unexpected": [
+      {
+        "index": 0,
+        "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      },
+      {
+        "index": 1,
+        "text": "[ClientLoader] Fetch failed for http://localhost:5555/game-assets/models/cow/cow.vrm with status: 404"
+      },
+      {
+        "index": 2,
+        "text": "[MobEntity] VRM load error for gdd_cow_4: Error: HTTP error! status: 404\n    at ClientLoader.fetchAssetBlob (http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165630:11)\n    at async http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165214:20"
+      },
+      {
+        "index": 3,
+        "text": "[MobEntity] VRM load error for gdd_cow_5: Error: HTTP error! status: 404\n    at ClientLoader.fetchAssetBlob (http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165630:11)\n    at async http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165214:20"
+      },
+      {
+        "index": 4,
+        "text": "[MobEntity] VRM load error for gdd_cow_3: Error: HTTP error! status: 404\n    at ClientLoader.fetchAssetBlob (http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165630:11)\n    at async http://localhost:3333/@fs/Users/lucid/Documents/hyperia/hyperia-implementation/packages/shared/build/framework.client.js:165214:20"
+      }
+    ],
+    "errorFree": false,
+    "productionClean": false
+  },
+  "scope": "Retained bytes, native work records, exact source delivery and cleanup. Not a visual verdict, full GPU allocation, presented frame rate or production acceptance.",
+  "regression": {
+    "file": "/Users/lucid/Documents/hyperia/asset-studio/compact-rock-outcrops01/regression01.json",
+    "sha256": "1bae26788e8b120712ae712827a13a5e2c40f832447696f775f71d9427a7c09a",
+    "passed": 1225,
+    "total": 1225,
+    "files": 90
+  }
+}

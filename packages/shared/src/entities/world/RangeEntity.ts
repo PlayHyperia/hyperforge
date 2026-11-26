@@ -14,9 +14,7 @@
  * **Visual Representation**:
  * - Gray/brown stove-like box
  *
- * **Special Ranges**:
- * - Lumbridge Castle Range: Standard
- * - Hosidius Kitchen Range: 5% burn reduction (requires favor)
+ * Specialized ranges may provide a configured burn-rate reduction.
  *
  * **Runs on**: Server (authoritative), Client (visual)
  */
@@ -51,7 +49,7 @@ export interface RangeEntityConfig {
   name?: string;
   position: { x: number; y: number; z: number };
   rotation?: { x: number; y: number; z: number };
-  /** Burn rate reduction (0 = standard, 0.05 = Hosidius) */
+  /** Burn rate reduction (0 = standard, 0.05 = five percent) */
   burnReduction?: number;
   /** Collision footprint - predefined ("standard", "large") or custom { width, depth } */
   footprint?: FootprintSpec;

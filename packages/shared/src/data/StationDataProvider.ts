@@ -32,6 +32,7 @@
  */
 
 import type { FootprintSpec } from "../types/game/resource-processing-types";
+import type { GrassExclusionBounds } from "../types/world/terrain";
 
 // ============================================================================
 // TYPES
@@ -61,6 +62,8 @@ export interface StationManifestEntry {
   flattenPadding?: number;
   /** Meters over which to blend from flat to procedural terrain (default: 0.5) */
   flattenBlendRadius?: number;
+  /** Grass-only clearance in meters beyond the scaled model bounds; omission preserves the terrain pad exclusion. */
+  grassClearanceMargin?: number;
 }
 
 /**
@@ -116,6 +119,8 @@ export interface StationData {
   flattenPadding: number;
   /** Meters over which to blend from flat to procedural terrain */
   flattenBlendRadius: number;
+  /** Optional grass-only clearance, independent of terrain grading and collision. */
+  grassClearanceMargin?: number;
 }
 
 // ============================================================================
@@ -214,6 +219,16 @@ export class StationDataProvider {
    * Called by DataManager after loading manifests/stations.json.
    */
   public loadStations(manifest: StationsManifest): void {
+    // Bounds may arrive later. Validate authored margins before replacing the
+    // current station table, then resolve geometry only when it is requested.
+    for (const entry of manifest.stations) {
+      if (entry.grassClearanceMargin !== undefined) {
+        this.validateGrassClearanceMargin(
+          entry.type,
+          entry.grassClearanceMargin,
+        );
+      }
+    }
     this.stationEntries = manifest.stations;
     this.rebuildStations();
   }
@@ -272,6 +287,13 @@ export class StationDataProvider {
         flattenPadding: entry.flattenPadding ?? 0.3,
         flattenBlendRadius: entry.flattenBlendRadius ?? 0.5,
       };
+      if (entry.grassClearanceMargin !== undefined) {
+        this.validateGrassClearanceMargin(
+          entry.type,
+          entry.grassClearanceMargin,
+        );
+        stationData.grassClearanceMargin = entry.grassClearanceMargin;
+      }
 
       this.stationsByType.set(entry.type, stationData);
     }
@@ -339,6 +361,83 @@ export class StationDataProvider {
    */
   public getStationData(stationType: string): StationData | undefined {
     return this.stationsByType.get(stationType);
+  }
+
+  private validateGrassClearanceMargin(
+    stationType: string,
+    margin: number,
+  ): void {
+    if (typeof margin !== "number" || !Number.isFinite(margin) || margin < 0) {
+      throw new Error(
+        `[StationDataProvider] ${stationType}: grassClearanceMargin must be a finite nonnegative number`,
+      );
+    }
+  }
+
+  /**
+   * Resolve optional grass clearance around the actual, unrotated station model.
+   * Uses model-space min/max rather than rounded collision tiles, preserving an
+   * off-center model pivot. The margin and result never alter the grading pad.
+   * Configured clearances require usable geometry; there is no fallback box.
+   */
+  public getGrassExclusionBounds(
+    stationType: string,
+    centerX: number,
+    centerZ: number,
+  ): GrassExclusionBounds | undefined {
+    const station = this.stationsByType.get(stationType);
+    const margin = station?.grassClearanceMargin;
+    if (margin === undefined) return undefined;
+    this.validateGrassClearanceMargin(stationType, margin);
+
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerZ)) {
+      throw new Error(
+        `[StationDataProvider] ${stationType}: grass clearance requires a finite world position`,
+      );
+    }
+    if (
+      !station ||
+      typeof station.model !== "string" ||
+      station.model.length === 0 ||
+      !Number.isFinite(station.modelScale) ||
+      station.modelScale <= 0
+    ) {
+      throw new Error(
+        `[StationDataProvider] ${stationType}: grass clearance requires a model and positive finite modelScale`,
+      );
+    }
+
+    const bounds = this.modelBoundsByPath.get(station.model)?.bounds;
+    if (
+      !bounds ||
+      !Number.isFinite(bounds.min?.x) ||
+      !Number.isFinite(bounds.max?.x) ||
+      !Number.isFinite(bounds.min?.z) ||
+      !Number.isFinite(bounds.max?.z) ||
+      bounds.min.x >= bounds.max.x ||
+      bounds.min.z >= bounds.max.z
+    ) {
+      throw new Error(
+        `[StationDataProvider] ${stationType}: grass clearance requires finite, nonempty XZ model bounds for ${station.model}`,
+      );
+    }
+
+    const result: GrassExclusionBounds = {
+      minX: centerX + bounds.min.x * station.modelScale - margin,
+      maxX: centerX + bounds.max.x * station.modelScale + margin,
+      minZ: centerZ + bounds.min.z * station.modelScale - margin,
+      maxZ: centerZ + bounds.max.z * station.modelScale + margin,
+    };
+    if (
+      !Object.values(result).every(Number.isFinite) ||
+      result.minX >= result.maxX ||
+      result.minZ >= result.maxZ
+    ) {
+      throw new Error(
+        `[StationDataProvider] ${stationType}: grass clearance cannot be represented as finite, nonempty world bounds`,
+      );
+    }
+    return result;
   }
 
   /**

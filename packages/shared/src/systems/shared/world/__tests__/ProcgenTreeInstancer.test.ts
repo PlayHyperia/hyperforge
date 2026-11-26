@@ -15,6 +15,202 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import THREE from "../../../../extras/three/three";
+import { World } from "../../../../core/World";
+import { ProcgenTreeInstancer } from "../ProcgenTreeInstancer";
+
+describe("actual ProcgenTreeInstancer read-only render ownership", () => {
+  const worlds: World[] = [];
+  const sources: THREE.Mesh[] = [];
+  let owner: ProcgenTreeInstancer | null = null;
+
+  function newWorld(): World {
+    const world = new World();
+    worlds.push(world);
+    return world;
+  }
+
+  function sourceGroup(): THREE.Group {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 4, 1),
+      new THREE.MeshStandardNodeMaterial({ color: 0x664422 }),
+    );
+    sources.push(mesh);
+    const group = new THREE.Group();
+    group.add(mesh);
+    return group;
+  }
+
+  afterEach(() => {
+    owner?.dispose();
+    owner = null;
+    for (const mesh of sources.splice(0)) {
+      mesh.geometry.dispose();
+      const materials = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material];
+      for (const material of materials) material.dispose();
+    }
+    for (const world of worlds.splice(0)) world.destroy();
+  });
+
+  it("does not initialize an absent owner or adopt another world/scene", () => {
+    const world = newWorld();
+    const scene = world.stage.scene;
+    const originalChildren = [...scene.children];
+    expect(ProcgenTreeInstancer.getRenderOwnership(world, scene)).toBeNull();
+    expect(ProcgenTreeInstancer.getRenderOwnership(world, scene)).toBeNull();
+    expect(scene.children).toEqual(originalChildren);
+
+    owner = ProcgenTreeInstancer.getInstance(world);
+    const current = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    const otherWorld = newWorld();
+    expect(
+      ProcgenTreeInstancer.getRenderOwnership(otherWorld, scene),
+    ).toBeNull();
+    expect(
+      ProcgenTreeInstancer.getRenderOwnership(world, new THREE.Scene()),
+    ).toBeNull();
+    expect(
+      ProcgenTreeInstancer.getRenderOwnership(
+        otherWorld,
+        otherWorld.stage.scene,
+      ),
+    ).toBeNull();
+    expect(ProcgenTreeInstancer.getRenderOwnership(world, scene)).toEqual(
+      current,
+    );
+  });
+
+  it("freezes metadata while retaining every real hidden/empty global and LOD mesh", () => {
+    const world = newWorld();
+    owner = ProcgenTreeInstancer.getInstance(world);
+    owner.registerPreset(
+      "ownership-fixture",
+      sourceGroup(),
+      sourceGroup(),
+      sourceGroup(),
+    );
+    const scene = world.stage.scene;
+    const meshes = scene.children.filter(
+      (child): child is THREE.InstancedMesh =>
+        child instanceof THREE.InstancedMesh,
+    );
+    expect(meshes).toHaveLength(5);
+    for (const mesh of meshes) {
+      expect(mesh.count).toBe(0);
+      mesh.visible = false;
+    }
+    const before = meshes.map((mesh) => ({
+      mesh,
+      version:
+        mesh.material instanceof THREE.Material ? mesh.material.version : null,
+      matrixVersion: mesh.instanceMatrix.version,
+      count: mesh.count,
+    }));
+    const snapshot = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    expect(snapshot.owner).toBe(owner);
+    expect(snapshot.world).toBe(world);
+    expect(snapshot.scene).toBe(scene);
+    expect(new Set(snapshot.records.map((record) => record.mesh))).toEqual(
+      new Set(meshes),
+    );
+    expect(
+      snapshot.records
+        .filter((record) => record.kind === "pool")
+        .map((record) => record.lod),
+    ).toEqual(["lod0", "lod1", "lod2"]);
+    expect(
+      snapshot.records
+        .filter((record) => record.preset === null)
+        .map((record) => record.kind),
+    ).toEqual(["global-leaves", "global-clusters"]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.records)).toBe(true);
+    for (const record of snapshot.records) {
+      expect(Object.isFrozen(record)).toBe(true);
+      expect(record.geometry).toBe(record.mesh.geometry);
+      expect(record.material).toBe(record.mesh.material);
+      for (const handle of [record.mesh, record.geometry, record.material])
+        expect(Object.isFrozen(handle)).toBe(false);
+    }
+    expect(Object.isFrozen(owner)).toBe(false);
+    expect(Object.isFrozen(world)).toBe(false);
+    expect(Object.isFrozen(scene)).toBe(false);
+    expect(ProcgenTreeInstancer.getRenderOwnership(world, scene)).toEqual(
+      snapshot,
+    );
+    expect(
+      scene.children.filter((child) => child instanceof THREE.InstancedMesh),
+    ).toEqual(meshes);
+    for (const state of before) {
+      expect(state.mesh.visible).toBe(false);
+      expect(state.mesh.count).toBe(state.count);
+      expect(state.mesh.instanceMatrix.version).toBe(state.matrixVersion);
+      expect(
+        state.mesh.material instanceof THREE.Material
+          ? state.mesh.material.version
+          : null,
+      ).toBe(state.version);
+    }
+  });
+
+  it("requires fresh membership after publication and reports actual replacement handles", () => {
+    const world = newWorld();
+    const scene = world.stage.scene;
+    owner = ProcgenTreeInstancer.getInstance(world);
+    const original = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    expect(original.records).toHaveLength(2);
+    owner.registerPreset("later-preset", sourceGroup());
+    const current = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    expect(current.owner).toBe(original.owner);
+    expect(original.records).toHaveLength(2);
+    expect(current.records).toHaveLength(3);
+    const record = current.records.find((member) => member.kind === "pool")!;
+    const geometry = record.mesh.geometry;
+    const material = record.mesh.material;
+    const replacementGeometry = new THREE.BoxGeometry();
+    const replacementMaterial = new THREE.MeshStandardNodeMaterial();
+    const replacementMaterials = [replacementMaterial];
+    try {
+      record.mesh.geometry = replacementGeometry;
+      record.mesh.material = replacementMaterials;
+      const replaced = ProcgenTreeInstancer.getRenderOwnership(
+        world,
+        scene,
+      )!.records.find((member) => member.mesh === record.mesh)!;
+      expect(replaced.geometry).toBe(replacementGeometry);
+      expect(replaced.material).toBe(replacementMaterials);
+      expect(record.geometry).toBe(geometry);
+      expect(record.material).toBe(material);
+      expect(Object.isFrozen(replacementMaterials)).toBe(false);
+    } finally {
+      record.mesh.geometry = geometry;
+      record.mesh.material = material;
+      replacementGeometry.dispose();
+      replacementMaterial.dispose();
+    }
+  });
+
+  it("reports retirement without reinitializing and distinguishes the successor owner", () => {
+    const world = newWorld();
+    const scene = world.stage.scene;
+    owner = ProcgenTreeInstancer.getInstance(world);
+    const previous = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    const oldMeshes = new Set(previous.records.map((record) => record.mesh));
+    owner.dispose();
+    owner = null;
+    const children = [...scene.children];
+    expect(ProcgenTreeInstancer.getRenderOwnership(world, scene)).toBeNull();
+    expect(scene.children).toEqual(children);
+    owner = ProcgenTreeInstancer.getInstance(world);
+    const successor = ProcgenTreeInstancer.getRenderOwnership(world, scene)!;
+    expect(successor.owner).not.toBe(previous.owner);
+    expect(successor.records).toHaveLength(2);
+    expect(
+      successor.records.every((record) => !oldMeshes.has(record.mesh)),
+    ).toBe(true);
+  });
+});
 
 // ============================================================================
 // CONFIGURATION CONSTANTS (exported from module for testing)

@@ -6,25 +6,29 @@
     "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@hyperforge/procgen/building/viewer": [
+        "../procgen/src/building/viewer/index.ts"
+      ]
     },
-    
+
     /* Emit */
     "outDir": "./dist",
     "rootDir": "./",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    
+
     /* Interop Constraints */
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    
+
     /* Type Checking */
     "strict": true,
     "ignoreDeprecations": "6.0",
@@ -32,7 +36,7 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
-    
+
     /* Advanced */
     "useDefineForClassFields": true,
     "noUncheckedSideEffectImports": true
@@ -48,6 +52,7 @@
     "dist",
     "**/*.spec.ts",
     "**/*.test.ts",
+    "src/store/useDebuggerStore 2.ts",
     "src/tests/**/*"
   ]
-} 
+}

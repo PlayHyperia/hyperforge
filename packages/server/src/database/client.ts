@@ -44,9 +44,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import * as schema from "./schema";
+import { createPostgresClientDatabase } from "./postgres-transaction";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { readSolanaAgentAuthConfig } from "../infrastructure/auth/solana-agent-auth.js";
+import { readDistributedRateLimitConfig } from "../infrastructure/rate-limit/distributed-rate-limit.js";
 
 const { Pool } = pg;
 
@@ -105,7 +108,7 @@ function getMigrationErrorMessage(error: unknown): string {
 /**
  * Ensure additive columns exist when the live DB lags behind drizzle-kit migrate
  * (e.g. SKIP_MIGRATIONS, wrong DATABASE_URL for CLI migrate, or partial apply).
- * Matches migration 0053_add_agent_streaming_duel_enabled.sql.
+ * Matches the fail-closed default established by migration 0090.
  */
 async function ensureAgentMappingsStreamingDuelColumn(
   pool: pg.Pool,
@@ -113,13 +116,225 @@ async function ensureAgentMappingsStreamingDuelColumn(
   try {
     await pool.query(`
       ALTER TABLE "agent_mappings"
-      ADD COLUMN IF NOT EXISTS "streaming_duel_enabled" boolean DEFAULT true NOT NULL;
+      ADD COLUMN IF NOT EXISTS "streaming_duel_enabled" boolean DEFAULT false NOT NULL;
+      ALTER TABLE "agent_mappings"
+      ALTER COLUMN "streaming_duel_enabled" SET DEFAULT false;
     `);
     console.log("[DB] ✓ Ensured agent_mappings.streaming_duel_enabled");
   } catch (error) {
     console.warn(
       "[DB] Could not ensure agent_mappings.streaming_duel_enabled:",
       getMigrationErrorMessage(error),
+    );
+  }
+}
+
+export async function assertSolanaAgentAuthDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const config = readSolanaAgentAuthConfig(environment);
+  if (!config) return;
+
+  const result = await pool.query<{
+    challenge_table: string | null;
+    constraint_count: string;
+    immutable_trigger: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.solana_agent_auth_challenges')::text AS challenge_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.solana_agent_auth_challenges')
+            AND tgname = 'trg_solana_agent_auth_challenge_immutability'
+            AND tgenabled <> 'D'
+       ) AS immutable_trigger,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.solana_agent_auth_challenges')
+            AND conname IN (
+              'solana_agent_auth_hash_lengths_check',
+              'solana_agent_auth_lifetime_check',
+              'solana_agent_auth_attempts_check',
+              'solana_agent_auth_terminal_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.challenge_table !== "solana_agent_auth_challenges" ||
+    authority.immutable_trigger !== true ||
+    Number(authority.constraint_count) !== 4
+  ) {
+    throw new Error(
+      "[DB] SOL agent authentication is enabled but migration 0091 authority is incomplete",
+    );
+  }
+}
+
+export async function assertAgentCredentialSessionDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const solanaAuthEnabled = readSolanaAgentAuthConfig(environment) !== null;
+  const deploymentRequiresAuthority =
+    environment.NODE_ENV === "production" ||
+    environment.NODE_ENV === "staging" ||
+    solanaAuthEnabled;
+  if (!deploymentRequiresAuthority) return;
+
+  const result = await pool.query<{
+    constraint_count: string;
+    immutable_trigger: boolean;
+    session_table: string | null;
+    single_active_index: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.agent_credential_sessions')::text AS session_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.agent_credential_sessions')
+            AND tgname = 'trg_agent_credential_session_immutability'
+            AND tgenabled <> 'D'
+       ) AS immutable_trigger,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.agent_credential_sessions')
+            AND c.relname = 'idx_agent_credential_sessions_one_active'
+            AND i.indisunique
+            AND i.indpred IS NOT NULL
+       ) AS single_active_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.agent_credential_sessions')
+            AND conname IN (
+              'agent_credential_session_id_check',
+              'agent_credential_session_auth_method_check',
+              'agent_credential_session_lifetime_check',
+              'agent_credential_session_revocation_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.session_table !== "agent_credential_sessions" ||
+    authority.immutable_trigger !== true ||
+    authority.single_active_index !== true ||
+    Number(authority.constraint_count) !== 4
+  ) {
+    throw new Error(
+      "[DB] Agent credential sessions are required but migration 0092 authority is incomplete",
+    );
+  }
+}
+
+export async function assertDistributedRateLimitDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const config = readDistributedRateLimitConfig(environment);
+  if (!config.enabled) return;
+
+  const result = await pool.query<{
+    bucket_table: string | null;
+    constraint_count: string;
+    expiry_index: boolean;
+  }>(
+    `SELECT
+       to_regclass('public.distributed_rate_limit_buckets')::text AS bucket_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.distributed_rate_limit_buckets')
+            AND c.relname = 'idx_distributed_rate_limit_buckets_expiry'
+            AND i.indisvalid
+       ) AS expiry_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.distributed_rate_limit_buckets')
+            AND conname IN (
+              'distributed_rate_limit_bucket_key_check',
+              'distributed_rate_limit_scope_check',
+              'distributed_rate_limit_window_check',
+              'distributed_rate_limit_count_check',
+              'distributed_rate_limit_updated_check'
+            )
+       ) AS constraint_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.bucket_table !== "distributed_rate_limit_buckets" ||
+    authority.expiry_index !== true ||
+    Number(authority.constraint_count) !== 5
+  ) {
+    throw new Error(
+      "[DB] Distributed rate limiting is enabled but migration 0093 authority is incomplete",
+    );
+  }
+}
+
+export async function assertDuelPreparationHostLeaseDatabaseAuthority(
+  pool: Pick<pg.Pool, "query">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (environment.STREAMING_DUEL_PREPARATION_MS === undefined) return;
+
+  const result = await pool.query<{
+    constraint_count: string;
+    expiry_index: boolean;
+    lease_table: string | null;
+    required_trigger_count: string;
+  }>(
+    `SELECT
+       to_regclass('public.streaming_duel_preparation_agent_host_leases')::text AS lease_table,
+       EXISTS (
+         SELECT 1
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE i.indrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND c.relname = 'idx_streaming_duel_preparation_agent_host_leases_expiry'
+            AND i.indisvalid
+       ) AS expiry_index,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_constraint
+          WHERE conrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND conname IN (
+              'streaming_duel_preparation_agent_host_leases_pk',
+              'streaming_duel_preparation_agent_host_leases_preparation_fk',
+              'streaming_duel_preparation_agent_host_leases_identity_check',
+              'streaming_duel_preparation_agent_host_leases_time_check'
+            )
+       ) AS constraint_count,
+       (
+         SELECT COUNT(*)::text
+           FROM pg_trigger
+          WHERE tgrelid = to_regclass('public.streaming_duel_preparation_agent_host_leases')
+            AND tgname IN (
+              'streaming_duel_preparation_agent_host_leases_validate',
+              'streaming_duel_preparation_agent_host_leases_reject_removal',
+              'streaming_duel_preparation_agent_host_leases_reject_truncate'
+            )
+            AND tgenabled <> 'D'
+       ) AS required_trigger_count`,
+  );
+  const authority = result.rows[0];
+  if (
+    authority?.lease_table !== "streaming_duel_preparation_agent_host_leases" ||
+    authority.expiry_index !== true ||
+    Number(authority.constraint_count) !== 4 ||
+    Number(authority.required_trigger_count) !== 3
+  ) {
+    throw new Error(
+      "[DB] Private duel preparation is enabled but migration 0098 host-lease authority is incomplete",
     );
   }
 }
@@ -196,6 +411,27 @@ function resolveMigrationsFolder(): string {
   );
 }
 
+async function migrateWithDedicatedClient(
+  pool: pg.Pool,
+  migrationsFolder: string,
+): Promise<void> {
+  const client = await pool.connect();
+  let discardClient = false;
+  try {
+    // Drizzle's migrator opens its own transaction. Supplying one acquired
+    // PoolClient guarantees its BEGIN and every migration statement share the
+    // same physical PostgreSQL connection even when multiple `pg` copies are
+    // present in the runtime dependency graph.
+    const migrationDb = createPostgresClientDatabase(client);
+    await migrate(migrationDb, { migrationsFolder });
+  } catch (error) {
+    discardClient = true;
+    throw error;
+  } finally {
+    client.release(discardClient);
+  }
+}
+
 /**
  * Detect if connection string is for a serverless/managed database
  * These require special handling for connection management:
@@ -235,6 +471,74 @@ function parseOptionalInt(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+const DEFAULT_POSTGRES_CONNECTION_TIMEOUT_MS = 10_000;
+const DEFAULT_POSTGRES_STATEMENT_TIMEOUT_MS = 15_000;
+const DEFAULT_POSTGRES_QUERY_TIMEOUT_MS = 20_000;
+const MIN_POSTGRES_TIMEOUT_MS = 1_000;
+const MAX_POSTGRES_TIMEOUT_MS = 300_000;
+
+export type PostgresPoolTimeouts = {
+  connectionTimeoutMillis: number;
+  statementTimeoutMillis: number;
+  queryTimeoutMillis: number;
+};
+
+function resolvePositivePostgresTimeout(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+): number {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_POSTGRES_TIMEOUT_MS ||
+    parsed > MAX_POSTGRES_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `${name} must be an integer between ${MIN_POSTGRES_TIMEOUT_MS} and ${MAX_POSTGRES_TIMEOUT_MS}`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Bound every layer of a PostgreSQL operation. The server statement timeout
+ * fires first so node-postgres never releases a connection that can still be
+ * executing a timed-out statement. The client read timeout is the final bound
+ * for broken sockets and must therefore remain strictly greater.
+ */
+export function resolvePostgresPoolTimeouts(
+  env: NodeJS.ProcessEnv = process.env,
+): PostgresPoolTimeouts {
+  const connectionTimeoutMillis = resolvePositivePostgresTimeout(
+    env,
+    "POSTGRES_CONNECTION_TIMEOUT_MS",
+    DEFAULT_POSTGRES_CONNECTION_TIMEOUT_MS,
+  );
+  const statementTimeoutMillis = resolvePositivePostgresTimeout(
+    env,
+    "POSTGRES_STATEMENT_TIMEOUT_MS",
+    DEFAULT_POSTGRES_STATEMENT_TIMEOUT_MS,
+  );
+  const queryTimeoutMillis = resolvePositivePostgresTimeout(
+    env,
+    "POSTGRES_QUERY_TIMEOUT_MS",
+    DEFAULT_POSTGRES_QUERY_TIMEOUT_MS,
+  );
+  if (queryTimeoutMillis <= statementTimeoutMillis) {
+    throw new Error(
+      "POSTGRES_QUERY_TIMEOUT_MS must be greater than POSTGRES_STATEMENT_TIMEOUT_MS",
+    );
+  }
+  return {
+    connectionTimeoutMillis,
+    statementTimeoutMillis,
+    queryTimeoutMillis,
+  };
 }
 
 /**
@@ -297,6 +601,7 @@ export async function initializeDatabase(connectionString: string) {
   const poolMinCandidate =
     envMin !== undefined && envMin >= 0 ? envMin : defaultMin;
   const poolMin = Math.min(poolMinCandidate, poolMax);
+  const poolTimeouts = resolvePostgresPoolTimeouts();
 
   const poolConfig: pg.PoolConfig = {
     connectionString,
@@ -306,7 +611,9 @@ export async function initializeDatabase(connectionString: string) {
     min: poolMin,
     // Serverless DBs close idle connections quickly, so use shorter timeout
     idleTimeoutMillis: isServerless ? 20000 : 30000,
-    connectionTimeoutMillis: 60000,
+    connectionTimeoutMillis: poolTimeouts.connectionTimeoutMillis,
+    statement_timeout: poolTimeouts.statementTimeoutMillis,
+    query_timeout: poolTimeouts.queryTimeoutMillis,
     allowExitOnIdle: true,
     // Enable SSL for cloud databases
     ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
@@ -319,7 +626,9 @@ export async function initializeDatabase(connectionString: string) {
   };
 
   console.log(
-    `[DB] Initializing ${isServerless ? "serverless" : "standard"} PostgreSQL pool (max: ${poolConfig.max}, keepAlive: ${poolConfig.keepAlive})`,
+    `[DB] Initializing ${isServerless ? "serverless" : "standard"} PostgreSQL pool ` +
+      `(max: ${poolConfig.max}, connect timeout: ${poolTimeouts.connectionTimeoutMillis}ms, ` +
+      `statement timeout: ${poolTimeouts.statementTimeoutMillis}ms, query timeout: ${poolTimeouts.queryTimeoutMillis}ms)`,
   );
 
   const pool = new Pool(poolConfig);
@@ -389,7 +698,7 @@ export async function initializeDatabase(connectionString: string) {
   } else {
     try {
       console.log("[DB] Running migrations...");
-      await migrate(db, { migrationsFolder });
+      await migrateWithDedicatedClient(pool, migrationsFolder);
       console.log("[DB] ✓ Migrations complete");
     } catch (error) {
       if (isMigrationExistingObjectError(error)) {
@@ -422,7 +731,7 @@ export async function initializeDatabase(connectionString: string) {
       }
 
       try {
-        await migrate(db, { migrationsFolder });
+        await migrateWithDedicatedClient(pool, migrationsFolder);
         console.log("[DB] ✓ Recovery migration pass complete");
       } catch (recoveryError) {
         if (isMigrationExistingObjectError(recoveryError)) {
@@ -448,6 +757,10 @@ export async function initializeDatabase(connectionString: string) {
   }
 
   await ensureAgentMappingsStreamingDuelColumn(pool);
+  await assertSolanaAgentAuthDatabaseAuthority(pool);
+  await assertAgentCredentialSessionDatabaseAuthority(pool);
+  await assertDistributedRateLimitDatabaseAuthority(pool);
+  await assertDuelPreparationHostLeaseDatabaseAuthority(pool);
 
   dbInstance = db;
   poolInstance = pool;

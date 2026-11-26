@@ -114,7 +114,7 @@ export class BankRepository extends BaseRepository {
 
     this.ensureDatabase();
 
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       // Delete existing bank items
       await tx
         .delete(schema.bankStorage)
@@ -150,7 +150,7 @@ export class BankRepository extends BaseRepository {
 
     this.ensureDatabase();
 
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       // Delete existing tabs
       await tx
         .delete(schema.bankTabs)
@@ -189,7 +189,7 @@ export class BankRepository extends BaseRepository {
 
     this.ensureDatabase();
 
-    await this.db.transaction(async (tx) => {
+    await this.withTransaction(async (tx) => {
       // Delete existing bank items
       await tx
         .delete(schema.bankStorage)

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "title": "KayKit preparation hatchet supported motion matrix",
+  "motions": [
+    {
+      "id": "idle",
+      "name": "Idle transition",
+      "asset": "motions/kaykit-idle.glb",
+      "sampleRatio": 0.35
+    },
+    {
+      "id": "woodcutting",
+      "name": "Woodcutting",
+      "asset": "motions/kaykit-woodcutting.glb",
+      "sampleRatio": 0.55
+    },
+    {
+      "id": "death",
+      "name": "Death suppression",
+      "asset": "motions/kaykit-death.glb",
+      "sampleRatio": 0.9
+    },
+    {
+      "id": "victory",
+      "name": "Victory suppression",
+      "asset": "motions/kaykit-victory.glb",
+      "sampleRatio": 0.55
+    }
+  ]
+}

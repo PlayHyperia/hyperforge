@@ -12,6 +12,17 @@
  * the flat 100m tile grid (TerrainTile). getHeightAt() is unaffected.
  */
 
+/** Fixed authored areas that need gameplay-density geometry in distant streams. */
+export interface TerrainDetailRegion {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+  readonly resolution: number;
+  /** Retain minimum-size descendants inside existing roots, independent of focus. */
+  readonly keepMinSize?: boolean;
+}
+
 export interface QuadTreeConfig {
   /** Smallest chunk size in meters (leaf nodes). Should match TILE_SIZE for grid alignment. */
   minSize: number;
@@ -21,10 +32,14 @@ export interface QuadTreeConfig {
   splitRatio: number;
   /** Multiplier on splitRatio for unsplit threshold (prevents thrashing at boundary). Must be > 1. */
   unsplitMultiplier: number;
-  /** Uniform vertex resolution (segments per axis) for ALL depth levels */
+  /** Default vertex count per axis, before fixed fine-detail leaf overrides. */
   resolution: number;
+  /** Optional fixed overrides for intersecting minimum-size leaves only. */
+  fineDetailRegions?: readonly TerrainDetailRegion[];
   /** Skirt drop distance in meters to hide LOD seams */
   skirtDrop: number;
+  /** Number of top-level root chunks to retain around the active root. */
+  rootChunkRadius: number;
 }
 
 export const DEFAULT_QUAD_TREE_CONFIG: QuadTreeConfig = {
@@ -34,6 +49,7 @@ export const DEFAULT_QUAD_TREE_CONFIG: QuadTreeConfig = {
   unsplitMultiplier: 1.2,
   resolution: 32,
   skirtDrop: 15,
+  rootChunkRadius: 1,
 };
 
 export type QuadPosition = "ne" | "nw" | "sw" | "se";
@@ -121,20 +137,44 @@ export class TerrainQuadNode {
     this.testReady();
   }
 
-  /** Resolution (segments per axis) — uniform for all depth levels */
+  /** Fixed per-leaf detail never changes merely because the camera moves. */
   get resolution(): number {
-    return this.tree.config.resolution;
+    let resolution = this.tree.config.resolution;
+    if (this.isMaxDepth) {
+      for (const region of this.tree.config.fineDetailRegions ?? []) {
+        if (this.intersectsDetailRegion(region)) {
+          resolution = Math.max(resolution, region.resolution);
+        }
+      }
+    }
+    return resolution;
+  }
+
+  private intersectsDetailRegion(region: TerrainDetailRegion): boolean {
+    // Touching edges do not cover area; match the per-leaf resolution rule.
+    return (
+      this.boundingBox.xMin < region.maxX &&
+      this.boundingBox.xMax > region.minX &&
+      this.boundingBox.zMin < region.maxZ &&
+      this.boundingBox.zMax > region.minZ
+    );
+  }
+
+  private requiresMinimumSize(): boolean {
+    for (const region of this.tree.config.fineDetailRegions ?? []) {
+      if (region.keepMinSize === true && this.intersectsDetailRegion(region))
+        return true;
+    }
+    return false;
   }
 
   check(): void {
     if (!this.needsCheck) return;
     this.needsCheck = false;
 
-    const underSplit = this.tree.isUnderSplitDistance(
-      this.size,
-      this.centerX,
-      this.centerZ,
-    );
+    const underSplit =
+      this.requiresMinimumSize() ||
+      this.tree.isUnderSplitDistance(this.size, this.centerX, this.centerZ);
 
     if (underSplit) {
       if (!this.isMaxDepth && !this.splitted) {
@@ -220,9 +260,18 @@ export class TerrainQuadNode {
   }
 
   split(): void {
+    if (this.splitted || this.isMaxDepth) return;
+    // A reversed merge still owns its children. Keep their live geometry and
+    // pending work instead of overwriting the map with orphan replacements.
+    this.unsplitting = false;
     this.splitting = true;
     this.splitted = true;
     this.unsetReady();
+
+    if (this.children.size === 4) {
+      this.testReady();
+      return;
+    }
 
     const qSize = this.halfSize;
     const q = this.quarterSize;
@@ -270,11 +319,15 @@ export class TerrainQuadNode {
   }
 
   unsplit(): void {
-    if (!this.splitted) return;
+    if (!this.splitted || this.requiresMinimumSize()) return;
+    // Only one transition may commit. A retained parent can already be ready
+    // when a split reverses; do not wait for a now-unnecessary publication.
+    this.splitting = false;
     this.splitted = false;
     this.unsplitting = true;
     this.unsetReady();
     this.createFinal();
+    this.testReady();
   }
 
   createFinal(): void {
@@ -372,7 +425,36 @@ export class TerrainQuadTree {
   private structureDirty = false;
 
   constructor(config: Partial<QuadTreeConfig> = {}) {
-    this.config = { ...DEFAULT_QUAD_TREE_CONFIG, ...config };
+    const resolvedConfig = { ...DEFAULT_QUAD_TREE_CONFIG, ...config };
+    const regions = resolvedConfig.fineDetailRegions ?? [];
+    if (regions.length > 8) throw new Error("Too many terrain detail regions");
+    for (const region of regions) {
+      if (
+        ![region.minX, region.maxX, region.minZ, region.maxZ].every(
+          Number.isFinite,
+        ) ||
+        region.minX >= region.maxX ||
+        region.minZ >= region.maxZ ||
+        !Number.isInteger(region.resolution) ||
+        region.resolution < 2 ||
+        region.resolution > 128 ||
+        (region.keepMinSize !== undefined &&
+          typeof region.keepMinSize !== "boolean")
+      )
+        throw new Error("Invalid terrain detail region");
+    }
+    const requestedRootChunkRadius = Number.isFinite(
+      resolvedConfig.rootChunkRadius,
+    )
+      ? resolvedConfig.rootChunkRadius
+      : DEFAULT_QUAD_TREE_CONFIG.rootChunkRadius;
+    this.config = {
+      ...resolvedConfig,
+      fineDetailRegions: Object.freeze(
+        regions.map((region) => Object.freeze({ ...region })),
+      ),
+      rootChunkRadius: Math.max(0, Math.floor(requestedRootChunkRadius)),
+    };
     this.maxSize = this.config.minSize * Math.pow(2, this.config.maxDepth);
   }
 
@@ -569,8 +651,9 @@ export class TerrainQuadTree {
       worldZ: number;
     }> = [];
 
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
+    const radius = this.config.rootChunkRadius;
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dz = -radius; dz <= radius; dz++) {
         const cx = gx + dx;
         const cz = gz + dz;
         coords.push({
@@ -587,7 +670,7 @@ export class TerrainQuadTree {
   }
 
   private updateAllNeighbours(): void {
-    // Main chunk neighbours (from the 3x3 grid)
+    // Main chunk neighbours from the configured root grid.
     for (const [key, chunk] of this.mainChunks) {
       const [xStr, zStr] = key.split(",");
       const x = parseFloat(xStr);

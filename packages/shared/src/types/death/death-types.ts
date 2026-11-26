@@ -83,6 +83,7 @@ export interface DeathLock {
   // Crash recovery fields (optional for backwards compatibility)
   items?: DeathItemData[]; // Dropped items for recovery (gravestone/ground)
   keptItems?: DeathItemData[]; // classic MMORPG keep-3 items returned on respawn
+  deathOperationId?: string; // Immutable database custody operation for this death
   killedBy?: string; // What killed the player
   recovered?: boolean; // Whether death was processed during crash recovery
 }

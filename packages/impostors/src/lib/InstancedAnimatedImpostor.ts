@@ -42,6 +42,7 @@ import {
   clamp,
   Discard,
   If,
+  select,
   varying,
   storage,
   instanceIndex,
@@ -49,6 +50,7 @@ import {
   cos,
 } from "three/tsl";
 import { StorageInstancedBufferAttribute } from "three/webgpu";
+import type { StorageBufferNode } from "three/webgpu";
 import type { GlobalMobAtlas, MobVariantConfig } from "./types";
 
 /**
@@ -115,10 +117,10 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
   PlaneGeometry,
   MeshStandardNodeMaterial
 > {
-  private _instanceStateStorage!: ReturnType<typeof storage>;
-  private _instanceOffsetStorage!: ReturnType<typeof storage>;
-  private _instanceVariantStorage!: ReturnType<typeof storage>;
-  private _instanceFlagsStorage!: ReturnType<typeof storage>;
+  private _instanceStateStorage!: StorageBufferNode<"vec4">;
+  private _instanceOffsetStorage!: StorageBufferNode<"float">;
+  private _instanceVariantStorage!: StorageBufferNode<"float">;
+  private _instanceFlagsStorage!: StorageBufferNode<"float">;
   private _variants: MobVariantConfig[];
   private _maxInstances: number;
   private _activeCount: number = 0;
@@ -177,6 +179,8 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
     // State: vec4(x, y, z, yaw)
     this._instanceStateStorage = storage(
       new StorageInstancedBufferAttribute(this._maxInstances, 4),
+      "vec4",
+      this._maxInstances,
     );
     // Animation offset: float
     this._instanceOffsetStorage = storage(
@@ -184,6 +188,8 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
         new Float32Array(this._maxInstances),
         1,
       ),
+      "float",
+      this._maxInstances,
     );
     // Variant: float (index into variants array)
     this._instanceVariantStorage = storage(
@@ -191,6 +197,8 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
         new Float32Array(this._maxInstances),
         1,
       ),
+      "float",
+      this._maxInstances,
     );
     // Flags: float (0 = visible, >=2 = hidden)
     this._instanceFlagsStorage = storage(
@@ -198,6 +206,8 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
         new Float32Array(this._maxInstances),
         1,
       ),
+      "float",
+      this._maxInstances,
     );
 
     // Varyings
@@ -278,7 +288,10 @@ export class InstancedAnimatedImpostor extends InstancedMesh<
       }).Else(() => {
         const dir = cameraDir.div(dot(abs(cameraDir), vec3(1.0))).toVar();
         If(dir.y.lessThan(0.0), () => {
-          const signNotZero = mix(vec2(1.0), sign(dir.xz), step(0.0, dir.xz));
+          const signNotZero = vec2(
+            select(dir.x.lessThan(0.0), float(-1.0), float(1.0)),
+            select(dir.z.lessThan(0.0), float(-1.0), float(1.0)),
+          );
           const oldX = dir.x;
           dir.x.assign(float(1.0).sub(abs(dir.z)).mul(signNotZero.x));
           dir.z.assign(float(1.0).sub(abs(oldX)).mul(signNotZero.y));

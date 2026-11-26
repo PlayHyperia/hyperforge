@@ -38,6 +38,13 @@ export interface IQuestQuery {
   getQuestStatus(playerId: string, questId: string): QuestStatus;
 
   /**
+   * Check whether a quest can be started at the current authoritative state.
+   * Returns false for unknown players/quests and already active/completed quests.
+   * The mutation path rechecks the same conditions before starting the quest.
+   */
+  canStartQuest(playerId: string, questId: string): boolean;
+
+  /**
    * Get quest definition by ID
    * @param questId - The quest identifier
    * @returns Quest definition or undefined if not found

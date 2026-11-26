@@ -6,6 +6,10 @@ import {
   addHeader,
   ModelType,
 } from "@elizaos/core";
+import {
+  formatUntrustedPromptData,
+  parseSafeConversationalText,
+} from "./prompt-safety.js";
 
 // Type definitions
 export interface ActionResult {
@@ -23,7 +27,10 @@ export interface ComposeContextOptions {
 
 export interface GenerateMessageOptions {
   runtime: IAgentRuntime;
-  context: string;
+  instruction: string;
+  untrustedData: unknown;
+  dataLabel?: string;
+  maxResponseChars?: number;
   modelType?: (typeof ModelType)[keyof typeof ModelType];
   stop?: string[];
 }
@@ -104,19 +111,35 @@ export function composeContext(options: ComposeContextOptions): string {
 export async function generateMessageResponse(
   options: GenerateMessageOptions,
 ): Promise<ActionResult> {
-  const { runtime, context, modelType = ModelType.MEDIUM } = options;
+  const {
+    runtime,
+    instruction,
+    untrustedData,
+    dataLabel = "MESSAGE_CONTEXT",
+    maxResponseChars = 1_200,
+    modelType = ModelType.MEDIUM,
+  } = options;
+  const prompt = [
+    instruction,
+    formatUntrustedPromptData(dataLabel, untrustedData, {
+      maxArrayItems: 64,
+      maxJsonChars: 24_000,
+      maxStringChars: 1_000,
+    }),
+  ].join("\n");
 
   const response = await runtime.useModel(modelType, {
-    prompt: context,
+    prompt,
     maxTokens: 1000,
     max_tokens: 1000, // Fallback for older versions
     temperature: 0.8,
   } as Parameters<typeof runtime.useModel>[1]);
 
   // Model returns either string directly or object with text property
-  const text = (response as { text?: string }).text || String(response);
+  const rawText = (response as { text?: string }).text || String(response);
+  const text = parseSafeConversationalText(rawText, maxResponseChars) ?? "";
 
-  return { text, success: true };
+  return { text, success: text.length > 0 };
 }
 
 export async function shouldRespond(
@@ -144,30 +167,22 @@ export async function generateDetailedResponse(
     modelType?: (typeof ModelType)[keyof typeof ModelType];
   } = {},
 ): Promise<ActionResult> {
-  const context = composeContext({
-    state,
-    template: options.template,
+  return generateMessageResponse({
     runtime,
-    additionalContext: {
+    instruction:
+      options.template ||
+      "Write a concise conversational response to the user's virtual-world message. Do not claim to execute tools or game actions.",
+    untrustedData: {
+      characterBio: runtime.character?.bio,
+      characterName: runtime.character?.name,
       messageText: message.content?.text || "",
+      stateText: state.text,
       userName: (message as Memory & { username?: string }).username || "User",
     },
+    dataLabel: "DETAILED_MESSAGE_CONTEXT",
+    maxResponseChars: 1_200,
+    modelType: options.modelType || ModelType.TEXT_LARGE,
   });
-
-  // Call useModel with proper parameters
-  const response = (await runtime.useModel(
-    options.modelType || ModelType.TEXT_LARGE,
-    {
-      prompt: context,
-      maxTokens: 2000,
-      max_tokens: 2000, // Fallback for older versions
-      temperature: 0.8,
-    } as Parameters<typeof runtime.useModel>[1],
-  )) as string;
-
-  const text = response;
-
-  return { text, success: true };
 }
 
 // Channel context helper

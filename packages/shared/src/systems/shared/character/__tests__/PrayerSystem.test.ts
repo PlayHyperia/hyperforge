@@ -86,6 +86,12 @@ describe("Prayer System Type Guards", () => {
   describe("isValidPrayerTogglePayload", () => {
     it("accepts valid payload", () => {
       expect(isValidPrayerTogglePayload({ prayerId: "thick_skin" })).toBe(true);
+      expect(
+        isValidPrayerTogglePayload({
+          prayerId: "thick_skin",
+          requestId: "00000000-0000-4000-8000-000000000001",
+        }),
+      ).toBe(true);
     });
 
     it("rejects missing prayerId", () => {
@@ -97,6 +103,15 @@ describe("Prayer System Type Guards", () => {
       expect(isValidPrayerTogglePayload({ prayerId: "" })).toBe(false);
       expect(isValidPrayerTogglePayload({ prayerId: 123 })).toBe(false);
       expect(isValidPrayerTogglePayload({ prayerId: "INVALID" })).toBe(false);
+    });
+
+    it("rejects malformed correlation IDs", () => {
+      expect(
+        isValidPrayerTogglePayload({
+          prayerId: "thick_skin",
+          requestId: "not-a-uuid",
+        }),
+      ).toBe(false);
     });
 
     it("rejects non-object types", () => {

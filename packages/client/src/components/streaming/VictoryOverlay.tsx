@@ -33,7 +33,7 @@ export function VictoryOverlay({
   }, [winner.id]);
 
   return (
-    <div style={styles.container}>
+    <div className="streaming-victory-overlay" style={styles.container}>
       <div ref={containerRef} className="victory-pulse" style={styles.content}>
         <div style={styles.winnerName}>{winner.name}</div>
         <div style={styles.winsText}>WINS!</div>
@@ -62,7 +62,7 @@ export function VictoryOverlay({
 const styles: Record<string, React.CSSProperties> = {
   container: {
     position: "absolute",
-    top: "50%",
+    top: "37%",
     left: "50%",
     transform: "translate(-50%, -50%)",
     zIndex: 60,
@@ -76,7 +76,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   winnerName: {
     color: "#f2d08a",
-    fontSize: "clamp(2.5rem, 10vw, 6rem)",
+    fontSize: "clamp(2rem, 6vw, 4.25rem)",
     fontWeight: "bold",
     fontFamily: "Impact, sans-serif",
     letterSpacing: "2px",
@@ -90,7 +90,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   winsText: {
     color: "#ff6b6b",
-    fontSize: "clamp(3.2rem, 12vw, 8rem)",
+    fontSize: "clamp(2.5rem, 7vw, 5rem)",
     fontWeight: "bold",
     fontFamily: "Impact, sans-serif",
     letterSpacing: "-2px",

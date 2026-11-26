@@ -5,12 +5,18 @@
  * teleportation, and error resilience of the resolver.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, vi } from "vitest";
 import { DuelCombatResolver } from "../DuelCombatResolver";
 import { createMockWorld, createDuelPlayers, type MockWorld } from "./mocks";
 import type { ServerDuelSession } from "../DuelSessionManager";
-import { EventType, createSlotNumber, createItemID } from "@hyperforge/shared";
-import { LOBBY_SPAWN_WINNER, LOBBY_SPAWN_LOSER } from "../config";
+import {
+  EventType,
+  PlayerEntity,
+  DataManager,
+  getDuelArenaLobbyReturnPosition,
+  createSlotNumber,
+  createItemID,
+} from "@hyperforge/shared";
 
 // Stable singleton mock so tests can verify calls
 const mockAuditLoggerInstance = {
@@ -31,6 +37,10 @@ vi.mock("../../ServerNetwork/services", () => ({
 }));
 
 import { Logger } from "../../ServerNetwork/services";
+
+beforeAll(async () => {
+  await DataManager.getInstance().initialize();
+});
 
 // ============================================================================
 // Helpers
@@ -94,6 +104,56 @@ function createTestSession(
     fightStartedAt: Date.now(),
     ...overrides,
   };
+}
+
+function installAuthoritativePlayerEntity(
+  world: MockWorld,
+  playerId: string,
+): void {
+  const skill = { level: 1, xp: 0 };
+  const entity = new PlayerEntity(
+    { ...world, stage: { scene: { add: vi.fn() } } } as never,
+    {
+      id: playerId,
+      type: "player",
+      name: playerId,
+      playerId,
+      playerName: playerId,
+      level: 1,
+      health: 10,
+      maxHealth: 10,
+      stamina: 100,
+      maxStamina: 100,
+      combatStyle: "attack",
+      equipment: {},
+      inventory: [],
+      skills: {
+        attack: skill,
+        strength: skill,
+        defense: skill,
+        constitution: { level: 10, xp: 0 },
+        ranged: skill,
+        magic: skill,
+        prayer: skill,
+        woodcutting: skill,
+        mining: skill,
+        fishing: skill,
+        firemaking: skill,
+        cooking: skill,
+        smithing: skill,
+        agility: skill,
+        crafting: skill,
+        fletching: skill,
+        runecrafting: skill,
+      },
+      position: [70, 0, 70],
+      quaternion: [0, 0, 0, 1],
+    } as never,
+  );
+  (world.entities.players as unknown as Map<string, PlayerEntity>).set(
+    playerId,
+    entity,
+  );
 }
 
 // ============================================================================
@@ -259,10 +319,10 @@ describe("DuelCombatResolver", () => {
       expect(loserRespawn).toBeDefined();
       expect(
         (winnerRespawn![1] as { spawnPosition: unknown }).spawnPosition,
-      ).toEqual(LOBBY_SPAWN_WINNER);
+      ).toEqual(getDuelArenaLobbyReturnPosition(true));
       expect(
         (loserRespawn![1] as { spawnPosition: unknown }).spawnPosition,
-      ).toEqual(LOBBY_SPAWN_LOSER);
+      ).toEqual(getDuelArenaLobbyReturnPosition(false));
     });
 
     it("emits PLAYER_SET_DEAD false for both players", () => {
@@ -279,7 +339,7 @@ describe("DuelCombatResolver", () => {
       }
     });
 
-    it("emits player:teleport for winner with LOBBY_SPAWN_WINNER", () => {
+    it("emits player:teleport for winner with getDuelArenaLobbyReturnPosition(true)", () => {
       const session = createTestSession();
 
       resolver.resolveDuel(session, "player1", "player2", "death");
@@ -292,11 +352,11 @@ describe("DuelCombatResolver", () => {
       );
       expect(winnerTeleport).toBeDefined();
       expect((winnerTeleport![1] as { position: unknown }).position).toEqual(
-        LOBBY_SPAWN_WINNER,
+        getDuelArenaLobbyReturnPosition(true),
       );
     });
 
-    it("emits player:teleport for loser with LOBBY_SPAWN_LOSER", () => {
+    it("emits player:teleport for loser with getDuelArenaLobbyReturnPosition(false)", () => {
       const session = createTestSession();
 
       resolver.resolveDuel(session, "player1", "player2", "death");
@@ -309,7 +369,7 @@ describe("DuelCombatResolver", () => {
       );
       expect(loserTeleport).toBeDefined();
       expect((loserTeleport![1] as { position: unknown }).position).toEqual(
-        LOBBY_SPAWN_LOSER,
+        getDuelArenaLobbyReturnPosition(false),
       );
     });
 
@@ -362,6 +422,97 @@ describe("DuelCombatResolver", () => {
         100000,
         "death",
       );
+    });
+
+    it("defers completion and audit until both prayer restores answer", async () => {
+      installAuthoritativePlayerEntity(world, "player1");
+      installAuthoritativePlayerEntity(world, "player2");
+      const resolvers = new Map<
+        string,
+        (receipt: { success: boolean }) => void
+      >();
+      const restorePrayerPoints = vi.fn(
+        (playerId: string) =>
+          new Promise<{ success: boolean }>((resolve) => {
+            resolvers.set(playerId, resolve);
+          }),
+      );
+      world.getSystem.mockImplementation((name: string) =>
+        name === "prayer"
+          ? { restorePrayerPoints, getMaxPrayerPoints: () => 10 }
+          : null,
+      );
+      const session = createTestSession();
+
+      resolver.resolveDuel(session, "player1", "player2", "death");
+
+      expect(resolver.hasPendingResolution(session.duelId)).toBe(true);
+      expect(world.emit).not.toHaveBeenCalledWith(
+        "duel:completed",
+        expect.anything(),
+      );
+      expect(mockAuditLoggerInstance.logDuelComplete).not.toHaveBeenCalled();
+      expect(world.emit).toHaveBeenCalledWith(
+        "player:teleport",
+        expect.objectContaining({ playerId: "player1" }),
+      );
+      expect(restorePrayerPoints).toHaveBeenCalledWith(
+        "player1",
+        10,
+        `ordinary-duel-resolution-prayer:${session.duelId}:player1`,
+      );
+
+      resolvers.get("player1")?.({ success: true });
+      await Promise.resolve();
+      expect(world.emit).not.toHaveBeenCalledWith(
+        "duel:completed",
+        expect.anything(),
+      );
+
+      resolvers.get("player2")?.({ success: true });
+      await resolver.waitForResolution(session.duelId);
+      expect(world.emit).toHaveBeenCalledWith(
+        "duel:completed",
+        expect.objectContaining({ duelId: session.duelId }),
+      );
+      expect(mockAuditLoggerInstance.logDuelComplete).toHaveBeenCalledOnce();
+    });
+
+    it("suppresses delayed completion and audit after resolver teardown", async () => {
+      installAuthoritativePlayerEntity(world, "player1");
+      installAuthoritativePlayerEntity(world, "player2");
+      const resolvers = new Map<
+        string,
+        (receipt: { success: boolean }) => void
+      >();
+      world.getSystem.mockImplementation((name: string) =>
+        name === "prayer"
+          ? {
+              restorePrayerPoints: (playerId: string) =>
+                new Promise<{ success: boolean }>((resolve) => {
+                  resolvers.set(playerId, resolve);
+                }),
+              getMaxPrayerPoints: () => 10,
+            }
+          : null,
+      );
+      const session = createTestSession();
+
+      resolver.resolveDuel(session, "player1", "player2", "death");
+      const pendingResolution = resolver.waitForResolution(session.duelId);
+      resolver.destroy();
+      world.emit.mockClear();
+      mockAuditLoggerInstance.logDuelComplete.mockClear();
+
+      resolvers.get("player1")?.({ success: true });
+      resolvers.get("player2")?.({ success: true });
+      await pendingResolution;
+
+      expect(world.emit).not.toHaveBeenCalledWith(
+        "duel:completed",
+        expect.anything(),
+      );
+      expect(mockAuditLoggerInstance.logDuelComplete).not.toHaveBeenCalled();
     });
 
     it("does not emit duel:stakes:settle when no stakes", () => {

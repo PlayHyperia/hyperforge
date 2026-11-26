@@ -122,18 +122,14 @@ export class ThreeResourceManager {
       }
     }
 
-    // Handle lights
-    if (object instanceof THREE.Light) {
-      // Some lights have shadow cameras that need disposal
-      if ("shadow" in object && object.shadow) {
-        if (object.shadow.map) {
-          object.shadow.map.dispose();
-        }
-        // Clean up shadow cameras
-        if (object.shadow.camera) {
-          object.shadow.camera = null;
-        }
-      }
+    // Handle the concrete light classes that own shadow-map render targets.
+    // LightShadow.dispose() releases both the primary and variance shadow maps.
+    if (
+      object instanceof THREE.DirectionalLight ||
+      object instanceof THREE.PointLight ||
+      object instanceof THREE.SpotLight
+    ) {
+      object.shadow.dispose();
     }
 
     // Handle cameras with render targets
@@ -244,7 +240,9 @@ export class ThreeResourceManager {
     // Type for materials with optional texture properties
     // MeshStandardMaterial and similar have these as optional properties
     type MaterialWithTextures = THREE.Material & {
-      [K in (typeof ThreeResourceManager.TEXTURE_PROPERTIES)[number]]?: THREE.Texture | null;
+      [
+        K in (typeof ThreeResourceManager.TEXTURE_PROPERTIES)[number]
+      ]?: THREE.Texture | null;
     };
 
     const materialWithTextures = material as MaterialWithTextures;

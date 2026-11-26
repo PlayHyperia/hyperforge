@@ -4,14 +4,384 @@
   isolation: isolate;
 }
 
+.streaming-duel-info,
+.streaming-between-strip {
+  position: absolute;
+  top: max(20px, env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  width: min(
+    1200px,
+    calc(
+      100vw - 40px - env(safe-area-inset-left, 0px) -
+        env(safe-area-inset-right, 0px)
+    )
+  );
+  justify-content: space-between;
+  align-items: flex-start;
+  column-gap: clamp(14px, 2vw, 28px);
+}
+
+.streaming-agent-stats {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: clamp(260px, 31vw, 396px);
+  min-width: 0;
+}
+
+.streaming-agent-heading {
+  min-width: 0;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 1px;
+}
+
+.streaming-agent-stats--right .streaming-agent-heading {
+  align-items: flex-end !important;
+}
+
+.streaming-agent-heading > div:first-child {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.streaming-agent-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streaming-agent-records {
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+
+.streaming-agent-stats--right .streaming-agent-records {
+  align-self: flex-end;
+}
+
+/* The frozen strategy and role loadouts are the announcement loadout proof.
+ * Repeating the ordinary inventory grid and idle Prayer resource underneath
+ * them obscures the arena without adding a new pre-bell decision signal. */
+.streaming-overlay-phase--announcement .streaming-agent-loadout {
+  display: none !important;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-prayer-resource {
+  display: none;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-heading {
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 1px;
+}
+
+.streaming-overlay-phase--announcement
+  .streaming-agent-stats--right
+  .streaming-agent-heading {
+  align-items: flex-end !important;
+}
+
+.streaming-overlay-phase--announcement
+  .streaming-agent-heading
+  > div:first-child {
+  width: 100%;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-records {
+  gap: 3px !important;
+  padding: 1px 6px !important;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-records > div {
+  gap: 2px !important;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-records span {
+  font-size: 0.58rem !important;
+}
+
+.streaming-overlay-phase--announcement .streaming-agent-records > span {
+  margin: 0 1px !important;
+}
+
+.streaming-agent-active-role {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin: 0 6px;
+  padding: 2px 8px;
+  border: 1px solid rgba(103, 232, 249, 0.42);
+  border-radius: 999px;
+  background: rgba(5, 18, 28, 0.82);
+  color: #67e8f9;
+  font-family: "Teko", "Arial Narrow", sans-serif;
+  font-size: 0.72rem;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: inset 0 0 10px rgba(103, 232, 249, 0.08);
+}
+
+.streaming-agent-active-role--right {
+  flex-direction: row-reverse;
+}
+
+.streaming-agent-active-role-label {
+  color: rgba(226, 232, 240, 0.64);
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.streaming-frozen-strategy {
+  box-sizing: border-box;
+  width: calc(100% - 12px);
+  margin: 0 6px;
+  padding: 5px 7px;
+  border: 1px solid rgba(103, 232, 249, 0.48);
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(4, 15, 23, 0.94),
+    rgba(9, 38, 48, 0.86)
+  );
+  box-shadow: inset 0 0 14px rgba(103, 232, 249, 0.08);
+  color: #ecfeff;
+  font-family: "Teko", "Arial Narrow", sans-serif;
+  text-transform: uppercase;
+}
+
+.streaming-frozen-strategy-header,
+.streaming-frozen-strategy-primary,
+.streaming-frozen-strategy-details,
+.streaming-frozen-strategy-thresholds {
+  display: flex;
+  align-items: center;
+}
+
+.streaming-frozen-strategy-header {
+  justify-content: space-between;
+  gap: 8px;
+  color: #67e8f9;
+  font-size: 0.58rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.15em;
+}
+
+.streaming-frozen-strategy-source {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+}
+
+.streaming-frozen-strategy-primary {
+  gap: 5px;
+  margin-top: 4px;
+  color: #fff;
+  font-size: 0.76rem;
+  line-height: 1;
+  letter-spacing: 0.08em;
+}
+
+.streaming-frozen-strategy-primary > span {
+  color: rgba(103, 232, 249, 0.58);
+}
+
+.streaming-frozen-strategy-details,
+.streaming-frozen-strategy-thresholds {
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 4px;
+  color: rgba(226, 232, 240, 0.9);
+  font-family: system-ui, sans-serif;
+  font-size: 0.5rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+}
+
+.streaming-frozen-strategy-thresholds {
+  color: #f2d08a;
+}
+
+.streaming-frozen-strategy--right .streaming-frozen-strategy-header,
+.streaming-frozen-strategy--right .streaming-frozen-strategy-primary,
+.streaming-frozen-strategy--right .streaming-frozen-strategy-details,
+.streaming-frozen-strategy--right .streaming-frozen-strategy-thresholds {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.streaming-frozen-loadouts {
+  box-sizing: border-box;
+  width: calc(100% - 12px);
+  margin: 0 6px;
+  padding: 4px 7px 5px;
+  border: 1px solid rgba(242, 208, 138, 0.52);
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(12, 10, 7, 0.92),
+    rgba(35, 26, 14, 0.84)
+  );
+  box-shadow: inset 0 0 14px rgba(242, 208, 138, 0.08);
+  color: #fff8e7;
+  font-family: "Teko", "Arial Narrow", sans-serif;
+  text-transform: uppercase;
+}
+
+.streaming-frozen-loadouts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #f2d08a;
+  font-size: 0.58rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.15em;
+}
+
+.streaming-frozen-loadouts--right .streaming-frozen-loadouts-header,
+.streaming-frozen-loadouts--right .streaming-frozen-loadout-entry {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.streaming-frozen-loadouts-fingerprint {
+  color: rgba(226, 232, 240, 0.62);
+  font-family: monospace;
+  font-size: 0.48rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.streaming-frozen-loadouts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 3px;
+}
+
+.streaming-frozen-loadout-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-size: 0.62rem;
+  line-height: 1.1;
+}
+
+.streaming-frozen-loadout-role {
+  flex: 0 0 42px;
+  color: #67e8f9;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.streaming-frozen-loadout-details {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.9);
+  font-family: system-ui, sans-serif;
+  font-size: 0.54rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streaming-frozen-loadouts-unavailable {
+  display: block;
+  margin-top: 3px;
+  color: #fca5a5;
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.streaming-fight-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 42px;
+}
+
+.streaming-fight-timer-outer {
+  min-width: 164px;
+  height: 52px;
+}
+
+.streaming-post-fight-position {
+  position: absolute;
+  top: 51%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 61;
+  pointer-events: none;
+}
+
+.streaming-post-fight-card {
+  width: min(440px, calc(100vw - 32px));
+  min-width: 340px;
+}
+
+.streaming-post-fight-agent {
+  min-width: 0;
+}
+
+.streaming-post-fight-agent--left {
+  align-items: flex-end;
+}
+
+.streaming-post-fight-agent--right {
+  align-items: flex-start;
+}
+
+.streaming-post-fight-agent-name {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+  line-height: 1.05;
+  white-space: normal;
+}
+
+.streaming-post-fight-agent--left .streaming-post-fight-agent-name {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.streaming-post-fight-agent--right .streaming-post-fight-agent-name {
+  justify-content: flex-start;
+  text-align: left;
+}
+
 .streaming-leaderboard-mount {
   position: absolute;
-  top: 72px;
+  top: 180px;
   left: 16px;
   z-index: 51;
   pointer-events: auto;
-  max-height: calc(100vh - 140px);
+  max-height: calc(100vh - 280px);
+  overflow: hidden;
   animation: streaming-mount-in 0.55s ease-out 0.1s both;
+}
+
+.streaming-combat-log {
+  top: 210px !important;
+  max-height: min(232px, calc(100vh - 280px)) !important;
 }
 
 @media (max-width: 720px) {
@@ -32,9 +402,18 @@
 }
 
 @keyframes heal-float-up {
-  0%   { opacity: 1; transform: translateY(0) scale(1.15); }
-  60%  { opacity: 1; transform: translateY(-18px) scale(1); }
-  100% { opacity: 0; transform: translateY(-28px) scale(0.9); }
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1.15);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-18px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-28px) scale(0.9);
+  }
 }
 
 /* Combat log scroll — hide native scrollbar */
@@ -48,13 +427,13 @@
   bottom: max(16px, env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%);
   z-index: 52;
-  width: min(720px, calc(100vw - 28px));
+  width: min(560px, calc(100vw - 28px));
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 12px 18px 14px;
-  border-radius: 14px;
+  gap: 4px;
+  padding: 8px 14px 9px;
+  border-radius: 12px;
   background: linear-gradient(
     180deg,
     rgba(6, 8, 14, 0.82) 0%,
@@ -66,7 +445,18 @@
     0 0 0 1px rgba(255, 255, 255, 0.04) inset;
   backdrop-filter: blur(14px) saturate(1.1);
   -webkit-backdrop-filter: blur(14px) saturate(1.1);
-  animation: streaming-mount-in 0.6s ease-out 0.15s both;
+  animation: streaming-centered-mount-in 0.6s ease-out 0.15s both;
+}
+
+@keyframes streaming-centered-mount-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .streaming-lower-third-brand {
@@ -279,14 +669,6 @@
 
 /* Preview / resolution strip: same slot as fight HUD, different center column */
 .streaming-between-strip {
-  position: absolute;
-  top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  width: min(1200px, calc(100vw - 40px));
-  justify-content: space-between;
-  align-items: flex-start;
   animation: streaming-interstitial-in 0.4s ease-out both;
 }
 
@@ -294,6 +676,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  flex: 0 0 clamp(180px, 18vw, 230px);
+  min-width: 0;
   margin-top: 38px;
   text-align: center;
   gap: 2px;
@@ -309,11 +693,17 @@
 
 .streaming-between-title {
   color: rgba(248, 250, 252, 0.98);
-  font-size: clamp(0.95rem, 2vw, 1.2rem);
+  font-size: clamp(0.9rem, 1.6vw, 1.15rem);
   font-weight: 800;
-  max-width: 14ch;
+  max-width: 100%;
   line-height: 1.2;
+  text-wrap: balance;
+  white-space: normal;
   text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+
+.streaming-between-matchup-compact {
+  display: none;
 }
 
 .streaming-between-timer-wrap {
@@ -353,12 +743,162 @@
 .streaming-between-agents-muted {
   opacity: 0.72;
   filter: saturate(0.85);
-  transition: opacity 0.3s ease, filter 0.3s ease;
+  transition:
+    opacity 0.3s ease,
+    filter 0.3s ease;
 }
 
 .streaming-between-agents-winner {
   opacity: 1;
   filter: saturate(1.05);
+}
+
+/* Live preparation — compact enough to keep the world action unobstructed. */
+.streaming-preparation-strip {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top, 0px));
+  left: 50%;
+  z-index: 55;
+  box-sizing: border-box;
+  width: min(570px, calc(100vw - 36px));
+  padding: 12px 18px 13px;
+  transform: translateX(-50%);
+  text-align: center;
+  color: #f8fafc;
+  border: 1px solid rgba(45, 212, 191, 0.32);
+  border-radius: 14px;
+  background: linear-gradient(
+    145deg,
+    rgba(5, 16, 22, 0.9),
+    rgba(8, 26, 31, 0.82)
+  );
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+    0 0 34px rgba(45, 212, 191, 0.08);
+  backdrop-filter: blur(14px) saturate(1.08);
+  -webkit-backdrop-filter: blur(14px) saturate(1.08);
+  animation: streaming-interstitial-in 0.4s ease-out both;
+}
+
+.streaming-preparation-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #5eead4;
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.streaming-preparation-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #2dd4bf;
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.9);
+  animation: streaming-preparation-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes streaming-preparation-pulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+.streaming-preparation-title {
+  margin-top: 4px;
+  font-size: clamp(1rem, 2vw, 1.28rem);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 0.025em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+}
+
+.streaming-preparation-matchup {
+  margin-top: 3px;
+  color: rgba(226, 232, 240, 0.9);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.streaming-preparation-matchup > span {
+  margin: 0 5px;
+  color: rgba(94, 234, 212, 0.58);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+}
+
+.streaming-preparation-agents {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.streaming-preparation-agent {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(2, 10, 15, 0.58);
+  font-size: 0.68rem;
+}
+
+.streaming-preparation-agent > span {
+  overflow: hidden;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streaming-preparation-status {
+  flex: 0 0 auto;
+  color: #5eead4;
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.streaming-preparation-recap {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: rgba(148, 163, 184, 0.84);
+  font-size: 0.54rem;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.streaming-preparation-sub {
+  margin: 8px 0 0;
+  color: rgba(203, 213, 225, 0.82);
+  font-size: 0.66rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+@media (max-width: 560px) {
+  .streaming-preparation-agents {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -367,7 +907,7 @@
 
 .streaming-betting-rail {
   position: absolute;
-  top: 88px;
+  top: 210px;
   right: 16px;
   z-index: 53;
   width: min(280px, calc(100vw - 32px));
@@ -387,6 +927,10 @@
   backdrop-filter: blur(14px) saturate(1.15);
   -webkit-backdrop-filter: blur(14px) saturate(1.15);
   animation: streaming-mount-in 0.5s ease-out 0.12s both;
+}
+
+.streaming-overlay-phase--announcement .streaming-betting-rail {
+  top: 248px;
 }
 
 .streaming-betting-rail--open {
@@ -461,12 +1005,28 @@
   border: none;
   cursor: pointer;
   box-shadow: 0 8px 24px rgba(251, 191, 36, 0.25);
-  transition: transform 0.15s ease, filter 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    filter 0.15s ease;
+}
+
+.streaming-betting-rail-cta-state {
+  display: none;
 }
 
 .streaming-betting-rail-cta:hover {
   filter: brightness(1.06);
   transform: translateY(-1px);
+}
+
+.streaming-betting-rail-cta--disabled,
+.streaming-betting-rail-cta--disabled:hover {
+  color: rgba(203, 213, 225, 0.72);
+  background: rgba(71, 85, 105, 0.42);
+  box-shadow: none;
+  cursor: default;
+  filter: none;
+  transform: none;
 }
 
 .streaming-betting-rail-hint {
@@ -484,6 +1044,42 @@
     left: auto;
     width: min(300px, calc(100vw - 24px));
   }
+
+  .streaming-overlay-phase--announcement .streaming-betting-rail {
+    top: auto;
+  }
+}
+
+/* A 4:3 broadcast has materially less horizontal gameplay space than 16:9.
+ * During combat the market is already locked, so remove both opaque side rails
+ * and leave betting details in the announcement rather than cover a fighter. */
+@media (min-width: 721px) and (max-aspect-ratio: 4/3) {
+  .streaming-overlay-phase--countdown .streaming-combat-log,
+  .streaming-overlay-phase--fighting .streaming-combat-log,
+  .streaming-overlay-phase--countdown .streaming-betting-rail,
+  .streaming-overlay-phase--fighting .streaming-betting-rail,
+  .streaming-leaderboard-mount {
+    display: none !important;
+  }
+}
+
+/* Tablet-width result frames cannot fit the completed-market rail beside the
+ * full contestant result card without obscuring one of them. The result is the
+ * primary broadcast information after the bell; settlement remains available
+ * in the dedicated betting application and on wider stream layouts. */
+@media (min-width: 721px) and (max-width: 1024px) {
+  .streaming-agent-name {
+    overflow: visible;
+    font-size: 0.9rem !important;
+    letter-spacing: 0.35px !important;
+    line-height: 1;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .streaming-overlay-phase--resolution .streaming-betting-rail--done {
+    display: none !important;
+  }
 }
 
 @media (max-width: 520px) {
@@ -491,5 +1087,422 @@
     left: 12px;
     right: 12px;
     width: auto;
+  }
+}
+
+@media (max-width: 720px), (max-aspect-ratio: 3/4) {
+  .streaming-duel-info,
+  .streaming-between-strip {
+    top: max(8px, env(safe-area-inset-top, 0px));
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    width: auto;
+    transform: none;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 78px minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .streaming-between-strip {
+    animation: streaming-compact-in 0.4s ease-out both;
+  }
+
+  .streaming-overlay-phase--announcement .streaming-between-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto auto;
+  }
+
+  .streaming-overlay-phase--announcement
+    .streaming-between-strip
+    > :first-child {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .streaming-overlay-phase--announcement .streaming-between-center {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    width: 100%;
+    margin-top: 0;
+  }
+
+  .streaming-overlay-phase--announcement .streaming-between-title {
+    max-width: none;
+    white-space: nowrap;
+  }
+
+  .streaming-overlay-phase--announcement .streaming-between-matchup-compact {
+    display: block;
+    max-width: calc(100vw - 32px);
+    overflow: hidden;
+    color: rgba(226, 232, 240, 0.9);
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .streaming-overlay-phase--announcement
+    .streaming-between-strip
+    > :last-child {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .streaming-agent-stats {
+    width: 100%;
+  }
+
+  .streaming-agent-heading {
+    min-width: 0;
+    padding: 0 2px !important;
+  }
+
+  .streaming-agent-heading > div:first-child {
+    min-width: 0;
+    gap: 4px !important;
+  }
+
+  .streaming-agent-rank {
+    flex: 0 0 auto;
+    padding: 1px 4px !important;
+    font-size: 0.68rem !important;
+  }
+
+  .streaming-agent-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: clamp(0.72rem, 2.8vw, 1rem) !important;
+    letter-spacing: 0 !important;
+  }
+
+  .streaming-frozen-loadouts {
+    width: calc(100% - 4px);
+    margin: 0 2px;
+    padding: 3px 4px 4px;
+  }
+
+  .streaming-frozen-strategy {
+    width: calc(100% - 4px);
+    margin: 0 2px;
+    padding: 3px 4px 4px;
+  }
+
+  .streaming-frozen-strategy-header {
+    font-size: 0.48rem;
+    letter-spacing: 0.08em;
+  }
+
+  .streaming-frozen-strategy-primary {
+    margin-top: 3px;
+    font-size: 0.62rem;
+  }
+
+  .streaming-frozen-strategy-details,
+  .streaming-frozen-strategy-thresholds {
+    gap: 2px 5px;
+    margin-top: 3px;
+    font-size: 0.46rem;
+  }
+
+  .streaming-frozen-loadouts-header {
+    font-size: 0.48rem;
+    letter-spacing: 0.08em;
+  }
+
+  .streaming-frozen-loadouts-fingerprint {
+    display: none;
+  }
+
+  .streaming-frozen-loadout-entry {
+    align-items: flex-start;
+    gap: 3px;
+    font-size: 0.52rem;
+    line-height: 1.08;
+  }
+
+  .streaming-frozen-loadout-role {
+    flex-basis: 34px;
+  }
+
+  .streaming-frozen-loadout-details {
+    overflow: visible;
+    font-size: 0.5rem;
+    line-height: 1.08;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .streaming-agent-records,
+  .streaming-agent-loadout,
+  .streaming-combat-log,
+  .streaming-leaderboard-mount {
+    display: none !important;
+  }
+
+  .streaming-fight-timer {
+    margin-top: 24px;
+  }
+
+  .streaming-fight-timer-eyebrow {
+    margin-bottom: 3px;
+    font-size: 0.48rem;
+    letter-spacing: 0.12em;
+  }
+
+  .streaming-fight-timer-outer {
+    min-width: 72px;
+    width: 72px;
+    height: 38px;
+  }
+
+  .streaming-fight-timer-inner {
+    font-size: clamp(0.92rem, 4vw, 1.2rem) !important;
+  }
+
+  .streaming-between-center {
+    flex-basis: auto;
+    min-width: 0;
+    margin-top: 20px;
+  }
+
+  .streaming-between-title {
+    max-width: 10ch;
+    font-size: clamp(0.65rem, 2.5vw, 0.9rem);
+    white-space: normal;
+  }
+
+  .streaming-between-timer-wrap {
+    min-width: 72px;
+    width: 72px;
+    height: 38px;
+  }
+
+  .streaming-between-center > span:last-child,
+  .streaming-between-eyebrow {
+    display: none;
+  }
+
+  .streaming-lower-third {
+    bottom: max(8px, env(safe-area-inset-bottom, 0px));
+    width: min(
+      560px,
+      calc(
+        100vw - 16px - env(safe-area-inset-left, 0px) -
+          env(safe-area-inset-right, 0px)
+      )
+    );
+    gap: 3px;
+    padding: 8px 10px 9px;
+    border-radius: 10px;
+  }
+
+  .streaming-lower-third-status {
+    font-size: clamp(0.68rem, 2.8vw, 0.82rem);
+  }
+
+  .streaming-betting-rail {
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    left: auto;
+    width: min(
+      560px,
+      calc(
+        100vw - 16px - env(safe-area-inset-left, 0px) -
+          env(safe-area-inset-right, 0px)
+      )
+    );
+    padding: 8px 10px 10px;
+    border-radius: 10px;
+  }
+
+  .streaming-overlay-phase--announcement .streaming-betting-rail {
+    top: auto;
+  }
+
+  .streaming-betting-rail-title,
+  .streaming-betting-rail-sub,
+  .streaming-betting-rail-hint {
+    display: none;
+  }
+
+  .streaming-betting-rail--done {
+    display: none;
+  }
+
+  .streaming-betting-rail-eyebrow,
+  .streaming-betting-rail-headline {
+    margin-bottom: 4px;
+  }
+
+  .streaming-betting-rail-cta {
+    padding: 8px 10px;
+    font-size: 0.72rem;
+  }
+
+  .streaming-post-fight-position {
+    top: auto;
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    transform: none;
+  }
+
+  .streaming-victory-overlay {
+    top: 32% !important;
+  }
+
+  .streaming-post-fight-card {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0 !important;
+  }
+}
+
+@media (min-width: 721px) and (max-aspect-ratio: 3/4) {
+  .streaming-frozen-strategy-header {
+    font-size: 0.58rem;
+    letter-spacing: 0.15em;
+  }
+
+  .streaming-frozen-strategy-primary {
+    font-size: 0.76rem;
+  }
+
+  .streaming-frozen-strategy-details,
+  .streaming-frozen-strategy-thresholds {
+    font-size: 0.5rem;
+  }
+
+  .streaming-frozen-loadouts-header {
+    font-size: 0.58rem;
+    letter-spacing: 0.15em;
+  }
+
+  .streaming-frozen-loadouts-fingerprint {
+    display: inline;
+  }
+
+  .streaming-frozen-loadout-entry {
+    font-size: 0.62rem;
+  }
+
+  .streaming-frozen-loadout-role {
+    flex-basis: 42px;
+  }
+
+  .streaming-frozen-loadout-details {
+    font-size: 0.54rem;
+  }
+}
+
+@keyframes streaming-compact-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-height: 560px) and (orientation: landscape) {
+  .streaming-agent-name {
+    font-size: 0.82rem !important;
+    letter-spacing: 0 !important;
+  }
+
+  .streaming-agent-rank {
+    padding: 1px 5px !important;
+    font-size: 0.68rem !important;
+  }
+
+  .streaming-agent-records,
+  .streaming-agent-loadout,
+  .streaming-combat-log,
+  .streaming-leaderboard-mount {
+    display: none !important;
+  }
+
+  .streaming-duel-info,
+  .streaming-between-strip {
+    top: max(8px, env(safe-area-inset-top, 0px));
+  }
+
+  .streaming-overlay-phase--announcement .streaming-frozen-strategy-details,
+  .streaming-overlay-phase--announcement .streaming-frozen-strategy-thresholds {
+    display: none;
+  }
+
+  .streaming-fight-timer,
+  .streaming-between-center {
+    margin-top: 20px;
+  }
+
+  .streaming-lower-third {
+    bottom: max(6px, env(safe-area-inset-bottom, 0px));
+    width: min(430px, calc(100vw - 24px));
+    gap: 0;
+    padding: 5px 10px 6px;
+  }
+
+  .streaming-lower-third-status {
+    display: none;
+  }
+
+  .streaming-betting-rail {
+    top: auto;
+    bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    left: auto;
+    display: block;
+    width: min(240px, calc(100vw - 24px));
+    padding: 4px;
+  }
+
+  .streaming-betting-rail-eyebrow,
+  .streaming-betting-rail-title,
+  .streaming-betting-rail-sub,
+  .streaming-betting-rail-hint {
+    display: none;
+  }
+
+  .streaming-betting-rail-headline {
+    display: none;
+  }
+
+  .streaming-betting-rail-cta {
+    gap: 6px;
+    min-height: 44px;
+    padding: 6px 8px;
+    font-size: 0.68rem;
+  }
+
+  .streaming-betting-rail-cta-state {
+    display: inline;
+    padding-right: 6px;
+    border-right: 1px solid rgba(15, 23, 42, 0.34);
+    font-size: 0.58rem;
+    line-height: 1.05;
+    opacity: 0.72;
+  }
+
+  .streaming-betting-rail--done {
+    display: none;
+  }
+
+  .streaming-victory-overlay {
+    top: 29% !important;
+  }
+
+  .streaming-post-fight-position {
+    top: clamp(116px, 36%, 220px);
+    bottom: auto;
+    transform: translateX(-50%) scale(0.82);
+    transform-origin: top center;
   }
 }

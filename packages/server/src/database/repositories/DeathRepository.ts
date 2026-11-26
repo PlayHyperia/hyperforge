@@ -58,6 +58,8 @@ export interface DeathLockData {
   itemCount: number;
   // Crash recovery fields
   items: DeathItemData[]; // Actual item data for recovery
+  keptItems?: DeathItemData[];
+  deathOperationId?: string | null;
   killedBy: string; // What killed the player
   recovered: boolean; // Whether death was processed during crash recovery
 }
@@ -105,6 +107,8 @@ export class DeathRepository extends BaseRepository {
         itemCount: data.itemCount,
         // Crash recovery fields
         items: data.items,
+        keptItems: data.keptItems ?? [],
+        deathOperationId: data.deathOperationId ?? null,
         killedBy: data.killedBy,
         recovered: data.recovered,
         createdAt: now,
@@ -121,6 +125,8 @@ export class DeathRepository extends BaseRepository {
           itemCount: data.itemCount,
           // Crash recovery fields
           items: data.items,
+          keptItems: data.keptItems ?? [],
+          deathOperationId: data.deathOperationId ?? null,
           killedBy: data.killedBy,
           recovered: data.recovered,
           updatedAt: now,
@@ -169,6 +175,8 @@ export class DeathRepository extends BaseRepository {
       itemCount: row.itemCount,
       // Crash recovery fields
       items: (row.items as DeathItemData[]) || [],
+      keptItems: (row.keptItems as DeathItemData[]) || [],
+      deathOperationId: row.deathOperationId,
       killedBy: row.killedBy,
       recovered: row.recovered,
     };
@@ -228,6 +236,8 @@ export class DeathRepository extends BaseRepository {
       itemCount: row.itemCount,
       // Crash recovery fields
       items: (row.items as DeathItemData[]) || [],
+      keptItems: (row.keptItems as DeathItemData[]) || [],
+      deathOperationId: row.deathOperationId,
       killedBy: row.killedBy,
       recovered: row.recovered,
     }));
@@ -291,6 +301,8 @@ export class DeathRepository extends BaseRepository {
       zoneType: row.zoneType,
       itemCount: row.itemCount,
       items: (row.items as DeathItemData[]) || [],
+      keptItems: (row.keptItems as DeathItemData[]) || [],
+      deathOperationId: row.deathOperationId,
       killedBy: row.killedBy,
       recovered: row.recovered,
     }));
@@ -359,6 +371,8 @@ export class DeathRepository extends BaseRepository {
         zoneType: data.zoneType,
         itemCount: data.itemCount,
         items: data.items,
+        keptItems: data.keptItems ?? [],
+        deathOperationId: data.deathOperationId ?? null,
         killedBy: data.killedBy,
         recovered: data.recovered,
         createdAt: now,

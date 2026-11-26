@@ -742,6 +742,115 @@ describe("BuildingCollisionService", () => {
       expect(building!.floors[0].walkableTiles.size).toBe(48);
     });
 
+    it("keeps a rotated foyer entrance corridor outside exact building coverage", () => {
+      const footprint = [
+        [true, true, true, true],
+        [true, true, true, true],
+        [true, true, true, true],
+        [false, true, false, false],
+        [false, true, false, false],
+      ];
+      const layout: BuildingLayoutInput = {
+        width: 4,
+        depth: 5,
+        floors: 1,
+        floorPlans: [
+          {
+            footprint,
+            roomMap: footprint.map((row) =>
+              row.map((occupied) => (occupied ? 0 : -1)),
+            ),
+            internalOpenings: new Map(),
+            externalOpenings: new Map([["2,2,south", "arch"]]),
+          },
+        ],
+        exteriorFootprint: footprint.map((row) => [...row]),
+        stairs: null,
+      };
+
+      service.registerBuilding(
+        "rotated-foyer",
+        "town-1",
+        layout,
+        { x: -770, y: 100, z: -1840 },
+        -Math.PI / 2,
+      );
+
+      const entrances = service.getEntranceTiles("rotated-foyer");
+      expect(entrances).toHaveLength(2);
+      const entrance = entrances[0];
+      const outward =
+        entrance.direction === "north"
+          ? { x: 0, z: -1 }
+          : entrance.direction === "south"
+            ? { x: 0, z: 1 }
+            : entrance.direction === "east"
+              ? { x: 1, z: 0 }
+              : { x: -1, z: 0 };
+
+      for (let distance = 0; distance <= 5; distance++) {
+        const tile = {
+          x: entrance.tileX + outward.x * distance,
+          z: entrance.tileZ + outward.z * distance,
+        };
+        expect(service.isTileInBuildingGroundCoverage(tile.x, tile.z)).toBe(
+          null,
+        );
+        expect(service.isTileWalkableInBuilding(tile.x, tile.z, 0)).toBe(true);
+        expect(service.queryCollision(tile.x, tile.z, 0).isInsideBuilding).toBe(
+          false,
+        );
+      }
+    });
+
+    it("blocks enclosed ground voids while leaving exterior concavities open", () => {
+      const footprint = [
+        [true, true, true],
+        [true, false, true],
+        [true, true, true],
+      ];
+      const layout: BuildingLayoutInput = {
+        width: 3,
+        depth: 3,
+        floors: 1,
+        floorPlans: [
+          {
+            footprint,
+            roomMap: footprint.map((row) =>
+              row.map((occupied) => (occupied ? 0 : -1)),
+            ),
+            internalOpenings: new Map(),
+            externalOpenings: new Map([["1,0,north", "door"]]),
+          },
+        ],
+        exteriorFootprint: [
+          [true, true, true],
+          [true, true, true],
+          [true, true, true],
+        ],
+        stairs: null,
+      };
+
+      service.registerBuilding(
+        "enclosed-void",
+        "town-1",
+        layout,
+        { x: 0, y: 0, z: 0 },
+        0,
+      );
+
+      expect(service.isTileInBuildingFootprint(0, 0)).toBe(null);
+      expect(service.isTileInBuildingGroundCoverage(0, 0)).toBe(
+        "enclosed-void",
+      );
+      expect(service.isTileWalkableInBuilding(0, 0, 0)).toBe(false);
+      expect(service.queryCollision(0, 0, 0)).toMatchObject({
+        buildingId: "enclosed-void",
+        isInsideBuilding: true,
+        isWalkable: false,
+      });
+    });
+
     it("handles building with no external doors (fully enclosed)", () => {
       const layout: BuildingLayoutInput = {
         width: 2,

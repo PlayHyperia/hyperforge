@@ -38,6 +38,20 @@ interface EmoteResetData {
   entityType: "player" | "mob";
 }
 
+/**
+ * One-shot combat clips must return to a looping stance when their visible
+ * motion ends, not clamp on the final strike pose until the next cooldown.
+ * Standard melee/ranged clips are one second; spell casting is two seconds.
+ */
+export function getCombatEmoteResetDelayTicks(
+  combatEmote: string | undefined,
+  attackSpeedTicks: number,
+): number {
+  const clipTicks = combatEmote === "spell_cast" ? 3 : 2;
+  const beforeNextAttack = Math.max(2, attackSpeedTicks - 1);
+  return Math.min(clipTicks, beforeNextAttack);
+}
+
 export class CombatAnimationManager {
   private world: World;
   private emoteResetTicks = new Map<string, EmoteResetData>();
@@ -60,15 +74,16 @@ export class CombatAnimationManager {
     attackSpeedTicks: number = 4,
     attackType?: "melee" | "ranged" | "magic",
   ): void {
+    let combatEmote: string | undefined;
     if (entityType === "player") {
-      this.setPlayerCombatEmote(entityId);
+      combatEmote = this.setPlayerCombatEmote(entityId);
     } else {
       this.setMobCombatEmote(entityId, attackType);
     }
 
-    // Hold combat pose until 1 tick before next attack
-    // Minimum 2 ticks to ensure animation plays, but scale with attack speed
-    const resetTick = currentTick + Math.max(2, attackSpeedTicks - 1);
+    const resetTick =
+      currentTick +
+      getCombatEmoteResetDelayTicks(combatEmote, attackSpeedTicks);
     this.emoteResetTicks.set(entityId, {
       tick: resetTick,
       entityType,
@@ -130,12 +145,12 @@ export class CombatAnimationManager {
   /**
    * Set combat emote for a player entity
    */
-  private setPlayerCombatEmote(entityId: string): void {
+  private setPlayerCombatEmote(entityId: string): string | undefined {
     const playerEntity = this.world.getPlayer?.(
       entityId,
     ) as AnimatablePlayerEntity | null;
 
-    if (!playerEntity) return;
+    if (!playerEntity) return undefined;
 
     // Determine emote based on equipped weapon
     let combatEmote = "combat"; // Default to punching
@@ -220,6 +235,7 @@ export class CombatAnimationManager {
     }
 
     playerEntity.markNetworkDirty?.();
+    return combatEmote;
   }
 
   /**

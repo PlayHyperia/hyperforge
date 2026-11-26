@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia isolated lobster-pot technical candidate",
+  "equipments": [
+    {
+      "asset": "fishing-tool-candidates/fitted/lobster_pot-fitted.glb",
+      "itemId": "lobster_pot",
+      "avatarId": "kaykit-knight",
+      "slot": "gatheringtool",
+      "grip": "one-hand"
+    }
+  ]
+}

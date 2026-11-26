@@ -1,0 +1,42 @@
+Exact File Provider placeholder metadata recorded before authored-source recovery.
+
+scripts/lib/duel-avatar-motion-manifest.mjs | logical size 3803 | blocks 0 | flags compressed,dataless
+scripts/lib/duel-motion-equipment-set.mjs | logical size 4081 | blocks 0 | flags compressed,dataless
+scripts/lib/duel-avatar-motion-manifest.test.mjs | logical size 3197 | blocks 0 | flags compressed,dataless
+scripts/lib/duel-motion-equipment-set.test.mjs | logical size 2955 | blocks 0 | flags compressed,dataless
+scripts/duel-avatar-motion-browser.ts | logical size 66433 | blocks 0 | flags compressed,dataless
+scripts/lib/nearest-mesh-surface-distance.ts | logical size 2093 | blocks 0 | flags compressed,dataless
+scripts/lib/object-axis-region.ts | logical size 3124 | blocks 0 | flags compressed,dataless
+scripts/lib/skinned-bone-region.ts | logical size 3142 | blocks 0 | flags compressed,dataless
+scripts/lib/nearest-mesh-surface-distance.test.ts | logical size 1582 | blocks 0 | flags compressed,dataless
+scripts/lib/object-axis-region.test.ts | logical size 1431 | blocks 0 | flags compressed,dataless
+scripts/lib/skinned-bone-region.test.ts | logical size 2369 | blocks 0 | flags compressed,dataless
+packages/server/world/assets/emotes/emote-walk.glb | logical size 63268 | blocks 0 | flags compressed,dataless
+  Recovery source: /Users/lucid/development/hyperscape/packages/server/world/assets/emotes/emote-walk.glb
+  Recovery source SHA-256: 462774a80a7a9111459f0041578bf02818ed2748ad7a05a65cd16d68f800e887
+scripts/duel-solana-keypair-policy.mjs | logical size 1119 | blocks 0 | flags compressed,dataless
+scripts/duel-solana-keypair-policy.test.mjs | logical size 2185 | blocks 0 | flags compressed,dataless
+scripts/build-steve-preparation-motion-candidates.mjs | logical size 10412 | blocks 0 | flags compressed,dataless
+scripts/build-steve-preparation-motion-candidates.test.mjs | logical size 1475 | blocks 0 | flags compressed,dataless
+packages/server/world/assets/emotes/emote-steve-fishing-cast.glb | logical size 37192 | blocks 0 | flags compressed,dataless
+  Expected SHA-256 from duel-presentation-assets.json: 061c247a2e6618daa370bfc759ebabb57ff0ff79c23c9f93dba5dc9c7177ac99
+
+scripts/duel-capture-scenarios.mjs | logical size 36758 | recovered SHA-256 cf277f56bc97ae0880d9ffa88f254970976dcb5e83b9777fcb2263e6bf8e33ff
+  Recovery source: HEAD plus three accepted post-HEAD apply_patch records from the retained Codex session history.
+scripts/capture-duel-motion-telemetry.mjs | logical size 62682 | recovered SHA-256 e1a77d8316b0b6a5dc00a7fdff9b96e0e38911f4ac6e2a2c632c35a6bd4d7c7b
+  Recovery source: HEAD plus 31 accepted post-HEAD apply_patch records from the retained Codex session history.
+scripts/duel-motion-telemetry.mjs | logical size 46146 | recovered SHA-256 53366d1dbbf308926a018e9d7e74ffd6db2bec0c4622ba34276418a78af47fc7
+  Recovery source: HEAD plus 11 accepted post-HEAD apply_patch records from the retained Codex session history.
+scripts/duel-ranged-transition-telemetry.mjs | logical size 34010 | recovered SHA-256 fad68ccdac06ad9fc88a6d4b107b3a6d51cef2784a71a2049646dbcab1486d65
+  Recovery source: HEAD plus accepted post-HEAD apply_patch/format chronology; the final 76-byte ranged/player hit-contract insertion was reconciled against its later accepted formatting patch and the exact pre-eviction logical size.
+scripts/duel-fighting-observation.mjs | logical size 1409 | recovered SHA-256 919144478c02c2fb72eaf50fe87eec9bf147fae1cf068b5b456ce4c376695b36
+  Recovery source: exact HEAD blob; no accepted post-HEAD source edit exists.
+scripts/duel-motion-telemetry.test.mjs | logical size 23451 | recovered SHA-256 90fdef789ee3052d877a9ce23a83e00234b23810d76384edf403a5cd1c3cbe2c
+  Recovery source: HEAD plus nine accepted post-HEAD apply_patch records and one accepted format event.
+scripts/duel-ranged-transition-telemetry.test.mjs | logical size 20683 | recovered SHA-256 73272e91819c7dbc84c0422a98f6e1f005269c804c0c133a318f6a16db5e69a2
+  Recovery source: HEAD plus 11 accepted post-HEAD apply_patch records and five accepted format events.
+scripts/duel-fighting-observation.test.mjs | logical size 1914 | recovered SHA-256 cc333942f42a0411799bad7f52fc51b4e7f11e6969c9c05937abcbaf26ac7c08
+  Recovery source: exact HEAD blob; no accepted post-HEAD source edit exists.
+
+The original placeholders are retained beside their source paths with suffix
+`.dataless-backup-20260902`; recovered files must match the recorded logical sizes.

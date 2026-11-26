@@ -319,5 +319,69 @@ describe("CycleStateMachine", () => {
 
       expect(sm.phase).toBe("IDLE");
     });
+
+    it("preserves the legal graph across seeded randomized transitions", () => {
+      const phases: readonly StreamingPhase[] = [
+        "IDLE",
+        "ANNOUNCEMENT",
+        "COUNTDOWN",
+        "FIGHTING",
+        "RESOLUTION",
+      ];
+      const allowed: Record<StreamingPhase, readonly StreamingPhase[]> = {
+        IDLE: ["ANNOUNCEMENT"],
+        ANNOUNCEMENT: ["COUNTDOWN", "IDLE"],
+        COUNTDOWN: ["FIGHTING", "RESOLUTION", "IDLE"],
+        FIGHTING: ["RESOLUTION", "IDLE"],
+        RESOLUTION: ["IDLE"],
+      };
+      let randomState = 0xc1c1e5ed;
+      const nextRandom = (): number => {
+        randomState = (Math.imul(randomState, 1_664_525) + 1_013_904_223) >>> 0;
+        return randomState / 0x1_0000_0000;
+      };
+
+      for (let run = 0; run < 128; run += 1) {
+        const sm = new CycleStateMachine();
+        let acceptedResolutionTransitions = 0;
+        let observedResolutionTransitions = 0;
+        sm.onPhaseChange((_from, to) => {
+          if (to === "RESOLUTION") {
+            observedResolutionTransitions += 1;
+          }
+        });
+
+        for (let step = 0; step < 80; step += 1) {
+          if (nextRandom() < 0.1) {
+            sm.forceIdle();
+            continue;
+          }
+
+          const from = sm.phase;
+          const to = phases[Math.floor(nextRandom() * phases.length)];
+          const isSelfTransition = from === to;
+          const isAllowed = allowed[from].includes(to);
+          expect(sm.canTransition(to)).toBe(!isSelfTransition && isAllowed);
+
+          if (isSelfTransition) {
+            sm.transition(to);
+            expect(sm.phase).toBe(from);
+          } else if (isAllowed) {
+            sm.transition(to);
+            expect(sm.phase).toBe(to);
+            if (to === "RESOLUTION") {
+              acceptedResolutionTransitions += 1;
+            }
+          } else {
+            expect(() => sm.transition(to)).toThrow("Illegal transition");
+            expect(sm.phase).toBe(from);
+          }
+
+          expect(observedResolutionTransitions).toBe(
+            acceptedResolutionTransitions,
+          );
+        }
+      }
+    });
   });
 });

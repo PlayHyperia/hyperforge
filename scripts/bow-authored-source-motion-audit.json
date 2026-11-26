@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "title": "Authored bow-motion source review — inactive",
+  "framing": "avatar-and-equipment",
+  "motions": [
+    {
+      "id": "ranged-idle-start-front-left",
+      "name": "Ranged idle 5% · front-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-idle.glb",
+      "sampleRatio": 0.05,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": -35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-idle-quarter-front-right",
+      "name": "Ranged idle 25% · front-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-idle.glb",
+      "sampleRatio": 0.25,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-idle-half-rear-left",
+      "name": "Ranged idle 50% · rear-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-idle.glb",
+      "sampleRatio": 0.5,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": -105,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-idle-late-rear-right",
+      "name": "Ranged idle 75% · rear-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-idle.glb",
+      "sampleRatio": 0.75,
+      "heldEquipmentEmote": "idle",
+      "cameraYawDegrees": 105,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "walk-quarter-front-left",
+      "name": "Authored walk 25% · front-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-walk.glb",
+      "sampleRatio": 0.25,
+      "heldEquipmentEmote": "walk",
+      "cameraYawDegrees": -35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "walk-late-front-right",
+      "name": "Authored walk 75% · front-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-walk.glb",
+      "sampleRatio": 0.75,
+      "heldEquipmentEmote": "walk",
+      "cameraYawDegrees": 35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "run-quarter-rear-left",
+      "name": "Authored run 25% · rear-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-run.glb",
+      "sampleRatio": 0.25,
+      "heldEquipmentEmote": "run",
+      "cameraYawDegrees": -105,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "run-late-rear-right",
+      "name": "Authored run 75% · rear-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-run.glb",
+      "sampleRatio": 0.75,
+      "heldEquipmentEmote": "run",
+      "cameraYawDegrees": 105,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-draw-front-left",
+      "name": "Authored draw 40% · front-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged.glb",
+      "sampleRatio": 0.4,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": -35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-draw-rear-left",
+      "name": "Authored draw 60% · rear-left",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged.glb",
+      "sampleRatio": 0.6,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": -105,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-release-front-right",
+      "name": "Authored release 40% · front-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-release.glb",
+      "sampleRatio": 0.4,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 35,
+      "cameraPitchDegrees": 8
+    },
+    {
+      "id": "ranged-release-rear-right",
+      "name": "Authored release 70% · rear-right",
+      "asset": "artifacts/duel-launch-avatar-bakeoff/motions/kaykit-ranged-release.glb",
+      "sampleRatio": 0.7,
+      "heldEquipmentEmote": "range",
+      "cameraYawDegrees": 105,
+      "cameraPitchDegrees": 8
+    }
+  ]
+}

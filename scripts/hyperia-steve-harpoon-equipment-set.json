@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve harpoon technical candidate",
+  "equipments": [
+    {
+      "asset": "artifacts/duel-launch-avatar-bakeoff/fishing-tool-candidates/fitted-steve/harpoon-fitted.glb",
+      "itemId": "harpoon",
+      "avatarId": "steve",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

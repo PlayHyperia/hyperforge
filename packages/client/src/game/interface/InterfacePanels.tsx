@@ -358,9 +358,8 @@ export function MenuBarWrapper({
 /**
  * MinimapWrapper - Wraps Minimap component for embedding in a panel
  *
- * The Minimap fills the entire container, scaling to match the larger dimension
- * so it always fills the panel completely with no gaps. The overlay controls
- * are sized to the actual container dimensions so they position correctly.
+ * The canvas and controls use the actual panel viewport. The saved window
+ * dimensions are never changed to accommodate a square map.
  */
 export function MinimapWrapper({
   world,
@@ -368,9 +367,7 @@ export function MinimapWrapper({
   isUnlocked,
 }: MinimapWrapperProps): React.ReactElement {
   const containerRef = React.useRef<HTMLDivElement>(null);
-  // Track minimap canvas size (square, uses larger dimension)
-  const [size, setSize] = React.useState(200);
-  // Track actual container dimensions for overlay positioning
+  // Track the same actual viewport for both map canvases and overlay controls.
   const [containerDimensions, setContainerDimensions] = React.useState({
     width: 200,
     height: 200,
@@ -382,6 +379,8 @@ export function MinimapWrapper({
         const rect = containerRef.current.getBoundingClientRect();
         const width = Math.floor(rect.width);
         const height = Math.floor(rect.height);
+        // Hidden/transitioning panels do not replace the last usable viewport.
+        if (width <= 0 || height <= 0) return;
 
         // Update container dimensions for overlay controls
         setContainerDimensions((prev) => {
@@ -390,10 +389,6 @@ export function MinimapWrapper({
           }
           return prev;
         });
-
-        // Use the larger dimension so minimap canvas always fills the container
-        const newSize = Math.max(width, height, 100);
-        setSize((prev) => (prev !== newSize ? newSize : prev));
       }
     };
 
@@ -441,20 +436,21 @@ export function MinimapWrapper({
         position: "relative",
       }}
     >
-      {/* Minimap canvas (square, centered) */}
+      {/* Fit the real viewport; no centered square extends beyond the panel. */}
       <div
         style={{
           position: "relative",
-          width: size,
-          height: size,
-          overflow: "visible",
+          width: containerDimensions.width,
+          height: containerDimensions.height,
+          flexShrink: 0,
+          overflow: "hidden",
         }}
       >
         <Minimap
-          key={`minimap-${size}`}
+          key={`minimap-${containerDimensions.width}x${containerDimensions.height}`}
           world={world}
-          width={size}
-          height={size}
+          width={containerDimensions.width}
+          height={containerDimensions.height}
           zoom={10}
           isVisible={true}
           resizable={false}

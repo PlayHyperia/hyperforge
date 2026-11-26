@@ -1,13 +1,17 @@
 import type { EquipmentSlotName, BulkClass, AttachmentSlotDef } from "./types";
+import { AVATAR_OPTIONS as GAME_AVATAR_OPTIONS } from "@hyperforge/shared";
 
-/** Available VRM avatars (served from /game-assets/avatars/) */
-export const AVATAR_OPTIONS: { label: string; url: string }[] = [
-  { label: "Male 01", url: "/game-assets/avatars/avatar-male-01.vrm" },
-  { label: "Male 02", url: "/game-assets/avatars/avatar-male-02.vrm" },
-  { label: "Female 01", url: "/game-assets/avatars/avatar-female-01.vrm" },
-  { label: "Female 02", url: "/game-assets/avatars/avatar-female-02.vrm" },
-  { label: "Steve", url: "/game-assets/avatars/steve.vrm" },
-];
+/**
+ * Use the game's exact active avatar registry. A private legacy list allowed
+ * Asset Forge to certify equipment against avatars that the duel client no
+ * longer used.
+ */
+export const AVATAR_OPTIONS: { id: string; label: string; url: string }[] =
+  GAME_AVATAR_OPTIONS.map((avatar) => ({
+    id: avatar.id,
+    label: avatar.name,
+    url: avatar.url.replace("asset://", "/game-assets/"),
+  }));
 
 export const ALL_SLOTS: EquipmentSlotName[] = [
   "helmet",

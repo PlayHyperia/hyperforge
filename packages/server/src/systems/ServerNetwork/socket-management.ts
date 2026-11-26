@@ -61,6 +61,7 @@ const RECONNECT_GRACE_MS = Math.max(
 interface DisconnectedPlayer {
   playerId: string;
   accountId: string;
+  agentCredentialCharacterId?: string;
   disconnectedAt: number;
 }
 
@@ -264,6 +265,10 @@ export class SocketManager {
       clearTimeout(socket.clientReadyTimeoutId);
       socket.clientReadyTimeoutId = undefined;
     }
+    if (socket.agentCredentialExpiryTimeoutId) {
+      clearTimeout(socket.agentCredentialExpiryTimeoutId);
+      socket.agentCredentialExpiryTimeoutId = undefined;
+    }
 
     // Clear character claim for duplicate detection
     socket.characterId = undefined;
@@ -328,18 +333,27 @@ export class SocketManager {
             // Continue into shared cleanup below so socket listeners/references
             // are always released, even in immediate-removal test mode.
           } else {
+            const disconnectedAt = Date.now();
+            const reconnectGraceExpiresAt = disconnectedAt + RECONNECT_GRACE_MS;
             console.log(
               `[SocketManager] Reconnect grace started for ${playerId} (account=${accountId}, ${RECONNECT_GRACE_MS / 1000}s)`,
             );
 
-            // Emit PLAYER_LEFT so systems persist data
-            this.world.emit(EventType.PLAYER_LEFT, { playerId });
+            // Persist ordinary disconnect state while telling competitive
+            // systems that the authenticated entity and durable preparation
+            // remain recoverable for this exact bounded grace window.
+            this.world.emit(EventType.PLAYER_LEFT, {
+              playerId,
+              reconnectGraceActive: true,
+              reconnectGraceExpiresAt,
+            });
 
             // Store disconnected player state
             this.disconnectedPlayers.set(accountId, {
               playerId,
               accountId,
-              disconnectedAt: Date.now(),
+              agentCredentialCharacterId: socket.agentCredentialCharacterId,
+              disconnectedAt,
             });
 
             // Schedule entity removal after grace period
@@ -375,6 +389,7 @@ export class SocketManager {
     socket.pendingClientReady = false;
     socket.selectedCharacterId = undefined;
     socket.characterId = undefined;
+    socket.agentCredentialCharacterId = undefined;
     socket.accountId = undefined;
 
     // Release references to heavy ws internals so stale socket objects are cheap.
@@ -417,9 +432,24 @@ export class SocketManager {
    * @param newSocket - New socket for the reconnected player
    * @returns The existing player entity ID if reconnection succeeded, null otherwise
    */
-  tryReconnect(accountId: string, newSocket: ServerSocket): string | null {
+  tryReconnect(
+    accountId: string,
+    newSocket: ServerSocket,
+    requestedCharacterId?: string,
+  ): string | null {
     const disconnected = this.disconnectedPlayers.get(accountId);
     if (!disconnected) return null;
+
+    if (
+      (requestedCharacterId &&
+        requestedCharacterId !== disconnected.playerId) ||
+      (disconnected.agentCredentialCharacterId &&
+        (newSocket.agentCredentialCharacterId !==
+          disconnected.agentCredentialCharacterId ||
+          disconnected.agentCredentialCharacterId !== disconnected.playerId))
+    ) {
+      return null;
+    }
 
     // Cancel the grace timer
     const timer = this.reconnectTimers.get(accountId);

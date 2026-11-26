@@ -13,7 +13,15 @@
  */
 
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three/webgpu";
+import { MeshStandardNodeMaterial, type Node } from "three/webgpu";
+import { createFilteredShingleColorNode } from "./FilteredShingleTSL";
+import { createFilteredWoodColorNode } from "./FilteredWoodTSL";
+import {
+  createHavenSurfaceResponse,
+  havenReliefWorldNormal,
+  havenReliefViewNormal,
+  type HavenSurfaceType,
+} from "./HavenArchitecturalSurface";
 import {
   Fn,
   uv,
@@ -34,6 +42,11 @@ import {
   sqrt,
   select,
   attribute,
+  fwidth,
+  positionWorld,
+  normalWorldGeometry,
+  cameraViewMatrix,
+  negateOnBackSide,
 } from "three/tsl";
 
 // ============================================================================
@@ -74,6 +87,15 @@ export interface BuildingMaterialConfig {
   variation: number;
   /** Whether to use vertex colors for tinting */
   useVertexColors: boolean;
+  /** Explicit compact-lodge candidate only; omission preserves the legacy graph. */
+  shingleFiltering?: "footprint-v1";
+  /** Pixel-footprint integration for explicit compact timber materials. */
+  woodFiltering?: "footprint-v1";
+  /** Authored compact architecture only; omission preserves historical graphs. */
+  architecturalFinish?: "haven-v1";
+  /** Optional continuous local-unit coordinates for the explicit Haven finish;
+   * consumed by both color and surface response, never geometry displacement. */
+  patternUV?: Node<"vec2">;
 }
 
 /**
@@ -162,14 +184,14 @@ export const DEFAULT_MATERIAL_CONFIGS: Record<
 /**
  * Hash function for pseudo-random values (TSL)
  */
-const tslHash = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslHash = Fn(([p]: [Node<"vec2">]) => {
   return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
 });
 
 /**
  * 2D noise function (TSL)
  */
-const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslNoise2D = Fn(([p]: [Node<"vec2">]) => {
   const i = floor(p);
   const f = fract(p);
   const smoothF = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
@@ -185,7 +207,7 @@ const tslNoise2D = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * FBM (Fractal Brownian Motion) noise (TSL)
  */
-const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
+const tslFBM = Fn(([p]: [Node<"vec2">]) => {
   const value = float(0.0).toVar();
   const amplitude = float(0.5).toVar();
   const frequency = float(1.0).toVar();
@@ -215,7 +237,7 @@ const tslFBM = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * Brick pattern - returns (isBrick, brickIdX, brickIdY, 0)
  */
-const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const brickPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const brickWidth = float(0.25);
   const brickHeight = float(0.065);
   const mortarWidth = float(0.01);
@@ -246,7 +268,7 @@ const brickPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Ashlar stone pattern - returns (isStone, stoneIdX, stoneIdY, bevel)
  */
-const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const ashlarPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const blockWidth = float(0.6);
   const blockHeight = float(0.3);
   const mortarWidth = float(0.015);
@@ -282,7 +304,7 @@ const ashlarPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Rubble stone pattern (Voronoi-based) - returns (isStone, cellIdX, cellIdY, 0)
  */
-const rubblePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const rubblePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const scale = float(0.15);
   const scaled = uvIn.div(scale);
   const cellId = floor(scaled);
@@ -326,7 +348,7 @@ const rubblePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Wood plank pattern - returns (isPlank, plankId, grainOffset, 0)
  */
-const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const woodPlankPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const plankWidth = float(0.15);
   const plankHeight = float(2.0);
   const gapWidth = float(0.005);
@@ -352,7 +374,7 @@ const woodPlankPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Shingle pattern - returns (isShingle, shingleIdX, shingleIdY, thickness)
  */
-const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const shinglePattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const shingleWidth = float(0.2);
   const shingleHeight = float(0.15);
   const overlap = float(0.3);
@@ -380,7 +402,7 @@ const shinglePattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
 /**
  * Plaster pattern - returns (1.0, variationValue, 0, 0)
  */
-const plasterPattern = Fn(([uvIn]: [ReturnType<typeof vec2>]) => {
+const plasterPattern = Fn(([uvIn]: [Node<"vec2">]) => {
   const scaled = uvIn.mul(2.0);
   const noise1 = tslFBM(scaled);
   const noise2 = tslFBM(scaled.mul(3.0));
@@ -425,6 +447,40 @@ export type TSLBuildingMaterial = MeshStandardNodeMaterial & {
 export function createBuildingMaterial(
   config: Partial<BuildingMaterialConfig> & { type: BuildingMaterialType },
 ): TSLBuildingMaterial {
+  if (
+    config.patternUV !== undefined &&
+    (config.architecturalFinish !== "haven-v1" ||
+      config.patternUV?.isNode !== true)
+  )
+    throw new Error(
+      "Pattern UV requires an actual node and the explicit Haven finish",
+    );
+  if (
+    config.architecturalFinish !== undefined &&
+    (config.architecturalFinish !== "haven-v1" ||
+      !["wood-plank", "shingle", "stone-ashlar", "plaster"].includes(
+        config.type,
+      ))
+  )
+    throw new Error(
+      "Haven finish requires an explicit supported architectural material",
+    );
+  if (
+    config.woodFiltering !== undefined &&
+    (config.woodFiltering !== "footprint-v1" || config.type !== "wood-plank")
+  ) {
+    throw new Error(
+      "Wood filtering requires the explicit wood-plank footprint-v1 opt-in",
+    );
+  }
+  if (
+    config.shingleFiltering !== undefined &&
+    (config.shingleFiltering !== "footprint-v1" || config.type !== "shingle")
+  ) {
+    throw new Error(
+      "Shingle filtering requires the explicit shingle footprint-v1 opt-in",
+    );
+  }
   const defaults = DEFAULT_MATERIAL_CONFIGS[config.type];
   const fullConfig: BuildingMaterialConfig = {
     ...defaults,
@@ -447,12 +503,12 @@ export function createBuildingMaterial(
   // Color node - procedural pattern generation
   const colorNode = Fn(() => {
     // Get UV from mesh UV attribute, scaled
-    const meshUV = uv();
+    const meshUV = fullConfig.patternUV ?? uv();
     const scaledUV = meshUV.div(uTextureScale);
 
     // Get vertex color for tinting (if available)
     const vertexColor = fullConfig.useVertexColors
-      ? attribute("color", "vec3")
+      ? attribute<"vec3">("color", "vec3")
       : vec3(1.0, 1.0, 1.0);
 
     // Pattern result placeholder
@@ -503,25 +559,37 @@ export function createBuildingMaterial(
       surfaceColor.assign(mix(uAccentColor, stoneColor, isStone));
     } else if (patternType === 3) {
       // Wood Plank
-      patternResult.assign(woodPlankPattern(scaledUV));
-      const isPlank = patternResult.x;
-      const plankId = patternResult.y;
-      const grainOffset = patternResult.z;
+      if (fullConfig.woodFiltering === "footprint-v1") {
+        surfaceColor.assign(
+          createFilteredWoodColorNode(
+            scaledUV,
+            uBaseColor.rgb,
+            uSecondaryColor.rgb,
+            uAccentColor.rgb,
+            uVariation,
+          ),
+        );
+      } else {
+        patternResult.assign(woodPlankPattern(scaledUV));
+        const isPlank = patternResult.x;
+        const plankId = patternResult.y;
+        const grainOffset = patternResult.z;
 
-      const plankNoise = tslHash(vec2(plankId, 0.0));
-      const baseWood = mix(
-        uBaseColor,
-        uSecondaryColor,
-        plankNoise.mul(uVariation),
-      );
+        const plankNoise = tslHash(vec2(plankId, 0.0));
+        const baseWood = mix(
+          uBaseColor,
+          uSecondaryColor,
+          plankNoise.mul(uVariation),
+        );
 
-      const grainNoise = tslNoise2D(vec2(grainOffset.mul(20.0), plankId));
-      const grainedColor = mix(
-        baseWood,
-        baseWood.mul(0.85),
-        grainNoise.mul(0.3),
-      );
-      surfaceColor.assign(mix(uAccentColor, grainedColor, isPlank));
+        const grainNoise = tslNoise2D(vec2(grainOffset.mul(20.0), plankId));
+        const grainedColor = mix(
+          baseWood,
+          baseWood.mul(0.85),
+          grainNoise.mul(0.3),
+        );
+        surfaceColor.assign(mix(uAccentColor, grainedColor, isPlank));
+      }
     } else if (patternType === 4 || patternType === 5) {
       // Timber Frame or Plaster
       patternResult.assign(plasterPattern(scaledUV));
@@ -530,20 +598,31 @@ export function createBuildingMaterial(
         mix(uBaseColor, uSecondaryColor, variationValue.mul(uVariation)),
       );
     } else if (patternType === 6) {
-      // Shingle
-      patternResult.assign(shinglePattern(scaledUV));
-      const isShingle = patternResult.x;
-      const shingleId = patternResult.yz;
-      const thickness = patternResult.w;
+      if (fullConfig.shingleFiltering === "footprint-v1") {
+        surfaceColor.assign(
+          createFilteredShingleColorNode(
+            scaledUV,
+            uBaseColor.rgb,
+            uSecondaryColor.rgb,
+            uVariation,
+          ),
+        );
+      } else {
+        // Shingle
+        patternResult.assign(shinglePattern(scaledUV));
+        const isShingle = patternResult.x;
+        const shingleId = patternResult.yz;
+        const thickness = patternResult.w;
 
-      const shingleNoise = tslHash(shingleId);
-      const shingleColor = mix(
-        uBaseColor,
-        uSecondaryColor,
-        shingleNoise.mul(uVariation),
-      );
-      const shadedColor = shingleColor.mul(thickness);
-      surfaceColor.assign(mix(uBaseColor.mul(0.3), shadedColor, isShingle));
+        const shingleNoise = tslHash(shingleId);
+        const shingleColor = mix(
+          uBaseColor,
+          uSecondaryColor,
+          shingleNoise.mul(uVariation),
+        );
+        const shadedColor = shingleColor.mul(thickness);
+        surfaceColor.assign(mix(uBaseColor.mul(0.3), shadedColor, isShingle));
+      }
     } else {
       surfaceColor.assign(uBaseColor);
     }
@@ -555,6 +634,50 @@ export function createBuildingMaterial(
   })();
 
   material.colorNode = colorNode;
+
+  if (fullConfig.architecturalFinish === "haven-v1") {
+    const scaledUV = (fullConfig.patternUV ?? uv()).div(uTextureScale);
+    const response = Fn(() => {
+      const surface = createHavenSurfaceResponse(
+        fullConfig.type as HavenSurfaceType,
+        scaledUV,
+        fwidth(scaledUV),
+        float(fullConfig.roughness),
+      );
+      return vec4(surface.gradient, surface.roughness, surface.ao);
+    })().toVar(
+      `havenArchitecturalResponse_${fullConfig.type.replaceAll("-", "_")}`,
+    );
+    const worldNormal = havenReliefWorldNormal(
+      response.xy,
+      scaledUV.dFdx(),
+      scaledUV.dFdy(),
+      positionWorld.dFdx(),
+      positionWorld.dFdy(),
+      normalWorldGeometry,
+    );
+    // r186 normalNode expects view space. Negate the completed perturbed normal
+    // for a back-facing material, not only its geometric component.
+    material.normalNode = negateOnBackSide(
+      havenReliefViewNormal(worldNormal, cameraViewMatrix),
+    );
+    material.roughnessNode = response.z;
+    material.aoNode = response.w;
+    Object.defineProperty(material.userData, "havenArchitecturalFinish", {
+      enumerable: true,
+      writable: false,
+      configurable: false,
+      value: Object.freeze({
+        schemaVersion: 1,
+        mode: "haven-v1",
+        surface: fullConfig.type,
+        relief: "bounded-analytic-c1-v1",
+        normalSpace: "view",
+        textureSamples: 0,
+        displaced: false,
+      }),
+    });
+  }
 
   // Store uniforms for runtime updates
   const tslMaterial = material as TSLBuildingMaterial;

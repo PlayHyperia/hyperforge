@@ -19,9 +19,23 @@ import {
   getSmithingLevelSafe,
 } from "../../../constants/SmithingConstants";
 import { processingDataProvider } from "../../../data/ProcessingDataProvider";
-import { EventType } from "../../../types/events";
+import {
+  EventType,
+  getProcessingRequestOperationId,
+} from "../../../types/events";
+import { uuid } from "../../../utils";
 import { SystemBase } from "../infrastructure/SystemBase";
 import type { World } from "../../../types/index";
+import type {
+  AtomicProcessingActionReceipt,
+  InventorySystem,
+} from "../character/InventorySystem";
+import { canPlayerUseProcessingStation } from "./ProcessingStationAuthority";
+import {
+  clearProcessingInteractionPresentation,
+  publishProcessingInteractionPresentation,
+} from "./ProcessingInteractionPresentation";
+import type { PlayerProcessingQuiescenceSystem } from "./ProcessingQuiescence";
 
 /** Active smithing session for a player */
 interface SmithingSession {
@@ -33,13 +47,30 @@ interface SmithingSession {
   smithed: number;
   /** Tick when current smith action completes (tick-based timing) */
   completionTick: number;
+  requestId?: string;
+}
+
+interface PendingSmithingAction {
+  operationId: string;
+  playerId: string;
+  recipeId: string;
+  retryCount: number;
+  retryAtTick: number;
+  state: "in_flight" | "retry_wait" | "settled";
+  receipt: AtomicProcessingActionReceipt | null;
+  stopAfterCommit: boolean;
 }
 
 /** Hammer item ID required for smithing (from centralized constants) */
 const HAMMER_ITEM_ID = SMITHING_CONSTANTS.HAMMER_ITEM_ID;
 
-export class SmithingSystem extends SystemBase {
+export class SmithingSystem
+  extends SystemBase
+  implements PlayerProcessingQuiescenceSystem
+{
   private readonly activeSessions = new Map<string, SmithingSession>();
+  private readonly authorizedAnvils = new Map<string, string>();
+  private readonly pendingActions = new Map<string, PendingSmithingAction>();
   private readonly playerSkills = new Map<
     string,
     Record<string, { level: number; xp: number }>
@@ -47,6 +78,7 @@ export class SmithingSystem extends SystemBase {
 
   /** Track last processed tick to ensure once-per-tick processing */
   private lastProcessedTick = -1;
+  private destroyed = false;
 
   /** OPTIMIZATION: Pre-allocated array for completed players (avoids allocation per tick) */
   private readonly _completedPlayers: string[] = [];
@@ -84,6 +116,7 @@ export class SmithingSystem extends SystemBase {
         recipeId: string;
         anvilId: string;
         quantity: number;
+        requestId?: string;
       }) => {
         this.startSmithing(data);
       },
@@ -100,10 +133,29 @@ export class SmithingSystem extends SystemBase {
       },
     );
 
+    this.subscribe<{
+      playerId: string;
+      targetPosition: { x: number; y: number; z: number };
+    }>(EventType.MOVEMENT_CLICK_TO_MOVE, (data) => {
+      this.authorizedAnvils.delete(data.playerId);
+      this.cancelSmithing(data.playerId);
+    });
+
+    this.subscribe(
+      EventType.COMBAT_STARTED,
+      (data: { attackerId: string; targetId: string }) => {
+        this.authorizedAnvils.delete(data.attackerId);
+        this.authorizedAnvils.delete(data.targetId);
+        this.cancelSmithing(data.attackerId);
+        this.cancelSmithing(data.targetId);
+      },
+    );
+
     // Clean up on player disconnect
     this.subscribe(
       EventType.PLAYER_UNREGISTERED,
       (data: { playerId: string }) => {
+        this.authorizedAnvils.delete(data.playerId);
         this.cancelSmithing(data.playerId);
         this.playerSkills.delete(data.playerId); // Memory cleanup
       },
@@ -118,6 +170,17 @@ export class SmithingSystem extends SystemBase {
     anvilId: string;
   }): void {
     const { playerId, anvilId } = data;
+
+    if (!this.canPlayerUseAnvil(playerId, anvilId)) {
+      this.authorizedAnvils.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "You must be next to that anvil to smith.",
+        type: "error",
+      });
+      return;
+    }
+    this.authorizedAnvils.set(playerId, anvilId);
 
     // Check if already smithing
     if (this.activeSessions.has(playerId)) {
@@ -201,8 +264,38 @@ export class SmithingSystem extends SystemBase {
     recipeId: string;
     anvilId: string;
     quantity: number;
+    requestId?: string;
   }): void {
-    const { playerId, recipeId, anvilId, quantity } = data;
+    const { playerId, recipeId, anvilId, quantity, requestId } = data;
+
+    if (requestId && quantity !== 1) {
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "invalid_request",
+      );
+      return;
+    }
+
+    if (
+      this.authorizedAnvils.get(playerId) !== anvilId ||
+      !this.canPlayerUseAnvil(playerId, anvilId)
+    ) {
+      this.authorizedAnvils.delete(playerId);
+      this.emitTypedEvent(EventType.UI_MESSAGE, {
+        playerId,
+        message: "Use a nearby anvil before selecting an item to smith.",
+        type: "error",
+      });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "not_authorized",
+      );
+      return;
+    }
 
     // Check if already smithing
     if (this.activeSessions.has(playerId)) {
@@ -211,6 +304,13 @@ export class SmithingSystem extends SystemBase {
         message: "You are already smithing.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "busy",
+        true,
+      );
       return;
     }
 
@@ -221,6 +321,12 @@ export class SmithingSystem extends SystemBase {
         message: "You need a hammer to work the metal on this anvil.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -232,6 +338,12 @@ export class SmithingSystem extends SystemBase {
         message: "Invalid smithing recipe.",
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "invalid_request",
+      );
       return;
     }
 
@@ -243,6 +355,12 @@ export class SmithingSystem extends SystemBase {
         message: `You need level ${recipe.levelRequired} Smithing to make that.`,
         type: "error",
       });
+      this.rejectProcessingRequest(
+        playerId,
+        requestId,
+        "smithing",
+        "requirements_not_met",
+      );
       return;
     }
 
@@ -258,10 +376,22 @@ export class SmithingSystem extends SystemBase {
       quantity: Math.max(1, quantity),
       smithed: 0,
       completionTick: currentTick + recipe.ticks, // First smith completes after recipe.ticks
+      requestId,
     };
 
     this.activeSessions.set(playerId, session);
-
+    publishProcessingInteractionPresentation(this.world, {
+      playerId,
+      skill: "smithing",
+      targetEntityId: anvilId,
+    });
+    this.reportProcessingRequestProgress(
+      playerId,
+      requestId,
+      "smithing",
+      "accepted",
+      true,
+    );
     // Show start message
     this.emitTypedEvent(EventType.UI_MESSAGE, {
       playerId,
@@ -284,6 +414,12 @@ export class SmithingSystem extends SystemBase {
   private scheduleNextSmith(playerId: string): void {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
+
+    if (!this.canPlayerUseAnvil(playerId, session.anvilId)) {
+      this.authorizedAnvils.delete(playerId);
+      this.completeSmithing(playerId);
+      return;
+    }
 
     // Check if we've reached the target quantity
     if (session.smithed >= session.quantity) {
@@ -320,58 +456,204 @@ export class SmithingSystem extends SystemBase {
     const session = this.activeSessions.get(playerId);
     if (!session) return;
 
+    if (this.pendingActions.has(playerId)) return;
+
+    if (!this.canPlayerUseAnvil(playerId, session.anvilId)) {
+      this.authorizedAnvils.delete(playerId);
+      this.completeSmithing(playerId);
+      return;
+    }
+
     const recipe = processingDataProvider.getSmithingRecipe(session.recipeId);
     if (!recipe) {
       this.completeSmithing(playerId);
       return;
     }
 
-    // Play smithing animation (classic MMORPG-style)
-    this.emitTypedEvent(EventType.ANIMATION_PLAY, {
-      entityId: playerId,
-      animation: "smithing",
-      loop: false,
-    });
-
-    // Consume bars
-    this.emitTypedEvent(EventType.INVENTORY_ITEM_REMOVED, {
-      playerId,
-      itemId: recipe.barType,
-      quantity: recipe.barsRequired,
-    });
-
-    // Add smithed item(s) to inventory
     const qty = recipe.outputQuantity || 1;
-    this.emitTypedEvent(EventType.INVENTORY_ITEM_ADDED, {
+    const pending: PendingSmithingAction = {
+      operationId:
+        getProcessingRequestOperationId("smithing", session.requestId) ??
+        `smithing-action:${uuid()}${uuid()}`,
       playerId,
-      item: {
-        id: `inv_${playerId}_${Date.now()}`,
+      recipeId: session.recipeId,
+      retryCount: 0,
+      retryAtTick: 0,
+      state: "in_flight",
+      receipt: null,
+      stopAfterCommit: false,
+    };
+    this.pendingActions.set(playerId, pending);
+    this.launchSmithingCommit(pending, {
+      barType: recipe.barType,
+      barsRequired: recipe.barsRequired,
+      itemId: recipe.itemId,
+      outputQuantity: qty,
+      xp: recipe.xp,
+    });
+  }
+
+  private launchSmithingCommit(
+    pending: PendingSmithingAction,
+    recipe: {
+      barType: string;
+      barsRequired: number;
+      itemId: string;
+      outputQuantity: number;
+      xp: number;
+    },
+  ): void {
+    const inventory = this.world.getSystem("inventory") as
+      InventorySystem | undefined;
+    if (!inventory?.commitProcessingActionAtomic) {
+      pending.retryCount++;
+      pending.retryAtTick =
+        (this.world.currentTick ?? 0) +
+        Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+      pending.state = "retry_wait";
+      return;
+    }
+    pending.state = "in_flight";
+    void inventory
+      .commitProcessingActionAtomic(pending.playerId, pending.operationId, {
+        skill: "smithing",
+        xpAmount: recipe.xp,
+        inputs: [{ itemId: recipe.barType, quantity: recipe.barsRequired }],
+        requiredItems: [{ itemId: HAMMER_ITEM_ID, quantity: 1 }],
+        consumables: [],
+        outputs: [{ itemId: recipe.itemId, quantity: recipe.outputQuantity }],
+      })
+      .then((receipt) => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.receipt = receipt;
+        pending.state = "settled";
+      })
+      .catch(() => {
+        if (
+          this.destroyed ||
+          this.pendingActions.get(pending.playerId) !== pending
+        ) {
+          return;
+        }
+        pending.retryCount++;
+        pending.retryAtTick =
+          (this.world.currentTick ?? 0) +
+          Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+        pending.state = "retry_wait";
+      });
+  }
+
+  private processPendingActions(currentTick: number): void {
+    for (const pending of this.pendingActions.values()) {
+      const recipe = processingDataProvider.getSmithingRecipe(pending.recipeId);
+      if (!recipe) {
+        this.pendingActions.delete(pending.playerId);
+        this.completeSmithing(pending.playerId);
+        continue;
+      }
+      const commitRecipe = {
+        barType: recipe.barType,
+        barsRequired: recipe.barsRequired,
         itemId: recipe.itemId,
-        quantity: qty,
-        slot: -1,
-        metadata: null,
-      },
-    });
+        outputQuantity: recipe.outputQuantity || 1,
+        xp: recipe.xp,
+      };
+      if (
+        pending.state === "retry_wait" &&
+        currentTick >= pending.retryAtTick
+      ) {
+        this.launchSmithingCommit(pending, commitRecipe);
+        continue;
+      }
+      if (pending.state !== "settled" || !pending.receipt) continue;
 
-    // Grant XP
-    this.emitTypedEvent(EventType.SKILLS_XP_GAINED, {
-      playerId,
-      skill: "smithing",
-      amount: recipe.xp,
-    });
+      const receipt = pending.receipt;
+      if (!receipt.ok) {
+        if (receipt.retryable) {
+          pending.retryCount++;
+          pending.retryAtTick =
+            currentTick + Math.min(2 ** Math.min(pending.retryCount, 6), 50);
+          pending.receipt = null;
+          pending.state = "retry_wait";
+          continue;
+        }
+        this.pendingActions.delete(pending.playerId);
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            receipt.reason === "inventory_full"
+              ? "Your inventory is too full to hold the smithed item."
+              : receipt.reason === "insufficient_items"
+                ? "You have run out of bars."
+                : "That smithing action could not be validated.",
+          type: "warning",
+        });
+        const session = this.activeSessions.get(pending.playerId);
+        this.rejectProcessingRequest(
+          pending.playerId,
+          session?.requestId,
+          "smithing",
+          receipt.reason === "inventory_full"
+            ? "capacity_unavailable"
+            : receipt.reason === "insufficient_items"
+              ? "resources_unavailable"
+              : "persistence_rejected",
+        );
+        this.completeSmithing(pending.playerId);
+        continue;
+      }
 
-    session.smithed++;
-
-    // Success message (classic MMORPG style - shows item name)
-    const qtyText = qty > 1 ? `${qty} ${recipe.name}` : `a ${recipe.name}`;
-    this.emitTypedEvent(EventType.UI_MESSAGE, {
-      playerId,
-      message: `You hammer the ${recipe.barType.replace("_bar", "")} and make ${qtyText}.`,
-      type: "success",
-    });
-
-    // Schedule next smith action
-    this.scheduleNextSmith(playerId);
+      if (receipt.xpAmount > 0) {
+        this.emitTypedEvent(EventType.SKILLS_PROGRESS_COMMITTED, {
+          playerId: receipt.playerId,
+          operationId: receipt.operationId,
+          replayed: receipt.replayed,
+          skill: receipt.skill,
+          xpAmount: receipt.xpAmount,
+          awardedXp: receipt.awardedXp,
+          operationCommittedXp: receipt.operationCommittedXp,
+          currentXp: receipt.currentXp,
+          currentLevel: receipt.currentLevel,
+        });
+      }
+      this.pendingActions.delete(pending.playerId);
+      const session = this.activeSessions.get(pending.playerId);
+      if (!session || session.recipeId !== pending.recipeId) continue;
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.ANIMATION_PLAY, {
+          entityId: pending.playerId,
+          animation: "smithing",
+          loop: false,
+        });
+      }
+      session.smithed++;
+      const qtyText =
+        commitRecipe.outputQuantity > 1
+          ? `${commitRecipe.outputQuantity} ${recipe.name}`
+          : `a ${recipe.name}`;
+      if (!pending.stopAfterCommit) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message: `You hammer the ${recipe.barType.replace("_bar", "")} and make ${qtyText}.`,
+          type: "success",
+        });
+      }
+      if (!receipt.liveInventoryApplied) {
+        this.emitTypedEvent(EventType.UI_MESSAGE, {
+          playerId: pending.playerId,
+          message:
+            "Your smithed item is safely recorded, but the live inventory view needs to resynchronize.",
+          type: "warning",
+        });
+      }
+      if (pending.stopAfterCommit) this.completeSmithing(pending.playerId);
+      else this.scheduleNextSmith(pending.playerId);
+    }
   }
 
   /**
@@ -382,16 +664,19 @@ export class SmithingSystem extends SystemBase {
     if (!session) return;
 
     this.activeSessions.delete(playerId);
+    clearProcessingInteractionPresentation(this.world, playerId, "smithing");
 
     const recipe = processingDataProvider.getSmithingRecipe(session.recipeId);
 
     // Emit completion event
+    this.finishProcessingRequest(session.requestId);
     this.emitTypedEvent(EventType.SMITHING_COMPLETE, {
       playerId,
       recipeId: session.recipeId,
       outputItemId: recipe?.itemId || session.recipeId,
       totalSmithed: session.smithed,
       totalXp: session.smithed * (recipe?.xp || 0),
+      ...(session.requestId ? { requestId: session.requestId } : {}),
     });
   }
 
@@ -399,6 +684,12 @@ export class SmithingSystem extends SystemBase {
    * Cancel smithing for a player
    */
   private cancelSmithing(playerId: string): void {
+    clearProcessingInteractionPresentation(this.world, playerId, "smithing");
+    const pending = this.pendingActions.get(playerId);
+    if (pending) {
+      pending.stopAfterCommit = true;
+      return;
+    }
     const session = this.activeSessions.get(playerId);
     if (session) {
       this.completeSmithing(playerId);
@@ -461,6 +752,55 @@ export class SmithingSystem extends SystemBase {
     return this.activeSessions.has(playerId);
   }
 
+  requestPlayerProcessingQuiescence(playerId: string): void {
+    this.authorizedAnvils.delete(playerId);
+    this.cancelSmithing(playerId);
+  }
+
+  isPlayerProcessingQuiescent(playerId: string): boolean {
+    return (
+      !this.activeSessions.has(playerId) && !this.pendingActions.has(playerId)
+    );
+  }
+
+  canPlayerUseAnvil(playerId: string, anvilId: string): boolean {
+    return canPlayerUseProcessingStation(
+      this.world,
+      playerId,
+      anvilId,
+      "anvil",
+    );
+  }
+
+  canPlayerUseActiveAnvil(playerId: string): boolean {
+    const anvilId = this.authorizedAnvils.get(playerId);
+    return !!anvilId && this.canPlayerUseAnvil(playerId, anvilId);
+  }
+
+  getSmithingCustodyStats(): {
+    activeSessions: number;
+    pendingActions: number;
+    inFlight: number;
+    retryWaiting: number;
+    maxRetryCount: number;
+  } {
+    let inFlight = 0;
+    let retryWaiting = 0;
+    let maxRetryCount = 0;
+    for (const pending of this.pendingActions.values()) {
+      if (pending.state === "in_flight") inFlight++;
+      if (pending.state === "retry_wait") retryWaiting++;
+      maxRetryCount = Math.max(maxRetryCount, pending.retryCount);
+    }
+    return {
+      activeSessions: this.activeSessions.size,
+      pendingActions: this.pendingActions.size,
+      inFlight,
+      retryWaiting,
+      maxRetryCount,
+    };
+  }
+
   /**
    * Update method - processes tick-based smithing sessions.
    * Called each frame, but only processes once per game tick.
@@ -477,11 +817,26 @@ export class SmithingSystem extends SystemBase {
     }
     this.lastProcessedTick = currentTick;
 
+    for (const session of this.activeSessions.values()) {
+      const pending = this.pendingActions.get(session.playerId);
+      this.reportProcessingRequestProgress(
+        session.playerId,
+        session.requestId,
+        "smithing",
+        pending?.state === "retry_wait" ? "reconciling" : "working",
+      );
+    }
+
+    this.processPendingActions(currentTick);
+
     // Process all active sessions that have reached their completion tick
     // OPTIMIZATION: Use pre-allocated array to avoid allocation per tick
     this._completedPlayers.length = 0; // Clear without reallocating
     for (const [playerId, session] of this.activeSessions) {
-      if (currentTick >= session.completionTick) {
+      if (
+        !this.pendingActions.has(playerId) &&
+        currentTick >= session.completionTick
+      ) {
         this._completedPlayers.push(playerId);
       }
     }
@@ -491,11 +846,14 @@ export class SmithingSystem extends SystemBase {
   }
 
   destroy(): void {
+    this.destroyed = true;
     // Complete all active sessions
     for (const playerId of this.activeSessions.keys()) {
       this.completeSmithing(playerId);
     }
     this.activeSessions.clear();
+    this.authorizedAnvils.clear();
+    this.pendingActions.clear();
     this.playerSkills.clear(); // Memory cleanup
   }
 }

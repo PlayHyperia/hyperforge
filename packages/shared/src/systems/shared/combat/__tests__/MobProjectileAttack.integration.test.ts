@@ -570,6 +570,7 @@ describe("MobProjectileAttack Integration", () => {
       expect(payload.delayMs).toBe(COMBAT_CONSTANTS.SPELL_LAUNCH_DELAY_MS);
       expect(typeof payload.travelDurationMs).toBe("number");
       expect(payload.travelDurationMs as number).toBeGreaterThanOrEqual(200);
+      expect(payload.projectileId).toEqual(expect.any(String));
     });
 
     it("skips attack when mob has no spellId", () => {
@@ -723,6 +724,51 @@ describe("MobProjectileAttack Integration", () => {
       expect(payload.delayMs).toBe(COMBAT_CONSTANTS.ARROW_LAUNCH_DELAY_MS);
       expect(typeof payload.travelDurationMs).toBe("number");
       expect(payload.travelDurationMs as number).toBeGreaterThanOrEqual(200);
+      expect(payload.projectileId).toEqual(expect.any(String));
+    });
+
+    it("carries one stable projectile identity from launch through impact", () => {
+      const player = createTestPlayer("player1", {
+        position: { x: 0.5, y: 0, z: 0.5 },
+      });
+      const mob = createTestMob("mob1", {
+        position: { x: 0.5, y: 0, z: 5.5 },
+        mobType: TEST_RANGER_ID,
+        combatRange: 7,
+      });
+
+      world.players.set("player1", player);
+      world.mobs.set("mob1", mob);
+      emitMobAttack({
+        mobId: "mob1",
+        targetId: "player1",
+        attackType: "ranged",
+        arrowId: "bronze_arrow",
+      });
+
+      const launchPayload = findEvents(EventType.COMBAT_PROJECTILE_LAUNCHED)[0]
+        .data as Record<string, unknown>;
+      const projectileId = launchPayload.projectileId;
+      expect(projectileId).toEqual(expect.any(String));
+
+      for (let tick = 101; tick <= 103; tick++) {
+        world.setTick(tick);
+        combatSystem.processCombatTick(tick);
+      }
+
+      const matchingImpacts = findEvents(
+        EventType.COMBAT_PROJECTILE_HIT,
+      ).filter(
+        (event) =>
+          (event.data as Record<string, unknown>).projectileId === projectileId,
+      );
+      expect(matchingImpacts).toHaveLength(1);
+      const matchingDamage = findEvents(EventType.COMBAT_DAMAGE_DEALT).filter(
+        (event) =>
+          (event.data as Record<string, unknown>).projectileId === projectileId,
+      );
+      expect(matchingDamage).toHaveLength(1);
+      expect(matchingDamage[0].data).toMatchObject({ attackType: "ranged" });
     });
 
     it("skips attack when mob has no arrowId", () => {

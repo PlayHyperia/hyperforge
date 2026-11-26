@@ -75,6 +75,7 @@ export interface FiremakingRequestPayload {
   logsId?: string;
   logsSlot?: number;
   tinderboxSlot?: number;
+  requestId?: unknown;
 }
 
 /** Payload for cooking request from client */
@@ -82,6 +83,7 @@ export interface CookingRequestPayload {
   rawFoodId?: string;
   rawFoodSlot?: number;
   fireId?: string;
+  requestId?: unknown;
 }
 
 /** Payload for smelting source interaction from client */
@@ -101,6 +103,7 @@ export interface ProcessingSmeltingPayload {
   barItemId?: unknown;
   furnaceId?: unknown;
   quantity?: unknown;
+  requestId?: unknown;
 }
 
 /** Payload for processing smithing from client */
@@ -108,6 +111,7 @@ export interface ProcessingSmithingPayload {
   recipeId?: unknown;
   anvilId?: unknown;
   quantity?: unknown;
+  requestId?: unknown;
 }
 
 /** Payload for crafting source interaction from client */
@@ -121,6 +125,7 @@ export interface CraftingSourceInteractPayload {
 export interface ProcessingRecipePayload {
   recipeId?: unknown;
   quantity?: unknown;
+  requestId?: unknown;
 }
 
 /** Payload for fletching source interaction from client */
@@ -134,11 +139,13 @@ export interface FletchingSourceInteractPayload {
 export interface ProcessingTanningPayload {
   inputItemId?: unknown;
   quantity?: unknown;
+  requestId?: unknown;
 }
 
 /** Payload for runecrafting altar interaction from client */
 export interface RunecraftingAltarPayload {
   altarId?: unknown;
+  requestId?: unknown;
 }
 
 // ============================================================================
@@ -196,11 +203,7 @@ export interface AgentThoughtSyncPayload {
       urgency: "critical" | "warning" | "safe";
     };
     decisionPath?:
-      | "short-circuit"
-      | "llm"
-      | "scripted"
-      | "planner"
-      | "curiosity";
+      "short-circuit" | "llm" | "scripted" | "planner" | "curiosity";
     providers?: string[];
   };
 }

@@ -24,13 +24,7 @@ export type TreeSubType = _TreeSubType;
  * These map to ore_<subtype> in mining.json manifest.
  */
 export type OreSubType =
-  | "copper"
-  | "tin"
-  | "iron"
-  | "coal"
-  | "mithril"
-  | "adamant"
-  | "runite";
+  "copper" | "tin" | "iron" | "coal" | "mithril" | "adamant" | "runite";
 
 /**
  * Combined resource subtype for spawn points.
@@ -38,14 +32,38 @@ export type OreSubType =
 export type ResourceSubType = TreeSubType | OreSubType;
 
 export interface TerrainResourceSpawnPoint {
+  /** Seeded candidate provenance only; never an override for runtime identity. */
+  id?: string;
+  /** Validated durable tree identity, accepted only on authored manifest batches. */
+  instanceId?: string;
   position: Position3D;
   type: "tree" | "rock" | "ore" | "herb" | "fish" | "gem" | "rare_ore";
   /** Optional subtype for variant selection (e.g., "oak" for tree_oak, "copper" for ore_copper) */
-  subType?: ResourceSubType;
+  subType?: ResourceSubType | "normal";
   /** Scale multiplier for visual variation (default: 1.0) */
   scale?: number;
   /** Y-axis rotation in radians for visual variation */
   rotation?: number;
+}
+
+/** Gameplay terrain tiles are centred on tileIndex * tileSize. */
+export interface TerrainResourceBatchOwner {
+  tileX: number;
+  tileZ: number;
+}
+
+export interface TerrainResourceSpawnBatch {
+  spawnPoints: TerrainResourceSpawnPoint[];
+  /** Present on procedural batches, including an empty full-content tile. */
+  owner?: TerrainResourceBatchOwner;
+  isManifest?: boolean;
+}
+
+export function centeredTerrainTileIndex(
+  coordinate: number,
+  tileSize: number,
+): number {
+  return Math.floor((coordinate + tileSize * 0.5) / tileSize);
 }
 
 export interface TerrainTileData {
@@ -75,6 +93,8 @@ export interface TerrainTile {
   roads: RoadSegment[];
   waterMeshes: THREE.Mesh[];
   generated: boolean;
+  /** Whether gameplay resources/entities were generated for this tile. */
+  contentGenerated?: boolean;
   heightData: number[];
   lastActiveTime: Date;
   playerCount: number;
@@ -150,6 +170,76 @@ export interface FlatZoneTileBounds {
   maxZ: number;
 }
 
+/** One smoothly blended shelf or shoulder in an authored pond bank. */
+export interface RadialPondBankSector {
+  /** Direction from the pond centre, in radians in [-PI, PI]. */
+  bearing: number;
+  /** Smooth angular support on either side of the bearing, at most PI / 2. */
+  halfWidth: number;
+  /** Intermediate radial knot between the bed and the outer bank. */
+  innerRadius: number;
+  /** Knot elevation between the bed and the dry outer bank. */
+  innerHeight: number;
+  /** Optional paired outer knot before rejoining the actual underlying grade. */
+  outerRadius?: number;
+  /** Requires outerRadius; omission retains the historical level outer bank. */
+  outerHeight?: number;
+}
+
+/** Authored surface role; geometry remains owned by the referenced bank sector. */
+export type RadialPondBankSurface =
+  "sedge-shelf" | "cutbank" | "dry-turf" | "mineral-shore";
+
+/** Authored emergence above the bound water plane; never changes water/height. */
+export interface RadialPondBankGroundCover {
+  readonly emergenceHeight: number;
+  /** At least 0.01 m above emergence, and at most 0.6 m above water. */
+  readonly fullHeight: number;
+}
+
+export interface RadialPondBankCompositionSector {
+  readonly sectorIndex: number;
+  readonly surface: RadialPondBankSurface;
+  /** Omission preserves the historical material and establishment recipe. */
+  readonly groundCover?: RadialPondBankGroundCover;
+}
+
+/** Optional restart-owned surface mapping. An absent entry keeps legacy rules. */
+export interface RadialPondBankComposition {
+  readonly schemaVersion: 1;
+  readonly sectors: readonly RadialPondBankCompositionSector[];
+}
+
+/**
+ * Smooth radial basin profile for an authored pond.
+ * `FlatZone.height` is the bed height and `FlatZone.blendRadius` controls the
+ * final transition from the level bank back to procedural terrain.
+ */
+export interface RadialPondTerrainProfile {
+  /** Radius of the level underwater bed. */
+  bedRadius: number;
+  /** Radius where the rising shoreline reaches the level bank. */
+  bankInnerRadius: number;
+  /** Outer radius of the level bank. */
+  bankOuterRadius: number;
+  /** Height of the dry bank. */
+  bankHeight: number;
+  /** Metres of bounded angular shoreline variation; zero/absent is circular. */
+  shorelineAmplitude?: number;
+  /** Up to four authored shelf/shoulder sections; absent preserves the legacy bank. */
+  bankSectors?: RadialPondBankSector[];
+  /** Appearance/grass data only; never changes the canonical height equations. */
+  bankComposition?: RadialPondBankComposition;
+}
+
+/** Inclusive continuous world-space grass boundary, independent of grading. */
+export type GrassExclusionBounds = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+};
+
 /**
  * Defines an area where terrain should be flattened.
  * Used for stations, buildings, and other world objects that need level ground.
@@ -159,7 +249,7 @@ export interface FlatZoneTileBounds {
  * L-shaped and other non-rectangular building footprints.
  */
 export interface FlatZone {
-  /** Unique identifier (e.g., "station_furnace_lumbridge_1") */
+  /** Unique identifier (e.g., "station_furnace_town_1") */
   id: string;
   /** Center X position in world coordinates (meters) */
   centerX: number;
@@ -173,6 +263,20 @@ export interface FlatZone {
   height: number;
   /** Blend radius for smooth transition to procedural terrain (meters) */
   blendRadius: number;
+  /** Optional Euclidean rectangle falloff; omission retains square corner ramps. */
+  blendShape?: "rounded";
+  /**
+   * Explicit same-height union for rounded backing zones. Multiplies their
+   * outside weights with the original winning unmarked same-height weight;
+   * unmarked zones and points outside the union retain their existing algebra.
+   */
+  blendComposition?: "smooth-union";
+  /** Defaults to true. Explicit false allows grass on a broad authored grade. */
+  excludeGrass?: boolean;
+  /** Optional rectangular clearance inside this grade's support. Grass only. */
+  grassExclusionBounds?: GrassExclusionBounds;
+  /** Optional smooth radial pond basin instead of a rectangular flat zone. */
+  radialPond?: RadialPondTerrainProfile;
   /**
    * Optional carve inset for removing terrain triangles in the flat zone core.
    * If provided, terrain will be carved inside the core area shrunk by this inset.

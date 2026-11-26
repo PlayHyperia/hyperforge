@@ -10,6 +10,7 @@ export * from "./interaction-types";
 export * from "./animation-dialogue-types";
 export * from "./spawning-types";
 export * from "./resource-processing-types";
+export * from "./processing-interaction-presentation";
 export * from "./prayer-types";
 export * from "./quest-types";
 export * from "./trade-types";

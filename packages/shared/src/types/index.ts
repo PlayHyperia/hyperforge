@@ -103,6 +103,7 @@ export * from "./world/building-collision-types";
 export * from "./entities/npc-mob-types";
 export * from "./game/inventory-types";
 export * from "./game/resource-processing-types";
+export * from "./game/processing-interaction-presentation";
 export * from "./game/interaction-types";
 export * from "./game/animation-dialogue-types";
 export * from "./game/spawning-types";
@@ -502,6 +503,8 @@ export interface WorldOptions {
   db?: SystemDatabase;
   // Client-network convenience options (optional)
   wsUrl?: string;
+  /** Explicit entry choice; null forbids fallback, undefined seeds tab storage once. */
+  selectedCharacterId?: string | null;
   name?: string;
   avatar?: string;
   /** DOM element to render into (client/editor only) */
@@ -1097,11 +1100,7 @@ export interface PointerEntry {
 }
 
 export type ControlEntry =
-  | ButtonEntry
-  | VectorEntry
-  | ValueEntry
-  | ScreenEntry
-  | PointerEntry;
+  ButtonEntry | VectorEntry | ValueEntry | ScreenEntry | PointerEntry;
 
 export interface ControlAction {
   id?: number;
@@ -1234,8 +1233,12 @@ export type LoaderResult =
 export interface GLBData {
   scene: THREE.Scene | THREE.Group;
   animations?: THREE.AnimationClip[];
+  /** Parsed source provenance; absent for synthetic or already-cloned scenes. */
+  parser?: { json: unknown };
   userData?: {
+    vrmExpressionManager?: { readonly expressions: readonly unknown[] };
     vrm?: {
+      expressionManager?: { readonly expressions: readonly unknown[] };
       humanoid?: {
         getRawBoneNode?: (boneName: string) => THREE.Object3D | null;
         getNormalizedBoneNode?: (
@@ -1270,6 +1273,8 @@ export interface GLBData {
 // Network Types
 export interface SnapshotData {
   id: string;
+  /** SHA-256 of the validated terrain profile and loaded world manifests. */
+  worldContentIdentity: string;
   serverTime: number;
   apiUrl?: string;
   maxUploadSize?: number;

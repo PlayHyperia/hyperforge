@@ -90,7 +90,7 @@ export class InventoryRepository extends BaseRepository {
 
       for (let attempt = 0; attempt < maxDeadlockRetries; attempt++) {
         try {
-          await this.db.transaction(async (tx) => {
+          await this.withTransaction(async (tx) => {
             // Step 1: Delete items in slots that are no longer occupied
             if (occupiedSlots.length > 0) {
               // Delete slots NOT in the current occupied list

@@ -7,7 +7,7 @@ on:
     branches: [main, staging, develop, dev, hackathon]
   schedule:
     # Run security scans weekly on Monday at 9am UTC
-    - cron: '0 9 * * 1'
+    - cron: "0 9 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,10 +21,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: 1.1.38
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: |

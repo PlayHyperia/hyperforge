@@ -9,6 +9,7 @@
 
 import * as THREE from "three";
 import { SpriteNodeMaterial } from "three/webgpu";
+import type { UniformNode } from "three/webgpu";
 import {
   attribute,
   uv as tslUv,
@@ -29,18 +30,18 @@ import type { FlowerConfig } from "./types.js";
 import { DEFAULT_FLOWER_CONFIG, DEFAULT_FLOWER_PALETTE } from "./types.js";
 
 // TSL uniform nodes - these are shader nodes, not plain values
-type TSLUniform<T> = ReturnType<typeof tslUniform<T>> & { value: T };
+type TSLUniform<TNodeType, TValue> = UniformNode<TNodeType, TValue>;
 
 /**
  * Uniform values for TSL flower material (shader node types)
  */
 export interface FlowerMaterialUniforms {
-  time: TSLUniform<number>;
-  color1: TSLUniform<THREE.Color>;
-  color2: TSLUniform<THREE.Color>;
-  colorStrength: TSLUniform<number>;
-  windIntensity: TSLUniform<number>;
-  windDirection: TSLUniform<THREE.Vector2>;
+  time: TSLUniform<"float", number>;
+  color1: TSLUniform<"color", THREE.Color>;
+  color2: TSLUniform<"color", THREE.Color>;
+  colorStrength: TSLUniform<"float", number>;
+  windIntensity: TSLUniform<"float", number>;
+  windDirection: TSLUniform<"vec2", THREE.Vector2>;
 }
 
 /**
@@ -77,18 +78,16 @@ export function createFlowerUniforms(
   const color = { ...DEFAULT_FLOWER_CONFIG.color, ...config.color };
 
   return {
-    time: tslUniform(0.0) as TSLUniform<number>,
+    time: tslUniform(0.0),
     color1: tslUniform(
       new THREE.Color(color.color1.r, color.color1.g, color.color1.b),
-    ) as TSLUniform<THREE.Color>,
+    ),
     color2: tslUniform(
       new THREE.Color(color.color2.r, color.color2.g, color.color2.b),
-    ) as TSLUniform<THREE.Color>,
-    colorStrength: tslUniform(color.colorStrength) as TSLUniform<number>,
-    windIntensity: tslUniform(0.5) as TSLUniform<number>,
-    windDirection: tslUniform(
-      new THREE.Vector2(1, 0),
-    ) as TSLUniform<THREE.Vector2>,
+    ),
+    colorStrength: tslUniform(color.colorStrength),
+    windIntensity: tslUniform(0.5),
+    windDirection: tslUniform(new THREE.Vector2(1, 0)),
   };
 }
 
@@ -115,8 +114,8 @@ export function createFlowerMaterial(
   material.alphaTest = 0.1;
 
   // Instance attributes
-  const instanceData = attribute("instanceData", "vec4");
-  const instanceVariation = attribute("instanceVariation", "vec4");
+  const instanceData = attribute<"vec4">("instanceData", "vec4");
+  const instanceVariation = attribute<"vec4">("instanceVariation", "vec4");
 
   // Unpack instance data
   const offsetX = instanceData.x;

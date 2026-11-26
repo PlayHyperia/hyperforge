@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "title": "Hyperia Steve bronze pickaxe launch candidate",
+  "equipments": [
+    {
+      "asset": "artifacts/duel-launch-avatar-bakeoff/fitted-steve-preparation-tiers/bronze_pickaxe.glb",
+      "itemId": "bronze_pickaxe",
+      "avatarId": "steve",
+      "slot": "gatheringtool",
+      "grip": "two-hand"
+    }
+  ]
+}

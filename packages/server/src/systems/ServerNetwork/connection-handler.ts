@@ -30,10 +30,10 @@
  * ```
  */
 
-import net from "node:net";
 import type { World } from "@hyperforge/shared";
 import {
   Socket,
+  DataManager,
   EventType,
   getDuelArenaConfig,
   writePacket,
@@ -52,8 +52,11 @@ import type {
 import { STREAMING_PUBLIC_DELAY_MS } from "../../streaming/streaming-policy.js";
 import { resolveStreamingViewerAccessToken } from "../../streaming/stream-viewer-access-token.js";
 import {
+  AgentCredentialAuthenticationError,
   authenticateUser,
   checkUserBan,
+  isLoadTestMode,
+  PresentedCredentialAuthenticationError,
   verifyStreamingViewerCredentials,
 } from "./authentication";
 import { loadCharacterList } from "./character-selection";
@@ -61,6 +64,7 @@ import type { BroadcastManager } from "./broadcast";
 import type { UwsWebSocketAdapter } from "../../startup/UwsWebSocketAdapter";
 import type { SpatialIndex } from "./SpatialIndex";
 import { errMsg } from "../../shared/errMsg.js";
+import { isLoopbackAddress } from "./loopback-address.js";
 
 /**
  * Format ban message for display to user
@@ -141,27 +145,6 @@ export class ConnectionHandler {
     this.spatialIndex = index;
   }
 
-  /** Normalize uWS / Node remote address text and detect loopback (IPv4, IPv6, IPv4-mapped). */
-  private static isLoopbackAddress(rawAddress: string): boolean {
-    let addr = rawAddress.trim();
-    if (addr.startsWith("[") && addr.endsWith("]")) {
-      addr = addr.slice(1, -1);
-    }
-    const base = addr.split("%")[0] ?? addr;
-
-    if (net.isIPv4(base)) {
-      return base === "127.0.0.1";
-    }
-    if (net.isIPv6(base)) {
-      if (base === "::1") return true;
-      const lower = base.toLowerCase();
-      return (
-        lower === "::ffff:127.0.0.1" || lower === "0:0:0:0:0:ffff:127.0.0.1"
-      );
-    }
-    return false;
-  }
-
   private isLoopbackWs(ws: NodeWebSocket): boolean {
     const rawAddress =
       ws.__remoteAddress ||
@@ -172,7 +155,7 @@ export class ConnectionHandler {
       )._socket?.remoteAddress;
 
     if (!rawAddress) return false;
-    return ConnectionHandler.isLoopbackAddress(rawAddress);
+    return isLoopbackAddress(rawAddress);
   }
 
   private hasStreamingViewerAccessToken(params: ConnectionParams): boolean {
@@ -234,8 +217,9 @@ export class ConnectionHandler {
       // Check if this is a load test bot (URL params come as strings)
       const loadTestBotParam = (params as { loadTestBot?: string | boolean })
         .loadTestBot;
-      const isLoadTestBot =
+      const requestedLoadTestBot =
         loadTestBotParam === "true" || loadTestBotParam === true;
+      const isLoadTestBot = requestedLoadTestBot && isLoadTestMode();
 
       // SECURITY: Check if using first-message auth pattern (no authToken in URL)
       // This is the preferred pattern as it prevents token exposure in:
@@ -251,16 +235,19 @@ export class ConnectionHandler {
       }
 
       // Authenticate user (legacy: authToken in URL)
-      const { user, authToken, userWithPrivy } = await authenticateUser(
-        params,
-        this.db,
-      );
+      const {
+        user,
+        authToken,
+        agentCredentialCharacterId,
+        agentCredentialSessionExpiresAt,
+        agentCredentialSessionId,
+        userWithPrivy,
+      } = await authenticateUser(params, this.db);
 
       // SECURITY: Always check bans, even for load test bots in production
       // Only skip ban check if LOAD_TEST_MODE is explicitly enabled
       // This prevents attackers from bypassing bans by claiming to be load test bots
-      const skipBanCheck =
-        isLoadTestBot && process.env.LOAD_TEST_MODE === "true";
+      const skipBanCheck = isLoadTestBot;
 
       if (!skipBanCheck) {
         // Check if user is banned
@@ -283,6 +270,10 @@ export class ConnectionHandler {
 
       // Create socket
       const socket = this.createSocket(ws, user.id);
+      socket.isLoadTestBot = isLoadTestBot;
+      socket.agentCredentialCharacterId = agentCredentialCharacterId;
+      socket.agentCredentialSessionId = agentCredentialSessionId;
+      this.armAgentCredentialExpiry(socket, agentCredentialSessionExpiresAt);
 
       // Load character list
       const characters = await loadCharacterList(user.id, this.world);
@@ -295,6 +286,8 @@ export class ConnectionHandler {
         livekit,
         characters,
       });
+
+      this.sendFireSnapshot(socket);
 
       // Send resource snapshot
       await this.sendResourceSnapshot(socket);
@@ -325,7 +318,21 @@ export class ConnectionHandler {
         this.emitPlayerJoined(socket);
       }
     } catch (err) {
-      console.error("[ConnectionHandler] Error in handleConnection:", err);
+      if (
+        err instanceof AgentCredentialAuthenticationError ||
+        err instanceof PresentedCredentialAuthenticationError
+      ) {
+        console.warn("[ConnectionHandler] Rejected presented credential");
+      } else {
+        console.error("[ConnectionHandler] Error in handleConnection:", err);
+      }
+      try {
+        const packet = writePacket("kick", "authentication_failed");
+        ws.send(packet);
+        ws.close(4001, "Authentication failed");
+      } catch {
+        // The transport may already be closed.
+      }
     }
   }
 
@@ -376,6 +383,27 @@ export class ConnectionHandler {
     socket.createdAt = Date.now(); // Track creation time for reconnection grace period
 
     return socket;
+  }
+
+  private armAgentCredentialExpiry(
+    socket: ServerSocket,
+    expiresAt: string | undefined,
+  ): void {
+    if (!socket.agentCredentialSessionId || !expiresAt) return;
+    const delayMs = Date.parse(expiresAt) - Date.now();
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      socket.disconnect("agent_credentials_expired");
+      return;
+    }
+    socket.agentCredentialExpiryTimeoutId = setTimeout(() => {
+      socket.agentCredentialExpiryTimeoutId = undefined;
+      try {
+        socket.send("kick", "agent_credentials_expired");
+      } finally {
+        socket.disconnect("agent_credentials_expired");
+      }
+    }, delayMs);
+    socket.agentCredentialExpiryTimeoutId.unref?.();
   }
 
   /**
@@ -528,10 +556,14 @@ export class ConnectionHandler {
           };
 
           // Authenticate user
-          const { user, authToken, userWithPrivy } = await authenticateUser(
-            authParams,
-            this.db,
-          );
+          const {
+            user,
+            authToken,
+            agentCredentialCharacterId,
+            agentCredentialSessionExpiresAt,
+            agentCredentialSessionId,
+            userWithPrivy,
+          } = await authenticateUser(authParams, this.db);
 
           // Check if user is banned
           const banInfo = await checkUserBan(user.id, this.db);
@@ -564,6 +596,12 @@ export class ConnectionHandler {
 
           // Create socket
           const socket = this.createSocket(ws, user.id);
+          socket.agentCredentialCharacterId = agentCredentialCharacterId;
+          socket.agentCredentialSessionId = agentCredentialSessionId;
+          this.armAgentCredentialExpiry(
+            socket,
+            agentCredentialSessionExpiresAt,
+          );
 
           // Load character list
           const characters = await loadCharacterList(user.id, this.world);
@@ -576,6 +614,8 @@ export class ConnectionHandler {
             livekit,
             characters,
           });
+
+          this.sendFireSnapshot(socket);
 
           // Send resource snapshot
           await this.sendResourceSnapshot(socket);
@@ -605,10 +645,17 @@ export class ConnectionHandler {
         } catch (err) {
           // Ensure cleanup on error
           cleanup();
-          console.error(
-            "[ConnectionHandler] Error in deferred authentication:",
-            err,
-          );
+          if (
+            err instanceof AgentCredentialAuthenticationError ||
+            err instanceof PresentedCredentialAuthenticationError
+          ) {
+            console.warn("[ConnectionHandler] Rejected presented credential");
+          } else {
+            console.error(
+              "[ConnectionHandler] Error in deferred authentication:",
+              err,
+            );
+          }
           try {
             const packet = writePacket("authResult", {
               success: false,
@@ -665,6 +712,7 @@ export class ConnectionHandler {
   ): Promise<void> {
     const baseSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       worldTime: this.world.getTime(), // Synced world time for day/night cycle
       assetsUrl: this.world.assetsUrl,
@@ -990,8 +1038,7 @@ export class ConnectionHandler {
     }
 
     const dataQuat = data.quaternion as
-      | [number, number, number, number]
-      | undefined;
+      [number, number, number, number] | undefined;
     if (Array.isArray(dataQuat) && dataQuat.length >= 4) {
       const [x, y, z, w] = dataQuat;
       if (
@@ -1037,19 +1084,16 @@ export class ConnectionHandler {
         entity as {
           data?: {
             position?:
-              | [number, number, number]
-              | { x?: number; y?: number; z?: number };
+              [number, number, number] | { x?: number; y?: number; z?: number };
           };
           position?:
-            | [number, number, number]
-            | { x?: number; y?: number; z?: number };
+            [number, number, number] | { x?: number; y?: number; z?: number };
         }
       ).data?.position ??
       (
         entity as {
           position?:
-            | [number, number, number]
-            | { x?: number; y?: number; z?: number };
+            [number, number, number] | { x?: number; y?: number; z?: number };
         }
       ).position;
 
@@ -1285,8 +1329,7 @@ export class ConnectionHandler {
   private async sendResourceSnapshot(socket: ServerSocket): Promise<void> {
     try {
       const resourceSystem = this.world.getSystem?.("resource") as
-        | ResourceSystem
-        | undefined;
+        ResourceSystem | undefined;
       const resources = resourceSystem?.getAllResources?.() || [];
 
       const payload = {
@@ -1302,9 +1345,39 @@ export class ConnectionHandler {
         })),
       };
 
-      this.broadcast.sendToSocket(socket.id, "resourceSnapshot", payload);
+      // Initial snapshots precede registration in the broadcast socket map.
+      // Send through this exact authenticated/authorized connection, as fires do.
+      socket.send("resourceSnapshot", payload);
     } catch {
       // Resource system not available or error, skip
+    }
+  }
+
+  /** Send authoritative active fires directly, including sockets not registered yet. */
+  private sendFireSnapshot(socket: ServerSocket): void {
+    try {
+      const processing = this.world.getSystem?.("processing") as
+        | {
+            getActiveFirePayloads?: () => Array<{
+              fireId: string;
+              playerId: string;
+              position: { x: number; y: number; z: number };
+              createdAt: number;
+              expiresAt: number;
+            }>;
+          }
+        | undefined;
+      for (const fire of processing?.getActiveFirePayloads?.() ?? []) {
+        socket.send("fireCreated", {
+          ...fire,
+          serverObservedAt: Date.now(),
+        });
+      }
+    } catch (error) {
+      console.error(
+        "[ConnectionHandler] Failed to send active fire snapshot:",
+        error,
+      );
     }
   }
 
@@ -1402,8 +1475,7 @@ export class ConnectionHandler {
 
       // Get database system for character lookup
       const databaseSystem = this.world.getSystem("database") as
-        | import("../DatabaseSystem").DatabaseSystem
-        | undefined;
+        import("../DatabaseSystem").DatabaseSystem | undefined;
 
       if (!databaseSystem) {
         console.error(
@@ -1558,6 +1630,8 @@ export class ConnectionHandler {
         characterId,
       });
 
+      this.sendFireSnapshot(socket);
+
       // Send resource snapshot
       await this.sendResourceSnapshot(socket);
 
@@ -1687,12 +1761,12 @@ export class ConnectionHandler {
       // Mark as streaming viewer
       socket.createdAt = Date.now();
       socket.isSpectator = true; // Reuse spectator flag for similar behavior
-      (
-        socket as ServerSocket & { isStreamingViewer?: boolean }
-      ).isStreamingViewer = true;
+      socket.isStreamingViewer = true;
 
       // Send streaming snapshot (similar to spectator but no follow entity)
       await this.sendStreamingSnapshot(socket);
+
+      this.sendFireSnapshot(socket);
 
       // Send resource snapshot
       await this.sendResourceSnapshot(socket);
@@ -1750,6 +1824,7 @@ export class ConnectionHandler {
 
     const streamingSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       worldTime: this.world.getTime(), // Synced world time for day/night cycle
       assetsUrl: this.world.assetsUrl,
@@ -1773,6 +1848,63 @@ export class ConnectionHandler {
     };
 
     socket.send("snapshot", streamingSnapshot);
+  }
+
+  /**
+   * Reconcile the entity set owned by canonical streaming viewers when the
+   * scheduler changes matchups. Streaming snapshots are intentionally focused
+   * around the current arena, so an already-existing agent selected from
+   * elsewhere in the world is not necessarily present in a connected viewer.
+   * Teleport and combat packets cannot create that missing client entity.
+   *
+   * Deliver the contestant snapshots before the scheduler publishes their new
+   * overlay state, and remove only contestants that this stream connection no
+   * longer owns. Pinned dashboard/agent spectators are deliberately untouched.
+   */
+  syncStreamingContestants(contestantIds: string[]): void {
+    const normalizedIds = Array.from(
+      new Set(
+        contestantIds.filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      ),
+    );
+    const nextIds = new Set(normalizedIds);
+
+    for (const socket of this.sockets.values()) {
+      if (!socket.isStreamingViewer) continue;
+
+      const previousIds = new Set(socket.spectatingDuelParticipantIds ?? []);
+      for (const previousId of previousIds) {
+        if (nextIds.has(previousId)) continue;
+        const previousEntity = this.findEntityBySpectatorKey(previousId) as
+          { id?: string } | undefined;
+        socket.send("entityRemoved", previousEntity?.id ?? previousId);
+      }
+
+      const snapshots: Record<string, unknown>[] = [];
+      for (const contestantId of normalizedIds) {
+        const entity = this.findEntityBySpectatorKey(contestantId) as
+          | {
+              id?: string;
+              serialize?: () => unknown;
+            }
+          | undefined;
+        if (!entity || typeof entity.serialize !== "function") continue;
+        const serialized = entity.serialize();
+        if (!serialized || typeof serialized !== "object") continue;
+        const snapshot = serialized as Record<string, unknown>;
+        this.applyAuthoritativeTransformSnapshot(entity, snapshot, {
+          groundPlayersToTerrain: true,
+        });
+        snapshots.push(snapshot);
+      }
+
+      socket.spectatingDuelParticipantIds = normalizedIds;
+      if (snapshots.length > 0) {
+        socket.send("entitiesBatchAdded", snapshots);
+      }
+    }
   }
 
   /**
@@ -1809,8 +1941,7 @@ export class ConnectionHandler {
     // Subscribe to followed player's region topics
     // Use findEntityBySpectatorKey so it searches both items AND players collections
     const followedEntity = this.findEntityBySpectatorKey(characterId) as
-      | { position?: { x: number; z: number } }
-      | undefined;
+      { position?: { x: number; z: number } } | undefined;
     if (followedEntity?.position && this.spatialIndex) {
       const regionKeys = this.spatialIndex.getAdjacentRegionKeys(
         followedEntity.position.x,
@@ -1850,6 +1981,7 @@ export class ConnectionHandler {
 
     const spectatorSnapshot = {
       id: socket.id,
+      worldContentIdentity: DataManager.getWorldContentIdentity(),
       serverTime: performance.now(),
       assetsUrl: this.world.assetsUrl,
       apiUrl: process.env.PUBLIC_API_URL,

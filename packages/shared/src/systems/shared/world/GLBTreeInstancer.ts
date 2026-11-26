@@ -20,6 +20,7 @@
 import THREE from "../../../extras/three/three";
 import type { World } from "../../../core/World";
 import { modelCache } from "../../../utils/rendering/ModelCache";
+import { createStorageInstancedMesh } from "../../../utils/rendering/createStorageInstancedMesh";
 import {
   createTreeDissolveMaterial,
   GPU_VEG_CONFIG,
@@ -28,12 +29,21 @@ import {
   type TreeMaterialOptions,
 } from "./GPUMaterials";
 import type { Wind } from "./Wind";
+import {
+  assertTreeWindInstanceMatrix,
+  cloneGeometryWithTreeWind,
+  deriveTreeWindDescriptor,
+  type TreeWindDescriptor,
+  type TreeWindMode,
+  type TreeWindPoolOptions,
+} from "./TreeWind";
 import { getLODDistances, inferLOD1Path, inferLOD2Path } from "./LODConfig";
 import {
   type DissolveAnim,
   startDissolve as startDissolveAnim,
   tickDissolveAnims,
 } from "./DissolveAnimation";
+import { shouldStreamVegetationBackgroundLods } from "../../../runtime/clientViewportMode";
 
 const MAX_INSTANCES = 512;
 
@@ -43,8 +53,16 @@ const _quaternion = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
 const _swapMatrix = new THREE.Matrix4();
 
+/** Optional exact actor lifetime; legacy callers may continue to omit it. */
+export interface TreeInstanceLifetime {
+  isCurrent(): boolean;
+  /** Read at insertion, after shared model loading, to avoid a depletion flash. */
+  getInitialDissolve(): number;
+}
+
 interface TreeSlot {
   entityId: string;
+  lifetime?: TreeInstanceLifetime;
   position: THREE.Vector3;
   rotation: number;
   scale: number;
@@ -53,6 +71,7 @@ interface TreeSlot {
 }
 
 interface LODPool {
+  readonly windMode: TreeWindMode;
   /** One InstancedMesh per sub-mesh/primitive in the GLB */
   meshes: THREE.InstancedMesh[];
   materials: DissolveMaterial[];
@@ -75,6 +94,7 @@ interface LODPool {
 }
 
 interface ModelPool {
+  readonly windMode: TreeWindMode;
   modelPath: string;
   lod0: LODPool | null;
   lod1: LODPool | null;
@@ -92,8 +112,71 @@ const resourceLOD = getLODDistances("resource");
 // ---- Module state ----
 let scene: THREE.Scene | null = null;
 let world: World | null = null;
+let windMode: TreeWindMode = "legacy-leaf-v1";
+let poolGeneration = 0;
+const cancelledPoolLoad = new Error("Tree pool world lifetime ended");
 const pools = new Map<string, ModelPool>();
 const entityToModel = new Map<string, string>();
+const pendingInstances = new Map<string, { lifetime?: TreeInstanceLifetime }>();
+
+/** Borrowed render handles; only snapshot metadata is immutable. */
+export type GLBTreeRenderOwnership<T extends THREE.Mesh> = Readonly<{
+  generation: number;
+  records: readonly Readonly<{
+    pool: string;
+    lod: 0 | 1 | 2;
+    materialSlot: number;
+    mesh: T;
+    geometry: THREE.BufferGeometry;
+    material: THREE.Material;
+  }>[];
+}>;
+
+/** Inspect an already initialized owner without loading or updating anything.
+ * Includes empty/hidden LOD members. Generation identifies the world lifetime,
+ * not subsequent pool publication: consumers must compare fresh full membership
+ * and mesh/geometry/material identities as well before omitting any draw.
+ * Foreign material replacements refuse the snapshot. Handles remain borrowed
+ * and must never be disposed by a diagnostic. */
+export function getGLBTreeRenderOwnership(
+  expectedWorld: World,
+  expectedScene: THREE.Scene,
+): GLBTreeRenderOwnership<THREE.InstancedMesh> | null {
+  if (!world || !scene || world !== expectedWorld || scene !== expectedScene)
+    return null;
+  const records: Array<
+    GLBTreeRenderOwnership<THREE.InstancedMesh>["records"][number]
+  > = [];
+  for (const [pool, owner] of pools) {
+    const lods = [owner.lod0, owner.lod1, owner.lod2] as const;
+    for (const lod of [0, 1, 2] as const) {
+      const member = lods[lod];
+      if (!member) continue;
+      for (const [materialSlot, mesh] of member.meshes.entries()) {
+        const material = mesh.material;
+        if (
+          Array.isArray(material) ||
+          material !== member.materials[materialSlot]
+        )
+          return null;
+        records.push(
+          Object.freeze({
+            pool,
+            lod,
+            materialSlot,
+            mesh,
+            geometry: mesh.geometry,
+            material,
+          }),
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    generation: poolGeneration,
+    records: Object.freeze(records),
+  });
+}
 
 // ---- Geometry extraction (reference, not clone) ----
 
@@ -128,9 +211,10 @@ function createSharedGeometry(
   if (source.index) geo.setIndex(source.index.clone());
   if (source.morphAttributes) {
     for (const name in source.morphAttributes) {
-      geo.morphAttributes[name] = source.morphAttributes[name].map((a) =>
-        a.clone(),
-      );
+      geo.morphAttributes[name as keyof typeof source.morphAttributes] =
+        source.morphAttributes[
+          name as keyof typeof source.morphAttributes
+        ]!.map((a) => a.clone());
     }
   }
   if (source.groups.length > 0) {
@@ -165,37 +249,61 @@ function computeModelBounds(
 
 function createLODPool(
   parts: { geometry: THREE.BufferGeometry; material: DissolveMaterial }[],
+  loadScene: THREE.Scene,
+  poolWindMode: TreeWindMode,
+  descriptor?: TreeWindDescriptor,
 ): LODPool {
   const meshes: THREE.InstancedMesh[] = [];
   const materials: DissolveMaterial[] = [];
+  const ownedGeometries: THREE.BufferGeometry[] = [];
   const sourceGeometries: THREE.BufferGeometry[] = [];
   const hlData = new Float32Array(MAX_INSTANCES);
   const dissolveData = new Float32Array(MAX_INSTANCES);
-  for (const part of parts) {
-    // Store the original geometry before adding instanced attributes
-    sourceGeometries.push(part.geometry);
+  try {
+    for (const part of parts) {
+      // Store the original geometry before adding instanced attributes
+      sourceGeometries.push(part.geometry);
 
-    const geo = createSharedGeometry(part.geometry);
+      const geo = descriptor
+        ? cloneGeometryWithTreeWind(part.geometry, descriptor)
+        : createSharedGeometry(part.geometry);
+      ownedGeometries.push(geo);
+      if (descriptor && !geo.hasAttribute("normal")) geo.computeVertexNormals();
 
-    const hlAttr = new THREE.InstancedBufferAttribute(hlData, 1);
-    hlAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("instanceHighlight", hlAttr);
+      const hlAttr = new THREE.InstancedBufferAttribute(hlData, 1);
+      hlAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute("instanceHighlight", hlAttr);
 
-    const dsAttr = new THREE.InstancedBufferAttribute(dissolveData, 1);
-    dsAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("instanceDissolve", dsAttr);
+      const dsAttr = new THREE.InstancedBufferAttribute(dissolveData, 1);
+      dsAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute("instanceDissolve", dsAttr);
 
-    const im = new THREE.InstancedMesh(geo, part.material, MAX_INSTANCES);
-    im.count = 0;
-    im.frustumCulled = false;
-    im.castShadow = true;
-    im.receiveShadow = false;
-    im.layers.set(1);
-    scene!.add(im);
-    meshes.push(im);
-    materials.push(part.material);
+      const im = createStorageInstancedMesh(geo, part.material, MAX_INSTANCES);
+      meshes.push(im);
+      im.count = 0;
+      // Shader wind does not change CPU geometry bounds. Native mesh culling
+      // stays disabled for every camera/pass; collision/model bounds stay static.
+      im.frustumCulled = false;
+      im.castShadow = true;
+      im.receiveShadow = false;
+      im.layers.set(1);
+      loadScene.add(im);
+      materials.push(part.material);
+    }
+  } catch (error) {
+    for (const im of meshes) {
+      im.removeFromParent();
+      im.dispose();
+    }
+    for (const geo of ownedGeometries) geo.dispose();
+    // Input materials transfer ownership to this function, including parts
+    // whose geometry could not be admitted before pool construction failed.
+    for (const material of new Set(parts.map((part) => part.material)))
+      material.dispose();
+    throw error;
   }
   return {
+    windMode: poolWindMode,
     meshes,
     materials,
     slots: new Map(),
@@ -208,9 +316,23 @@ function createLODPool(
   };
 }
 
-async function loadLODParts(path: string): Promise<MeshPart[] | null> {
+function disposeLODPool(pool: LODPool): void {
+  for (const im of pool.meshes) {
+    im.removeFromParent();
+    im.geometry.dispose();
+    im.dispose();
+  }
+  for (const material of new Set(pool.materials)) material.dispose();
+  // These are borrowed ModelCache geometries, never disposal targets.
+  pool.sourceGeometries.length = 0;
+}
+
+async function loadLODParts(
+  path: string,
+  loadWorld: World,
+): Promise<MeshPart[] | null> {
   try {
-    const { scene: lodScene } = await modelCache.loadModel(path, world!);
+    const { scene: lodScene } = await modelCache.loadModel(path, loadWorld);
     const parts = extractAllMeshParts(lodScene);
     return parts.length > 0 ? parts : null;
   } catch {
@@ -234,8 +356,7 @@ function enableTextureRepeat(mat: DissolveMaterial): void {
   ] as const;
   for (const key of texProps) {
     const tex = (mat as unknown as Record<string, unknown>)[key] as
-      | THREE.Texture
-      | undefined;
+      THREE.Texture | undefined;
     if (tex) {
       tex.wrapS = THREE.RepeatWrapping;
       tex.wrapT = THREE.RepeatWrapping;
@@ -255,6 +376,26 @@ async function ensureModelPool(
   const pending = pendingEnsure.get(modelPath);
   if (pending) return pending;
 
+  if (!world || !scene) throw cancelledPoolLoad;
+  const loadWorld = world;
+  const loadScene = scene;
+  const poolWindMode = windMode;
+  const generation = poolGeneration;
+  const assertCurrent = () => {
+    if (
+      generation !== poolGeneration ||
+      world !== loadWorld ||
+      scene !== loadScene
+    ) {
+      throw cancelledPoolLoad;
+    }
+  };
+  const loadParts = async (path: string) => {
+    const parts = await loadLODParts(path, loadWorld);
+    assertCurrent();
+    return parts;
+  };
+
   const promise = (async (): Promise<ModelPool> => {
     const dissolveOpts = {
       fadeStart: GPU_VEG_CONFIG.FADE_START,
@@ -268,77 +409,117 @@ async function ensureModelPool(
     function buildTreeParts(
       parts: MeshPart[],
     ): { geometry: THREE.BufferGeometry; material: DissolveMaterial }[] {
-      return parts.map((p) => {
-        const dm = createTreeDissolveMaterial(p.material, {
-          ...dissolveOpts,
-        } as TreeMaterialOptions);
-        dm.side = THREE.DoubleSide;
-        enableTextureRepeat(dm);
-        world!.setupMaterial(dm);
-        return { geometry: p.geometry, material: dm };
-      });
+      const built: {
+        geometry: THREE.BufferGeometry;
+        material: DissolveMaterial;
+      }[] = [];
+      try {
+        for (const p of parts) {
+          const dm = createTreeDissolveMaterial(p.material, {
+            ...dissolveOpts,
+            treeWind: poolWindMode,
+          } as TreeMaterialOptions);
+          // Own the material immediately: setupMaterial/texture setup may throw.
+          built.push({ geometry: p.geometry, material: dm });
+          dm.side = THREE.DoubleSide;
+          enableTextureRepeat(dm);
+          loadWorld.setupMaterial(dm);
+        }
+        return built;
+      } catch (error) {
+        for (const part of built) part.material.dispose();
+        throw error;
+      }
     }
 
     // LOD0
-    const { scene: lod0Scene } = await modelCache.loadModel(modelPath, world!);
+    const { scene: lod0Scene } = await modelCache.loadModel(
+      modelPath,
+      loadWorld,
+    );
+    assertCurrent();
     const lod0Parts = extractAllMeshParts(lod0Scene);
     if (lod0Parts.length === 0)
       throw new Error(`No mesh found in ${modelPath}`);
 
     const bounds = computeModelBounds(lod0Scene, 1);
+    const descriptor =
+      poolWindMode === "connected-v1"
+        ? deriveTreeWindDescriptor(
+            [...new Set(lod0Parts.map((part) => part.geometry))],
+            -bounds.yOffset,
+          )
+        : undefined;
 
-    const lod0Pool = createLODPool(buildTreeParts(lod0Parts));
+    // The fixed broadcast viewport has no exploration traversal and keeps LOD0
+    // available as the visual fallback. Avoid decoding and uploading distant
+    // tree LOD pools during its critical startup window.
+    const loadBackgroundLods = shouldStreamVegetationBackgroundLods();
 
     // LOD1 — explicit path first, fall back to inferred naming convention
-    let lod1Pool: LODPool | null = null;
-    if (lod1ModelPath) {
-      const lod1Parts = await loadLODParts(lod1ModelPath);
-      if (lod1Parts) {
-        lod1Pool = createLODPool(buildTreeParts(lod1Parts));
-      }
+    let lod1Parts: MeshPart[] | null = null;
+    if (loadBackgroundLods && lod1ModelPath) {
+      lod1Parts = await loadParts(lod1ModelPath);
     }
-    if (!lod1Pool) {
-      const lod1Parts = await loadLODParts(inferLOD1Path(modelPath));
-      if (lod1Parts) {
-        lod1Pool = createLODPool(buildTreeParts(lod1Parts));
-      }
+    if (loadBackgroundLods && !lod1Parts) {
+      lod1Parts = await loadParts(inferLOD1Path(modelPath));
     }
 
     // LOD2 — explicit path first, fall back to inferred naming convention
-    let lod2Pool: LODPool | null = null;
-    if (lod2ModelPath) {
-      const lod2Parts = await loadLODParts(lod2ModelPath);
-      if (lod2Parts) {
-        lod2Pool = createLODPool(buildTreeParts(lod2Parts));
-      }
+    let lod2Parts: MeshPart[] | null = null;
+    if (loadBackgroundLods && lod2ModelPath) {
+      lod2Parts = await loadParts(lod2ModelPath);
     }
-    if (!lod2Pool) {
-      const lod2Parts = await loadLODParts(inferLOD2Path(modelPath));
-      if (lod2Parts) {
-        lod2Pool = createLODPool(buildTreeParts(lod2Parts));
-      }
+    if (loadBackgroundLods && !lod2Parts) {
+      lod2Parts = await loadParts(inferLOD2Path(modelPath));
     }
 
-    const pool: ModelPool = {
-      modelPath,
-      lod0: lod0Pool,
-      lod1: lod1Pool,
-      lod2: lod2Pool,
-      instances: new Map(),
-      yOffset: bounds.yOffset,
-      modelHeight: bounds.height,
-      modelRadius: bounds.radius,
+    // Publish scene-owned resources only after every load is admitted. Teardown
+    // during an LOD await cannot leave a partly built pool outside the registry.
+    assertCurrent();
+    const completedLods: LODPool[] = [];
+    const buildLOD = (parts: MeshPart[]) => {
+      const lod = createLODPool(
+        buildTreeParts(parts),
+        loadScene,
+        poolWindMode,
+        descriptor,
+      );
+      completedLods.push(lod);
+      return lod;
     };
-    pools.set(modelPath, pool);
+    try {
+      const lod0Pool = buildLOD(lod0Parts);
+      const lod1Pool = lod1Parts ? buildLOD(lod1Parts) : null;
+      const lod2Pool = lod2Parts ? buildLOD(lod2Parts) : null;
+      assertCurrent();
 
-    return pool;
+      const pool: ModelPool = {
+        windMode: poolWindMode,
+        modelPath,
+        lod0: lod0Pool,
+        lod1: lod1Pool,
+        lod2: lod2Pool,
+        instances: new Map(),
+        yOffset: bounds.yOffset,
+        modelHeight: bounds.height,
+        modelRadius: bounds.radius,
+      };
+      pools.set(modelPath, pool);
+
+      return pool;
+    } catch (error) {
+      for (const lod of completedLods) disposeLODPool(lod);
+      throw error;
+    }
   })();
 
   pendingEnsure.set(modelPath, promise);
   try {
     return await promise;
   } finally {
-    pendingEnsure.delete(modelPath);
+    if (pendingEnsure.get(modelPath) === promise)
+      pendingEnsure.delete(modelPath);
   }
 }
 
@@ -362,6 +543,7 @@ function addToPool(
   mat: THREE.Matrix4,
   dissolve = 0,
 ): boolean {
+  if (pool.windMode === "connected-v1") assertTreeWindInstanceMatrix(mat);
   if (pool.activeCount >= MAX_INSTANCES) return false;
   const idx = pool.activeCount;
   for (const im of pool.meshes) {
@@ -411,9 +593,23 @@ function removeFromPool(pool: LODPool, entityId: string): void {
 
 // ---- Public API ----
 
-export function initGLBTreeInstancer(s: THREE.Scene, w: World): void {
+export function initGLBTreeInstancer(
+  s: THREE.Scene,
+  w: World,
+  options: TreeWindPoolOptions = {},
+): void {
+  const nextWindMode = options.windMode ?? "legacy-leaf-v1";
+  if (nextWindMode !== "legacy-leaf-v1" && nextWindMode !== "connected-v1")
+    throw new Error("Unsupported tree pool wind mode");
+  if (
+    (nextWindMode !== windMode || s !== scene || w !== world) &&
+    (pools.size > 0 || pendingEnsure.size > 0 || pendingInstances.size > 0)
+  )
+    throw new Error("Tree pool owner or wind mode change requires teardown");
+  poolGeneration++;
   scene = s;
   world = w;
+  windMode = nextWindMode;
 }
 
 /**
@@ -421,23 +617,23 @@ export function initGLBTreeInstancer(s: THREE.Scene, w: World): void {
  * after this to dispose cached proxy geometries that reference sourceGeometries.
  */
 export function destroyGLBTreeInstancer(): void {
+  poolGeneration++;
   for (const pool of pools.values()) {
     for (const lodPool of [pool.lod0, pool.lod1, pool.lod2]) {
       if (!lodPool) continue;
-      for (const im of lodPool.meshes) {
-        scene?.remove(im);
-        im.geometry.dispose();
-      }
-      for (const mat of lodPool.materials) mat.dispose();
-      lodPool.sourceGeometries.length = 0;
+      disposeLODPool(lodPool);
     }
   }
   pools.clear();
   entityToModel.clear();
+  pendingInstances.clear();
   pendingEnsure.clear();
   dissolveAnims.clear();
   scene = null;
   world = null;
+  windMode = "legacy-leaf-v1";
+  highlightedEntityId = null;
+  lastUpdateFrame = -1;
 }
 
 export async function addInstance(
@@ -449,15 +645,36 @@ export async function addInstance(
   lod1ModelPath?: string | null,
   lod2ModelPath?: string | null,
   initialDissolve = 0,
+  lifetime?: TreeInstanceLifetime,
 ): Promise<boolean> {
-  if (!scene || !world) return false;
+  if (!scene || !world || (lifetime && !lifetime.isCurrent())) return false;
+  const instanceWorld = world;
+  const instanceScene = scene;
+  const generation = poolGeneration;
 
-  if (entityToModel.has(entityId)) {
-    removeInstance(entityId);
-  }
+  const request = { lifetime };
 
   try {
+    // Reject malformed connected transforms before replacing even a pending
+    // request. The real model offset is validated again after model admission.
+    if (windMode === "connected-v1") {
+      assertTreeWindInstanceMatrix(
+        composeInstanceMatrix(position, rotation, scale, 0),
+      );
+    }
+    pendingInstances.set(entityId, request);
     const pool = await ensureModelPool(modelPath, lod1ModelPath, lod2ModelPath);
+    if (
+      pendingInstances.get(entityId) !== request ||
+      world !== instanceWorld ||
+      scene !== instanceScene ||
+      generation !== poolGeneration ||
+      (lifetime && !lifetime.isCurrent())
+    )
+      return false;
+
+    const mat = composeInstanceMatrix(position, rotation, scale, pool.yOffset);
+    if (pool.windMode === "connected-v1") assertTreeWindInstanceMatrix(mat);
 
     // Pick initial LOD based on camera distance to avoid LOD0 pop-in at range
     let initialLOD: 0 | 1 | 2 = 0;
@@ -475,6 +692,7 @@ export async function addInstance(
 
     const slot: TreeSlot = {
       entityId,
+      lifetime,
       position: position.clone(),
       rotation,
       scale,
@@ -482,35 +700,50 @@ export async function addInstance(
       currentLOD: initialLOD,
     };
 
-    pool.instances.set(entityId, slot);
-    entityToModel.set(entityId, modelPath);
-
-    const mat = composeInstanceMatrix(position, rotation, scale, pool.yOffset);
     const initialPool =
       initialLOD === 0 ? pool.lod0 : initialLOD === 1 ? pool.lod1 : pool.lod2;
+    if (!initialPool) return false;
     if (
-      initialPool &&
-      !addToPool(initialPool, entityId, mat, initialDissolve)
+      initialPool.activeCount >= MAX_INSTANCES &&
+      !initialPool.slots.has(entityId)
     ) {
       console.warn(
         `[GLBTreeInstancer] LOD${initialLOD} pool full for ${modelPath}, cannot add ${entityId}`,
       );
-      pool.instances.delete(entityId);
-      entityToModel.delete(entityId);
       return false;
     }
 
+    // No await from admission through insertion. A replacement keeps its old
+    // actor until the target LOD, capacity and transform have all been admitted.
+    // Replacing within a full same-LOD pool reuses the actor's existing slot.
+    const insertionDissolve = lifetime?.getInitialDissolve() ?? initialDissolve;
+    removeInstance(entityId);
+    if (!addToPool(initialPool, entityId, mat, insertionDissolve)) return false;
+
+    pool.instances.set(entityId, slot);
+    entityToModel.set(entityId, modelPath);
     return true;
   } catch (error) {
+    if (error === cancelledPoolLoad) return false;
     console.warn(
       `[GLBTreeInstancer] Failed to add instance ${entityId}:`,
       error,
     );
     return false;
+  } finally {
+    if (pendingInstances.get(entityId) === request)
+      pendingInstances.delete(entityId);
   }
 }
 
-export function removeInstance(entityId: string): void {
+export function removeInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): void {
+  const pending = pendingInstances.get(entityId);
+  if (pending && (!lifetime || pending.lifetime === lifetime)) {
+    pendingInstances.delete(entityId);
+  }
   const modelPath = entityToModel.get(entityId);
   if (!modelPath) return;
 
@@ -518,7 +751,7 @@ export function removeInstance(entityId: string): void {
   if (!pool) return;
 
   const slot = pool.instances.get(entityId);
-  if (!slot) return;
+  if (!slot || (lifetime && slot.lifetime !== lifetime)) return;
 
   const lodPool =
     slot.currentLOD === 0
@@ -533,13 +766,21 @@ export function removeInstance(entityId: string): void {
   dissolveAnims.delete(entityId);
 }
 
-export function hasInstance(entityId: string): boolean {
-  return entityToModel.has(entityId);
+export function hasInstance(
+  entityId: string,
+  lifetime?: TreeInstanceLifetime,
+): boolean {
+  const path = entityToModel.get(entityId);
+  if (!path) return false;
+  return (
+    !lifetime || pools.get(path)?.instances.get(entityId)?.lifetime === lifetime
+  );
 }
 
 /**
- * Returns the unscaled model dimensions for an instanced entity.
+ * Returns static, unscaled model dimensions for an instanced entity.
  * Used to size collision proxies to match the actual model.
+ * These are not the wind-swept visual envelope; native mesh culling is disabled.
  */
 export function getModelDimensions(
   entityId: string,
@@ -733,24 +974,25 @@ export function updateGLBTreeInstancer(deltaTime: number): void {
         wasHighlighted = oldPool.highlightData[oldIdx];
         wasDissolve = oldPool.dissolveData[oldIdx];
       }
+      const mat = composeInstanceMatrix(
+        slot.position,
+        slot.rotation,
+        slot.scale,
+        slot.yOffset,
+      );
+      // Validate/admit the destination before releasing the visible source.
+      // A full destination must not orphan an instance during LOD migration.
+      if (!newPool || !addToPool(newPool, slot.entityId, mat, wasDissolve))
+        continue;
       if (oldPool) removeFromPool(oldPool, slot.entityId);
-      if (newPool) {
-        const mat = composeInstanceMatrix(
-          slot.position,
-          slot.rotation,
-          slot.scale,
-          slot.yOffset,
-        );
-        addToPool(newPool, slot.entityId, mat, wasDissolve);
-        if (wasHighlighted > 0) {
-          const newIdx = newPool.slots.get(slot.entityId);
-          if (newIdx !== undefined) {
-            newPool.highlightData[newIdx] = wasHighlighted;
-            for (const im of newPool.meshes) {
-              const attr = im.geometry.getAttribute("instanceHighlight");
-              if (attr)
-                (attr as THREE.InstancedBufferAttribute).needsUpdate = true;
-            }
+      if (wasHighlighted > 0) {
+        const newIdx = newPool.slots.get(slot.entityId);
+        if (newIdx !== undefined) {
+          newPool.highlightData[newIdx] = wasHighlighted;
+          for (const im of newPool.meshes) {
+            const attr = im.geometry.getAttribute("instanceHighlight");
+            if (attr)
+              (attr as THREE.InstancedBufferAttribute).needsUpdate = true;
           }
         }
       }
