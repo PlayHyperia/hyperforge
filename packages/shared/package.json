@@ -134,7 +134,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "@vitest/browser": "^4.0.18",
     "@vitest/browser-playwright": "^4.0.18",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.10",
     "@vitest/ui": "^4.0.6",
     "ajv": "^8.18.0",
     "ajv-draft-04": "^1.0.0",
@@ -159,7 +159,7 @@
     "tsx": "^4.20.3",
     "typescript": "^6.0.2",
     "vite": "^8.0.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.10"
   },
   "peerDependencies": {
     "@types/react": "^19.2.14",

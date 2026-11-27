@@ -294,7 +294,7 @@
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.10",
     "@vitest/ui": "^4.0.6",
     "@webgpu/types": "0.1.71",
     "bun-types": "^1.2.20",
@@ -319,7 +319,7 @@
     "typedoc": "^0.28.14",
     "typedoc-plugin-markdown": "^4.9.0",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "@types/node": "22.20.1",

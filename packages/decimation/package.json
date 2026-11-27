@@ -29,7 +29,7 @@
     "@types/node": "22.20.1",
     "@webgpu/types": "^0.1.69",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.10"
   },
   "keywords": [
     "mesh",
