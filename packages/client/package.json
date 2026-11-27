@@ -93,7 +93,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
-    "@babel/eslint-parser": "^7.23.10",
+    "@babel/eslint-parser": "^8.0.1",
     "@babel/preset-react": "^7.23.10",
     "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4.1.14",
