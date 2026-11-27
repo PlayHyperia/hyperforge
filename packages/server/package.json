@@ -166,7 +166,7 @@
     "@typescript-eslint/parser": "^8.38.0",
     "@vitest/coverage-v8": "^4.1.8",
     "chokidar": "^4.0.3",
-    "esbuild": "^0.27.0",
+    "esbuild": "^0.28.1",
     "eslint": "^10.0.2",
     "eslint-config-prettier": "^9.1.0",
     "pg-mem": "^3.0.8",
