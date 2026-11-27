@@ -384,7 +384,7 @@
     "canvas": "^3.1.2",
     "drizzle-kit": "^0.31.5",
     "drizzle-orm": "^0.44.6",
-    "meshoptimizer": "^0.22.0",
+    "meshoptimizer": "^1.1.1",
     "pg": "^8.16.3",
     "playwright": "^1.55.1",
     "pngjs": "^7.0.0",
