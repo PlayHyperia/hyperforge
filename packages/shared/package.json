@@ -111,7 +111,7 @@
     "yoga-layout": "^3.2.1"
   },
   "devDependencies": {
-    "@babel/eslint-parser": "^7.23.10",
+    "@babel/eslint-parser": "^8.0.1",
     "@babel/preset-react": "^7.23.10",
     "@capacitor/android": "^8.2.0",
     "@capacitor/cli": "^8.1.0",
