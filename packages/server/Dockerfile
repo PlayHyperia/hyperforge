@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Builder - Install dependencies and build packages
 # ============================================================================
-FROM oven/bun:1.3.14-alpine AS builder
+FROM oven/bun:1.4.0-alpine AS builder
 
 # Install build dependencies for native modules (canvas, better-sqlite3)
 RUN apk add --no-cache python3 py3-setuptools make g++ pkgconfig cairo-dev pango-dev jpeg-dev giflib-dev
@@ -46,7 +46,7 @@ RUN bun run build
 # ============================================================================
 # Stage 2: Runtime - Minimal production image
 # ============================================================================
-FROM oven/bun:1.3.14-alpine AS runtime
+FROM oven/bun:1.4.0-alpine AS runtime
 
 # Install runtime dependencies for native modules
 RUN apk add --no-cache python3 py3-setuptools make g++ pkgconfig cairo-dev pango-dev jpeg-dev giflib-dev ffmpeg
