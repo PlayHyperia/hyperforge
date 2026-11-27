@@ -112,7 +112,7 @@
   },
   "devDependencies": {
     "@babel/eslint-parser": "^7.23.10",
-    "@babel/preset-react": "^7.23.10",
+    "@babel/preset-react": "^8.0.1",
     "@capacitor/android": "^8.2.0",
     "@capacitor/cli": "^8.1.0",
     "@capacitor/core": "^8.2.0",
