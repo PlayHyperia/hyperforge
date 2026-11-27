@@ -58,4 +58,4 @@ jobs:
       - name: Deploy
         if: steps.portal.outputs.has_content == 'true'
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
